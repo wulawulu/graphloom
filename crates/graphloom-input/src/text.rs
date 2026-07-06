@@ -111,7 +111,12 @@ struct ReaderState {
 }
 
 async fn read_text_file(storage: Arc<dyn Storage>, path: &str) -> Result<Vec<TextDocument>> {
-    let bytes = storage.get(path).await?;
+    let bytes = storage
+        .get(path)
+        .await?
+        .ok_or_else(|| InputError::MissingInput {
+            path: path.to_owned(),
+        })?;
     let text = String::from_utf8(bytes).map_err(|source| InputError::Utf8 {
         path: path.to_owned(),
         source,

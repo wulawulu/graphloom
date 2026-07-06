@@ -103,7 +103,8 @@ mod tests {
         let raw = storage
             .get("llm/key")
             .await
-            .expect("raw storage get should work");
+            .expect("raw storage get should work")
+            .expect("raw storage object should exist");
         let raw: serde_json::Value =
             serde_json::from_slice(&raw).expect("stored value should be JSON");
         assert_eq!(raw["result"], json!({"answer": "yes"}));

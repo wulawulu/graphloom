@@ -28,13 +28,33 @@ pub enum StorageError {
         source: std::io::Error,
     },
 
-    /// Arrow schema or array conversion failed.
+    /// A regular expression pattern cannot be compiled.
+    #[error("invalid regex pattern {pattern:?}: {source}")]
+    Regex {
+        /// Rejected regular expression pattern.
+        pattern: String,
+        /// Original regex compilation error.
+        #[source]
+        source: regex::Error,
+    },
+
+    /// Stored bytes were not valid UTF-8.
+    #[error("object {name} is not valid UTF-8: {source}")]
+    Utf8 {
+        /// Object name being decoded.
+        name: String,
+        /// UTF-8 conversion error.
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+
+    /// Arrow schema conversion failed.
     #[error("arrow conversion failed: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
-    /// Parquet read or write failed.
-    #[error("parquet operation failed: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
+    /// Polars dataframe operation failed.
+    #[error("polars dataframe operation failed: {0}")]
+    Polars(#[from] polars_core::prelude::PolarsError),
 
     /// A blocking table task failed before returning its domain result.
     #[error("blocking task failed while {operation}: {source}")]
@@ -46,13 +66,21 @@ pub enum StorageError {
         source: tokio::task::JoinError,
     },
 
-    /// A table value does not match the declared Arrow schema.
+    /// A dataframe cannot be appended to an existing table because its schema
+    /// differs.
     #[error("schema mismatch for column {column}: {reason}")]
     SchemaMismatch {
         /// Column name.
         column: String,
         /// Human-readable mismatch reason.
         reason: String,
+    },
+
+    /// A streaming table handle is already closed.
+    #[error("table writer {name} is already closed")]
+    TableClosed {
+        /// Table object or provider-specific key.
+        name: String,
     },
 
     /// A requested table is not present.

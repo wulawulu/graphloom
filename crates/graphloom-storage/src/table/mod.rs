@@ -1,146 +1,45 @@
 //! Table model, provider traits, and concrete table-provider implementations.
 
-mod arrow_codec;
 mod memory;
 mod parquet;
-mod parquet_io;
 /// Arrow schemas for GraphRAG-compatible final tables.
 pub mod schemas;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
-use arrow::{
-    datatypes::{Schema, SchemaRef},
-    record_batch::RecordBatch,
-};
 use async_trait::async_trait;
 pub use memory::MemoryTableProvider;
 pub use parquet::ParquetTableProvider;
-use serde::{Deserialize, Serialize};
+use polars_core::{
+    frame::row::Row,
+    prelude::{AnyValue, DataFrame},
+};
 
-use self::arrow_codec::{build_array, validate_value, value_from_array};
 use crate::{Result, StorageError};
 
-/// A `GraphLoom` table value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum TableValue {
-    /// Null value.
-    Null,
-    /// Boolean value.
-    Bool(bool),
-    /// Signed 64-bit integer value.
-    Int(i64),
-    /// 64-bit floating point value.
-    Float(f64),
-    /// UTF-8 string value.
-    String(String),
-    /// Ordered list value.
-    List(Vec<TableValue>),
-    /// Structured object value.
-    Object(BTreeMap<String, TableValue>),
-}
-
-/// A table row keyed by column name.
-pub type TableRow = BTreeMap<String, TableValue>;
-
-/// A table represented as an Arrow schema plus row values.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableBatch {
-    schema: SchemaRef,
-    rows: Vec<TableRow>,
-}
-
-impl TableBatch {
-    /// Create a table batch after validating rows against `schema`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a row value does not match the declared Arrow
-    /// schema.
-    pub fn try_new(schema: SchemaRef, rows: Vec<TableRow>) -> Result<Self> {
-        let batch = Self { schema, rows };
-        batch.validate()?;
-        Ok(batch)
-    }
-
-    /// Return this batch's schema.
-    #[must_use]
-    pub fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
-    }
-
-    /// Return this batch's rows.
-    #[must_use]
-    pub fn rows(&self) -> &[TableRow] {
-        &self.rows
-    }
-
-    /// Convert this batch into an Arrow [`RecordBatch`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when conversion to Arrow arrays fails.
-    pub fn to_record_batch(&self) -> Result<RecordBatch> {
-        let arrays = self
-            .schema
-            .fields()
-            .iter()
-            .map(|field| build_array(field, &self.rows))
-            .collect::<Result<Vec<_>>>()?;
-        RecordBatch::try_new(Arc::clone(&self.schema), arrays).map_err(StorageError::Arrow)
-    }
-
-    fn validate(&self) -> Result<()> {
-        for field in self.schema.fields() {
-            for row in &self.rows {
-                let value = row.get(field.name()).unwrap_or(&TableValue::Null);
-                validate_value(field, value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl TryFrom<RecordBatch> for TableBatch {
-    type Error = StorageError;
-
-    fn try_from(batch: RecordBatch) -> Result<Self> {
-        let schema = batch.schema();
-        let mut rows = Vec::with_capacity(batch.num_rows());
-
-        for row_index in 0..batch.num_rows() {
-            let mut row = TableRow::new();
-            for (column_index, field) in schema.fields().iter().enumerate() {
-                row.insert(
-                    field.name().clone(),
-                    value_from_array(batch.column(column_index), row_index, field)?,
-                );
-            }
-            rows.push(row);
-        }
-
-        Self::try_new(schema, rows)
-    }
-}
-
-/// Streaming table writer used by workflows that produce rows incrementally.
+/// Streaming table handle used by workflows that read or write rows
+/// incrementally.
 #[async_trait]
 pub trait Table: Send + std::fmt::Debug {
-    /// Append a row to the staged table output.
+    /// Write dataframe rows to the staged table output.
     ///
     /// # Errors
     ///
-    /// Returns an error when the row does not match the table schema or the
+    /// Returns an error when the dataframe cannot be appended or the
     /// table has already been closed.
-    async fn append(&mut self, row: TableRow) -> Result<()>;
+    async fn write(&mut self, dataframe: DataFrame) -> Result<()>;
 
-    /// Number of rows currently staged.
-    fn len(&self) -> usize;
+    /// Number of rows visible through this table handle.
+    fn length(&self) -> usize;
 
-    /// Return true when no rows are currently staged.
+    /// Number of rows visible through this table handle.
+    fn len(&self) -> usize {
+        self.length()
+    }
+
+    /// Return true when no rows are visible through this table handle.
     fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.length() == 0
     }
 
     /// Commit staged rows.
@@ -156,41 +55,54 @@ pub trait Table: Send + std::fmt::Debug {
     ///
     /// Returns an error when cleanup fails.
     async fn abort(&mut self) -> Result<()>;
+
+    /// Read the next row from this table handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dataframe row extraction fails.
+    async fn next_row(&mut self) -> Result<Option<Row<'static>>>;
+
+    /// Return whether any visible row has an `id` field equal to `row_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dataframe row extraction fails while scanning.
+    async fn has(&self, row_id: &str) -> Result<bool>;
 }
 
 /// Provider for named `GraphLoom` tables.
 #[async_trait]
 pub trait TableProvider: Send + Sync + std::fmt::Debug {
-    /// Read a complete table.
+    /// Read a complete table dataframe.
     ///
     /// # Errors
     ///
     /// Returns an error when the table does not exist or cannot be decoded.
-    async fn read_table(&self, table_name: &str) -> Result<TableBatch>;
+    async fn read_dataframe(&self, table_name: &str) -> Result<DataFrame>;
 
-    /// Write a complete table, replacing any existing table atomically where the
-    /// backing store supports it.
+    /// Write a complete table dataframe, replacing any existing table.
     ///
     /// # Errors
     ///
     /// Returns an error when validation or persistence fails.
-    async fn write_table(&self, table_name: &str, batch: TableBatch) -> Result<()>;
+    async fn write_dataframe(&self, table_name: &str, dataframe: DataFrame) -> Result<()>;
 
     /// Return whether a table exists.
     ///
     /// # Errors
     ///
     /// Returns an error when the table name is invalid.
-    async fn has_table(&self, table_name: &str) -> Result<bool>;
+    async fn has(&self, table_name: &str) -> Result<bool>;
 
     /// List table names in this provider namespace.
     ///
     /// # Errors
     ///
     /// Returns an error when the backing store cannot be enumerated.
-    async fn list_tables(&self) -> Result<Vec<String>>;
+    async fn list(&self) -> Result<Vec<String>>;
 
-    /// Open a streaming table writer.
+    /// Open a streaming table handle.
     ///
     /// `truncate=true` starts from an empty table. `truncate=false` appends to
     /// the existing table if one exists.
@@ -199,35 +111,85 @@ pub trait TableProvider: Send + Sync + std::fmt::Debug {
     ///
     /// Returns an error when the table name is invalid or an existing table
     /// cannot be read for append mode.
-    async fn open_table(
-        &self,
-        table_name: &str,
-        schema: SchemaRef,
-        truncate: bool,
-    ) -> Result<Box<dyn Table>>;
+    async fn open(&self, table_name: &str, truncate: bool) -> Result<Box<dyn Table>>;
 
     /// Create a namespace view rooted at `namespace`.
     ///
     /// # Errors
     ///
     /// Returns an error when the namespace is invalid.
-    fn child(&self, namespace: &str) -> Result<Arc<dyn TableProvider>>;
+    fn child(&self, namespace: Option<&str>) -> Result<Arc<dyn TableProvider>>;
 }
 
-fn ensure_open(closed: bool) -> Result<()> {
-    if closed {
+pub(super) fn append_dataframe(mut existing: DataFrame, pending: &DataFrame) -> Result<DataFrame> {
+    if existing.height() == 0 {
+        return Ok(pending.clone());
+    }
+    if pending.height() == 0 {
+        return Ok(existing);
+    }
+
+    let existing_names = column_name_set(&existing);
+    let pending_names = column_name_set(pending);
+    if existing_names != pending_names {
         return Err(StorageError::SchemaMismatch {
             column: "<table>".to_owned(),
-            reason: "table writer is already closed".to_owned(),
+            reason: format!(
+                "cannot append dataframe with columns {pending_names:?} to existing columns \
+                 {existing_names:?}"
+            ),
         });
     }
-    Ok(())
+
+    let names = existing
+        .get_column_names_owned()
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let pending = pending.select(&names)?;
+    existing.vstack_mut(&pending)?;
+    Ok(existing)
 }
 
-fn validate_row(schema: &Schema, row: &TableRow) -> Result<()> {
-    for field in schema.fields() {
-        let value = row.get(field.name()).unwrap_or(&TableValue::Null);
-        validate_value(field, value)?;
-    }
-    Ok(())
+pub(super) fn append_optional_dataframe(
+    existing: Option<DataFrame>,
+    pending: &DataFrame,
+) -> Result<DataFrame> {
+    existing.map_or_else(
+        || Ok(pending.clone()),
+        |existing| append_dataframe(existing, pending),
+    )
+}
+
+pub(super) fn row_from_dataframe(dataframe: &DataFrame, row_index: usize) -> Result<Row<'static>> {
+    let row = dataframe.get_row(row_index)?;
+    Ok(Row::new(
+        row.0
+            .into_iter()
+            .map(AnyValue::into_static)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+pub(super) fn row_matches_id(row: &Row<'static>, id_index: usize, row_id: &str) -> bool {
+    row.0.get(id_index).is_some_and(|value| match value {
+        AnyValue::String(value) => *value == row_id,
+        AnyValue::StringOwned(value) => value.as_str() == row_id,
+        _ => false,
+    })
+}
+
+pub(super) fn id_column_index(dataframe: &DataFrame) -> Option<usize> {
+    dataframe
+        .get_column_names()
+        .iter()
+        .position(|name| name.as_str() == "id")
+}
+
+fn column_name_set(dataframe: &DataFrame) -> BTreeSet<String> {
+    dataframe
+        .get_column_names_owned()
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect()
 }

@@ -34,4 +34,11 @@ pub enum InputError {
         #[source]
         source: std::string::FromUtf8Error,
     },
+
+    /// A requested input object is absent.
+    #[error("input file {path} does not exist")]
+    MissingInput {
+        /// Missing input object path.
+        path: String,
+    },
 }

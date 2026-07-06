@@ -31,7 +31,9 @@ impl Cache for JsonCache {
             return Ok(None);
         }
 
-        let bytes = self.storage.get(key).await?;
+        let Some(bytes) = self.storage.get(key).await? else {
+            return Ok(None);
+        };
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(_source) => {
@@ -89,7 +91,7 @@ impl Cache for JsonCache {
 
     fn child(&self, namespace: &str) -> Result<Arc<dyn Cache>> {
         Ok(Arc::new(Self {
-            storage: self.storage.child(namespace)?,
+            storage: self.storage.child(Some(namespace))?,
         }))
     }
 }

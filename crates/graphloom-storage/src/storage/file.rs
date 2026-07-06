@@ -5,6 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use regex::Regex;
 
 use super::Storage;
 use crate::{
@@ -24,10 +25,18 @@ impl FileStorage {
     ///
     /// # Errors
     ///
-    /// This constructor currently only validates the root path shape and cannot
-    /// fail for existing paths. Directories are created by write operations.
+    /// Creates the root directory when it is absent.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "FileStorage::new is a synchronous constructor and must create the root before \
+                  returning"
+    )]
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
+        std::fs::create_dir_all(&root).map_err(|source| StorageError::Filesystem {
+            path: root.clone(),
+            source,
+        })?;
         Ok(Self {
             root,
             namespace: PathBuf::new(),
@@ -40,19 +49,17 @@ impl FileStorage {
             .join(&self.namespace)
             .join(validate_logical_path(name)?))
     }
-
-    fn namespace_prefix(&self) -> String {
-        path_to_logical(&self.namespace)
-    }
 }
 
 #[async_trait]
 impl Storage for FileStorage {
-    async fn get(&self, name: &str) -> Result<Vec<u8>> {
+    async fn get(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let path = self.logical_path(name)?;
-        tokio::fs::read(&path)
-            .await
-            .map_err(|source| StorageError::Filesystem { path, source })
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(StorageError::Filesystem { path, source }),
+        }
     }
 
     async fn set(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -88,12 +95,47 @@ impl Storage for FileStorage {
                 source,
             })?
         {
+            tokio::fs::create_dir_all(&root)
+                .await
+                .map_err(|source| StorageError::Filesystem { path: root, source })?;
             return Ok(());
         }
 
-        tokio::fs::remove_dir_all(&root)
-            .await
-            .map_err(|source| StorageError::Filesystem { path: root, source })
+        let mut entries =
+            tokio::fs::read_dir(&root)
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: root.clone(),
+                    source,
+                })?;
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: root.clone(),
+                    source,
+                })?
+        {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: path.clone(),
+                    source,
+                })?;
+            if file_type.is_dir() {
+                tokio::fs::remove_dir_all(&path)
+                    .await
+                    .map_err(|source| StorageError::Filesystem { path, source })?;
+            } else {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|source| StorageError::Filesystem { path, source })?;
+            }
+        }
+        Ok(())
     }
 
     async fn has(&self, name: &str) -> Result<bool> {
@@ -113,7 +155,6 @@ impl Storage for FileStorage {
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let prefix = path_to_logical(&validate_logical_path(prefix)?);
         let root = self.root.join(&self.namespace);
-        let namespace_prefix = self.namespace_prefix();
         let mut names = Vec::new();
 
         if tokio::fs::try_exists(&root)
@@ -123,7 +164,76 @@ impl Storage for FileStorage {
                 source,
             })?
         {
-            collect_files(&root, &namespace_prefix, &prefix, &mut names).await?;
+            collect_files(&root, &prefix, None, &mut names).await?;
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
+    async fn keys(&self) -> Result<Vec<String>> {
+        let root = self.root.join(&self.namespace);
+        let mut names = Vec::new();
+        if !tokio::fs::try_exists(&root)
+            .await
+            .map_err(|source| StorageError::Filesystem {
+                path: root.clone(),
+                source,
+            })?
+        {
+            return Ok(names);
+        }
+
+        let mut entries =
+            tokio::fs::read_dir(&root)
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: root.clone(),
+                    source,
+                })?;
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: root.clone(),
+                    source,
+                })?
+        {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: path.clone(),
+                    source,
+                })?;
+            if file_type.is_file()
+                && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    async fn find(&self, pattern: &str) -> Result<Vec<String>> {
+        let regex = Regex::new(pattern).map_err(|source| StorageError::Regex {
+            pattern: pattern.to_owned(),
+            source,
+        })?;
+        let root = self.root.join(&self.namespace);
+        let mut names = Vec::new();
+
+        if tokio::fs::try_exists(&root)
+            .await
+            .map_err(|source| StorageError::Filesystem {
+                path: root.clone(),
+                source,
+            })?
+        {
+            collect_files(&root, "", Some(&regex), &mut names).await?;
         }
 
         names.sort();
@@ -148,7 +258,10 @@ impl Storage for FileStorage {
         Ok(Some(datetime.format("%Y-%m-%d %H:%M:%S %z").to_string()))
     }
 
-    fn child(&self, namespace: &str) -> Result<Arc<dyn Storage>> {
+    fn child(&self, namespace: Option<&str>) -> Result<Arc<dyn Storage>> {
+        let Some(namespace) = namespace else {
+            return Ok(Arc::new(self.clone()));
+        };
         let mut child_namespace = self.namespace.clone();
         child_namespace.push(validate_logical_path(namespace)?);
         Ok(Arc::new(Self {
@@ -160,8 +273,8 @@ impl Storage for FileStorage {
 
 async fn collect_files(
     base: &Path,
-    namespace_prefix: &str,
     prefix: &str,
+    regex: Option<&Regex>,
     output: &mut Vec<String>,
 ) -> Result<()> {
     let mut stack = vec![base.to_path_buf()];
@@ -202,12 +315,9 @@ async fn collect_files(
                         reason: "listed file escaped storage root",
                     })?;
                 let logical = path_to_logical(relative);
-                if logical.starts_with(prefix) {
-                    if namespace_prefix.is_empty() {
-                        output.push(logical);
-                    } else {
-                        output.push(format!("{namespace_prefix}/{logical}"));
-                    }
+                if logical.starts_with(prefix) && regex.is_none_or(|regex| regex.is_match(&logical))
+                {
+                    output.push(logical);
                 }
             }
         }

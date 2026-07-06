@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use regex::Regex;
 
 use super::Storage;
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
 /// In-memory [`Storage`] for tests and deterministic local execution.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStorage {
-    objects: Arc<DashMap<String, Vec<u8>>>,
+    storage: Arc<DashMap<String, Vec<u8>>>,
     namespace: String,
 }
 
@@ -37,34 +38,28 @@ impl MemoryStorage {
 
 #[async_trait]
 impl Storage for MemoryStorage {
-    async fn get(&self, name: &str) -> Result<Vec<u8>> {
+    async fn get(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let key = self.key(name)?;
-        self.objects
-            .get(&key)
-            .map(|bytes| bytes.value().clone())
-            .ok_or(StorageError::InvalidPath {
-                path: name.to_owned(),
-                reason: "object does not exist",
-            })
+        Ok(self.storage.get(&key).map(|bytes| bytes.value().clone()))
     }
 
     async fn set(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        self.objects.insert(self.key(name)?, bytes.to_vec());
+        self.storage.insert(self.key(name)?, bytes.to_vec());
         Ok(())
     }
 
     async fn delete(&self, name: &str) -> Result<()> {
-        self.objects.remove(&self.key(name)?);
+        self.storage.remove(&self.key(name)?);
         Ok(())
     }
 
     async fn clear(&self) -> Result<()> {
         if self.namespace.is_empty() {
-            self.objects.clear();
+            self.storage.clear();
         } else {
             let prefix = format!("{}/", self.namespace);
             let keys = self
-                .objects
+                .storage
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
@@ -76,20 +71,20 @@ impl Storage for MemoryStorage {
                 })
                 .collect::<Vec<_>>();
             for key in keys {
-                self.objects.remove(&key);
+                self.storage.remove(&key);
             }
         }
         Ok(())
     }
 
     async fn has(&self, name: &str) -> Result<bool> {
-        Ok(self.objects.contains_key(&self.key(name)?))
+        Ok(self.storage.contains_key(&self.key(name)?))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let prefix = self.key(prefix)?;
         let mut names = self
-            .objects
+            .storage
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
@@ -104,21 +99,55 @@ impl Storage for MemoryStorage {
         Ok(names)
     }
 
+    async fn keys(&self) -> Result<Vec<String>> {
+        let mut names = self
+            .storage
+            .iter()
+            .filter_map(|entry| {
+                let stripped = strip_namespace(entry.key(), &self.namespace);
+                if stripped.contains('/') {
+                    None
+                } else {
+                    Some(stripped)
+                }
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    async fn find(&self, pattern: &str) -> Result<Vec<String>> {
+        let regex = Regex::new(pattern).map_err(|source| StorageError::Regex {
+            pattern: pattern.to_owned(),
+            source,
+        })?;
+        let mut names = self
+            .storage
+            .iter()
+            .filter_map(|entry| {
+                let key = entry.key();
+                if self.namespace.is_empty() || key.starts_with(&format!("{}/", self.namespace)) {
+                    let stripped = strip_namespace(key, &self.namespace);
+                    if regex.is_match(&stripped) {
+                        return Some(stripped);
+                    }
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
     async fn get_creation_date(&self, _name: &str) -> Result<Option<String>> {
         Ok(None)
     }
 
-    fn child(&self, namespace: &str) -> Result<Arc<dyn Storage>> {
-        let child = path_to_logical(&validate_logical_path(namespace)?);
-        let namespace = if self.namespace.is_empty() {
-            child
-        } else {
-            format!("{}/{}", self.namespace, child)
+    fn child(&self, namespace: Option<&str>) -> Result<Arc<dyn Storage>> {
+        let Some(namespace) = namespace else {
+            return Ok(Arc::new(self.clone()));
         };
-
-        Ok(Arc::new(Self {
-            objects: Arc::clone(&self.objects),
-            namespace,
-        }))
+        validate_logical_path(namespace)?;
+        Ok(Arc::new(Self::new()))
     }
 }

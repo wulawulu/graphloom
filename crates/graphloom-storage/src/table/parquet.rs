@@ -1,203 +1,268 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fmt, io::Cursor, path::Path, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use polars_core::{frame::row::Row, prelude::DataFrame};
+use polars_io::prelude::{ParquetReader, ParquetWriter, SerReader};
 
 use super::{
-    Table, TableBatch, TableProvider, TableRow, ensure_open,
-    parquet_io::{read_parquet_table, run_blocking, write_parquet_table},
-    validate_row,
+    Table, TableProvider, append_optional_dataframe, id_column_index, row_from_dataframe,
+    row_matches_id,
 };
-use crate::{
-    Result, StorageError,
-    path::{validate_logical_path, validate_table_name},
-};
+use crate::{FileStorage, Result, Storage, StorageError, path::validate_table_name};
 
 /// Parquet-backed [`TableProvider`].
 #[derive(Debug, Clone)]
 pub struct ParquetTableProvider {
-    root: PathBuf,
-    namespace: PathBuf,
+    storage: Arc<dyn Storage>,
 }
 
 impl ParquetTableProvider {
-    /// Create a Parquet provider rooted at `root`.
+    /// Create a Parquet provider over a filesystem-backed storage root.
     ///
     /// # Errors
     ///
-    /// This constructor currently only validates the root path shape and cannot
-    /// fail for existing paths. Directories are created by write operations.
+    /// Returns an error when the storage root cannot be initialized.
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref().to_path_buf();
         Ok(Self {
-            root,
-            namespace: PathBuf::new(),
+            storage: Arc::new(FileStorage::new(root)?),
         })
     }
 
-    fn table_path(&self, table_name: &str) -> Result<PathBuf> {
-        Ok(self
-            .root
-            .join(&self.namespace)
-            .join(format!("{}.parquet", validate_table_name(table_name)?)))
+    /// Create a Parquet provider over an existing object storage provider.
+    #[must_use]
+    pub fn from_storage(storage: Arc<dyn Storage>) -> Self {
+        Self { storage }
+    }
+
+    fn table_object(table_name: &str) -> Result<String> {
+        Ok(format!("{}.parquet", validate_table_name(table_name)?))
+    }
+
+    async fn read_optional(&self, table_name: &str) -> Result<Option<DataFrame>> {
+        let object = Self::table_object(table_name)?;
+        let Some(bytes) = self.storage.get(&object).await? else {
+            return Ok(None);
+        };
+        run_blocking("reading parquet table", move || {
+            read_parquet_dataframe(bytes)
+        })
+        .await
+        .map(Some)
     }
 }
 
 #[async_trait]
 impl TableProvider for ParquetTableProvider {
-    async fn read_table(&self, table_name: &str) -> Result<TableBatch> {
-        let path = self.table_path(table_name)?;
-        let table_name = table_name.to_owned();
-        run_blocking("reading parquet table", move || {
-            read_parquet_table(&path, &table_name)
-        })
-        .await
-    }
-
-    async fn write_table(&self, table_name: &str, batch: TableBatch) -> Result<()> {
-        let path = self.table_path(table_name)?;
-        run_blocking("writing parquet table", move || {
-            write_parquet_table(&path, &batch)
-        })
-        .await
-    }
-
-    async fn has_table(&self, table_name: &str) -> Result<bool> {
-        let path = self.table_path(table_name)?;
-        tokio::fs::metadata(&path)
-            .await
-            .map(|metadata| metadata.is_file())
-            .or_else(|source| {
-                if source.kind() == std::io::ErrorKind::NotFound {
-                    Ok(false)
-                } else {
-                    Err(StorageError::Filesystem { path, source })
-                }
+    async fn read_dataframe(&self, table_name: &str) -> Result<DataFrame> {
+        self.read_optional(table_name)
+            .await?
+            .ok_or_else(|| StorageError::MissingTable {
+                name: table_name.to_owned(),
             })
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
-        let root = self.root.join(&self.namespace);
-        let mut tables = Vec::new();
-        if tokio::fs::try_exists(&root)
-            .await
-            .map_err(|source| StorageError::Filesystem {
-                path: root.clone(),
-                source,
-            })?
-        {
-            let mut entries =
-                tokio::fs::read_dir(&root)
-                    .await
-                    .map_err(|source| StorageError::Filesystem {
-                        path: root.clone(),
-                        source,
-                    })?;
-            while let Some(entry) =
-                entries
-                    .next_entry()
-                    .await
-                    .map_err(|source| StorageError::Filesystem {
-                        path: root.clone(),
-                        source,
-                    })?
-            {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("parquet")
-                    && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                {
-                    tables.push(stem.to_owned());
-                }
-            }
-        }
+    async fn write_dataframe(&self, table_name: &str, dataframe: DataFrame) -> Result<()> {
+        let object = Self::table_object(table_name)?;
+        let bytes = run_blocking("writing parquet table", move || {
+            write_parquet_dataframe(dataframe)
+        })
+        .await?;
+        self.storage.set(&object, &bytes).await
+    }
+
+    async fn has(&self, table_name: &str) -> Result<bool> {
+        self.storage.has(&Self::table_object(table_name)?).await
+    }
+
+    async fn list(&self) -> Result<Vec<String>> {
+        let mut tables = self
+            .storage
+            .find(r"\.parquet$")
+            .await?
+            .into_iter()
+            .filter_map(|key| {
+                key.strip_suffix(".parquet")
+                    .map(std::borrow::ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
         tables.sort();
         Ok(tables)
     }
 
-    async fn open_table(
-        &self,
-        table_name: &str,
-        schema: SchemaRef,
-        truncate: bool,
-    ) -> Result<Box<dyn Table>> {
-        let path = self.table_path(table_name)?;
-        let exists =
-            tokio::fs::try_exists(&path)
-                .await
-                .map_err(|source| StorageError::Filesystem {
-                    path: path.clone(),
-                    source,
-                })?;
-        let rows = if truncate || !exists {
-            Vec::new()
+    async fn open(&self, table_name: &str, truncate: bool) -> Result<Box<dyn Table>> {
+        let object = Self::table_object(table_name)?;
+        let existing = if truncate {
+            None
         } else {
-            let table_name = table_name.to_owned();
-            run_blocking("reading parquet table for append", {
-                let path = path.clone();
-                move || read_parquet_table(&path, &table_name)
-            })
-            .await?
-            .rows()
-            .to_vec()
+            self.read_optional(table_name).await?
         };
 
         Ok(Box::new(ParquetTable {
-            path,
-            schema,
-            rows,
+            storage: Arc::clone(&self.storage),
+            object,
+            existing,
+            truncate,
+            pending: DataFrame::empty(),
+            read_index: 0,
             closed: false,
         }))
     }
 
-    fn child(&self, namespace: &str) -> Result<Arc<dyn TableProvider>> {
-        let mut child_namespace = self.namespace.clone();
-        child_namespace.push(validate_logical_path(namespace)?);
+    fn child(&self, namespace: Option<&str>) -> Result<Arc<dyn TableProvider>> {
         Ok(Arc::new(Self {
-            root: self.root.clone(),
-            namespace: child_namespace,
+            storage: self.storage.child(namespace)?,
         }))
     }
 }
 
-#[derive(Debug)]
 struct ParquetTable {
-    path: PathBuf,
-    schema: SchemaRef,
-    rows: Vec<TableRow>,
+    storage: Arc<dyn Storage>,
+    object: String,
+    existing: Option<DataFrame>,
+    truncate: bool,
+    pending: DataFrame,
+    read_index: usize,
     closed: bool,
+}
+
+impl fmt::Debug for ParquetTable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParquetTable")
+            .field("object", &self.object)
+            .field(
+                "existing_rows",
+                &self.existing.as_ref().map_or(0, DataFrame::height),
+            )
+            .field("truncate", &self.truncate)
+            .field("pending_rows", &self.pending.height())
+            .field("read_index", &self.read_index)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait]
 impl Table for ParquetTable {
-    async fn append(&mut self, row: TableRow) -> Result<()> {
-        ensure_open(self.closed)?;
-        validate_row(&self.schema, &row)?;
-        self.rows.push(row);
+    async fn write(&mut self, dataframe: DataFrame) -> Result<()> {
+        self.check_open()?;
+        self.pending =
+            append_optional_dataframe(Some(std::mem::take(&mut self.pending)), &dataframe)?;
         Ok(())
     }
 
-    fn len(&self) -> usize {
-        self.rows.len()
+    fn length(&self) -> usize {
+        self.existing.as_ref().map_or(0, DataFrame::height) + self.pending.height()
     }
 
     async fn close(&mut self) -> Result<()> {
-        ensure_open(self.closed)?;
-        let batch = TableBatch::try_new(Arc::clone(&self.schema), self.rows.clone())?;
-        let path = self.path.clone();
-        run_blocking("closing parquet table", move || {
-            write_parquet_table(&path, &batch)
+        self.check_open()?;
+        if self.pending.height() == 0 {
+            self.closed = true;
+            return Ok(());
+        }
+
+        let existing = if self.truncate {
+            None
+        } else {
+            match self.storage.get(&self.object).await? {
+                Some(bytes) => Some(
+                    run_blocking("reading parquet table for append", move || {
+                        read_parquet_dataframe(bytes)
+                    })
+                    .await?,
+                ),
+                None => None,
+            }
+        };
+        let dataframe = append_optional_dataframe(existing, &self.pending)?;
+        let bytes = run_blocking("closing parquet table", move || {
+            write_parquet_dataframe(dataframe)
         })
         .await?;
+        self.storage.set(&self.object, &bytes).await?;
         self.closed = true;
         Ok(())
     }
 
     async fn abort(&mut self) -> Result<()> {
-        self.rows.clear();
+        self.pending = DataFrame::empty();
         self.closed = true;
         Ok(())
     }
+
+    async fn next_row(&mut self) -> Result<Option<Row<'static>>> {
+        let existing_rows = self.existing.as_ref().map_or(0, DataFrame::height);
+        let row = if let Some(existing) = &self.existing
+            && self.read_index < existing_rows
+        {
+            row_from_dataframe(existing, self.read_index)?
+        } else {
+            let pending_index = self.read_index.saturating_sub(existing_rows);
+            if pending_index >= self.pending.height() {
+                return Ok(None);
+            }
+            row_from_dataframe(&self.pending, pending_index)?
+        };
+        self.read_index = self.read_index.saturating_add(1);
+        Ok(Some(row))
+    }
+
+    async fn has(&self, row_id: &str) -> Result<bool> {
+        if let Some(existing) = &self.existing {
+            let Some(id_index) = id_column_index(existing) else {
+                return Ok(false);
+            };
+            for row_index in 0..existing.height() {
+                let row = row_from_dataframe(existing, row_index)?;
+                if row_matches_id(&row, id_index, row_id) {
+                    return Ok(true);
+                }
+            }
+        }
+        if let Some(id_index) = id_column_index(&self.pending) {
+            for row_index in 0..self.pending.height() {
+                let row = row_from_dataframe(&self.pending, row_index)?;
+                if row_matches_id(&row, id_index, row_id) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl ParquetTable {
+    fn check_open(&self) -> Result<()> {
+        if self.closed {
+            return Err(StorageError::TableClosed {
+                name: self.object.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+async fn run_blocking<F, T>(operation: &'static str, task: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|source| StorageError::BlockingTask { operation, source })?
+}
+
+fn read_parquet_dataframe(bytes: Vec<u8>) -> Result<DataFrame> {
+    ParquetReader::new(Cursor::new(bytes))
+        .finish()
+        .map_err(StorageError::Polars)
+}
+
+fn write_parquet_dataframe(mut dataframe: DataFrame) -> Result<Vec<u8>> {
+    let mut buffer = Cursor::new(Vec::new());
+    ParquetWriter::new(&mut buffer)
+        .finish(&mut dataframe)
+        .map_err(StorageError::Polars)?;
+    Ok(buffer.into_inner())
 }
