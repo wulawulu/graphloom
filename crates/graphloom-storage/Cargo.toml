@@ -12,6 +12,7 @@ readme.workspace = true
 [dependencies]
 async-trait.workspace = true
 arrow.workspace = true
+chrono.workspace = true
 dashmap.workspace = true
 graphloom-common.workspace = true
 parquet.workspace = true

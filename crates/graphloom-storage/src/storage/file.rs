@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, Local};
 
 use super::Storage;
 use crate::{
@@ -78,6 +79,23 @@ impl Storage for FileStorage {
         }
     }
 
+    async fn clear(&self) -> Result<()> {
+        let root = self.root.join(&self.namespace);
+        if !tokio::fs::try_exists(&root)
+            .await
+            .map_err(|source| StorageError::Filesystem {
+                path: root.clone(),
+                source,
+            })?
+        {
+            return Ok(());
+        }
+
+        tokio::fs::remove_dir_all(&root)
+            .await
+            .map_err(|source| StorageError::Filesystem { path: root, source })
+    }
+
     async fn has(&self, name: &str) -> Result<bool> {
         let path = self.logical_path(name)?;
         tokio::fs::metadata(&path)
@@ -110,6 +128,24 @@ impl Storage for FileStorage {
 
         names.sort();
         Ok(names)
+    }
+
+    async fn get_creation_date(&self, name: &str) -> Result<Option<String>> {
+        let path = self.logical_path(name)?;
+        let metadata =
+            tokio::fs::metadata(&path)
+                .await
+                .map_err(|source| StorageError::Filesystem {
+                    path: path.clone(),
+                    source,
+                })?;
+        let timestamp = metadata
+            .created()
+            .or_else(|_| metadata.modified())
+            .map_err(|source| StorageError::Filesystem { path, source })?;
+        let datetime = DateTime::<Local>::from(timestamp);
+
+        Ok(Some(datetime.format("%Y-%m-%d %H:%M:%S %z").to_string()))
     }
 
     fn child(&self, namespace: &str) -> Result<Arc<dyn Storage>> {

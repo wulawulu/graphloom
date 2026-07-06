@@ -58,6 +58,30 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    async fn clear(&self) -> Result<()> {
+        if self.namespace.is_empty() {
+            self.objects.clear();
+        } else {
+            let prefix = format!("{}/", self.namespace);
+            let keys = self
+                .objects
+                .iter()
+                .filter_map(|entry| {
+                    let key = entry.key();
+                    if key == &self.namespace || key.starts_with(&prefix) {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            for key in keys {
+                self.objects.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     async fn has(&self, name: &str) -> Result<bool> {
         Ok(self.objects.contains_key(&self.key(name)?))
     }
@@ -78,6 +102,10 @@ impl Storage for MemoryStorage {
             .collect::<Vec<_>>();
         names.sort();
         Ok(names)
+    }
+
+    async fn get_creation_date(&self, _name: &str) -> Result<Option<String>> {
+        Ok(None)
     }
 
     fn child(&self, namespace: &str) -> Result<Arc<dyn Storage>> {

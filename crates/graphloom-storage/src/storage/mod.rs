@@ -37,6 +37,13 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     /// other than the object not existing.
     async fn delete(&self, name: &str) -> Result<()>;
 
+    /// Clear this storage namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider cleanup fails.
+    async fn clear(&self) -> Result<()>;
+
     /// Return whether an object exists.
     ///
     /// # Errors
@@ -51,6 +58,14 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     /// Returns an error when the prefix is invalid or a backing store cannot be
     /// enumerated.
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+
+    /// Return the object's creation date using `GraphRAG`'s local-time string
+    /// format when the provider exposes one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is invalid or metadata cannot be read.
+    async fn get_creation_date(&self, name: &str) -> Result<Option<String>>;
 
     /// Create a namespace view rooted at `namespace`.
     ///

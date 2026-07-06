@@ -68,6 +68,14 @@ async fn test_should_namespace_memory_storage() {
             .await
             .expect("root lookup should succeed")
     );
+
+    child.clear().await.expect("clear should succeed");
+    assert!(
+        !child
+            .has("graph.graphml")
+            .await
+            .expect("child lookup should succeed")
+    );
 }
 
 #[tokio::test]
