@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    graphloom_common::init_tracing();
 }

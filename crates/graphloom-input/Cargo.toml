@@ -10,3 +10,4 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+graphloom-common.workspace = true
