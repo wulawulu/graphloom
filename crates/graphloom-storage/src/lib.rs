@@ -15,7 +15,7 @@ pub mod table;
 
 pub use error::{Result, StorageError};
 pub use storage::{FileStorage, MemoryStorage, Storage};
-pub use table::{MemoryTableProvider, ParquetTableProvider, Table, TableProvider, schemas};
+pub use table::{MemoryTableProvider, ParquetTableProvider, Table, TableProvider};
 
 #[cfg(test)]
 mod tests;

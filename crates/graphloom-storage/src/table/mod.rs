@@ -2,8 +2,6 @@
 
 mod memory;
 mod parquet;
-/// Arrow schemas for GraphRAG-compatible final tables.
-pub mod schemas;
 
 use std::{collections::BTreeSet, sync::Arc};
 

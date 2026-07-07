@@ -31,6 +31,14 @@ fn default_summarize_descriptions() -> SummarizeDescriptionsConfig {
     SummarizeDescriptionsConfig::default()
 }
 
+fn default_extract_claims() -> ExtractClaimsConfig {
+    ExtractClaimsConfig::default()
+}
+
+fn default_cluster_graph() -> ClusterGraphConfig {
+    ClusterGraphConfig::default()
+}
+
 fn default_snapshots() -> SnapshotsConfig {
     SnapshotsConfig::default()
 }
@@ -45,6 +53,14 @@ fn default_extract_graph_model_instance_name() -> String {
 
 fn default_summarize_model_instance_name() -> String {
     "summarize_descriptions".to_owned()
+}
+
+fn default_extract_claims_model_instance_name() -> String {
+    "extract_claims".to_owned()
+}
+
+fn default_claim_description() -> String {
+    "Any claims or facts that could be relevant to information discovery.".to_owned()
 }
 
 fn default_entity_types() -> Vec<String> {
@@ -180,6 +196,71 @@ impl Default for SummarizeDescriptionsConfig {
     }
 }
 
+/// Claim extraction configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ExtractClaimsConfig {
+    /// Whether claim extraction is enabled.
+    pub enabled: bool,
+    /// Completion model id.
+    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    pub completion_model_id: String,
+    /// Model instance/cache namespace name.
+    #[serde(
+        alias = "model_instance_name",
+        default = "default_extract_claims_model_instance_name"
+    )]
+    pub model_instance_name: String,
+    /// Optional prompt path or inline prompt override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Claim description inserted into the extraction prompt.
+    #[serde(default = "default_claim_description")]
+    pub description: String,
+    /// Maximum number of claim gleaning rounds.
+    #[serde(alias = "max_gleanings")]
+    pub max_gleanings: usize,
+}
+
+impl Default for ExtractClaimsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            completion_model_id: default_completion_model_id(),
+            model_instance_name: default_extract_claims_model_instance_name(),
+            prompt: None,
+            description: default_claim_description(),
+            max_gleanings: 1,
+        }
+    }
+}
+
+/// Graph clustering configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ClusterGraphConfig {
+    /// Maximum cluster size before hierarchical refinement.
+    #[serde(alias = "max_cluster_size")]
+    pub max_cluster_size: u32,
+    /// Whether to restrict clustering to the stable largest connected component.
+    #[serde(alias = "use_lcc")]
+    pub use_lcc: bool,
+    /// Deterministic Leiden seed.
+    pub seed: u64,
+}
+
+impl Default for ClusterGraphConfig {
+    fn default() -> Self {
+        Self {
+            max_cluster_size: 10,
+            use_lcc: true,
+            seed: 0xDEADBEEF,
+        }
+    }
+}
+
 /// Snapshot configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -229,6 +310,12 @@ pub struct GraphRagConfig {
         default = "default_summarize_descriptions"
     )]
     pub summarize_descriptions: SummarizeDescriptionsConfig,
+    /// Claim extraction config.
+    #[serde(alias = "extract_claims", default = "default_extract_claims")]
+    pub extract_claims: ExtractClaimsConfig,
+    /// Graph clustering config.
+    #[serde(alias = "cluster_graph", default = "default_cluster_graph")]
+    pub cluster_graph: ClusterGraphConfig,
     /// Snapshot config.
     #[serde(default = "default_snapshots")]
     pub snapshots: SnapshotsConfig,
@@ -249,6 +336,8 @@ impl Default for GraphRagConfig {
             workflows: Vec::new(),
             extract_graph: default_extract_graph(),
             summarize_descriptions: default_summarize_descriptions(),
+            extract_claims: default_extract_claims(),
+            cluster_graph: default_cluster_graph(),
             snapshots: default_snapshots(),
             sections: BTreeMap::new(),
         }
@@ -260,7 +349,7 @@ impl GraphRagConfig {
     #[must_use]
     pub fn workflow_order(&self) -> Vec<String> {
         if self.workflows.is_empty() {
-            crate::workflows::STEP6_WORKFLOWS
+            crate::workflows::STEP7_WORKFLOWS
                 .iter()
                 .map(|workflow| (*workflow).to_owned())
                 .collect()

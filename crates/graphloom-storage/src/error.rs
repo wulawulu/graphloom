@@ -48,10 +48,6 @@ pub enum StorageError {
         source: std::string::FromUtf8Error,
     },
 
-    /// Arrow schema conversion failed.
-    #[error("arrow conversion failed: {0}")]
-    Arrow(#[from] arrow::error::ArrowError),
-
     /// Polars dataframe operation failed.
     #[error("polars dataframe operation failed: {0}")]
     Polars(#[from] polars_core::prelude::PolarsError),

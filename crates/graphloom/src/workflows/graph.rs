@@ -1024,11 +1024,11 @@ fn xml_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn row_to_static(row: Row<'_>) -> Row<'static> {
+pub(crate) fn row_to_static(row: Row<'_>) -> Row<'static> {
     Row::new(row.0.into_iter().map(AnyValue::into_static).collect())
 }
 
-fn list_at(row: &Row<'static>, index: usize) -> Result<Vec<String>> {
+pub(crate) fn list_at(row: &Row<'static>, index: usize) -> Result<Vec<String>> {
     let Some(value) = row.0.get(index) else {
         return Ok(Vec::new());
     };
