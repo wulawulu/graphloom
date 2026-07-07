@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use graphloom_cache::Cache;
 use graphloom_input::InputReader;
+use graphloom_llm::CompletionModel;
 use graphloom_storage::{Storage, TableProvider};
 use serde_json::Value;
 
@@ -25,6 +26,8 @@ pub struct PipelineRunContext {
     pub previous_table_provider: Option<Arc<dyn TableProvider>>,
     /// Cache provider for LLM and operation results.
     pub cache: Option<Arc<dyn Cache>>,
+    /// Completion model instances keyed by model id.
+    pub completion_models: BTreeMap<String, Arc<dyn CompletionModel>>,
     /// Workflow callbacks.
     pub callbacks: Arc<dyn WorkflowCallbacks>,
     /// Arbitrary run-local state.
@@ -44,6 +47,7 @@ impl PipelineRunContext {
             output_table_provider,
             previous_table_provider: None,
             cache: None,
+            completion_models: BTreeMap::new(),
             callbacks: Arc::new(NoopWorkflowCallbacks),
             state: BTreeMap::new(),
             input_reader: None,
@@ -61,6 +65,17 @@ impl PipelineRunContext {
     #[must_use]
     pub fn with_callbacks(mut self, callbacks: Arc<dyn WorkflowCallbacks>) -> Self {
         self.callbacks = callbacks;
+        self
+    }
+
+    /// Attach a completion model by model id.
+    #[must_use]
+    pub fn with_completion_model(
+        mut self,
+        model_id: impl Into<String>,
+        model: Arc<dyn CompletionModel>,
+    ) -> Self {
+        self.completion_models.insert(model_id.into(), model);
         self
     }
 }

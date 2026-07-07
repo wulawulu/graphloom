@@ -38,3 +38,33 @@ pub fn text_units() -> SchemaRef {
         string_list_field("covariate_ids"),
     ]))
 }
+
+/// Final `entities` table schema.
+#[must_use]
+pub fn entities() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("human_readable_id", DataType::Int64, false),
+        Field::new("title", DataType::Utf8, false),
+        Field::new("type", DataType::Utf8, false),
+        Field::new("description", DataType::Utf8, false),
+        string_list_field("text_unit_ids"),
+        Field::new("frequency", DataType::Int64, false),
+        Field::new("degree", DataType::Int64, false),
+    ]))
+}
+
+/// Final `relationships` table schema.
+#[must_use]
+pub fn relationships() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("human_readable_id", DataType::Int64, false),
+        Field::new("source", DataType::Utf8, false),
+        Field::new("target", DataType::Utf8, false),
+        Field::new("description", DataType::Utf8, false),
+        Field::new("weight", DataType::Float64, false),
+        Field::new("combined_degree", DataType::Int64, false),
+        string_list_field("text_unit_ids"),
+    ]))
+}

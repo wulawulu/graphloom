@@ -23,6 +23,37 @@ fn default_chunking() -> ChunkingConfig {
     ChunkingConfig::default()
 }
 
+fn default_extract_graph() -> ExtractGraphConfig {
+    ExtractGraphConfig::default()
+}
+
+fn default_summarize_descriptions() -> SummarizeDescriptionsConfig {
+    SummarizeDescriptionsConfig::default()
+}
+
+fn default_snapshots() -> SnapshotsConfig {
+    SnapshotsConfig::default()
+}
+
+fn default_completion_model_id() -> String {
+    "default_completion_model".to_owned()
+}
+
+fn default_extract_graph_model_instance_name() -> String {
+    "extract_graph".to_owned()
+}
+
+fn default_summarize_model_instance_name() -> String {
+    "summarize_descriptions".to_owned()
+}
+
+fn default_entity_types() -> Vec<String> {
+    ["organization", "person", "geo", "event"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Input reader configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +106,94 @@ impl InputConfig {
     }
 }
 
+/// Graph extraction configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ExtractGraphConfig {
+    /// Completion model id.
+    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    pub completion_model_id: String,
+    /// Model instance/cache namespace name.
+    #[serde(
+        alias = "model_instance_name",
+        default = "default_extract_graph_model_instance_name"
+    )]
+    pub model_instance_name: String,
+    /// Optional prompt path or inline prompt override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Entity types to ask the extractor to identify.
+    #[serde(alias = "entity_types", default = "default_entity_types")]
+    pub entity_types: Vec<String>,
+    /// Maximum number of gleaning rounds.
+    #[serde(alias = "max_gleanings")]
+    pub max_gleanings: usize,
+}
+
+impl Default for ExtractGraphConfig {
+    fn default() -> Self {
+        Self {
+            completion_model_id: default_completion_model_id(),
+            model_instance_name: default_extract_graph_model_instance_name(),
+            prompt: None,
+            entity_types: default_entity_types(),
+            max_gleanings: 1,
+        }
+    }
+}
+
+/// Description summarization configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SummarizeDescriptionsConfig {
+    /// Completion model id.
+    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    pub completion_model_id: String,
+    /// Model instance/cache namespace name.
+    #[serde(
+        alias = "model_instance_name",
+        default = "default_summarize_model_instance_name"
+    )]
+    pub model_instance_name: String,
+    /// Optional prompt path or inline prompt override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Maximum summary length.
+    #[serde(alias = "max_length")]
+    pub max_length: usize,
+    /// Maximum input tokens.
+    #[serde(alias = "max_input_tokens")]
+    pub max_input_tokens: usize,
+}
+
+impl Default for SummarizeDescriptionsConfig {
+    fn default() -> Self {
+        Self {
+            completion_model_id: default_completion_model_id(),
+            model_instance_name: default_summarize_model_instance_name(),
+            prompt: None,
+            max_length: 500,
+            max_input_tokens: 4_000,
+        }
+    }
+}
+
+/// Snapshot configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SnapshotsConfig {
+    /// Whether to snapshot embeddings.
+    pub embeddings: bool,
+    /// Whether to write `graph.graphml`.
+    pub graphml: bool,
+    /// Whether to write raw extracted graph tables.
+    #[serde(alias = "raw_graph")]
+    pub raw_graph: bool,
+}
+
 /// Phase-1 GraphRAG configuration surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -101,6 +220,18 @@ pub struct GraphRagConfig {
     /// Configured workflow order. Empty means standard order.
     #[serde(default)]
     pub workflows: Vec<String>,
+    /// Extract graph config.
+    #[serde(alias = "extract_graph", default = "default_extract_graph")]
+    pub extract_graph: ExtractGraphConfig,
+    /// Description summarization config.
+    #[serde(
+        alias = "summarize_descriptions",
+        default = "default_summarize_descriptions"
+    )]
+    pub summarize_descriptions: SummarizeDescriptionsConfig,
+    /// Snapshot config.
+    #[serde(default = "default_snapshots")]
+    pub snapshots: SnapshotsConfig,
     /// Future-compatible sections retained as dynamic values.
     #[serde(flatten)]
     pub sections: BTreeMap<String, Value>,
@@ -116,6 +247,9 @@ impl Default for GraphRagConfig {
             input: default_input(),
             chunking: default_chunking(),
             workflows: Vec::new(),
+            extract_graph: default_extract_graph(),
+            summarize_descriptions: default_summarize_descriptions(),
+            snapshots: default_snapshots(),
             sections: BTreeMap::new(),
         }
     }
@@ -126,7 +260,7 @@ impl GraphRagConfig {
     #[must_use]
     pub fn workflow_order(&self) -> Vec<String> {
         if self.workflows.is_empty() {
-            crate::workflows::STEP5_WORKFLOWS
+            crate::workflows::STEP6_WORKFLOWS
                 .iter()
                 .map(|workflow| (*workflow).to_owned())
                 .collect()
