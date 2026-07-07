@@ -15,6 +15,9 @@ homepage.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
 graphloom-cache.workspace = true
 graphloom-chunking.workspace = true
 graphloom-common.workspace = true
@@ -22,7 +25,9 @@ graphloom-input.workspace = true
 graphloom-llm.workspace = true
 graphloom-storage.workspace = true
 graphloom-vectors.workspace = true
+polars-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true

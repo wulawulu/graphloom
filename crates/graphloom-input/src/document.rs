@@ -23,6 +23,24 @@ pub struct TextDocument {
 }
 
 impl TextDocument {
+    /// Create a text document.
+    #[must_use]
+    pub fn new(
+        id: String,
+        text: String,
+        title: String,
+        creation_date: Option<String>,
+        raw_data: Option<Value>,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            title,
+            creation_date,
+            raw_data,
+        }
+    }
+
     /// Get a standard field or a nested raw-data field using dot notation.
     #[must_use]
     pub fn get(&self, field: &str) -> Option<Value> {

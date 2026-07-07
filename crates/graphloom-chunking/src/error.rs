@@ -21,4 +21,8 @@ pub enum ChunkingError {
     /// Chunking configuration is invalid.
     #[error("invalid chunking config: {0}")]
     InvalidConfig(String),
+
+    /// Tokenizer operation failed.
+    #[error("tokenizer failed: {0}")]
+    Tokenizer(String),
 }

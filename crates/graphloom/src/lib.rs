@@ -1,12 +1,33 @@
-//empty file
 //! Public `GraphLoom` crate.
 //!
-//! Step 1 establishes the workspace-level API surface and dependency direction.
-//! Later implementation steps add configuration, pipeline, workflow, query, and
-//! update modules behind this top-level crate.
+//! The top-level crate owns configuration, provider assembly, and workflow
+//! orchestration for the indexing pipeline.
 
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
+mod callbacks;
+mod config;
+mod context;
+mod error;
+mod pipeline;
+mod stats;
+mod workflow;
+pub mod workflows;
+
+pub use callbacks::{NoopWorkflowCallbacks, WorkflowCallbacks};
+pub use config::{GraphRagConfig, InputConfig};
+pub use context::PipelineRunContext;
+pub use error::{GraphLoomError, Result};
 pub use graphloom_common as common;
 pub use graphloom_storage as storage;
+pub use pipeline::{Pipeline, PipelineFactory};
+pub use stats::PipelineRunStats;
+pub use workflow::{Workflow, WorkflowFunctionOutput, WorkflowRegistry};
+pub use workflows::{
+    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_FINAL_DOCUMENTS_WORKFLOW,
+    LOAD_INPUT_DOCUMENTS_WORKFLOW, register_step5_workflows,
+};
+
+#[cfg(test)]
+mod tests;

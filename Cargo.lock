@@ -1211,6 +1211,9 @@ name = "graphloom"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
  "graphloom-cache",
  "graphloom-chunking",
  "graphloom-common",
@@ -1218,10 +1221,12 @@ dependencies = [
  "graphloom-llm",
  "graphloom-storage",
  "graphloom-vectors",
+ "polars-core",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

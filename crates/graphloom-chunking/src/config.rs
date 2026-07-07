@@ -6,10 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ChunkingError, Result};
 
+/// Default tiktoken encoding model used by GraphRAG.
+pub const DEFAULT_ENCODING_MODEL: &str = "cl100k_base";
+
 /// Chunking configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ChunkingConfig {
+    /// Tokenizer encoding model.
+    #[serde(default = "default_encoding_model")]
+    pub encoding_model: String,
     /// Maximum tokens per chunk.
     pub size: NonZeroUsize,
     /// Overlap tokens between adjacent chunks.
@@ -26,6 +32,7 @@ impl ChunkingConfig {
     /// Returns an error when `overlap >= size`.
     pub fn new(size: NonZeroUsize, overlap: usize, prepend_metadata: Vec<String>) -> Result<Self> {
         let config = Self {
+            encoding_model: default_encoding_model(),
             size,
             overlap,
             prepend_metadata,
@@ -43,4 +50,19 @@ impl ChunkingConfig {
         }
         Ok(())
     }
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            encoding_model: default_encoding_model(),
+            size: NonZeroUsize::new(1200).unwrap_or(NonZeroUsize::MIN),
+            overlap: 100,
+            prepend_metadata: Vec::new(),
+        }
+    }
+}
+
+fn default_encoding_model() -> String {
+    DEFAULT_ENCODING_MODEL.to_owned()
 }

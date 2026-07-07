@@ -128,13 +128,13 @@ async fn read_text_file(storage: Arc<dyn Storage>, path: &str) -> Result<Vec<Tex
         .to_owned();
     let creation_date = storage.get_creation_date(path).await?;
 
-    Ok(vec![TextDocument {
-        id: gen_sha512_hash([text.as_str()]),
+    Ok(vec![TextDocument::new(
+        gen_sha512_hash([text.as_str()]),
         text,
         title,
         creation_date,
-        raw_data: None,
-    }])
+        None,
+    )])
 }
 
 /// Filesystem convenience wrapper for [`TextFileReader`].
