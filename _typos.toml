@@ -2,3 +2,9 @@
 
 [files]
 extend-exclude = ["CHANGELOG.md", "vendors/"]
+
+[default]
+extend-ignore-re = [
+    # 忽略 64 位十六进制哈希及其版本后缀，例如 <hash>_v4
+    "\\b[0-9a-fA-F]{64}(?:_v[0-9]+)?\\b",
+]

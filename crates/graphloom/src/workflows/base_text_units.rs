@@ -100,6 +100,7 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         context.stats.text_unit_count = rows.len();
         Ok(WorkflowFunctionOutput {
             result: sample,
+            stop: false,
             input_rows,
             output_rows: rows.len(),
         })

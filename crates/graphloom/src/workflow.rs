@@ -13,6 +13,8 @@ use crate::{GraphLoomError, GraphRagConfig, PipelineRunContext, Result};
 pub struct WorkflowFunctionOutput {
     /// Up to five sample output rows.
     pub result: Vec<Value>,
+    /// Stop the pipeline after this workflow.
+    pub stop: bool,
     /// Number of input rows read.
     pub input_rows: usize,
     /// Number of output rows written.

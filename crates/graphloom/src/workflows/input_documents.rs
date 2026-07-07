@@ -79,6 +79,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
         context.stats.document_count = rows.len();
         Ok(WorkflowFunctionOutput {
             result: sample,
+            stop: false,
             input_rows: rows.len(),
             output_rows: rows.len(),
         })

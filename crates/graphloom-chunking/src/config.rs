@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ChunkingError, Result};
 
 /// Default tiktoken encoding model used by GraphRAG.
-pub const DEFAULT_ENCODING_MODEL: &str = "cl100k_base";
+pub const DEFAULT_ENCODING_MODEL: &str = "o200k_base";
 
 /// Chunking configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

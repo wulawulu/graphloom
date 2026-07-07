@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::{
     ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, EmbeddingModel,
     EmbeddingRequest, MockCompletionModel, MockEmbeddingModel, ModelConfig, PromptLoader,
-    Tokenizer, completion_cache_key, embedding_cache_key, parse_claim_tuples,
+    Tokenizer, completion_cache_key, embedding_cache_key, graphrag_cache_key, parse_claim_tuples,
     parse_community_report, parse_graph_tuples,
 };
 
@@ -77,12 +77,42 @@ fn test_should_create_deterministic_cache_keys() {
     assert_eq!(
         completion_cache_key("extract_graph", &config, &completion)
             .expect("completion key should hash"),
-        completion_cache_key("extract_graph", &config, &completion)
-            .expect("completion key should hash")
+        "f572b82de883c02e40e55802097327b085960df971ffacb9c6e0844e56d09fec_v4"
     );
     assert_eq!(
         embedding_cache_key("embed", &config, &embedding).expect("embedding key should hash"),
-        embedding_cache_key("embed", &config, &embedding).expect("embedding key should hash")
+        "c1acdf25b4b7df2452b560f79939baf569a89d280b13221dbe8bf15a3259e337_v4"
+    );
+}
+
+#[test]
+fn test_should_match_graphrag_cache_key_filtering_and_yaml_hash() {
+    let key = graphrag_cache_key(&serde_json::json!({
+        "api_key": "sk-test",
+        "metrics": {},
+        "messages": [{"role": "user", "content": "hello"}],
+        "response_format": null,
+        "timeout": 30,
+    }))
+    .expect("cache key should hash");
+
+    assert_eq!(
+        key,
+        "98dbb7395b26e4b91598416540218dd2362f4bf67f55310c01d38ba6b555dbdd_v4",
+    );
+}
+
+#[test]
+fn test_should_match_graphrag_cache_key_for_multiline_message() {
+    let key = graphrag_cache_key(&serde_json::json!({
+        "messages": [{"role": "user", "content": "line1\nline2"}],
+        "response_format": null,
+    }))
+    .expect("cache key should hash");
+
+    assert_eq!(
+        key,
+        "39161cfaa02b838880f47181bb47f72b4047fc46e5e376f3c50a4c527926f9ce_v4",
     );
 }
 

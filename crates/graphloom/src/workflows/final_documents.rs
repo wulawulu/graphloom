@@ -71,6 +71,7 @@ impl Workflow for CreateFinalDocumentsWorkflow {
 
         Ok(WorkflowFunctionOutput {
             result: sample,
+            stop: false,
             input_rows: documents.height().saturating_add(text_units.height()),
             output_rows: rows.len(),
         })

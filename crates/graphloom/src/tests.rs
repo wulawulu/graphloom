@@ -11,6 +11,11 @@ use crate::{
 
 #[test]
 fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
+    assert_eq!(
+        GraphRagConfig::default().chunking.encoding_model,
+        "o200k_base"
+    );
+
     let config = serde_json::from_value::<GraphRagConfig>(json!({
         "chunking": {
             "encoding_model": "o200k_base",

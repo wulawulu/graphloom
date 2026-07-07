@@ -52,7 +52,11 @@ impl Pipeline {
                     context
                         .callbacks
                         .workflow_completed(workflow_name, &context.stats);
+                    let should_stop = output.stop;
                     outputs.push(output);
+                    if should_stop {
+                        break;
+                    }
                 }
                 Err(source) => {
                     error!(
