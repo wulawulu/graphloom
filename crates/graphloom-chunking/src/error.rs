@@ -23,6 +23,11 @@ pub enum ChunkingError {
     InvalidConfig(String),
 
     /// Tokenizer operation failed.
-    #[error("tokenizer failed: {0}")]
-    Tokenizer(String),
+    #[error("tokenizer {encoding_model:?} failed: {message}")]
+    Tokenizer {
+        /// Encoding model requested by configuration.
+        encoding_model: String,
+        /// Human-readable tokenizer error.
+        message: String,
+    },
 }

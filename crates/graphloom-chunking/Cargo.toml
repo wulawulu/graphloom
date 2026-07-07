@@ -12,4 +12,9 @@ readme.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+text-splitter.workspace = true
 thiserror.workspace = true
+tiktoken-rs.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

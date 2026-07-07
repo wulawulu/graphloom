@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use graphloom_chunking::{
-    Chunker, ChunkingError, MetadataTransform, TextTransform, TokenDecode, TokenEncode,
-    TokenOverlapChunker, add_metadata,
-};
+use graphloom_chunking::{MetadataTransform, TextTransform, add_metadata, create_chunker};
 use graphloom_input::{TextDocument, gen_sha512_hash};
 use graphloom_llm::{TiktokenTokenizer, Tokenizer};
 use polars_core::{frame::row::Row, prelude::*};
@@ -37,19 +34,7 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         context: &mut PipelineRunContext,
     ) -> Result<WorkflowFunctionOutput> {
         let tokenizer = Arc::new(TiktokenTokenizer::new(&config.chunking.encoding_model)?);
-        let encode_tokenizer = Arc::clone(&tokenizer);
-        let decode_tokenizer = Arc::clone(&tokenizer);
-        let encode: Arc<TokenEncode> = Arc::new(move |text| {
-            encode_tokenizer
-                .encode(text)
-                .map_err(|source| ChunkingError::Tokenizer(source.to_string()))
-        });
-        let decode: Arc<TokenDecode> = Arc::new(move |tokens| {
-            decode_tokenizer
-                .decode(tokens)
-                .map_err(|source| ChunkingError::Tokenizer(source.to_string()))
-        });
-        let chunker = TokenOverlapChunker::new(config.chunking.clone(), encode, decode)?;
+        let chunker = create_chunker(&config.chunking)?;
 
         let mut documents = context
             .output_table_provider
