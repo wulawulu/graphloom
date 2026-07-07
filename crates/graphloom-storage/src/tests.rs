@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use polars_core::{frame::row::Row, prelude::*};
 use tempfile::tempdir;
 
@@ -380,14 +381,21 @@ async fn test_should_stream_table_rows_report_length_and_has_row_id() {
     assert_eq!(table.length(), 2);
     assert!(table.has("doc-1").await.expect("has should succeed"));
     assert!(table.has("doc-2").await.expect("has should succeed"));
-    assert_eq!(
-        table
-            .next_row()
-            .await
-            .expect("row should stream")
-            .and_then(|row| row_id(&row)),
-        Some("doc-1".to_owned())
-    );
+    let mut rows = table.rows();
+    let first = rows
+        .next()
+        .await
+        .expect("first row should stream")
+        .expect("first row should be valid");
+    let second = rows
+        .next()
+        .await
+        .expect("second row should stream")
+        .expect("second row should be valid");
+
+    assert_eq!(row_id(&first), Some("doc-1".to_owned()));
+    assert_eq!(row_id(&second), Some("doc-2".to_owned()));
+    assert!(rows.next().await.is_none());
 }
 
 #[tokio::test]

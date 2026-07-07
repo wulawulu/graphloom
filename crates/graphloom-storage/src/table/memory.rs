@@ -2,11 +2,11 @@ use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use polars_core::{frame::row::Row, prelude::DataFrame};
+use polars_core::prelude::DataFrame;
 
 use super::{
-    Table, TableProvider, append_optional_dataframe, id_column_index, row_from_dataframe,
-    row_matches_id,
+    Table, TableProvider, append_optional_dataframe, id_column_index, next_dataframe_row,
+    row_from_dataframe, row_matches_id, row_stream,
 };
 use crate::{
     Result, StorageError,
@@ -178,21 +178,10 @@ impl Table for MemoryTable {
         Ok(())
     }
 
-    async fn next_row(&mut self) -> Result<Option<Row<'static>>> {
-        let existing_rows = self.existing.as_ref().map_or(0, DataFrame::height);
-        let row = if let Some(existing) = &self.existing
-            && self.read_index < existing_rows
-        {
-            row_from_dataframe(existing, self.read_index)?
-        } else {
-            let pending_index = self.read_index.saturating_sub(existing_rows);
-            if pending_index >= self.pending.height() {
-                return Ok(None);
-            }
-            row_from_dataframe(&self.pending, pending_index)?
-        };
-        self.read_index = self.read_index.saturating_add(1);
-        Ok(Some(row))
+    fn rows(&mut self) -> super::RowStream<'_> {
+        row_stream(move || {
+            next_dataframe_row(self.existing.as_ref(), &self.pending, &mut self.read_index)
+        })
     }
 
     async fn has(&self, row_id: &str) -> Result<bool> {

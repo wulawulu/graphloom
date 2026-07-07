@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use graphloom_chunking::{
     Chunker, ChunkingError, MetadataTransform, TextTransform, TokenDecode, TokenEncode,
     TokenOverlapChunker, add_metadata,
@@ -62,7 +63,9 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         let mut rows = Vec::new();
         let mut sample = Vec::new();
 
-        while let Some(row) = documents.next_row().await? {
+        let mut document_rows = documents.rows();
+        while let Some(row) = document_rows.next().await {
+            let row = row?;
             let document = document_from_row(&row)?;
             let transform = metadata_transform(&document, &config.chunking.prepend_metadata);
             let transform_fn: Option<Box<TextTransform>> = transform.map(|transform| {

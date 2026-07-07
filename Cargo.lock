@@ -1023,6 +1023,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures-core",
+ "futures-util",
  "graphloom-common",
  "polars-core",
  "polars-io",

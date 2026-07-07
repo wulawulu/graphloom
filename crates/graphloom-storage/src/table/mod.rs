@@ -3,9 +3,11 @@
 mod memory;
 mod parquet;
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
+use futures_core::Stream;
+use futures_util::stream;
 pub use memory::MemoryTableProvider;
 pub use parquet::ParquetTableProvider;
 use polars_core::{
@@ -14,6 +16,9 @@ use polars_core::{
 };
 
 use crate::{Result, StorageError};
+
+/// Stream of table rows.
+pub type RowStream<'a> = Pin<Box<dyn Stream<Item = Result<Row<'static>>> + Send + 'a>>;
 
 /// Streaming table handle used by workflows that read or write rows
 /// incrementally.
@@ -54,12 +59,8 @@ pub trait Table: Send + std::fmt::Debug {
     /// Returns an error when cleanup fails.
     async fn abort(&mut self) -> Result<()>;
 
-    /// Read the next row from this table handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when dataframe row extraction fails.
-    async fn next_row(&mut self) -> Result<Option<Row<'static>>>;
+    /// Stream rows from this table handle.
+    fn rows(&mut self) -> RowStream<'_>;
 
     /// Return whether any visible row has an `id` field equal to `row_id`.
     ///
@@ -166,6 +167,46 @@ pub(super) fn row_from_dataframe(dataframe: &DataFrame, row_index: usize) -> Res
             .into_iter()
             .map(AnyValue::into_static)
             .collect::<Vec<_>>(),
+    ))
+}
+
+pub(super) fn next_dataframe_row(
+    existing: Option<&DataFrame>,
+    pending: &DataFrame,
+    read_index: &mut usize,
+) -> Result<Option<Row<'static>>> {
+    let existing_rows = existing.map_or(0, DataFrame::height);
+    let row = if let Some(existing) = existing
+        && *read_index < existing_rows
+    {
+        row_from_dataframe(existing, *read_index)?
+    } else {
+        let pending_index = read_index.saturating_sub(existing_rows);
+        if pending_index >= pending.height() {
+            return Ok(None);
+        }
+        row_from_dataframe(pending, pending_index)?
+    };
+    *read_index = read_index.saturating_add(1);
+    Ok(Some(row))
+}
+
+pub(super) fn row_stream<'a, F>(next_row: F) -> RowStream<'a>
+where
+    F: FnMut() -> Result<Option<Row<'static>>> + Send + 'a,
+{
+    Box::pin(stream::unfold(
+        (next_row, false),
+        |(mut next_row, finished)| async move {
+            if finished {
+                return None;
+            }
+            match next_row() {
+                Ok(Some(row)) => Some((Ok(row), (next_row, false))),
+                Ok(None) => None,
+                Err(error) => Some((Err(error), (next_row, true))),
+            }
+        },
     ))
 }
 
