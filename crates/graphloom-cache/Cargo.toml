@@ -11,6 +11,7 @@ readme.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 dashmap.workspace = true
 graphloom-storage.workspace = true
 serde.workspace = true

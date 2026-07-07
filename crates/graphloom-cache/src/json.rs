@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use graphloom_storage::Storage;
 use serde_json::{Map, Value};
 
@@ -26,7 +27,7 @@ impl JsonCache {
 
 #[async_trait]
 impl Cache for JsonCache {
-    async fn get(&self, key: &str) -> Result<Option<Value>> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         if !self.has(key).await? {
             return Ok(None);
         }
@@ -34,14 +35,7 @@ impl Cache for JsonCache {
         let Some(bytes) = self.storage.get(key).await? else {
             return Ok(None);
         };
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_source) => {
-                self.storage.delete(key).await?;
-                return Ok(None);
-            }
-        };
-        let data = match serde_json::from_str::<Value>(&text) {
+        let data = match serde_json::from_slice::<Value>(&bytes) {
             Ok(data) => data,
             Err(_source) => {
                 self.storage.delete(key).await?;
@@ -49,15 +43,26 @@ impl Cache for JsonCache {
             }
         };
 
-        Ok(data.get("result").cloned())
+        data.get("result")
+            .map(serde_json::to_vec)
+            .transpose()
+            .map(|value| value.map(Bytes::from))
+            .map_err(|source| CacheError::Json {
+                key: key.to_owned(),
+                source,
+            })
     }
 
     async fn set_with_debug(
         &self,
         key: &str,
-        value: Value,
+        value: Bytes,
         debug_data: BTreeMap<String, Value>,
     ) -> Result<()> {
+        let value = serde_json::from_slice::<Value>(&value).map_err(|source| CacheError::Json {
+            key: key.to_owned(),
+            source,
+        })?;
         if value.is_null() {
             return Ok(());
         }

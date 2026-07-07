@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 use serde_json::Value;
 
@@ -12,7 +13,7 @@ use crate::{Cache, Result};
 /// directly by key, and child caches are independent empty caches.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCache {
-    values: Arc<DashMap<String, Value>>,
+    values: Arc<DashMap<String, Bytes>>,
 }
 
 impl MemoryCache {
@@ -25,14 +26,14 @@ impl MemoryCache {
 
 #[async_trait]
 impl Cache for MemoryCache {
-    async fn get(&self, key: &str) -> Result<Option<Value>> {
+    async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         Ok(self.values.get(key).map(|value| value.value().clone()))
     }
 
     async fn set_with_debug(
         &self,
         key: &str,
-        value: Value,
+        value: Bytes,
         _debug_data: BTreeMap<String, Value>,
     ) -> Result<()> {
         self.values.insert(key.to_owned(), value);
@@ -62,22 +63,29 @@ impl Cache for MemoryCache {
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
+    use bytes::Bytes;
     use graphloom_storage::{MemoryStorage, Storage};
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
-    use crate::{Cache, JsonCache, MemoryCache};
+    use crate::{Cache, JsonCache, JsonCacheExt, MemoryCache};
+
+    #[derive(Debug, Deserialize, PartialEq, Serialize)]
+    struct CachedAnswer {
+        answer: String,
+    }
 
     #[tokio::test]
     async fn test_should_store_and_delete_memory_cache_value() {
         let cache = MemoryCache::new();
         cache
-            .set("a/b", json!({"value": 1}))
+            .set("a/b", Bytes::from_static(br#"{"value":1}"#))
             .await
             .expect("set should work");
 
         assert_eq!(
             cache.get("a/b").await.expect("get should work"),
-            Some(json!({"value": 1}))
+            Some(Bytes::from_static(br#"{"value":1}"#))
         );
 
         cache.delete("a/b").await.expect("delete should work");
@@ -90,15 +98,21 @@ mod tests {
         let cache = JsonCache::new(Arc::clone(&storage));
         let mut debug = BTreeMap::new();
         debug.insert("tokens".to_owned(), json!(12));
+        let answer = CachedAnswer {
+            answer: "yes".to_owned(),
+        };
 
         cache
-            .set_with_debug("llm/key", json!({"answer": "yes"}), debug)
+            .set_json_with_debug("llm/key", &answer, debug)
             .await
             .expect("set should work");
 
         assert_eq!(
-            cache.get("llm/key").await.expect("get should work"),
-            Some(json!({"answer": "yes"}))
+            cache
+                .get_json::<CachedAnswer>("llm/key")
+                .await
+                .expect("get should work"),
+            Some(answer)
         );
         let raw = storage
             .get("llm/key")
@@ -118,7 +132,7 @@ mod tests {
         let child = cache.child("extract_graph").expect("child should be valid");
 
         child
-            .set("key", json!("value"))
+            .set_json("key", &"value")
             .await
             .expect("set should work");
 

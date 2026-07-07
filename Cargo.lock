@@ -948,6 +948,7 @@ name = "graphloom-cache"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "dashmap",
  "graphloom-storage",
  "serde",

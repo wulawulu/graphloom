@@ -16,6 +16,7 @@ readme = "README.md"
 anyhow = "1.0.103"
 async-trait = "0.1.89"
 async-openai = { version = "0.41.1", default-features = false, features = ["byot", "chat-completion", "embedding", "middleware", "rustls"] }
+bytes = "1.12.0"
 chrono = "0.4.45"
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
 dashmap = "6.1.0"
