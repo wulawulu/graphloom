@@ -82,7 +82,7 @@ pub struct PromptLoader {
 }
 
 impl PromptLoader {
-    /// Create a prompt loader rooted at a GraphRAG project directory.
+    /// Create a prompt loader rooted at a `GraphRAG` project directory.
     #[must_use]
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {

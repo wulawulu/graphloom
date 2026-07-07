@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+fn default_max_retries() -> u32 {
+    1
+}
+
 /// OpenAI-compatible chat role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,10 +76,10 @@ pub struct ModelConfig {
     /// Per-request timeout in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
-    /// Maximum retry attempts. The initial request counts as attempt one.
+    /// Maximum retry attempts.
     #[serde(alias = "max_retries")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
     /// Retry strategy name. Supported values are `exponential_backoff` and `immediate`.
     #[serde(alias = "retry_strategy")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +116,13 @@ impl ModelConfig {
             return Err(crate::LlmError::InvalidConfig {
                 model_instance: model_instance.to_owned(),
                 message: "api_key is required".to_owned(),
+            });
+        }
+
+        if self.max_retries == 0 {
+            return Err(crate::LlmError::InvalidConfig {
+                model_instance: model_instance.to_owned(),
+                message: "max_retries must be greater than zero".to_owned(),
             });
         }
 
@@ -172,7 +183,7 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionResponse {
-    /// First choice content, matching GraphRAG's `.content` convenience field.
+    /// First choice content, matching `GraphRAG`'s `.content` convenience field.
     pub content: String,
     /// Usage counters when the provider returns them.
     #[serde(default, skip_serializing_if = "Option::is_none")]

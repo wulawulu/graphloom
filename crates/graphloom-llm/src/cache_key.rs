@@ -1,4 +1,4 @@
-//! Cache keys compatible with GraphRAG's `graphrag_cache` package.
+//! Cache keys compatible with `GraphRAG`'s `graphrag_cache` package.
 
 use std::collections::BTreeMap;
 
@@ -42,13 +42,12 @@ pub fn completion_cache_key(
         request
             .response_format
             .as_ref()
-            .map(|response_format| {
+            .map_or(Value::Null, |response_format| {
                 Value::Object(Map::from_iter([(
                     "type".to_owned(),
                     Value::String(response_format.clone()),
                 )]))
-            })
-            .unwrap_or(Value::Null),
+            }),
     );
     if let Some(temperature) = request.temperature {
         payload.insert("temperature".to_owned(), number_from_f32(temperature)?);

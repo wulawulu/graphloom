@@ -15,7 +15,7 @@ readme = "README.md"
 [workspace.dependencies]
 anyhow = "1.0.103"
 async-trait = "0.1.89"
-async-openai = { version = "0.41.1", default-features = false, features = ["byot", "chat-completion", "embedding", "rustls"] }
+async-openai = { version = "0.41.1", default-features = false, features = ["byot", "chat-completion", "embedding", "middleware", "rustls"] }
 chrono = "0.4.45"
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
 dashmap = "6.1.0"
@@ -37,6 +37,7 @@ tempfile = "3.23.0"
 thiserror = "2.0.18"
 tiktoken-rs = "0.12.0"
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread"] }
+tower = { version = "0.5.3", features = ["limit", "timeout"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.23.4", features = ["v4"] }

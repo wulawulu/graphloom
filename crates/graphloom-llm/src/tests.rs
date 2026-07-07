@@ -133,8 +133,33 @@ fn test_should_parse_graphrag_snake_case_model_config() {
 
     assert_eq!(config.api_key.as_deref(), Some("sk-test"));
     assert_eq!(config.api_base.as_deref(), Some("https://example.test/v1"));
-    assert_eq!(config.max_retries, Some(3));
+    assert_eq!(config.max_retries, 3);
     assert_eq!(config.encoding_model.as_deref(), Some("cl100k_base"));
+}
+
+#[test]
+fn test_should_default_model_config_retries() {
+    let config: ModelConfig = serde_json::from_value(serde_json::json!({
+        "type": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-test"
+    }))
+    .expect("config should parse");
+
+    assert_eq!(config.max_retries, 1);
+}
+
+#[test]
+fn test_should_reject_zero_model_config_retries() {
+    let config: ModelConfig = serde_json::from_value(serde_json::json!({
+        "type": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-test",
+        "max_retries": 0
+    }))
+    .expect("config should parse");
+
+    assert!(config.validate_openai_compatible("chat").is_err());
 }
 
 #[tokio::test]
@@ -210,7 +235,7 @@ fn model_config() -> ModelConfig {
         api_base: None,
         organization: None,
         timeout: None,
-        max_retries: Some(1),
+        max_retries: 1,
         retry_strategy: None,
         tokens_per_minute: None,
         requests_per_minute: None,

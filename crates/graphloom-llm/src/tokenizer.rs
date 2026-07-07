@@ -30,7 +30,7 @@ pub trait Tokenizer: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// OpenAI tiktoken-backed tokenizer.
+/// `OpenAI` tiktoken-backed tokenizer.
 #[derive(Clone)]
 pub struct TiktokenTokenizer {
     encoding_model: String,
@@ -38,7 +38,7 @@ pub struct TiktokenTokenizer {
 }
 
 impl TiktokenTokenizer {
-    /// Create a tokenizer for an OpenAI model or encoding name.
+    /// Create a tokenizer for an `OpenAI` model or encoding name.
     ///
     /// # Errors
     ///

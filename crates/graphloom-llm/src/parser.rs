@@ -1,15 +1,15 @@
-//! Parsers for GraphRAG LLM output formats.
+//! Parsers for `GraphRAG` LLM output formats.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{LlmError, Result};
 
-/// GraphRAG tuple delimiter.
+/// `GraphRAG` tuple delimiter.
 pub const TUPLE_DELIMITER: &str = "<|>";
-/// GraphRAG record delimiter.
+/// `GraphRAG` record delimiter.
 pub const RECORD_DELIMITER: &str = "##";
-/// GraphRAG completion delimiter.
+/// `GraphRAG` completion delimiter.
 pub const COMPLETION_DELIMITER: &str = "<|COMPLETE|>";
 
 /// Parsed graph extraction output.
@@ -101,7 +101,7 @@ pub struct CommunityFinding {
     pub explanation: String,
 }
 
-/// Parse GraphRAG entity and relationship tuple output.
+/// Parse `GraphRAG` entity and relationship tuple output.
 #[must_use]
 pub fn parse_graph_tuples(result: &str, source_id: &str) -> GraphExtraction {
     let mut entities = Vec::new();
@@ -131,7 +131,7 @@ pub fn parse_graph_tuples(result: &str, source_id: &str) -> GraphExtraction {
                         .last()
                         .and_then(|weight| weight.parse::<f64>().ok())
                         .unwrap_or(1.0),
-                })
+                });
             }
             _ => {}
         }
@@ -143,7 +143,7 @@ pub fn parse_graph_tuples(result: &str, source_id: &str) -> GraphExtraction {
     }
 }
 
-/// Parse GraphRAG claim tuple output.
+/// Parse `GraphRAG` claim tuple output.
 #[must_use]
 pub fn parse_claim_tuples(claims: &str) -> Vec<ClaimRecord> {
     let without_completion = claims
@@ -186,7 +186,7 @@ pub fn parse_community_report(input: &str) -> Result<CommunityReport> {
     })
 }
 
-/// Try to parse a GraphRAG JSON object response with limited deterministic cleanup.
+/// Try to parse a `GraphRAG` JSON object response with limited deterministic cleanup.
 ///
 /// # Errors
 ///
@@ -199,7 +199,7 @@ pub fn try_parse_json_object(input: &str) -> Result<(String, Value)> {
     }
 
     let mut cleaned = extract_json_object(input).unwrap_or_else(|| input.to_owned());
-    cleaned = cleaned
+    let normalized = cleaned
         .replace("{{", "{")
         .replace("}}", "}")
         .replace("\"[{", "[{")
@@ -210,6 +210,7 @@ pub fn try_parse_json_object(input: &str) -> Result<(String, Value)> {
         .replace('\r', "")
         .trim()
         .to_owned();
+    cleaned = normalized;
 
     if let Some(stripped) = cleaned.strip_prefix("```json") {
         cleaned = stripped.to_owned();
