@@ -7,61 +7,22 @@ use graphloom_llm::ModelConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-fn default_concurrent_requests() -> usize {
-    25
-}
-
-fn default_async_mode() -> String {
-    "asyncio".to_owned()
-}
-
-fn default_input() -> InputConfig {
-    InputConfig::default()
-}
-
-fn default_chunking() -> ChunkingConfig {
-    ChunkingConfig::default()
-}
-
-fn default_extract_graph() -> ExtractGraphConfig {
-    ExtractGraphConfig::default()
-}
-
-fn default_summarize_descriptions() -> SummarizeDescriptionsConfig {
-    SummarizeDescriptionsConfig::default()
-}
-
-fn default_extract_claims() -> ExtractClaimsConfig {
-    ExtractClaimsConfig::default()
-}
-
-fn default_cluster_graph() -> ClusterGraphConfig {
-    ClusterGraphConfig::default()
-}
-
-fn default_snapshots() -> SnapshotsConfig {
-    SnapshotsConfig::default()
-}
-
-fn default_completion_model_id() -> String {
-    "default_completion_model".to_owned()
-}
-
-fn default_extract_graph_model_instance_name() -> String {
-    "extract_graph".to_owned()
-}
-
-fn default_summarize_model_instance_name() -> String {
-    "summarize_descriptions".to_owned()
-}
-
-fn default_extract_claims_model_instance_name() -> String {
-    "extract_claims".to_owned()
-}
-
-fn default_claim_description() -> String {
-    "Any claims or facts that could be relevant to information discovery.".to_owned()
-}
+const DEFAULT_CONCURRENT_REQUESTS: usize = 25;
+const DEFAULT_COMPLETION_MODEL_ID: &str = "default_completion_model";
+const DEFAULT_EXTRACT_GRAPH_MODEL_INSTANCE_NAME: &str = "extract_graph";
+const DEFAULT_SUMMARIZE_MODEL_INSTANCE_NAME: &str = "summarize_descriptions";
+const DEFAULT_EXTRACT_CLAIMS_MODEL_INSTANCE_NAME: &str = "extract_claims";
+const DEFAULT_CLAIM_DESCRIPTION: &str =
+    "Any claims or facts that could be relevant to information discovery.";
+const DEFAULT_INPUT_TYPE: &str = "file";
+const DEFAULT_FILE_PATTERN: &str = r".*\.txt$";
+const DEFAULT_TEXT_COLUMN: &str = "text";
+const DEFAULT_TITLE_COLUMN: &str = "title";
+const DEFAULT_MAX_GLEANINGS: usize = 1;
+const DEFAULT_MAX_SUMMARY_LENGTH: usize = 500;
+const DEFAULT_MAX_INPUT_TOKENS: usize = 4_000;
+const DEFAULT_MAX_CLUSTER_SIZE: u32 = 10;
+const DEFAULT_CLUSTER_SEED: u64 = 0xDEAD_BEEF;
 
 fn default_entity_types() -> Vec<String> {
     ["organization", "person", "geo", "event"]
@@ -72,53 +33,34 @@ fn default_entity_types() -> Vec<String> {
 
 /// Input reader configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct InputConfig {
     /// Input reader type.
-    #[serde(rename = "type", default = "InputConfig::default_type")]
+    #[serde(rename = "type")]
     pub input_type: String,
     /// File pattern for file readers.
-    #[serde(alias = "file_pattern", default = "InputConfig::default_file_pattern")]
+    #[serde(alias = "file_pattern")]
     pub file_pattern: String,
     /// Text column for structured inputs.
-    #[serde(alias = "text_column", default = "InputConfig::default_text_column")]
+    #[serde(alias = "text_column")]
     pub text_column: String,
     /// Title column for structured inputs.
-    #[serde(alias = "title_column", default = "InputConfig::default_title_column")]
+    #[serde(alias = "title_column")]
     pub title_column: String,
     /// Metadata fields to collect from structured inputs.
-    #[serde(default)]
     pub metadata: Vec<String>,
 }
 
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
-            input_type: Self::default_type(),
-            file_pattern: Self::default_file_pattern(),
-            text_column: Self::default_text_column(),
-            title_column: Self::default_title_column(),
+            input_type: DEFAULT_INPUT_TYPE.to_owned(),
+            file_pattern: DEFAULT_FILE_PATTERN.to_owned(),
+            text_column: DEFAULT_TEXT_COLUMN.to_owned(),
+            title_column: DEFAULT_TITLE_COLUMN.to_owned(),
             metadata: Vec::new(),
         }
-    }
-}
-
-impl InputConfig {
-    fn default_type() -> String {
-        "file".to_owned()
-    }
-
-    fn default_file_pattern() -> String {
-        r".*\.txt$".to_owned()
-    }
-
-    fn default_text_column() -> String {
-        "text".to_owned()
-    }
-
-    fn default_title_column() -> String {
-        "title".to_owned()
     }
 }
 
@@ -128,16 +70,13 @@ impl InputConfig {
 #[non_exhaustive]
 pub struct ExtractGraphConfig {
     /// Completion model id.
-    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    #[serde(alias = "completion_model_id")]
     pub completion_model_id: String,
     /// Model instance/cache namespace name.
-    #[serde(
-        alias = "model_instance_name",
-        default = "default_extract_graph_model_instance_name"
-    )]
+    #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
     /// Optional prompt path or inline prompt override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Entity types to ask the extractor to identify.
     #[serde(alias = "entity_types", default = "default_entity_types")]
@@ -150,11 +89,11 @@ pub struct ExtractGraphConfig {
 impl Default for ExtractGraphConfig {
     fn default() -> Self {
         Self {
-            completion_model_id: default_completion_model_id(),
-            model_instance_name: default_extract_graph_model_instance_name(),
+            completion_model_id: DEFAULT_COMPLETION_MODEL_ID.to_owned(),
+            model_instance_name: DEFAULT_EXTRACT_GRAPH_MODEL_INSTANCE_NAME.to_owned(),
             prompt: None,
             entity_types: default_entity_types(),
-            max_gleanings: 1,
+            max_gleanings: DEFAULT_MAX_GLEANINGS,
         }
     }
 }
@@ -165,16 +104,13 @@ impl Default for ExtractGraphConfig {
 #[non_exhaustive]
 pub struct SummarizeDescriptionsConfig {
     /// Completion model id.
-    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    #[serde(alias = "completion_model_id")]
     pub completion_model_id: String,
     /// Model instance/cache namespace name.
-    #[serde(
-        alias = "model_instance_name",
-        default = "default_summarize_model_instance_name"
-    )]
+    #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
     /// Optional prompt path or inline prompt override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Maximum summary length.
     #[serde(alias = "max_length")]
@@ -187,11 +123,11 @@ pub struct SummarizeDescriptionsConfig {
 impl Default for SummarizeDescriptionsConfig {
     fn default() -> Self {
         Self {
-            completion_model_id: default_completion_model_id(),
-            model_instance_name: default_summarize_model_instance_name(),
+            completion_model_id: DEFAULT_COMPLETION_MODEL_ID.to_owned(),
+            model_instance_name: DEFAULT_SUMMARIZE_MODEL_INSTANCE_NAME.to_owned(),
             prompt: None,
-            max_length: 500,
-            max_input_tokens: 4_000,
+            max_length: DEFAULT_MAX_SUMMARY_LENGTH,
+            max_input_tokens: DEFAULT_MAX_INPUT_TOKENS,
         }
     }
 }
@@ -204,19 +140,15 @@ pub struct ExtractClaimsConfig {
     /// Whether claim extraction is enabled.
     pub enabled: bool,
     /// Completion model id.
-    #[serde(alias = "completion_model_id", default = "default_completion_model_id")]
+    #[serde(alias = "completion_model_id")]
     pub completion_model_id: String,
     /// Model instance/cache namespace name.
-    #[serde(
-        alias = "model_instance_name",
-        default = "default_extract_claims_model_instance_name"
-    )]
+    #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
     /// Optional prompt path or inline prompt override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Claim description inserted into the extraction prompt.
-    #[serde(default = "default_claim_description")]
     pub description: String,
     /// Maximum number of claim gleaning rounds.
     #[serde(alias = "max_gleanings")]
@@ -227,11 +159,11 @@ impl Default for ExtractClaimsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            completion_model_id: default_completion_model_id(),
-            model_instance_name: default_extract_claims_model_instance_name(),
+            completion_model_id: DEFAULT_COMPLETION_MODEL_ID.to_owned(),
+            model_instance_name: DEFAULT_EXTRACT_CLAIMS_MODEL_INSTANCE_NAME.to_owned(),
             prompt: None,
-            description: default_claim_description(),
-            max_gleanings: 1,
+            description: DEFAULT_CLAIM_DESCRIPTION.to_owned(),
+            max_gleanings: DEFAULT_MAX_GLEANINGS,
         }
     }
 }
@@ -254,9 +186,9 @@ pub struct ClusterGraphConfig {
 impl Default for ClusterGraphConfig {
     fn default() -> Self {
         Self {
-            max_cluster_size: 10,
+            max_cluster_size: DEFAULT_MAX_CLUSTER_SIZE,
             use_lcc: true,
-            seed: 0xDEADBEEF,
+            seed: DEFAULT_CLUSTER_SEED,
         }
     }
 }
@@ -275,7 +207,7 @@ pub struct SnapshotsConfig {
     pub raw_graph: bool,
 }
 
-/// Phase-1 GraphRAG configuration surface.
+/// Phase-1 `GraphRAG` configuration surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
@@ -287,37 +219,27 @@ pub struct GraphRagConfig {
     #[serde(alias = "embedding_models")]
     pub embedding_models: BTreeMap<String, ModelConfig>,
     /// Maximum concurrent LLM requests.
-    #[serde(alias = "concurrent_requests", default = "default_concurrent_requests")]
+    #[serde(alias = "concurrent_requests")]
     pub concurrent_requests: usize,
-    /// Async mode compatibility field.
-    #[serde(alias = "async_mode", default = "default_async_mode")]
-    pub async_mode: String,
     /// Input config.
-    #[serde(default = "default_input")]
     pub input: InputConfig,
     /// Chunking config.
-    #[serde(default = "default_chunking")]
     pub chunking: ChunkingConfig,
     /// Configured workflow order. Empty means standard order.
-    #[serde(default)]
     pub workflows: Vec<String>,
     /// Extract graph config.
-    #[serde(alias = "extract_graph", default = "default_extract_graph")]
+    #[serde(alias = "extract_graph")]
     pub extract_graph: ExtractGraphConfig,
     /// Description summarization config.
-    #[serde(
-        alias = "summarize_descriptions",
-        default = "default_summarize_descriptions"
-    )]
+    #[serde(alias = "summarize_descriptions")]
     pub summarize_descriptions: SummarizeDescriptionsConfig,
     /// Claim extraction config.
-    #[serde(alias = "extract_claims", default = "default_extract_claims")]
+    #[serde(alias = "extract_claims")]
     pub extract_claims: ExtractClaimsConfig,
     /// Graph clustering config.
-    #[serde(alias = "cluster_graph", default = "default_cluster_graph")]
+    #[serde(alias = "cluster_graph")]
     pub cluster_graph: ClusterGraphConfig,
     /// Snapshot config.
-    #[serde(default = "default_snapshots")]
     pub snapshots: SnapshotsConfig,
     /// Future-compatible sections retained as dynamic values.
     #[serde(flatten)]
@@ -329,16 +251,15 @@ impl Default for GraphRagConfig {
         Self {
             completion_models: BTreeMap::new(),
             embedding_models: BTreeMap::new(),
-            concurrent_requests: default_concurrent_requests(),
-            async_mode: default_async_mode(),
-            input: default_input(),
-            chunking: default_chunking(),
+            concurrent_requests: DEFAULT_CONCURRENT_REQUESTS,
+            input: InputConfig::default(),
+            chunking: ChunkingConfig::default(),
             workflows: Vec::new(),
-            extract_graph: default_extract_graph(),
-            summarize_descriptions: default_summarize_descriptions(),
-            extract_claims: default_extract_claims(),
-            cluster_graph: default_cluster_graph(),
-            snapshots: default_snapshots(),
+            extract_graph: ExtractGraphConfig::default(),
+            summarize_descriptions: SummarizeDescriptionsConfig::default(),
+            extract_claims: ExtractClaimsConfig::default(),
+            cluster_graph: ClusterGraphConfig::default(),
+            snapshots: SnapshotsConfig::default(),
             sections: BTreeMap::new(),
         }
     }

@@ -28,6 +28,7 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
             "overlap": 8,
             "prepend_metadata": ["title"],
         },
+        "async_mode": "asyncio",
         "local_search": {
             "enabled": true,
         },
@@ -47,7 +48,8 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.extract_claims.model_instance_name, "extract_claims");
     assert_eq!(config.cluster_graph.max_cluster_size, 10);
     assert!(config.cluster_graph.use_lcc);
-    assert_eq!(config.cluster_graph.seed, 0xDEADBEEF);
+    assert_eq!(config.cluster_graph.seed, 0xDEAD_BEEF);
+    assert_eq!(config.sections["async_mode"], "asyncio");
     assert_eq!(config.sections["local_search"]["enabled"], true);
 }
 

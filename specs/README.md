@@ -711,7 +711,6 @@ Phase 1 至少支持以下配置区块：
 completion_models
 embedding_models
 concurrent_requests
-async_mode
 input
 input_storage
 chunking
@@ -738,6 +737,7 @@ local_search
 global_search
 drift_search
 basic_search
+async_mode
 ```
 
 配置对象应允许保留 provider 自定义字段。
