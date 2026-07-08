@@ -150,23 +150,24 @@ fn resolve_report_context(
         return Ok(local_context.context.clone());
     }
 
-    let mut children_by_size = community
+    let mut children_by_full_token_count = community
         .children
         .iter()
         .filter_map(|child| {
             local_contexts
                 .get(child)
-                .map(|context| (*child, context.token_count))
+                .map(|context| (*child, context.full_token_count))
         })
         .collect::<Vec<_>>();
-    children_by_size.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    if children_by_size.is_empty() {
+    children_by_full_token_count
+        .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if children_by_full_token_count.is_empty() {
         return Ok(local_context.context.clone());
     }
 
     let mut report_children = Vec::new();
     let mut detail_children = stable_children(community);
-    for (child, _) in &children_by_size {
+    for (child, _) in &children_by_full_token_count {
         if reports_by_community.contains_key(child) {
             report_children.push(*child);
             detail_children.retain(|detail_child| detail_child != child);
@@ -184,7 +185,7 @@ fn resolve_report_context(
 
     let mut report_records = ContextRecords::default();
     let mut best = String::new();
-    for (child, _) in children_by_size {
+    for (child, _) in children_by_full_token_count {
         if let Some(report) = reports_by_community.get(&child) {
             let mut candidate_records = report_records.clone();
             candidate_records.add_report(ReportContextRow {
@@ -787,44 +788,52 @@ mod tests {
     }
 
     #[test]
-    fn test_should_substitute_children_by_token_count_then_community() {
+    fn test_should_substitute_children_by_full_token_count_then_community() {
         let tokenizer = WordCountTokenizer;
         let entities = vec![
-            entity_with_description("entity-a", 0, "ALICE", 1, "one two three four five six"),
-            entity_with_description("entity-b", 1, "BOB", 1, "one two three four five six"),
-            entity_with_description("entity-c", 2, "CAROL", 1, "tiny"),
+            entity_with_description("entity-a1", 0, "ALICE_SMALL", 2, "tiny"),
+            entity_with_description(
+                "entity-a2",
+                1,
+                "ALICE_LARGE",
+                1,
+                "one two three four five six seven eight nine ten eleven twelve",
+            ),
+            entity_with_description("entity-b1", 2, "BOB_SMALL", 2, "tiny"),
+            entity_with_description("entity-b2", 3, "BOB_DETAIL", 1, "one two three four"),
         ];
         let communities = vec![
-            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
-            community(2, 1, 0, Vec::new(), vec!["entity-b"]),
-            community(3, 1, 0, Vec::new(), vec!["entity-c"]),
+            community(1, 1, 0, Vec::new(), vec!["entity-b1", "entity-b2"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-a1", "entity-a2"]),
             community(
                 0,
                 0,
                 -1,
-                vec![1, 2, 3],
-                vec!["entity-a", "entity-b", "entity-c"],
+                vec![1, 2],
+                vec!["entity-a1", "entity-a2", "entity-b1", "entity-b2"],
             ),
         ];
-        let local_contexts =
-            build_local_contexts(&communities, &entities, &[], &[], &tokenizer, 100)
-                .expect("contexts");
-        let reports = reports_by_community(&[(1, "first"), (2, "second"), (3, "third")]);
+        let local_contexts = build_local_contexts(&communities, &entities, &[], &[], &tokenizer, 9)
+            .expect("contexts");
+        let child_1 = local_contexts.get(&1).expect("child 1 context");
+        let child_2 = local_contexts.get(&2).expect("child 2 context");
+        assert_eq!(child_1.token_count, child_2.token_count);
+        assert!(child_2.full_token_count > child_1.full_token_count);
+        let reports = reports_by_community(&[(1, "smaller child"), (2, "larger child")]);
 
         let context = resolve_report_context(
             communities.last().expect("parent"),
             &local_contexts,
             &reports,
             &tokenizer,
-            24,
+            26,
         )
         .expect("context");
 
-        assert!(
-            context.find("# Report 1").expect("report 1")
-                < context.find("# Report 2").expect("report 2")
-        );
-        assert!(context.contains("CAROL"));
+        assert!(context.contains("# Report 2"));
+        assert!(!context.contains("# Report 1"));
+        assert!(!context.contains("ALICE_LARGE"));
+        assert!(context.contains("BOB_DETAIL"));
     }
 
     #[test]

@@ -211,15 +211,17 @@ fn trim_relationship_records(
             tokenizer,
             max_input_length,
         )?;
-        try_add_claims(
-            relationship.source.as_str(),
-            claims_by_subject,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
+        if contains_entity_for_title(&committed, relationship.source.as_str(), entity_by_title) {
+            try_add_claims(
+                relationship.source.as_str(),
+                claims_by_subject,
+                &mut committed,
+                &mut committed_text,
+                &mut committed_tokens,
+                tokenizer,
+                max_input_length,
+            )?;
+        }
         try_add_entity(
             relationship.target.as_str(),
             entity_by_title,
@@ -229,25 +231,29 @@ fn trim_relationship_records(
             tokenizer,
             max_input_length,
         )?;
-        try_add_claims(
-            relationship.target.as_str(),
-            claims_by_subject,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
-        let mut relationship_candidate = committed.clone();
-        relationship_candidate.add_relationship(relationship);
-        let _ = commit_if_within_limit(
-            &relationship_candidate,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
+        if contains_entity_for_title(&committed, relationship.target.as_str(), entity_by_title) {
+            try_add_claims(
+                relationship.target.as_str(),
+                claims_by_subject,
+                &mut committed,
+                &mut committed_text,
+                &mut committed_tokens,
+                tokenizer,
+                max_input_length,
+            )?;
+        }
+        if contains_entity_for_title(&committed, relationship.source.as_str(), entity_by_title)
+            && contains_entity_for_title(&committed, relationship.target.as_str(), entity_by_title)
+        {
+            let _ = try_add_relationship(
+                relationship,
+                &mut committed,
+                &mut committed_text,
+                &mut committed_tokens,
+                tokenizer,
+                max_input_length,
+            )?;
+        }
     }
     Ok((committed, committed_text, committed_tokens))
 }
@@ -397,6 +403,36 @@ fn try_add_claims(
         )?;
     }
     Ok(())
+}
+
+fn try_add_relationship(
+    relationship: RelationshipContextRow,
+    committed: &mut ContextRecords,
+    committed_text: &mut String,
+    committed_tokens: &mut usize,
+    tokenizer: &dyn Tokenizer,
+    max_input_length: usize,
+) -> Result<bool> {
+    let mut candidate = committed.clone();
+    candidate.add_relationship(relationship);
+    commit_if_within_limit(
+        &candidate,
+        committed,
+        committed_text,
+        committed_tokens,
+        tokenizer,
+        max_input_length,
+    )
+}
+
+fn contains_entity_for_title(
+    records: &ContextRecords,
+    title: &str,
+    entity_by_title: &BTreeMap<&str, &EntityContextRow>,
+) -> bool {
+    entity_by_title
+        .get(title)
+        .is_some_and(|entity| records.entity_ids.contains(&entity.human_readable_id))
 }
 
 fn commit_if_within_limit(
@@ -785,6 +821,102 @@ mod tests {
         assert!(local.token_count <= 9);
         assert!(!local.context.contains("BIG"));
         assert!(local.context.contains("SMALL"));
+    }
+
+    #[test]
+    fn test_should_not_add_claim_or_relationship_when_source_entity_is_missing() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["source", "target"])],
+            &[
+                entity_with_description(
+                    "source",
+                    10,
+                    "SOURCE",
+                    2,
+                    "one two three four five six seven eight nine ten eleven twelve",
+                ),
+                entity_with_description("target", 20, "TARGET", 1, "tiny"),
+            ],
+            &[relationship_with_degree(
+                100, "SOURCE", "TARGET", "link", 20,
+            )],
+            &[claim(7, "SOURCE", "short")],
+            &tokenizer,
+            18,
+        )
+        .expect("contexts");
+        let local = contexts.get(&0).expect("community");
+
+        assert!(local.token_count <= 18);
+        assert!(!local.records.entity_ids.contains(&10));
+        assert!(local.records.entity_ids.contains(&20));
+        assert!(!local.records.claim_ids.contains(&7));
+        assert!(!local.records.relationship_ids.contains(&100));
+        assert!(!local.context.contains("SOURCE"));
+        assert!(!local.context.contains("-----Claims-----"));
+        assert!(!local.context.contains("-----Relationships-----"));
+        assert!(local.context.contains("TARGET"));
+    }
+
+    #[test]
+    fn test_should_not_add_relationship_when_target_entity_is_missing() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["source", "target"])],
+            &[
+                entity_with_description("source", 10, "SOURCE", 2, "tiny"),
+                entity_with_description(
+                    "target",
+                    20,
+                    "TARGET",
+                    1,
+                    "one two three four five six seven eight nine ten",
+                ),
+            ],
+            &[relationship_with_degree(
+                100, "SOURCE", "TARGET", "link", 20,
+            )],
+            &[],
+            &tokenizer,
+            18,
+        )
+        .expect("contexts");
+        let local = contexts.get(&0).expect("community");
+
+        assert!(local.token_count <= 18);
+        assert!(local.records.entity_ids.contains(&10));
+        assert!(!local.records.entity_ids.contains(&20));
+        assert!(!local.records.relationship_ids.contains(&100));
+        assert!(local.context.contains("SOURCE"));
+        assert!(!local.context.contains("TARGET"));
+        assert!(!local.context.contains("-----Relationships-----"));
+    }
+
+    #[test]
+    fn test_should_add_relationship_when_both_endpoint_entities_exist() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["source", "target"])],
+            &[
+                entity_with_description("source", 10, "SOURCE", 2, "tiny"),
+                entity_with_description("target", 20, "TARGET", 1, "small"),
+            ],
+            &[relationship_with_degree(
+                100, "SOURCE", "TARGET", "link", 20,
+            )],
+            &[claim(7, "SOURCE", "short")],
+            &tokenizer,
+            100,
+        )
+        .expect("contexts");
+        let local = contexts.get(&0).expect("community");
+
+        assert!(local.records.entity_ids.contains(&10));
+        assert!(local.records.entity_ids.contains(&20));
+        assert!(local.records.claim_ids.contains(&7));
+        assert!(local.records.relationship_ids.contains(&100));
+        assert!(local.context.contains("100,SOURCE,TARGET"));
     }
 
     fn community(community: i64, level: i64, entity_ids: Vec<&str>) -> CommunityInputRow {
