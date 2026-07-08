@@ -46,7 +46,7 @@ impl Workflow for CreateFinalDocumentsWorkflow {
             let document_id = string_at(&row, 0, "id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
             let document = DocumentRow {
                 id: document_id.clone(),
-                human_readable_id: row_index,
+                human_readable_id: row_index as i64,
                 title: optional_string_at(&row, 2),
                 text: string_at(&row, 3, "text", CREATE_FINAL_DOCUMENTS_WORKFLOW)?,
                 text_unit_ids: mapping.get(&document_id).cloned().unwrap_or_default(),

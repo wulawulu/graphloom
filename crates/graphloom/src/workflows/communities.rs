@@ -97,7 +97,7 @@ struct CommunityRow {
     relationship_ids: Vec<String>,
     text_unit_ids: Vec<String>,
     period: String,
-    size: usize,
+    size: i64,
 }
 
 fn create_communities(
@@ -144,7 +144,7 @@ fn create_communities(
         if relationship_ids.is_empty() {
             continue;
         }
-        let size = entity_ids.len();
+        let size = entity_ids.len() as i64;
         rows.push(CommunityRow {
             id: Uuid::new_v4().to_string(),
             human_readable_id: cluster.community,
@@ -247,7 +247,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
         "parent" => rows.iter().map(|row| row.parent).collect::<Vec<_>>(),
         "title" => rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
         "period" => rows.iter().map(|row| row.period.as_str()).collect::<Vec<_>>(),
-        "size" => rows.iter().map(|row| row.size as i64).collect::<Vec<_>>(),
+        "size" => rows.iter().map(|row| row.size).collect::<Vec<_>>(),
     )?;
     dataframe.insert_column(
         5,
@@ -358,6 +358,25 @@ mod tests {
                 "period",
                 "size",
             ]
+        );
+        assert_eq!(
+            dataframe
+                .column("human_readable_id")
+                .expect("human_readable_id")
+                .dtype(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            dataframe.column("community").expect("community").dtype(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            dataframe.column("level").expect("level").dtype(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            dataframe.column("parent").expect("parent").dtype(),
+            &DataType::Int64
         );
         assert_eq!(
             dataframe.column("children").expect("children").dtype(),

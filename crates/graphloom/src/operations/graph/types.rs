@@ -62,7 +62,7 @@ pub(crate) struct SummarizedRelationshipRow {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FinalEntityRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
+    pub(crate) human_readable_id: i64,
     pub(crate) title: String,
     pub(crate) entity_type: String,
     pub(crate) description: String,
@@ -74,7 +74,7 @@ pub(crate) struct FinalEntityRow {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FinalRelationshipRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
+    pub(crate) human_readable_id: i64,
     pub(crate) source: String,
     pub(crate) target: String,
     pub(crate) description: String,

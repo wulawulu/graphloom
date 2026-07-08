@@ -50,7 +50,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
                 .transpose()?;
             let row = DocumentRow {
                 id: document.id,
-                human_readable_id: rows.len(),
+                human_readable_id: rows.len() as i64,
                 title: Some(document.title),
                 text: document.text,
                 text_unit_ids: Vec::new(),
@@ -89,7 +89,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
+    pub(crate) human_readable_id: i64,
     pub(crate) title: Option<String>,
     pub(crate) text: String,
     pub(crate) text_unit_ids: Vec<String>,
@@ -133,7 +133,7 @@ pub(crate) fn documents_dataframe(rows: &[DocumentRow]) -> Result<DataFrame> {
     let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     let human_ids = rows
         .iter()
-        .map(|row| row.human_readable_id as u64)
+        .map(|row| row.human_readable_id)
         .collect::<Vec<_>>();
     let titles = rows
         .iter()

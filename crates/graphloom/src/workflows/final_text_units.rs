@@ -7,7 +7,7 @@ use polars_core::prelude::*;
 
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{invalid_data, list_at, row_to_static, string_value, usize_column_value},
+    dataframe::{i64_column_value, invalid_data, list_at, row_to_static, string_value},
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
@@ -66,7 +66,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
         for (index, text_unit) in text_units.into_iter().enumerate() {
             rows.push(TextUnitRow {
                 id: text_unit.id.clone(),
-                human_readable_id: index,
+                human_readable_id: index as i64,
                 text: text_unit.text,
                 n_tokens: text_unit.n_tokens,
                 document_id: text_unit.document_id,
@@ -94,7 +94,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
 struct TextUnitInput {
     id: String,
     text: String,
-    n_tokens: usize,
+    n_tokens: i64,
     document_id: String,
 }
 
@@ -114,7 +114,7 @@ fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
         rows.push(TextUnitInput {
             id: string_value(ids.get(index), "id", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
             text: string_value(texts.get(index), "text", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
-            n_tokens: usize_column_value(
+            n_tokens: i64_column_value(
                 dataframe,
                 index,
                 "n_tokens",
@@ -186,7 +186,7 @@ mod tests {
     fn test_should_read_text_units_by_column_name() {
         let dataframe = df!(
             "document_id" => ["doc-1"],
-            "n_tokens" => [7u64],
+            "n_tokens" => [7i64],
             "text" => ["Alice reports Bob."],
             "id" => ["tu-1"],
         )

@@ -31,7 +31,7 @@ pub(crate) fn finalize_entities(
         }
         final_rows.push(FinalEntityRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: final_rows.len(),
+            human_readable_id: final_rows.len() as i64,
             title: row.title.clone(),
             entity_type: row.entity_type.clone(),
             description: row.description.clone(),
@@ -59,7 +59,7 @@ pub(crate) fn finalize_relationships(
         }
         final_rows.push(FinalRelationshipRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: final_rows.len(),
+            human_readable_id: final_rows.len() as i64,
             source: row.source.clone(),
             target: row.target.clone(),
             description: row.description.clone(),

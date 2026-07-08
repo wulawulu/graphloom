@@ -8,9 +8,9 @@ use crate::{Result, dataframe::list_column};
 #[derive(Debug, Clone)]
 pub(crate) struct TextUnitRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
+    pub(crate) human_readable_id: i64,
     pub(crate) text: String,
-    pub(crate) n_tokens: usize,
+    pub(crate) n_tokens: i64,
     pub(crate) document_id: String,
     pub(crate) entity_ids: Vec<String>,
     pub(crate) relationship_ids: Vec<String>,
@@ -42,13 +42,10 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
     let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     let human_ids = rows
         .iter()
-        .map(|row| row.human_readable_id as i64)
+        .map(|row| row.human_readable_id)
         .collect::<Vec<_>>();
     let texts = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
-    let n_tokens = rows
-        .iter()
-        .map(|row| row.n_tokens as i64)
-        .collect::<Vec<_>>();
+    let n_tokens = rows.iter().map(|row| row.n_tokens).collect::<Vec<_>>();
     let document_ids = rows
         .iter()
         .map(|row| row.document_id.as_str())

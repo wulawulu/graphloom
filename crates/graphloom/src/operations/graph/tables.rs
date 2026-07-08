@@ -196,7 +196,7 @@ pub(crate) fn relationship_intermediate_dataframe(
 pub(crate) fn final_entities_dataframe(rows: &[FinalEntityRow]) -> Result<DataFrame> {
     let mut dataframe = df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
         "title" => rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
         "type" => rows.iter().map(|row| row.entity_type.as_str()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_str()).collect::<Vec<_>>(),
@@ -219,7 +219,7 @@ pub(crate) fn final_entities_dataframe(rows: &[FinalEntityRow]) -> Result<DataFr
 pub(crate) fn final_relationships_dataframe(rows: &[FinalRelationshipRow]) -> Result<DataFrame> {
     let mut dataframe = df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
         "source" => rows.iter().map(|row| row.source.as_str()).collect::<Vec<_>>(),
         "target" => rows.iter().map(|row| row.target.as_str()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_str()).collect::<Vec<_>>(),

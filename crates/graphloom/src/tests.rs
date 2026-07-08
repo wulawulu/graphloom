@@ -246,8 +246,8 @@ async fn test_should_extract_and_finalize_graph_with_summaries_and_graphml() {
         entities
             .column("human_readable_id")
             .expect("human id should exist")
-            .u64()
-            .expect("human id should be u64")
+            .i64()
+            .expect("human id should be i64")
             .get(0),
         Some(0),
     );
@@ -440,6 +440,15 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
             .expect("human id should be i64")
             .get(0),
         Some(0),
+    );
+    assert_eq!(
+        text_units
+            .column("n_tokens")
+            .expect("n_tokens should exist")
+            .i64()
+            .expect("n_tokens should be i64")
+            .get(0),
+        Some(4),
     );
     assert_eq!(
         text_units

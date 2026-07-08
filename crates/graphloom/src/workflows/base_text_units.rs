@@ -107,9 +107,9 @@ fn append_document_chunks(
         let n_tokens = tokenizer.count(&chunk.text)?;
         let row = TextUnitRow {
             id: gen_sha512_hash([chunk.text.as_str()]),
-            human_readable_id: rows.len(),
+            human_readable_id: rows.len() as i64,
             text: chunk.text,
-            n_tokens,
+            n_tokens: n_tokens as i64,
             document_id: document.id.clone(),
             entity_ids: Vec::new(),
             relationship_ids: Vec::new(),

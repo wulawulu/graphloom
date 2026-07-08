@@ -26,7 +26,7 @@ pub(crate) struct TextUnitInput {
 #[derive(Debug, Clone)]
 pub(crate) struct CovariateRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
+    pub(crate) human_readable_id: i64,
     pub(crate) covariate_type: String,
     pub(crate) claim_type: Option<String>,
     pub(crate) description: Option<String>,
@@ -106,7 +106,7 @@ pub(crate) async fn extract_covariates(
         for claim in claims {
             rows.push(CovariateRow {
                 id: Uuid::new_v4().to_string(),
-                human_readable_id: rows.len(),
+                human_readable_id: rows.len() as i64,
                 covariate_type: "claim".to_owned(),
                 claim_type: claim.claim_type,
                 description: claim.description,
@@ -230,7 +230,7 @@ async fn render_builtin_prompt(
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
     Ok(df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as i64).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
         "covariate_type" => rows.iter().map(|row| row.covariate_type.as_str()).collect::<Vec<_>>(),
         "type" => rows.iter().map(|row| row.claim_type.as_deref()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_deref()).collect::<Vec<_>>(),
