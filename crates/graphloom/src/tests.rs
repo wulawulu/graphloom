@@ -9,17 +9,22 @@ use std::{
 use async_trait::async_trait;
 use futures_util::{Stream, stream};
 use graphloom_input::{DocumentStream, InputReader, TextDocument, gen_sha512_hash};
-use graphloom_llm::{CompletionModel, CompletionRequest, CompletionResponse, MockCompletionModel};
+use graphloom_llm::{
+    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, EmbeddingRequest,
+    EmbeddingResponse, MockCompletionModel, ModelConfig,
+};
 use graphloom_storage::{MemoryStorage, MemoryTableProvider, Storage, TableProvider};
+use graphloom_vectors::{LanceDbVectorStore, VectorStore, VectorStoreConfig};
 use polars_core::prelude::*;
 use serde_json::json;
+use tempfile::TempDir;
 
 use crate::{
     CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
     CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW, GraphRagConfig, PipelineFactory, PipelineRunContext, WorkflowRegistry,
-    register_step5_workflows, register_step6_workflows, register_step7_workflows,
-    register_step8_workflows,
+    FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphRagConfig, PipelineFactory,
+    PipelineRunContext, WorkflowRegistry, register_step5_workflows, register_step6_workflows,
+    register_step7_workflows, register_step8_workflows, register_step9_workflows,
 };
 
 #[test]
@@ -559,12 +564,12 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
 }
 
 #[test]
-fn test_should_default_workflow_order_to_step8() {
+fn test_should_default_workflow_order_to_step9() {
     let order = GraphRagConfig::default().workflow_order();
 
     assert_eq!(
         order.last().map(String::as_str),
-        Some(CREATE_COMMUNITY_REPORTS_WORKFLOW)
+        Some(GENERATE_TEXT_EMBEDDINGS_WORKFLOW)
     );
 }
 
@@ -757,6 +762,211 @@ fn assert_step8_report_schema(reports: &DataFrame) {
             .expect("json value")
             .contains("rating_explanation")
     );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "VectorStoreConfig is non_exhaustive outside graphloom-vectors and must be \
+              customized after Default"
+)]
+async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "text_units",
+            df!(
+                "id" => ["tu-1", "tu-2"],
+                "text" => ["hello text", "   "],
+            )
+            .expect("text units dataframe should build"),
+        )
+        .await
+        .expect("text_units should write");
+    provider
+        .write_dataframe(
+            "entities",
+            df!(
+                "id" => ["entity-1", "entity-2"],
+                "title" => [Some("Alice"), None],
+                "description" => [Some("Engineer"), None],
+            )
+            .expect("entities dataframe should build"),
+        )
+        .await
+        .expect("entities should write");
+    provider
+        .write_dataframe(
+            "community_reports",
+            df!(
+                "id" => ["report-1"],
+                "full_content" => ["community content"],
+            )
+            .expect("community reports dataframe should build"),
+        )
+        .await
+        .expect("community_reports should write");
+
+    let tempdir = TempDir::new().expect("tempdir should create");
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_embedding_model("default_embedding_model", model.clone());
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    let mut vector_store = VectorStoreConfig::default();
+    vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
+    vector_store.vector_size = 2;
+    let mut config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        snapshots: crate::SnapshotsConfig {
+            embeddings: true,
+            ..Default::default()
+        },
+        vector_store,
+        ..Default::default()
+    };
+    config.embedding_models.insert(
+        "default_embedding_model".to_owned(),
+        test_embedding_model_config(),
+    );
+
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step9 pipeline should build");
+    let outputs = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("step9 pipeline should run");
+
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].input_rows, 5);
+    assert_eq!(outputs[0].output_rows, 3);
+    assert_eq!(context.stats.embedding_count, 3);
+    assert_eq!(context.stats.llm_request_count, 3);
+    assert!(model.inputs().iter().any(|input| input == "Alice:Engineer"));
+
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("store should reopen");
+    let text_schema = config
+        .vector_store
+        .schema_for(crate::TEXT_UNIT_TEXT_EMBEDDING);
+    let entity_schema = config
+        .vector_store
+        .schema_for(crate::ENTITY_DESCRIPTION_EMBEDDING);
+    let report_schema = config
+        .vector_store
+        .schema_for(crate::COMMUNITY_FULL_CONTENT_EMBEDDING);
+    assert_eq!(store.count(&text_schema).await.expect("text count"), 1);
+    assert_eq!(store.count(&entity_schema).await.expect("entity count"), 1);
+    assert_eq!(store.count(&report_schema).await.expect("report count"), 1);
+    assert!(
+        store
+            .get_by_id(&text_schema, "tu-1")
+            .await
+            .expect("get text")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_by_id(&entity_schema, "entity-1")
+            .await
+            .expect("get entity")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_by_id(&report_schema, "report-1")
+            .await
+            .expect("get report")
+            .is_some()
+    );
+
+    let snapshots = provider
+        .child(Some("embeddings"))
+        .expect("snapshot namespace should open");
+    for table_name in [
+        crate::TEXT_UNIT_TEXT_EMBEDDING,
+        crate::ENTITY_DESCRIPTION_EMBEDDING,
+        crate::COMMUNITY_FULL_CONTENT_EMBEDDING,
+    ] {
+        let dataframe = snapshots
+            .read_dataframe(table_name)
+            .await
+            .expect("snapshot should exist");
+        assert_eq!(
+            dataframe
+                .get_column_names()
+                .iter()
+                .map(|name| name.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["id".to_owned(), "embedding".to_owned()]
+        );
+        assert_eq!(
+            dataframe.column("embedding").expect("embedding").dtype(),
+            &DataType::List(Box::new(DataType::Float32))
+        );
+    }
+
+    assert_eq!(
+        GraphRagConfig::default()
+            .workflow_order()
+            .last()
+            .map(String::as_str),
+        Some(GENERATE_TEXT_EMBEDDINGS_WORKFLOW)
+    );
+}
+
+fn test_embedding_model_config() -> ModelConfig {
+    ModelConfig {
+        provider_type: "mock".to_owned(),
+        model: "mock".to_owned(),
+        api_key: None,
+        api_base: None,
+        organization: None,
+        timeout: None,
+        max_retries: 1,
+        retry_strategy: None,
+        tokens_per_minute: None,
+        requests_per_minute: None,
+        encoding_model: Some("cl100k_base".to_owned()),
+    }
+}
+
+#[derive(Debug, Default)]
+struct CapturingEmbeddingModel {
+    inputs: Mutex<Vec<String>>,
+}
+
+impl CapturingEmbeddingModel {
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("inputs lock").clone()
+    }
+}
+
+#[async_trait]
+impl EmbeddingModel for CapturingEmbeddingModel {
+    async fn embed(&self, request: EmbeddingRequest) -> graphloom_llm::Result<EmbeddingResponse> {
+        self.inputs
+            .lock()
+            .expect("inputs lock")
+            .extend(request.input.iter().cloned());
+        Ok(EmbeddingResponse {
+            embeddings: request
+                .input
+                .iter()
+                .map(|input| {
+                    if input.contains("Alice") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect(),
+            usage: None,
+            request_id: None,
+        })
+    }
 }
 
 #[derive(Debug)]

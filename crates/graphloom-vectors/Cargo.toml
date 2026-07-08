@@ -10,4 +10,16 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
 graphloom-common.workspace = true
+lancedb.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

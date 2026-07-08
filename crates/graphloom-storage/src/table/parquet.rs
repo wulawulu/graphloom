@@ -155,6 +155,17 @@ impl Table for ParquetTable {
         self.existing.as_ref().map_or(0, DataFrame::height) + self.pending.height()
     }
 
+    fn column_names(&self) -> Vec<String> {
+        self.existing
+            .as_ref()
+            .filter(|dataframe| dataframe.width() > 0)
+            .unwrap_or(&self.pending)
+            .get_column_names_owned()
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect()
+    }
+
     async fn close(&mut self) -> Result<()> {
         self.check_open()?;
         if self.pending.height() == 0 {

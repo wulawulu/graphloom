@@ -18,6 +18,8 @@ pub struct PipelineRunStats {
     pub community_count: usize,
     /// Number of community reports created.
     pub report_count: usize,
+    /// Number of original rows embedded and written to the vector store.
+    pub embedding_count: usize,
     /// Number of LLM requests.
     pub llm_request_count: usize,
     /// LLM cache hits.

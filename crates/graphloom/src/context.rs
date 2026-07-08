@@ -4,8 +4,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use graphloom_cache::Cache;
 use graphloom_input::InputReader;
-use graphloom_llm::CompletionModel;
+use graphloom_llm::{CompletionModel, EmbeddingModel};
 use graphloom_storage::{Storage, TableProvider};
+use graphloom_vectors::VectorStore;
 use serde_json::Value;
 
 use crate::{NoopWorkflowCallbacks, PipelineRunStats, WorkflowCallbacks};
@@ -28,6 +29,10 @@ pub struct PipelineRunContext {
     pub cache: Option<Arc<dyn Cache>>,
     /// Completion model instances keyed by model id.
     pub completion_models: BTreeMap<String, Arc<dyn CompletionModel>>,
+    /// Embedding model instances keyed by model id.
+    pub embedding_models: BTreeMap<String, Arc<dyn EmbeddingModel>>,
+    /// Optional caller-provided vector store.
+    pub vector_store: Option<Arc<dyn VectorStore>>,
     /// Workflow callbacks.
     pub callbacks: Arc<dyn WorkflowCallbacks>,
     /// Arbitrary run-local state.
@@ -48,6 +53,8 @@ impl PipelineRunContext {
             previous_table_provider: None,
             cache: None,
             completion_models: BTreeMap::new(),
+            embedding_models: BTreeMap::new(),
+            vector_store: None,
             callbacks: Arc::new(NoopWorkflowCallbacks),
             state: BTreeMap::new(),
             input_reader: None,
@@ -76,6 +83,24 @@ impl PipelineRunContext {
         model: Arc<dyn CompletionModel>,
     ) -> Self {
         self.completion_models.insert(model_id.into(), model);
+        self
+    }
+
+    /// Attach an embedding model by model id.
+    #[must_use]
+    pub fn with_embedding_model(
+        mut self,
+        model_id: impl Into<String>,
+        model: Arc<dyn EmbeddingModel>,
+    ) -> Self {
+        self.embedding_models.insert(model_id.into(), model);
+        self
+    }
+
+    /// Attach a custom vector store.
+    #[must_use]
+    pub fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {
+        self.vector_store = Some(vector_store);
         self
     }
 }

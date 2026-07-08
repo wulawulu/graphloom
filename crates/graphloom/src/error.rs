@@ -21,11 +21,19 @@ pub enum GraphLoomError {
     #[error(transparent)]
     Chunking(#[from] graphloom_chunking::ChunkingError),
 
+    /// Cache operation failed.
+    #[error(transparent)]
+    Cache(#[from] graphloom_cache::CacheError),
+
     /// LLM/tokenizer operation failed.
     #[error(transparent)]
     Llm(#[from] graphloom_llm::LlmError),
 
-    /// DataFrame operation failed.
+    /// Vector store operation failed.
+    #[error(transparent)]
+    Vector(#[from] graphloom_vectors::VectorError),
+
+    /// `DataFrame` operation failed.
     #[error(transparent)]
     Polars(#[from] polars_core::error::PolarsError),
 

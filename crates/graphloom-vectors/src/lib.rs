@@ -1,10 +1,14 @@
-//empty file
-//! Vector store abstractions will live here in Step 9.
+//! Vector store contracts and `LanceDB` provider for `GraphLoom`.
 
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-/// Marker exported so downstream crates can depend on this crate before Step 9
-/// fills in vector providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VectorsCrate;
+mod config;
+mod error;
+mod lancedb;
+mod store;
+
+pub use config::{VectorIndexSchema, VectorStoreConfig, VectorStoreType, validate_identifier};
+pub use error::{Result, VectorError};
+pub use lancedb::LanceDbVectorStore;
+pub use store::{VectorDocument, VectorSearchResult, VectorStore, create_vector_store};

@@ -45,6 +45,9 @@ pub trait Table: Send + std::fmt::Debug {
         self.length() == 0
     }
 
+    /// Visible column names in table order.
+    fn column_names(&self) -> Vec<String>;
+
     /// Commit staged rows.
     ///
     /// # Errors

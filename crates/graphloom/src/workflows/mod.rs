@@ -9,6 +9,7 @@ mod extract_graph;
 mod final_documents;
 mod final_text_units;
 mod finalize_graph;
+mod generate_text_embeddings;
 pub(crate) mod input_documents;
 
 pub use base_text_units::{CREATE_BASE_TEXT_UNITS_WORKFLOW, CreateBaseTextUnitsWorkflow};
@@ -19,6 +20,9 @@ pub use extract_graph::{EXTRACT_GRAPH_WORKFLOW, ExtractGraphWorkflow};
 pub use final_documents::{CREATE_FINAL_DOCUMENTS_WORKFLOW, CreateFinalDocumentsWorkflow};
 pub use final_text_units::{CREATE_FINAL_TEXT_UNITS_WORKFLOW, CreateFinalTextUnitsWorkflow};
 pub use finalize_graph::{FINALIZE_GRAPH_WORKFLOW, FinalizeGraphWorkflow};
+pub use generate_text_embeddings::{
+    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GenerateTextEmbeddingsWorkflow,
+};
 pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkflow};
 
 use crate::WorkflowRegistry;
@@ -64,6 +68,20 @@ pub const STEP8_WORKFLOWS: &[&str] = &[
     CREATE_COMMUNITY_REPORTS_WORKFLOW,
 ];
 
+/// Workflow names for the implemented Step-9 standard prefix.
+pub const STEP9_WORKFLOWS: &[&str] = &[
+    LOAD_INPUT_DOCUMENTS_WORKFLOW,
+    CREATE_BASE_TEXT_UNITS_WORKFLOW,
+    CREATE_FINAL_DOCUMENTS_WORKFLOW,
+    EXTRACT_GRAPH_WORKFLOW,
+    FINALIZE_GRAPH_WORKFLOW,
+    EXTRACT_COVARIATES_WORKFLOW,
+    CREATE_COMMUNITIES_WORKFLOW,
+    CREATE_FINAL_TEXT_UNITS_WORKFLOW,
+    CREATE_COMMUNITY_REPORTS_WORKFLOW,
+    GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+];
+
 /// Register built-in Step-5 workflows.
 pub fn register_step5_workflows(registry: &mut WorkflowRegistry) {
     registry.register(LoadInputDocumentsWorkflow);
@@ -90,4 +108,10 @@ pub fn register_step7_workflows(registry: &mut WorkflowRegistry) {
 pub fn register_step8_workflows(registry: &mut WorkflowRegistry) {
     register_step7_workflows(registry);
     registry.register(CreateCommunityReportsWorkflow);
+}
+
+/// Register built-in Step-9 workflows.
+pub fn register_step9_workflows(registry: &mut WorkflowRegistry) {
+    register_step8_workflows(registry);
+    registry.register(GenerateTextEmbeddingsWorkflow);
 }

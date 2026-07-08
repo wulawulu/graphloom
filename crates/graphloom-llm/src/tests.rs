@@ -19,7 +19,7 @@ fn test_should_parse_graphrag_graph_tuples() {
     assert_eq!(parsed.entities[0].entity_type, "PERSON");
     assert_eq!(parsed.relationships[0].source, "ALICE");
     assert_eq!(parsed.relationships[0].target, "BOB");
-    assert_eq!(parsed.relationships[0].weight, 1.0);
+    assert!((parsed.relationships[0].weight - 1.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn test_should_parse_relationship_weight_when_completion_delimiter_is_separate()
         "tu-1",
     );
 
-    assert_eq!(parsed.relationships[0].weight, 7.0);
+    assert!((parsed.relationships[0].weight - 7.0).abs() < f64::EPSILON);
 }
 
 #[test]

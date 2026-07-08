@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use graphloom_chunking::ChunkingConfig;
 use graphloom_llm::ModelConfig;
+use graphloom_vectors::VectorStoreConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +27,29 @@ const DEFAULT_MAX_CLUSTER_SIZE: u32 = 10;
 const DEFAULT_CLUSTER_SEED: u64 = 0xDEAD_BEEF;
 const DEFAULT_COMMUNITY_REPORT_MAX_LENGTH: usize = 2_000;
 const DEFAULT_COMMUNITY_REPORT_MAX_INPUT_LENGTH: usize = 8_000;
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "default_embedding_model";
+const DEFAULT_EMBED_TEXT_MODEL_INSTANCE_NAME: &str = "text_embedding";
+const DEFAULT_EMBED_TEXT_BATCH_SIZE: usize = 16;
+const DEFAULT_EMBED_TEXT_BATCH_MAX_TOKENS: usize = 8_191;
+
+/// Entity title and description embedding name.
+pub const ENTITY_DESCRIPTION_EMBEDDING: &str = "entity_description";
+/// Community full content embedding name.
+pub const COMMUNITY_FULL_CONTENT_EMBEDDING: &str = "community_full_content";
+/// Text unit text embedding name.
+pub const TEXT_UNIT_TEXT_EMBEDDING: &str = "text_unit_text";
+/// All supported embedding names.
+pub const ALL_EMBEDDINGS: &[&str] = &[
+    ENTITY_DESCRIPTION_EMBEDDING,
+    COMMUNITY_FULL_CONTENT_EMBEDDING,
+    TEXT_UNIT_TEXT_EMBEDDING,
+];
+/// Default embedding names, matching Microsoft `GraphRAG`.
+pub const DEFAULT_EMBEDDINGS: &[&str] = &[
+    ENTITY_DESCRIPTION_EMBEDDING,
+    COMMUNITY_FULL_CONTENT_EMBEDDING,
+    TEXT_UNIT_TEXT_EMBEDDING,
+];
 
 fn default_entity_types() -> Vec<String> {
     ["organization", "person", "geo", "event"]
@@ -234,6 +258,77 @@ impl Default for CommunityReportsConfig {
     }
 }
 
+/// Text embedding generation configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct EmbedTextConfig {
+    /// Embedding model id.
+    #[serde(alias = "embedding_model_id")]
+    pub embedding_model_id: String,
+    /// Model instance/cache namespace name.
+    #[serde(alias = "model_instance_name")]
+    pub model_instance_name: String,
+    /// Maximum input snippets per provider request.
+    #[serde(alias = "batch_size")]
+    pub batch_size: usize,
+    /// Maximum total tokens per provider request and split chunk.
+    #[serde(alias = "batch_max_tokens")]
+    pub batch_max_tokens: usize,
+    /// Embedding names to generate.
+    pub names: Vec<String>,
+}
+
+impl Default for EmbedTextConfig {
+    fn default() -> Self {
+        Self {
+            embedding_model_id: DEFAULT_EMBEDDING_MODEL_ID.to_owned(),
+            model_instance_name: DEFAULT_EMBED_TEXT_MODEL_INSTANCE_NAME.to_owned(),
+            batch_size: DEFAULT_EMBED_TEXT_BATCH_SIZE,
+            batch_max_tokens: DEFAULT_EMBED_TEXT_BATCH_MAX_TOKENS,
+            names: DEFAULT_EMBEDDINGS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        }
+    }
+}
+
+impl EmbedTextConfig {
+    /// Validate embedding generation configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message for invalid batching or embedding names.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.embedding_model_id.trim().is_empty() {
+            return Err("embedding_model_id must not be empty".to_owned());
+        }
+        if self.model_instance_name.trim().is_empty() {
+            return Err("model_instance_name must not be empty".to_owned());
+        }
+        if self.batch_size == 0 {
+            return Err("batch_size must be greater than zero".to_owned());
+        }
+        if self.batch_max_tokens <= 100 {
+            return Err("batch_max_tokens must be greater than 100".to_owned());
+        }
+        if self.names.is_empty() {
+            return Err("names must not be empty".to_owned());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for name in &self.names {
+            if !ALL_EMBEDDINGS.contains(&name.as_str()) {
+                return Err(format!("unsupported embedding name {name}"));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(format!("duplicate embedding name {name}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Snapshot configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -283,6 +378,12 @@ pub struct GraphRagConfig {
     /// Community report generation config.
     #[serde(alias = "community_reports")]
     pub community_reports: CommunityReportsConfig,
+    /// Text embedding generation config.
+    #[serde(alias = "embed_text")]
+    pub embed_text: EmbedTextConfig,
+    /// Vector store config.
+    #[serde(alias = "vector_store")]
+    pub vector_store: VectorStoreConfig,
     /// Snapshot config.
     pub snapshots: SnapshotsConfig,
     /// Future-compatible sections retained as dynamic values.
@@ -304,6 +405,8 @@ impl Default for GraphRagConfig {
             extract_claims: ExtractClaimsConfig::default(),
             cluster_graph: ClusterGraphConfig::default(),
             community_reports: CommunityReportsConfig::default(),
+            embed_text: EmbedTextConfig::default(),
+            vector_store: VectorStoreConfig::default(),
             snapshots: SnapshotsConfig::default(),
             sections: BTreeMap::new(),
         }
@@ -315,12 +418,25 @@ impl GraphRagConfig {
     #[must_use]
     pub fn workflow_order(&self) -> Vec<String> {
         if self.workflows.is_empty() {
-            crate::workflows::STEP8_WORKFLOWS
+            crate::workflows::STEP9_WORKFLOWS
                 .iter()
                 .map(|workflow| (*workflow).to_owned())
                 .collect()
         } else {
             self.workflows.clone()
         }
+    }
+
+    /// Validate Step 9 configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message for invalid embedding or vector-store settings.
+    pub fn validate_embed_text(&self) -> std::result::Result<(), String> {
+        self.embed_text.validate()?;
+        self.vector_store
+            .validate()
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
