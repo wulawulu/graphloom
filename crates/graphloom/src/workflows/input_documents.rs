@@ -5,6 +5,7 @@ use futures_util::TryStreamExt;
 use polars_core::prelude::*;
 use serde_json::{Map, Value, json};
 
+use super::common::list_column;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
 };
@@ -167,15 +168,4 @@ pub(crate) fn documents_dataframe(rows: &[DocumentRow]) -> Result<DataFrame> {
         )?,
     )?;
     Ok(dataframe)
-}
-
-pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {
-    let series_rows = rows
-        .iter()
-        .map(|values| {
-            let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
-            Series::new("item".into(), refs)
-        })
-        .collect::<Vec<_>>();
-    Ok(Series::new(name.into(), series_rows).into())
 }

@@ -8,10 +8,7 @@ use graphloom_llm::{TiktokenTokenizer, Tokenizer};
 use polars_core::{frame::row::Row, prelude::*};
 use serde_json::{Map, Value, json};
 
-use super::{
-    common::{optional_string_at, string_at},
-    input_documents::list_column,
-};
+use super::common::{list_column, optional_string_at, string_at};
 use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
 /// Workflow name.

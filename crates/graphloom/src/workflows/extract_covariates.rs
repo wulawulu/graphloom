@@ -1,18 +1,18 @@
 //! Claim covariate extraction workflow.
 
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use async_trait::async_trait;
 use graphloom_llm::{
-    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, OpenAiCompletionModel,
-    PromptLoader, parse_claim_tuples,
+    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader,
+    parse_claim_tuples,
 };
 use polars_core::prelude::*;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::common::string_value;
+use super::common::{resolve_completion_model, string_value};
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
 };
@@ -139,31 +139,6 @@ struct ClaimPromptValues<'a> {
     input_text: &'a str,
     entity_specs: &'a [String],
     claim_description: &'a str,
-}
-
-fn resolve_completion_model(
-    config: &GraphRagConfig,
-    context: &PipelineRunContext,
-    model_id: &str,
-    model_instance_name: &str,
-    workflow: &'static str,
-) -> Result<Arc<dyn CompletionModel>> {
-    if let Some(model) = context.completion_models.get(model_id) {
-        return Ok(Arc::clone(model));
-    }
-    let model_config =
-        config
-            .completion_models
-            .get(model_id)
-            .ok_or_else(|| GraphLoomError::InvalidData {
-                workflow,
-                message: format!("completion model {model_id} is not configured"),
-            })?;
-    Ok(Arc::new(OpenAiCompletionModel::new(
-        model_instance_name,
-        model_config.clone(),
-        config.concurrent_requests,
-    )?))
 }
 
 async fn extract_claims_for_text_unit(

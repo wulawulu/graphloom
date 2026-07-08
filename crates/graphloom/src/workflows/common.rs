@@ -1,8 +1,11 @@
 //! Shared workflow helpers.
 
+use std::sync::Arc;
+
+use graphloom_llm::{CompletionModel, OpenAiCompletionModel};
 use polars_core::{frame::row::Row, prelude::*};
 
-use crate::{GraphLoomError, Result};
+use crate::{GraphLoomError, GraphRagConfig, PipelineRunContext, Result};
 
 pub(crate) fn string_value(
     value: Option<&str>,
@@ -19,6 +22,31 @@ pub(crate) fn invalid_data(workflow: &'static str, message: &str) -> GraphLoomEr
         workflow,
         message: message.to_owned(),
     }
+}
+
+pub(crate) fn resolve_completion_model(
+    config: &GraphRagConfig,
+    context: &PipelineRunContext,
+    model_id: &str,
+    model_instance_name: &str,
+    workflow: &'static str,
+) -> Result<Arc<dyn CompletionModel>> {
+    if let Some(model) = context.completion_models.get(model_id) {
+        return Ok(Arc::clone(model));
+    }
+    let model_config =
+        config
+            .completion_models
+            .get(model_id)
+            .ok_or_else(|| GraphLoomError::InvalidData {
+                workflow,
+                message: format!("completion model {model_id} is not configured"),
+            })?;
+    Ok(Arc::new(OpenAiCompletionModel::new(
+        model_instance_name,
+        model_config.clone(),
+        config.concurrent_requests,
+    )?))
 }
 
 pub(crate) fn row_to_static(row: Row<'_>) -> Row<'static> {
@@ -109,6 +137,17 @@ pub(crate) fn f64_at(
             _ => None,
         })
         .ok_or_else(|| invalid_data(workflow, &format!("missing float column {column}")))
+}
+
+pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {
+    let series_rows = rows
+        .iter()
+        .map(|values| {
+            let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
+            Series::new("item".into(), refs)
+        })
+        .collect::<Vec<_>>();
+    Ok(Series::new(name.into(), series_rows).into())
 }
 
 fn any_value_to_string(value: &AnyValue<'_>) -> Option<String> {

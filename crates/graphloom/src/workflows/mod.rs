@@ -1,22 +1,22 @@
 //! Built-in Step-5 workflows.
 
 mod base_text_units;
-mod common;
+pub(crate) mod common;
 mod communities;
 mod extract_covariates;
+mod extract_graph;
 mod final_documents;
 mod final_text_units;
-mod graph;
-mod input_documents;
+mod finalize_graph;
+pub(crate) mod input_documents;
 
 pub use base_text_units::{CREATE_BASE_TEXT_UNITS_WORKFLOW, CreateBaseTextUnitsWorkflow};
 pub use communities::{CREATE_COMMUNITIES_WORKFLOW, CreateCommunitiesWorkflow};
 pub use extract_covariates::{EXTRACT_COVARIATES_WORKFLOW, ExtractCovariatesWorkflow};
+pub use extract_graph::{EXTRACT_GRAPH_WORKFLOW, ExtractGraphWorkflow};
 pub use final_documents::{CREATE_FINAL_DOCUMENTS_WORKFLOW, CreateFinalDocumentsWorkflow};
 pub use final_text_units::{CREATE_FINAL_TEXT_UNITS_WORKFLOW, CreateFinalTextUnitsWorkflow};
-pub use graph::{
-    EXTRACT_GRAPH_WORKFLOW, ExtractGraphWorkflow, FINALIZE_GRAPH_WORKFLOW, FinalizeGraphWorkflow,
-};
+pub use finalize_graph::{FINALIZE_GRAPH_WORKFLOW, FinalizeGraphWorkflow};
 pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkflow};
 
 use crate::WorkflowRegistry;

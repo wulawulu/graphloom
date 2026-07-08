@@ -10,6 +10,7 @@ mod callbacks;
 mod config;
 mod context;
 mod error;
+mod operations;
 mod pipeline;
 mod stats;
 mod workflow;
