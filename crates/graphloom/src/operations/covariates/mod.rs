@@ -191,6 +191,8 @@ async fn extract_claims_for_text_unit(
         }
     }
 
+    // Keep this compatible with Microsoft GraphRAG's current claim extractor:
+    // continuation requests are sent, but tuple parsing still uses the initial response.
     Ok(parse_claim_tuples(&initial))
 }
 
@@ -228,7 +230,7 @@ async fn render_builtin_prompt(
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
     Ok(df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as i64).collect::<Vec<_>>(),
         "covariate_type" => rows.iter().map(|row| row.covariate_type.as_str()).collect::<Vec<_>>(),
         "type" => rows.iter().map(|row| row.claim_type.as_deref()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_deref()).collect::<Vec<_>>(),
@@ -261,27 +263,32 @@ pub(crate) fn covariate_value(row: &CovariateRow) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
-    use graphloom_llm::{MockCompletionModel, PromptLoader};
+    use async_trait::async_trait;
+    use graphloom_llm::{CompletionResponse, LlmError, MockCompletionModel, PromptLoader};
     use polars_core::prelude::*;
+    use tokio::time::sleep;
 
     use super::*;
 
     #[tokio::test]
     async fn test_should_keep_stable_order_with_concurrent_claim_extraction() {
-        let model = MockCompletionModel::new(
-            "claims",
-            vec![claim("ALICE", "BOB"), claim("CAROL", "DAVE")],
-        );
+        let model = DelayedContentModel::default();
         let text_units = vec![
             TextUnitInput {
                 id: "tu-1".to_owned(),
-                text: "Alice reports Bob.".to_owned(),
+                text: "tu-1 Alice reports Bob.".to_owned(),
             },
             TextUnitInput {
                 id: "tu-2".to_owned(),
-                text: "Carol reports Dave.".to_owned(),
+                text: "tu-2 Carol reports Dave.".to_owned(),
             },
         ];
         let completed = AtomicUsize::new(0);
@@ -312,6 +319,11 @@ mod tests {
         assert_eq!(rows[1].text_unit_id, "tu-2");
         assert_eq!(rows[1].subject_id.as_deref(), Some("CAROL"));
         assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(model.max_in_flight(), 2);
+        assert_eq!(
+            model.completion_order(),
+            vec!["tu-2".to_owned(), "tu-1".to_owned()]
+        );
     }
 
     #[tokio::test]
@@ -343,6 +355,42 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].subject_id.as_deref(), Some("ALICE"));
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_fast_when_any_text_unit_claim_extraction_fails() {
+        let model = FailingContentModel;
+        let text_units = vec![
+            TextUnitInput {
+                id: "tu-1".to_owned(),
+                text: "tu-1 Alice reports Bob.".to_owned(),
+            },
+            TextUnitInput {
+                id: "tu-2".to_owned(),
+                text: "tu-2 should fail.".to_owned(),
+            },
+        ];
+
+        let error = extract_covariates(
+            &model,
+            &PromptLoader::new("."),
+            &text_units,
+            ClaimExtractionConfig {
+                prompt_path: None,
+                claim_description: "claims",
+                entity_types: &default_claim_entity_types(),
+                max_gleanings: 0,
+                concurrency: 2,
+            },
+            &|_, _| {},
+        )
+        .await
+        .expect_err("GraphLoom currently fails fast on a single text-unit LLM error");
+
+        // Microsoft GraphRAG currently records per-document claim extraction errors and
+        // continues. GraphLoom intentionally preserves its existing fail-fast behavior
+        // until error-tolerance semantics are decided separately.
+        assert!(error.to_string().contains("tu-2"));
     }
 
     #[test]
@@ -386,7 +434,7 @@ mod tests {
                 .column("human_readable_id")
                 .expect("human_readable_id")
                 .dtype(),
-            &DataType::UInt64
+            &DataType::Int64
         );
         assert_eq!(
             dataframe
@@ -402,6 +450,117 @@ mod tests {
             "({subject}<|>{object}<|>REPORT<|>TRUE<|>2026-07-07<|>2026-07-08<|>{subject} reports \
              {object}<|>source)##<|COMPLETE|>"
         )
+    }
+
+    #[derive(Debug, Default)]
+    struct DelayedContentModel {
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+        completion_order: Mutex<Vec<String>>,
+    }
+
+    impl DelayedContentModel {
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(Ordering::SeqCst)
+        }
+
+        fn completion_order(&self) -> Vec<String> {
+            self.completion_order
+                .lock()
+                .expect("completion order lock should not be poisoned")
+                .clone()
+        }
+
+        fn observe_in_flight(&self) {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut max_seen = self.max_in_flight.load(Ordering::SeqCst);
+            while current > max_seen {
+                match self.max_in_flight.compare_exchange(
+                    max_seen,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => max_seen = actual,
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CompletionModel for DelayedContentModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            self.observe_in_flight();
+            let content = request
+                .messages
+                .last()
+                .map(|message| message.content.as_str())
+                .unwrap_or_default();
+            let response = if content.contains("tu-1") {
+                sleep(Duration::from_millis(80)).await;
+                self.completion_order
+                    .lock()
+                    .map_err(|source| LlmError::InvalidResponse {
+                        model_instance: "delayed".to_owned(),
+                        operation: "completion",
+                        message: source.to_string(),
+                    })?
+                    .push("tu-1".to_owned());
+                claim("ALICE", "BOB")
+            } else if content.contains("tu-2") {
+                sleep(Duration::from_millis(5)).await;
+                self.completion_order
+                    .lock()
+                    .map_err(|source| LlmError::InvalidResponse {
+                        model_instance: "delayed".to_owned(),
+                        operation: "completion",
+                        message: source.to_string(),
+                    })?
+                    .push("tu-2".to_owned());
+                claim("CAROL", "DAVE")
+            } else {
+                claim("UNKNOWN", "UNKNOWN")
+            };
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(CompletionResponse {
+                content: response,
+                usage: None,
+                request_id: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingContentModel;
+
+    #[async_trait]
+    impl CompletionModel for FailingContentModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            let content = request
+                .messages
+                .last()
+                .map(|message| message.content.as_str())
+                .unwrap_or_default();
+            if content.contains("tu-2") {
+                return Err(LlmError::InvalidResponse {
+                    model_instance: "failing".to_owned(),
+                    operation: "completion",
+                    message: "tu-2 failed".to_owned(),
+                });
+            }
+            Ok(CompletionResponse {
+                content: claim("ALICE", "BOB"),
+                usage: None,
+                request_id: None,
+            })
+        }
     }
 
     fn column_names(dataframe: &DataFrame) -> Vec<&str> {

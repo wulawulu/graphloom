@@ -262,6 +262,21 @@ mod tests {
     }
 
     #[test]
+    fn test_should_use_stable_lexical_lcc_tiebreaker_independent_of_input_order() {
+        let first = vec![relationship("C", "D", 1.0), relationship("A", "B", 1.0)];
+        let second = vec![relationship("A", "B", 1.0), relationship("C", "D", 1.0)];
+
+        let first_edges = prepare_cluster_edges(&first, true);
+        let second_edges = prepare_cluster_edges(&second, true);
+
+        // Microsoft GraphRAG's current union-find keeps the first equal-sized
+        // component by input order. GraphLoom intentionally keeps the
+        // lexically first component so shuffled equal-sized inputs are stable.
+        assert_eq!(first_edges, vec![("A".to_owned(), "B".to_owned(), 1.0)]);
+        assert_eq!(second_edges, first_edges);
+    }
+
+    #[test]
     fn test_should_normalize_and_keep_largest_connected_component() {
         let relationships = vec![
             relationship("bob", "Alice &amp; Co", 1.0),
@@ -292,6 +307,65 @@ mod tests {
         assert_eq!(cluster_sets(&first), cluster_sets(&second));
     }
 
+    #[test]
+    fn test_should_match_fixed_community_fixture_by_normalized_hierarchy() {
+        // `network_partitions` and Microsoft GraphRAG's `graspologic_native`
+        // may assign different raw community ids. This fixture locks the
+        // normalized hierarchy shape that GraphLoom emits for a fixed graph.
+        let relationships = vec![
+            relationship("A", "B", 1.0),
+            relationship("B", "C", 1.0),
+            relationship("C", "D", 1.0),
+            relationship("D", "A", 1.0),
+            relationship("A", "B", 2.0),
+            relationship("E", "F", 1.0),
+            relationship("F", "G", 1.0),
+            relationship("G", "H", 1.0),
+            relationship("H", "E", 1.0),
+            relationship("D", "E", 0.2),
+        ];
+
+        let clusters = cluster_graph(&relationships, 3, false, 0xDEAD_BEEF)
+            .expect("fixture cluster should run");
+        let hierarchy = normalized_hierarchy(&clusters);
+
+        assert_eq!(
+            hierarchy,
+            vec![
+                NormalizedCluster {
+                    level: 0,
+                    nodes: set(["A", "B", "C", "D"]),
+                    parent_nodes: None,
+                },
+                NormalizedCluster {
+                    level: 0,
+                    nodes: set(["E", "F", "G", "H"]),
+                    parent_nodes: None,
+                },
+                NormalizedCluster {
+                    level: 1,
+                    nodes: set(["A", "B"]),
+                    parent_nodes: Some(set(["A", "B", "C", "D"])),
+                },
+                NormalizedCluster {
+                    level: 1,
+                    nodes: set(["C", "D"]),
+                    parent_nodes: Some(set(["A", "B", "C", "D"])),
+                },
+                NormalizedCluster {
+                    level: 1,
+                    nodes: set(["E", "F"]),
+                    parent_nodes: Some(set(["E", "F", "G", "H"])),
+                },
+                NormalizedCluster {
+                    level: 1,
+                    nodes: set(["G", "H"]),
+                    parent_nodes: Some(set(["E", "F", "G", "H"])),
+                },
+            ]
+        );
+    }
+
     fn relationship(source: &str, target: &str, weight: f64) -> ClusterRelationship {
         ClusterRelationship {
             source: source.to_owned(),
@@ -312,5 +386,47 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct NormalizedCluster {
+        level: i64,
+        nodes: BTreeSet<String>,
+        parent_nodes: Option<BTreeSet<String>>,
+    }
+
+    fn normalized_hierarchy(clusters: &[CommunityCluster]) -> Vec<NormalizedCluster> {
+        let by_community = clusters
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster.community,
+                    cluster.titles.iter().cloned().collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut normalized = clusters
+            .iter()
+            .map(|cluster| NormalizedCluster {
+                level: cluster.level,
+                nodes: cluster.titles.iter().cloned().collect(),
+                parent_nodes: if cluster.parent < 0 {
+                    None
+                } else {
+                    by_community.get(&cluster.parent).cloned()
+                },
+            })
+            .collect::<Vec<_>>();
+        normalized.sort_by(|left, right| {
+            left.level
+                .cmp(&right.level)
+                .then_with(|| left.nodes.cmp(&right.nodes))
+                .then_with(|| left.parent_nodes.cmp(&right.parent_nodes))
+        });
+        normalized
+    }
+
+    fn set<const N: usize>(nodes: [&str; N]) -> BTreeSet<String> {
+        nodes.into_iter().map(str::to_owned).collect()
     }
 }

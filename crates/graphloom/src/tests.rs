@@ -398,8 +398,8 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
         covariates
             .column("human_readable_id")
             .expect("human id should exist")
-            .u64()
-            .expect("human id should be u64")
+            .i64()
+            .expect("human id should be i64")
             .get(0),
         Some(0),
     );
@@ -422,8 +422,8 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
         communities
             .column("size")
             .expect("size should exist")
-            .u64()
-            .expect("size should be u64")
+            .i64()
+            .expect("size should be i64")
             .get(0),
         Some(2),
     );
@@ -436,8 +436,8 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
         text_units
             .column("human_readable_id")
             .expect("human id should exist")
-            .u64()
-            .expect("human id should be u64")
+            .i64()
+            .expect("human id should be i64")
             .get(0),
         Some(0),
     );

@@ -42,12 +42,12 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
     let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     let human_ids = rows
         .iter()
-        .map(|row| row.human_readable_id as u64)
+        .map(|row| row.human_readable_id as i64)
         .collect::<Vec<_>>();
     let texts = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
     let n_tokens = rows
         .iter()
-        .map(|row| row.n_tokens as u64)
+        .map(|row| row.n_tokens as i64)
         .collect::<Vec<_>>();
     let document_ids = rows
         .iter()
@@ -82,4 +82,39 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
             .collect::<Vec<_>>(),
     )?)?;
     Ok(dataframe)
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_core::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn test_should_write_text_unit_numeric_schema_as_signed_int64() {
+        let rows = vec![TextUnitRow {
+            id: "tu-1".to_owned(),
+            human_readable_id: 0,
+            text: "Alice reports Bob.".to_owned(),
+            n_tokens: 4,
+            document_id: "doc-1".to_owned(),
+            entity_ids: Vec::new(),
+            relationship_ids: Vec::new(),
+            covariate_ids: Vec::new(),
+        }];
+
+        let dataframe = text_units_dataframe(&rows).expect("dataframe should build");
+
+        assert_eq!(
+            dataframe
+                .column("human_readable_id")
+                .expect("human_readable_id")
+                .dtype(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            dataframe.column("n_tokens").expect("n_tokens").dtype(),
+            &DataType::Int64
+        );
+    }
 }

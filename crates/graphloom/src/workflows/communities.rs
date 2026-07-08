@@ -247,7 +247,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
         "parent" => rows.iter().map(|row| row.parent).collect::<Vec<_>>(),
         "title" => rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
         "period" => rows.iter().map(|row| row.period.as_str()).collect::<Vec<_>>(),
-        "size" => rows.iter().map(|row| row.size as u64).collect::<Vec<_>>(),
+        "size" => rows.iter().map(|row| row.size as i64).collect::<Vec<_>>(),
     )?;
     dataframe.insert_column(
         5,
@@ -383,7 +383,7 @@ mod tests {
         );
         assert_eq!(
             dataframe.column("size").expect("size").dtype(),
-            &DataType::UInt64
+            &DataType::Int64
         );
     }
 
