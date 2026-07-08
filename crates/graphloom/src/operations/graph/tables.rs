@@ -109,13 +109,16 @@ pub(crate) fn raw_entity_dataframe(rows: &[EntityRow]) -> Result<DataFrame> {
                 .collect::<Vec<_>>(),
         )?,
     )?;
-    dataframe.with_column(list_column(
-        "text_unit_ids",
-        &rows
-            .iter()
-            .map(|row| row.text_unit_ids.clone())
-            .collect::<Vec<_>>(),
-    )?)?;
+    dataframe.insert_column(
+        3,
+        list_column(
+            "text_unit_ids",
+            &rows
+                .iter()
+                .map(|row| row.text_unit_ids.clone())
+                .collect::<Vec<_>>(),
+        )?,
+    )?;
     Ok(dataframe)
 }
 
@@ -135,13 +138,16 @@ pub(crate) fn raw_relationship_dataframe(rows: &[RelationshipRow]) -> Result<Dat
                 .collect::<Vec<_>>(),
         )?,
     )?;
-    dataframe.with_column(list_column(
-        "text_unit_ids",
-        &rows
-            .iter()
-            .map(|row| row.text_unit_ids.clone())
-            .collect::<Vec<_>>(),
-    )?)?;
+    dataframe.insert_column(
+        3,
+        list_column(
+            "text_unit_ids",
+            &rows
+                .iter()
+                .map(|row| row.text_unit_ids.clone())
+                .collect::<Vec<_>>(),
+        )?,
+    )?;
     Ok(dataframe)
 }
 
@@ -370,10 +376,67 @@ mod tests {
         let relationship_frame =
             raw_relationship_dataframe(&relationships).expect("raw relationships should build");
 
-        assert!(entity_frame.column("frequency").is_ok());
-        assert!(entity_frame.column("text_unit_ids").is_ok());
+        assert_eq!(
+            column_names(&entity_frame),
+            ["title", "type", "description", "text_unit_ids", "frequency"]
+        );
+        assert_eq!(
+            column_names(&relationship_frame),
+            ["source", "target", "description", "text_unit_ids", "weight"]
+        );
+        assert_eq!(
+            entity_frame.column("title").expect("title").dtype(),
+            &DataType::String
+        );
+        assert_eq!(
+            entity_frame.column("type").expect("type").dtype(),
+            &DataType::String
+        );
+        assert_eq!(
+            entity_frame
+                .column("description")
+                .expect("description")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            entity_frame
+                .column("text_unit_ids")
+                .expect("text_unit_ids")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            entity_frame.column("frequency").expect("frequency").dtype(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            relationship_frame
+                .column("description")
+                .expect("description")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            relationship_frame
+                .column("text_unit_ids")
+                .expect("text_unit_ids")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            relationship_frame.column("weight").expect("weight").dtype(),
+            &DataType::Float64
+        );
         assert!(entity_frame.column("source_id").is_err());
-        assert!(relationship_frame.column("text_unit_ids").is_ok());
         assert!(relationship_frame.column("source_id").is_err());
+    }
+
+    fn column_names(dataframe: &DataFrame) -> Vec<&str> {
+        dataframe
+            .get_column_names()
+            .into_iter()
+            .map(|name| name.as_str())
+            .collect()
     }
 }

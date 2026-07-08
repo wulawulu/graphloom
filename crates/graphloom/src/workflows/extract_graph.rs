@@ -120,6 +120,7 @@ impl Workflow for ExtractGraphWorkflow {
             });
         }
 
+        let summary_total = entities.len().saturating_add(relationships.len());
         let summarized_entities = summarize_entities(
             summarizer.as_ref(),
             &prompt_loader,
@@ -131,13 +132,14 @@ impl Workflow for ExtractGraphWorkflow {
                 max_input_tokens: config.summarize_descriptions.max_input_tokens,
                 concurrency,
             },
-            &|completed, total| {
+            &|completed, _total| {
                 context
                     .callbacks
-                    .progress(EXTRACT_GRAPH_WORKFLOW, completed, Some(total));
+                    .progress(EXTRACT_GRAPH_WORKFLOW, completed, Some(summary_total));
             },
         )
         .await?;
+        let summarized_entity_count = summarized_entities.len();
         let summarized_relationships = summarize_relationships(
             summarizer.as_ref(),
             &prompt_loader,
@@ -149,10 +151,13 @@ impl Workflow for ExtractGraphWorkflow {
                 max_input_tokens: config.summarize_descriptions.max_input_tokens,
                 concurrency,
             },
-            &|completed, total| {
-                context
-                    .callbacks
-                    .progress(EXTRACT_GRAPH_WORKFLOW, completed, Some(total));
+            &|completed, _total| {
+                let cumulative_completed = summarized_entity_count.saturating_add(completed);
+                context.callbacks.progress(
+                    EXTRACT_GRAPH_WORKFLOW,
+                    cumulative_completed,
+                    Some(summary_total),
+                );
             },
         )
         .await?;
