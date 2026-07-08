@@ -15,9 +15,9 @@ use rand::{SeedableRng, rngs::SmallRng};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::common::{invalid_data, list_at, list_column, row_to_static, string_value};
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::{invalid_data, list_at, list_column, row_to_static, string_value},
 };
 
 /// Workflow name.

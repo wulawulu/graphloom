@@ -9,6 +9,7 @@
 mod callbacks;
 mod config;
 mod context;
+mod dataframe;
 mod error;
 mod operations;
 mod pipeline;

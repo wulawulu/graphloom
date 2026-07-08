@@ -8,8 +8,10 @@ use graphloom_llm::{TiktokenTokenizer, Tokenizer};
 use polars_core::{frame::row::Row, prelude::*};
 use serde_json::{Map, Value, json};
 
-use super::common::{list_column, optional_string_at, string_at};
-use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
+use crate::{
+    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::{list_column, optional_string_at, string_at},
+};
 
 /// Workflow name.
 pub const CREATE_BASE_TEXT_UNITS_WORKFLOW: &str = "create_base_text_units";

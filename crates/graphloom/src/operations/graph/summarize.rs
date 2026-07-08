@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, path::Path};
 
+use futures_util::{StreamExt, stream};
 use graphloom_llm::{
     ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader, Tokenizer,
 };
@@ -15,6 +16,13 @@ struct SummarizePromptValues {
     entity_name: String,
     description_list: String,
     max_length: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DescriptionSummarizeConfig {
+    pub(crate) max_length: usize,
+    pub(crate) max_input_tokens: usize,
+    pub(crate) concurrency: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,29 +41,48 @@ pub(crate) async fn summarize_entities(
     prompt_path: Option<&str>,
     tokenizer: &dyn Tokenizer,
     rows: &[EntityRow],
-    max_length: usize,
-    max_input_tokens: usize,
+    config: DescriptionSummarizeConfig,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<SummarizedEntityRow>> {
     let context = SummarizeContext {
         model,
         prompt_loader,
         prompt_path,
         tokenizer,
-        max_length,
-        max_input_tokens,
+        max_length: config.max_length,
+        max_input_tokens: config.max_input_tokens,
     };
+    let mut stream = stream::iter(rows.iter().cloned().enumerate())
+        .map(|(index, row)| {
+            let summarize_context = context;
+            async move {
+                let id = serde_json::to_string(&row.title)?;
+                let description =
+                    summarize_description_list(&summarize_context, &id, &row.description).await?;
+                Ok::<(usize, SummarizedEntityRow), crate::GraphLoomError>((
+                    index,
+                    SummarizedEntityRow {
+                        title: row.title,
+                        entity_type: row.entity_type,
+                        description,
+                        text_unit_ids: row.text_unit_ids,
+                        frequency: row.frequency,
+                    },
+                ))
+            }
+        })
+        .buffer_unordered(config.concurrency.max(1));
+
+    let mut completed = 0usize;
     let mut summarized = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = serde_json::to_string(&row.title)?;
-        summarized.push(SummarizedEntityRow {
-            title: row.title.clone(),
-            entity_type: row.entity_type.clone(),
-            description: summarize_description_list(&context, &id, &row.description).await?,
-            text_unit_ids: row.text_unit_ids.clone(),
-            frequency: row.frequency,
-        });
+    while let Some(result) = stream.next().await {
+        let result = result?;
+        completed = completed.saturating_add(1);
+        progress(completed, rows.len());
+        summarized.push(result);
     }
-    Ok(summarized)
+    summarized.sort_by_key(|(index, _)| *index);
+    Ok(summarized.into_iter().map(|(_, row)| row).collect())
 }
 
 pub(crate) async fn summarize_relationships(
@@ -64,29 +91,48 @@ pub(crate) async fn summarize_relationships(
     prompt_path: Option<&str>,
     tokenizer: &dyn Tokenizer,
     rows: &[RelationshipRow],
-    max_length: usize,
-    max_input_tokens: usize,
+    config: DescriptionSummarizeConfig,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<SummarizedRelationshipRow>> {
     let context = SummarizeContext {
         model,
         prompt_loader,
         prompt_path,
         tokenizer,
-        max_length,
-        max_input_tokens,
+        max_length: config.max_length,
+        max_input_tokens: config.max_input_tokens,
     };
+    let mut stream = stream::iter(rows.iter().cloned().enumerate())
+        .map(|(index, row)| {
+            let summarize_context = context;
+            async move {
+                let id = serde_json::to_string(&[row.source.as_str(), row.target.as_str()])?;
+                let description =
+                    summarize_description_list(&summarize_context, &id, &row.description).await?;
+                Ok::<(usize, SummarizedRelationshipRow), crate::GraphLoomError>((
+                    index,
+                    SummarizedRelationshipRow {
+                        source: row.source,
+                        target: row.target,
+                        description,
+                        text_unit_ids: row.text_unit_ids,
+                        weight: row.weight,
+                    },
+                ))
+            }
+        })
+        .buffer_unordered(config.concurrency.max(1));
+
+    let mut completed = 0usize;
     let mut summarized = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = serde_json::to_string(&[row.source.as_str(), row.target.as_str()])?;
-        summarized.push(SummarizedRelationshipRow {
-            source: row.source.clone(),
-            target: row.target.clone(),
-            description: summarize_description_list(&context, &id, &row.description).await?,
-            text_unit_ids: row.text_unit_ids.clone(),
-            weight: row.weight,
-        });
+    while let Some(result) = stream.next().await {
+        let result = result?;
+        completed = completed.saturating_add(1);
+        progress(completed, rows.len());
+        summarized.push(result);
     }
-    Ok(summarized)
+    summarized.sort_by_key(|(index, _)| *index);
+    Ok(summarized.into_iter().map(|(_, row)| row).collect())
 }
 
 async fn render_summarization_prompt(
@@ -180,4 +226,95 @@ async fn summarize_description_list(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use graphloom_llm::{CompletionResponse, LlmError};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct UnusedModel;
+
+    #[async_trait]
+    impl CompletionModel for UnusedModel {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            Err(LlmError::InvalidResponse {
+                model_instance: "unused".to_owned(),
+                operation: "completion",
+                message: "single-description rows should not call the model".to_owned(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct WhitespaceTokenizer;
+
+    impl Tokenizer for WhitespaceTokenizer {
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            Ok(text
+                .split_whitespace()
+                .enumerate()
+                .map(|(index, _)| u32::try_from(index).unwrap_or(u32::MAX))
+                .collect())
+        }
+
+        fn decode(&self, _tokens: &[u32]) -> graphloom_llm::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_entity_order_with_concurrent_summarization() {
+        let rows = vec![
+            EntityRow {
+                title: "B".to_owned(),
+                entity_type: "person".to_owned(),
+                description: vec!["second".to_owned()],
+                text_unit_ids: vec!["tu-2".to_owned()],
+                frequency: 1,
+            },
+            EntityRow {
+                title: "A".to_owned(),
+                entity_type: "person".to_owned(),
+                description: vec!["first".to_owned()],
+                text_unit_ids: vec!["tu-1".to_owned()],
+                frequency: 1,
+            },
+        ];
+        let progress = Arc::new(AtomicUsize::new(0));
+        let progress_ref = Arc::clone(&progress);
+
+        let summarized = summarize_entities(
+            &UnusedModel,
+            &PromptLoader::new("."),
+            None,
+            &WhitespaceTokenizer,
+            &rows,
+            DescriptionSummarizeConfig {
+                max_length: 100,
+                max_input_tokens: 100,
+                concurrency: 2,
+            },
+            &|completed, _| {
+                progress_ref.store(completed, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("summarization should succeed");
+
+        assert_eq!(summarized[0].title, "B");
+        assert_eq!(summarized[1].title, "A");
+        assert_eq!(progress.load(Ordering::SeqCst), 2);
+    }
 }

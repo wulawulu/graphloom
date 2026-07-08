@@ -1,16 +1,17 @@
 //! Graph extraction workflow orchestration.
 
 use async_trait::async_trait;
+use futures_util::{StreamExt, stream};
 use graphloom_llm::{PromptLoader, TiktokenTokenizer};
 
 use super::common::resolve_completion_model;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
     operations::graph::{
-        entity_intermediate_dataframe, extract_graph_sample, extract_text_unit_graph,
-        filter_orphan_relationships, merge_entities, merge_relationships, raw_entity_dataframe,
-        raw_relationship_dataframe, read_text_units, relationship_intermediate_dataframe,
-        summarize_entities, summarize_relationships,
+        DescriptionSummarizeConfig, entity_intermediate_dataframe, extract_graph_sample,
+        extract_text_unit_graph, filter_orphan_relationships, merge_entities, merge_relationships,
+        raw_entity_dataframe, raw_relationship_dataframe, read_text_units,
+        relationship_intermediate_dataframe, summarize_entities, summarize_relationships,
     },
 };
 
@@ -54,26 +55,51 @@ impl Workflow for ExtractGraphWorkflow {
         )?;
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
         let prompt_loader = PromptLoader::new(".");
+        let concurrency = config.concurrent_requests.max(1);
+
+        let extraction_prompt = config.extract_graph.prompt.clone();
+        let entity_types = config.extract_graph.entity_types.clone();
+        let max_gleanings = config.extract_graph.max_gleanings;
+        let mut extraction_results = stream::iter(text_units.iter().cloned().enumerate())
+            .map(|(index, text_unit)| {
+                let extractor = extractor.clone();
+                let prompt_loader = prompt_loader.clone();
+                let extraction_prompt = extraction_prompt.clone();
+                let entity_types = entity_types.clone();
+                async move {
+                    extract_text_unit_graph(
+                        extractor.as_ref(),
+                        &prompt_loader,
+                        extraction_prompt.as_deref(),
+                        &entity_types,
+                        &text_unit,
+                        max_gleanings,
+                    )
+                    .await
+                    .map(|(entities, relationships)| (index, entities, relationships))
+                }
+            })
+            .buffer_unordered(concurrency);
+
+        let mut completed_extractions = 0usize;
+        let mut extracted = Vec::with_capacity(text_units.len());
+        while let Some(result) = extraction_results.next().await {
+            let result = result?;
+            completed_extractions = completed_extractions.saturating_add(1);
+            context.callbacks.progress(
+                EXTRACT_GRAPH_WORKFLOW,
+                completed_extractions,
+                Some(text_units.len()),
+            );
+            extracted.push(result);
+        }
+        extracted.sort_by_key(|(index, _, _)| *index);
 
         let mut extracted_entities = Vec::new();
         let mut extracted_relationships = Vec::new();
-        for (index, text_unit) in text_units.iter().enumerate() {
-            let (entities, relationships) = extract_text_unit_graph(
-                extractor.as_ref(),
-                &prompt_loader,
-                config.extract_graph.prompt.as_deref(),
-                &config.extract_graph.entity_types,
-                text_unit,
-                config.extract_graph.max_gleanings,
-            )
-            .await?;
+        for (_, entities, relationships) in extracted {
             extracted_entities.extend(entities);
             extracted_relationships.extend(relationships);
-            context.callbacks.progress(
-                EXTRACT_GRAPH_WORKFLOW,
-                index.saturating_add(1),
-                Some(text_units.len()),
-            );
         }
 
         let entities = merge_entities(&extracted_entities);
@@ -100,8 +126,16 @@ impl Workflow for ExtractGraphWorkflow {
             config.summarize_descriptions.prompt.as_deref(),
             &tokenizer,
             &entities,
-            config.summarize_descriptions.max_length,
-            config.summarize_descriptions.max_input_tokens,
+            DescriptionSummarizeConfig {
+                max_length: config.summarize_descriptions.max_length,
+                max_input_tokens: config.summarize_descriptions.max_input_tokens,
+                concurrency,
+            },
+            &|completed, total| {
+                context
+                    .callbacks
+                    .progress(EXTRACT_GRAPH_WORKFLOW, completed, Some(total));
+            },
         )
         .await?;
         let summarized_relationships = summarize_relationships(
@@ -110,8 +144,16 @@ impl Workflow for ExtractGraphWorkflow {
             config.summarize_descriptions.prompt.as_deref(),
             &tokenizer,
             &relationships,
-            config.summarize_descriptions.max_length,
-            config.summarize_descriptions.max_input_tokens,
+            DescriptionSummarizeConfig {
+                max_length: config.summarize_descriptions.max_length,
+                max_input_tokens: config.summarize_descriptions.max_input_tokens,
+                concurrency,
+            },
+            &|completed, total| {
+                context
+                    .callbacks
+                    .progress(EXTRACT_GRAPH_WORKFLOW, completed, Some(total));
+            },
         )
         .await?;
 
@@ -133,13 +175,13 @@ impl Workflow for ExtractGraphWorkflow {
         if config.snapshots.raw_graph {
             context
                 .output_table_provider
-                .write_dataframe("raw_entities", raw_entity_dataframe(&extracted_entities)?)
+                .write_dataframe("raw_entities", raw_entity_dataframe(&entities)?)
                 .await?;
             context
                 .output_table_provider
                 .write_dataframe(
                     "raw_relationships",
-                    raw_relationship_dataframe(&extracted_relationships)?,
+                    raw_relationship_dataframe(&relationships)?,
                 )
                 .await?;
         }

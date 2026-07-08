@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use polars_core::{frame::row::Row, prelude::*};
 
-use super::{
-    base_text_units::{TextUnitRow, text_units_dataframe},
-    common::{invalid_data, list_at, row_to_static, string_value},
+use super::base_text_units::{TextUnitRow, text_units_dataframe};
+use crate::{
+    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::{invalid_data, list_at, row_to_static, string_value},
 };
-use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
 /// Workflow name.
 pub const CREATE_FINAL_TEXT_UNITS_WORKFLOW: &str = "create_final_text_units";

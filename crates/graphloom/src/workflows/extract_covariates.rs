@@ -12,9 +12,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::common::{resolve_completion_model, string_value};
+use super::common::resolve_completion_model;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::string_value,
 };
 
 /// Workflow name.

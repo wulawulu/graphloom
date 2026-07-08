@@ -41,3 +41,26 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_escape_graphml_node_and_edge_attributes() {
+        let graphml = graphml_snapshot(&[FinalRelationshipRow {
+            id: "rel-1".to_owned(),
+            human_readable_id: 0,
+            source: "A&B".to_owned(),
+            target: "\"B<C\"".to_owned(),
+            description: "quoted".to_owned(),
+            weight: 1.0,
+            combined_degree: 2,
+            text_unit_ids: Vec::new(),
+        }]);
+
+        assert!(graphml.contains(r#"<node id="A&amp;B"/>"#));
+        assert!(graphml.contains(r#"<node id="&quot;B&lt;C&quot;"/>"#));
+        assert!(graphml.contains(r#"source="A&amp;B" target="&quot;B&lt;C&quot;""#));
+    }
+}

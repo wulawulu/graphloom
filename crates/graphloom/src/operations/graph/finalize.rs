@@ -87,3 +87,31 @@ fn sorted_pair(left: &str, right: &str) -> (String, String) {
         (right.to_owned(), left.to_owned())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_count_reverse_edges_once_in_degree_map() {
+        let degree = degree_map(&[
+            SummarizedRelationshipRow {
+                source: "ALICE".to_owned(),
+                target: "BOB".to_owned(),
+                description: "one".to_owned(),
+                text_unit_ids: vec!["tu-1".to_owned()],
+                weight: 1.0,
+            },
+            SummarizedRelationshipRow {
+                source: "BOB".to_owned(),
+                target: "ALICE".to_owned(),
+                description: "reverse".to_owned(),
+                text_unit_ids: vec!["tu-2".to_owned()],
+                weight: 1.0,
+            },
+        ]);
+
+        assert_eq!(degree.get("ALICE"), Some(&1));
+        assert_eq!(degree.get("BOB"), Some(&1));
+    }
+}

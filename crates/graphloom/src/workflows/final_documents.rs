@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use polars_core::prelude::DataFrame;
 
-use super::{
-    common::{optional_string_at, row_to_static, string_at},
-    input_documents::{DocumentRow, documents_dataframe},
+use super::input_documents::{DocumentRow, documents_dataframe};
+use crate::{
+    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::{optional_string_at, row_to_static, string_at},
 };
-use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
 /// Workflow name.
 pub const CREATE_FINAL_DOCUMENTS_WORKFLOW: &str = "create_final_documents";

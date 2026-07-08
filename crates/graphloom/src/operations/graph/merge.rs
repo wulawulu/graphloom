@@ -56,3 +56,59 @@ pub(crate) fn filter_orphan_relationships(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_merge_entities_and_filter_orphan_relationships() {
+        let raw_entities = vec![
+            RawEntityRow {
+                title: "ALICE".to_owned(),
+                entity_type: "person".to_owned(),
+                description: "engineer".to_owned(),
+                source_id: "tu-1".to_owned(),
+            },
+            RawEntityRow {
+                title: "ALICE".to_owned(),
+                entity_type: "person".to_owned(),
+                description: "mentor".to_owned(),
+                source_id: "tu-2".to_owned(),
+            },
+            RawEntityRow {
+                title: "BOB".to_owned(),
+                entity_type: "person".to_owned(),
+                description: "researcher".to_owned(),
+                source_id: "tu-1".to_owned(),
+            },
+        ];
+        let entities = merge_entities(&raw_entities);
+
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0].frequency, 2);
+        assert_eq!(entities[0].description, vec!["engineer", "mentor"]);
+
+        let relationships = merge_relationships(&[
+            RawRelationshipRow {
+                source: "ALICE".to_owned(),
+                target: "BOB".to_owned(),
+                description: "works with".to_owned(),
+                source_id: "tu-1".to_owned(),
+                weight: 2.0,
+            },
+            RawRelationshipRow {
+                source: "ALICE".to_owned(),
+                target: "CAROL".to_owned(),
+                description: "missing endpoint".to_owned(),
+                source_id: "tu-2".to_owned(),
+                weight: 1.0,
+            },
+        ]);
+        let relationships = filter_orphan_relationships(relationships, &entities);
+
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].source, "ALICE");
+        assert_eq!(relationships[0].target, "BOB");
+    }
+}

@@ -5,9 +5,9 @@ use futures_util::TryStreamExt;
 use polars_core::prelude::*;
 use serde_json::{Map, Value, json};
 
-use super::common::list_column;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    dataframe::list_column,
 };
 
 /// Workflow name.

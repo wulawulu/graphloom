@@ -138,3 +138,43 @@ async fn render_builtin_prompt(
         .await
         .map_err(GraphLoomError::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use graphloom_llm::MockCompletionModel;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_should_append_gleaned_graph_records() {
+        let model = MockCompletionModel::new(
+            "mock",
+            vec![
+                "(\"entity\"<|>Alice<|>person<|>Alice)##".to_owned(),
+                "(\"entity\"<|>Bob<|>person<|>Bob)##(\"relationship\"<|>Alice<|>Bob<|>knows<|>1)##\
+                 <|COMPLETE|>"
+                    .to_owned(),
+            ],
+        );
+        let text_unit = TextUnitInput {
+            id: "tu-1".to_owned(),
+            text: "Alice knows Bob.".to_owned(),
+        };
+
+        let (entities, relationships) = extract_text_unit_graph(
+            &model,
+            &PromptLoader::new("."),
+            None,
+            &[String::from("person")],
+            &text_unit,
+            1,
+        )
+        .await
+        .expect("graph extraction should succeed");
+
+        assert_eq!(entities.len(), 2);
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].source, "ALICE");
+        assert_eq!(relationships[0].target, "BOB");
+    }
+}
