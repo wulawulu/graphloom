@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::{
     common::{invalid_data, string_value},
     graph::{list_at, row_to_static},
-    input_documents::{list_column, usize_to_i64},
+    input_documents::list_column,
 };
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
@@ -113,7 +113,7 @@ struct CommunityRow {
     relationship_ids: Vec<String>,
     text_unit_ids: Vec<String>,
     period: String,
-    size: i64,
+    size: usize,
 }
 
 fn create_communities(
@@ -164,7 +164,7 @@ fn create_communities(
             relationship_ids,
             text_unit_ids,
             period: period.clone(),
-            size: usize_to_i64(cluster.titles.len(), CREATE_COMMUNITIES_WORKFLOW)?,
+            size: cluster.titles.len(),
         });
     }
 
@@ -237,11 +237,18 @@ fn cluster_graph(
 fn cluster_key(cluster: &HierarchicalCluster) -> Result<(i64, i64, i64)> {
     Ok((
         i64::from(cluster.level),
-        usize_to_i64(cluster.cluster, CREATE_COMMUNITIES_WORKFLOW)?,
-        cluster.parent_cluster.map_or(Ok(-1), |parent| {
-            usize_to_i64(parent, CREATE_COMMUNITIES_WORKFLOW)
-        })?,
+        cluster_index_to_i64(cluster.cluster, "community")?,
+        cluster
+            .parent_cluster
+            .map_or(Ok(-1), |parent| cluster_index_to_i64(parent, "parent"))?,
     ))
+}
+
+fn cluster_index_to_i64(value: usize, column: &'static str) -> Result<i64> {
+    i64::try_from(value).map_err(|source| GraphLoomError::InvalidData {
+        workflow: CREATE_COMMUNITIES_WORKFLOW,
+        message: format!("{column} cluster index is too large for i64: {source}"),
+    })
 }
 
 fn prepare_cluster_edges(relationships: &[RelationshipRow], use_lcc: bool) -> Vec<Edge> {
@@ -442,7 +449,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
         "parent" => rows.iter().map(|row| row.parent).collect::<Vec<_>>(),
         "title" => rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
         "period" => rows.iter().map(|row| row.period.as_str()).collect::<Vec<_>>(),
-        "size" => rows.iter().map(|row| row.size).collect::<Vec<_>>(),
+        "size" => rows.iter().map(|row| row.size as u64).collect::<Vec<_>>(),
     )?;
     dataframe.insert_column(
         5,

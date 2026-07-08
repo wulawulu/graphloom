@@ -3,13 +3,12 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use polars_core::prelude::*;
+use polars_core::{frame::row::Row, prelude::*};
 
 use super::{
     base_text_units::{TextUnitRow, text_units_dataframe},
     common::{invalid_data, string_value},
     graph::{list_at, row_to_static},
-    input_documents::usize_to_i64,
 };
 use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
@@ -68,7 +67,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
         for (index, text_unit) in text_units.into_iter().enumerate() {
             rows.push(TextUnitRow {
                 id: text_unit.id.clone(),
-                human_readable_id: usize_to_i64(index, CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
+                human_readable_id: index,
                 text: text_unit.text,
                 n_tokens: text_unit.n_tokens,
                 document_id: text_unit.document_id,
@@ -96,7 +95,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
 struct TextUnitInput {
     id: String,
     text: String,
-    n_tokens: i64,
+    n_tokens: usize,
     document_id: String,
 }
 
@@ -110,16 +109,14 @@ fn cloned_vec_or_empty(values: Option<&Vec<String>>) -> Vec<String> {
 fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
     let ids = dataframe.column("id")?.str()?;
     let texts = dataframe.column("text")?.str()?;
-    let n_tokens = dataframe.column("n_tokens")?.i64()?;
     let document_ids = dataframe.column("document_id")?.str()?;
     let mut rows = Vec::with_capacity(dataframe.height());
     for index in 0..dataframe.height() {
+        let row = row_to_static(dataframe.get_row(index)?);
         rows.push(TextUnitInput {
             id: string_value(ids.get(index), "id", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
             text: string_value(texts.get(index), "text", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
-            n_tokens: n_tokens.get(index).ok_or_else(|| {
-                invalid_data(CREATE_FINAL_TEXT_UNITS_WORKFLOW, "missing n_tokens")
-            })?,
+            n_tokens: usize_at(&row, 3, "n_tokens")?,
             document_id: string_value(
                 document_ids.get(index),
                 "document_id",
@@ -128,6 +125,28 @@ fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
         });
     }
     Ok(rows)
+}
+
+fn usize_at(row: &Row<'static>, index: usize, column: &'static str) -> Result<usize> {
+    row.0
+        .get(index)
+        .and_then(any_value_to_usize)
+        .ok_or_else(|| {
+            invalid_data(
+                CREATE_FINAL_TEXT_UNITS_WORKFLOW,
+                &format!("missing {column}"),
+            )
+        })
+}
+
+fn any_value_to_usize(value: &AnyValue<'_>) -> Option<usize> {
+    match value {
+        AnyValue::UInt64(value) => usize::try_from(*value).ok(),
+        AnyValue::UInt32(value) => usize::try_from(*value).ok(),
+        AnyValue::Int64(value) => usize::try_from(*value).ok(),
+        AnyValue::Int32(value) => usize::try_from(*value).ok(),
+        _ => None,
+    }
 }
 
 fn build_multi_ref_map(

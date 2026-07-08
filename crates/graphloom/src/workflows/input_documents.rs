@@ -42,7 +42,6 @@ impl Workflow for LoadInputDocumentsWorkflow {
         let mut sample = Vec::new();
 
         while let Some(document) = stream.try_next().await? {
-            let human_readable_id = usize_to_i64(rows.len(), LOAD_INPUT_DOCUMENTS_WORKFLOW)?;
             let raw_data = document
                 .raw_data
                 .as_ref()
@@ -50,7 +49,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
                 .transpose()?;
             let row = DocumentRow {
                 id: document.id,
-                human_readable_id,
+                human_readable_id: rows.len(),
                 title: Some(document.title),
                 text: document.text,
                 text_unit_ids: Vec::new(),
@@ -89,7 +88,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: i64,
+    pub(crate) human_readable_id: usize,
     pub(crate) title: Option<String>,
     pub(crate) text: String,
     pub(crate) text_unit_ids: Vec<String>,
@@ -133,7 +132,7 @@ pub(crate) fn documents_dataframe(rows: &[DocumentRow]) -> Result<DataFrame> {
     let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     let human_ids = rows
         .iter()
-        .map(|row| row.human_readable_id)
+        .map(|row| row.human_readable_id as u64)
         .collect::<Vec<_>>();
     let titles = rows
         .iter()
@@ -168,17 +167,6 @@ pub(crate) fn documents_dataframe(rows: &[DocumentRow]) -> Result<DataFrame> {
         )?,
     )?;
     Ok(dataframe)
-}
-
-pub(crate) fn usize_to_i64(value: usize, workflow: &'static str) -> Result<i64> {
-    value
-        .try_into()
-        .map_err(
-            |source: std::num::TryFromIntError| GraphLoomError::NumericConversion {
-                workflow,
-                message: source.to_string(),
-            },
-        )
 }
 
 pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {

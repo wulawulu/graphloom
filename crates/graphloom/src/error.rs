@@ -65,13 +65,4 @@ pub enum GraphLoomError {
         /// Failure details.
         message: String,
     },
-
-    /// Numeric conversion failed.
-    #[error("numeric conversion failed in workflow {workflow}: {message}")]
-    NumericConversion {
-        /// Workflow name.
-        workflow: &'static str,
-        /// Failure details.
-        message: String,
-    },
 }

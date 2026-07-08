@@ -10,7 +10,7 @@ use polars_core::{
 
 use super::{
     base_text_units::{optional_string_at, string_at},
-    input_documents::{DocumentRow, documents_dataframe, usize_to_i64},
+    input_documents::{DocumentRow, documents_dataframe},
 };
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
@@ -51,7 +51,7 @@ impl Workflow for CreateFinalDocumentsWorkflow {
             let document_id = string_at(&row, 0, "id")?;
             let document = DocumentRow {
                 id: document_id.clone(),
-                human_readable_id: usize_to_i64(row_index, CREATE_FINAL_DOCUMENTS_WORKFLOW)?,
+                human_readable_id: row_index,
                 title: optional_string_at(&row, 2),
                 text: string_at(&row, 3, "text")?,
                 text_unit_ids: mapping.get(&document_id).cloned().unwrap_or_default(),

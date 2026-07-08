@@ -1,16 +1,14 @@
 //! `create_base_text_units` workflow.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use graphloom_chunking::{MetadataTransform, TextTransform, add_metadata, create_chunker};
+use graphloom_chunking::{Chunker, MetadataTransform, TextTransform, add_metadata, create_chunker};
 use graphloom_input::{TextDocument, gen_sha512_hash};
 use graphloom_llm::{TiktokenTokenizer, Tokenizer};
 use polars_core::{frame::row::Row, prelude::*};
 use serde_json::{Map, Value, json};
 
-use super::input_documents::{list_column, usize_to_i64};
+use super::input_documents::list_column;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
 };
@@ -33,8 +31,10 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         config: &GraphRagConfig,
         context: &mut PipelineRunContext,
     ) -> Result<WorkflowFunctionOutput> {
-        let tokenizer = Arc::new(TiktokenTokenizer::new(&config.chunking.encoding_model)?);
+        let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
         let chunker = create_chunker(&config.chunking)?;
+        let prepend_metadata = &config.chunking.prepend_metadata;
+        let should_prepend_metadata = !prepend_metadata.is_empty();
 
         let mut documents = context
             .output_table_provider
@@ -49,30 +49,29 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         let mut sample = Vec::new();
 
         let mut document_rows = documents.rows();
-        while let Some(row) = document_rows.next().await {
-            let row = row?;
+        while let Some(document) = document_rows.next().await {
+            let row = document?;
             let document = document_from_row(&row)?;
-            let transform = metadata_transform(&document, &config.chunking.prepend_metadata);
-            let transform_fn: Option<Box<TextTransform>> = transform.map(|transform| {
-                Box::new(move |text: &str| transform.transform(text)) as Box<TextTransform>
-            });
-            let transform_ref = transform_fn.as_deref();
-            for chunk in chunker.chunk(&document.text, transform_ref)? {
-                let n_tokens = tokenizer.count(&chunk.text)?;
-                let row = TextUnitRow {
-                    id: gen_sha512_hash([chunk.text.as_str()]),
-                    human_readable_id: usize_to_i64(rows.len(), CREATE_BASE_TEXT_UNITS_WORKFLOW)?,
-                    text: chunk.text,
-                    n_tokens: usize_to_i64(n_tokens, CREATE_BASE_TEXT_UNITS_WORKFLOW)?,
-                    document_id: document.id.clone(),
-                    entity_ids: Vec::new(),
-                    relationship_ids: Vec::new(),
-                    covariate_ids: Vec::new(),
-                };
-                if sample.len() < 5 {
-                    sample.push(row.to_value());
-                }
-                rows.push(row);
+            if should_prepend_metadata {
+                let transform = metadata_transform(&document, prepend_metadata);
+                let transform_fn = move |text: &str| transform.transform(text);
+                append_document_chunks(
+                    &document,
+                    chunker.as_ref(),
+                    &tokenizer,
+                    Some(&transform_fn),
+                    &mut rows,
+                    &mut sample,
+                )?;
+            } else {
+                append_document_chunks(
+                    &document,
+                    chunker.as_ref(),
+                    &tokenizer,
+                    None,
+                    &mut rows,
+                    &mut sample,
+                )?;
             }
             context.callbacks.progress(
                 CREATE_BASE_TEXT_UNITS_WORKFLOW,
@@ -95,12 +94,40 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
     }
 }
 
+fn append_document_chunks(
+    document: &TextDocument,
+    chunker: &dyn Chunker,
+    tokenizer: &dyn Tokenizer,
+    transform: Option<&TextTransform>,
+    rows: &mut Vec<TextUnitRow>,
+    sample: &mut Vec<Value>,
+) -> Result<()> {
+    for chunk in chunker.chunk(&document.text, transform)? {
+        let n_tokens = tokenizer.count(&chunk.text)?;
+        let row = TextUnitRow {
+            id: gen_sha512_hash([chunk.text.as_str()]),
+            human_readable_id: rows.len(),
+            text: chunk.text,
+            n_tokens,
+            document_id: document.id.clone(),
+            entity_ids: Vec::new(),
+            relationship_ids: Vec::new(),
+            covariate_ids: Vec::new(),
+        };
+        if sample.len() < 5 {
+            sample.push(row.to_value());
+        }
+        rows.push(row);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TextUnitRow {
     pub(crate) id: String,
-    pub(crate) human_readable_id: i64,
+    pub(crate) human_readable_id: usize,
     pub(crate) text: String,
-    pub(crate) n_tokens: i64,
+    pub(crate) n_tokens: usize,
     pub(crate) document_id: String,
     pub(crate) entity_ids: Vec<String>,
     pub(crate) relationship_ids: Vec<String>,
@@ -132,10 +159,13 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
     let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     let human_ids = rows
         .iter()
-        .map(|row| row.human_readable_id)
+        .map(|row| row.human_readable_id as u64)
         .collect::<Vec<_>>();
     let texts = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
-    let n_tokens = rows.iter().map(|row| row.n_tokens).collect::<Vec<_>>();
+    let n_tokens = rows
+        .iter()
+        .map(|row| row.n_tokens as u64)
+        .collect::<Vec<_>>();
     let document_ids = rows
         .iter()
         .map(|row| row.document_id.as_str())
@@ -171,20 +201,8 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
     Ok(dataframe)
 }
 
-fn metadata_transform(
-    document: &TextDocument,
-    prepend_metadata: &[String],
-) -> Option<MetadataTransform> {
-    if prepend_metadata.is_empty() {
-        None
-    } else {
-        Some(add_metadata(
-            &document.collect(prepend_metadata),
-            ": ",
-            ".\n",
-            false,
-        ))
-    }
+fn metadata_transform(document: &TextDocument, prepend_metadata: &[String]) -> MetadataTransform {
+    add_metadata(&document.collect(prepend_metadata), ": ", ".\n", false)
 }
 
 fn document_from_row(row: &Row<'static>) -> Result<TextDocument> {

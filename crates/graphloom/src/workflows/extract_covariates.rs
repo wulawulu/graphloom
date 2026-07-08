@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{common::string_value, input_documents::usize_to_i64};
+use super::common::string_value;
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
 };
@@ -77,7 +77,7 @@ impl Workflow for ExtractCovariatesWorkflow {
             for claim in claims {
                 let row = CovariateRow {
                     id: Uuid::new_v4().to_string(),
-                    human_readable_id: usize_to_i64(rows.len(), EXTRACT_COVARIATES_WORKFLOW)?,
+                    human_readable_id: rows.len(),
                     covariate_type: "claim".to_owned(),
                     claim_type: claim.claim_type,
                     description: claim.description,
@@ -121,7 +121,7 @@ struct TextUnitInput {
 #[derive(Debug, Clone)]
 struct CovariateRow {
     id: String,
-    human_readable_id: i64,
+    human_readable_id: usize,
     covariate_type: String,
     claim_type: Option<String>,
     description: Option<String>,
@@ -294,7 +294,7 @@ fn read_text_unit_inputs(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
 fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
     Ok(df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
         "covariate_type" => rows.iter().map(|row| row.covariate_type.as_str()).collect::<Vec<_>>(),
         "type" => rows.iter().map(|row| row.claim_type.as_deref()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_deref()).collect::<Vec<_>>(),

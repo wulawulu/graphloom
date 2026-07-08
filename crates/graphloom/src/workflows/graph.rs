@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::{
     base_text_units::{optional_string_at, string_at},
-    input_documents::{list_column, usize_to_i64},
+    input_documents::list_column,
 };
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
@@ -305,7 +305,7 @@ struct SummarizedRelationshipRow {
 #[derive(Debug, Clone, PartialEq)]
 struct FinalEntityRow {
     id: String,
-    human_readable_id: i64,
+    human_readable_id: usize,
     title: String,
     entity_type: String,
     description: String,
@@ -317,7 +317,7 @@ struct FinalEntityRow {
 #[derive(Debug, Clone, PartialEq)]
 struct FinalRelationshipRow {
     id: String,
-    human_readable_id: i64,
+    human_readable_id: usize,
     source: String,
     target: String,
     description: String,
@@ -712,7 +712,7 @@ fn finalize_entities(
         }
         final_rows.push(FinalEntityRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: usize_to_i64(final_rows.len(), FINALIZE_GRAPH_WORKFLOW)?,
+            human_readable_id: final_rows.len(),
             title: row.title.clone(),
             entity_type: row.entity_type.clone(),
             description: row.description.clone(),
@@ -740,7 +740,7 @@ fn finalize_relationships(
         }
         final_rows.push(FinalRelationshipRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: usize_to_i64(final_rows.len(), FINALIZE_GRAPH_WORKFLOW)?,
+            human_readable_id: final_rows.len(),
             source: row.source.clone(),
             target: row.target.clone(),
             description: row.description.clone(),
@@ -880,7 +880,7 @@ fn relationship_intermediate_dataframe(rows: &[SummarizedRelationshipRow]) -> Re
 fn final_entities_dataframe(rows: &[FinalEntityRow]) -> Result<DataFrame> {
     let mut dataframe = df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
         "title" => rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
         "type" => rows.iter().map(|row| row.entity_type.as_str()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_str()).collect::<Vec<_>>(),
@@ -903,7 +903,7 @@ fn final_entities_dataframe(rows: &[FinalEntityRow]) -> Result<DataFrame> {
 fn final_relationships_dataframe(rows: &[FinalRelationshipRow]) -> Result<DataFrame> {
     let mut dataframe = df!(
         "id" => rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        "human_readable_id" => rows.iter().map(|row| row.human_readable_id).collect::<Vec<_>>(),
+        "human_readable_id" => rows.iter().map(|row| row.human_readable_id as u64).collect::<Vec<_>>(),
         "source" => rows.iter().map(|row| row.source.as_str()).collect::<Vec<_>>(),
         "target" => rows.iter().map(|row| row.target.as_str()).collect::<Vec<_>>(),
         "description" => rows.iter().map(|row| row.description.as_str()).collect::<Vec<_>>(),
