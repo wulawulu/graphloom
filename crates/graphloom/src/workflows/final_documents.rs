@@ -3,18 +3,13 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use polars_core::{
-    frame::row::Row,
-    prelude::{AnyValue, DataFrame},
-};
+use polars_core::prelude::DataFrame;
 
 use super::{
-    base_text_units::{optional_string_at, string_at},
+    common::{optional_string_at, row_to_static, string_at},
     input_documents::{DocumentRow, documents_dataframe},
 };
-use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-};
+use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
 /// Workflow name.
 pub const CREATE_FINAL_DOCUMENTS_WORKFLOW: &str = "create_final_documents";
@@ -48,12 +43,12 @@ impl Workflow for CreateFinalDocumentsWorkflow {
 
         for row_index in 0..documents.height() {
             let row = row_to_static(documents.get_row(row_index)?);
-            let document_id = string_at(&row, 0, "id")?;
+            let document_id = string_at(&row, 0, "id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
             let document = DocumentRow {
                 id: document_id.clone(),
                 human_readable_id: row_index,
                 title: optional_string_at(&row, 2),
-                text: string_at(&row, 3, "text")?,
+                text: string_at(&row, 3, "text", CREATE_FINAL_DOCUMENTS_WORKFLOW)?,
                 text_unit_ids: mapping.get(&document_id).cloned().unwrap_or_default(),
                 creation_date: optional_string_at(&row, 5),
                 raw_data: optional_string_at(&row, 6),
@@ -82,24 +77,9 @@ fn text_unit_mapping(dataframe: &DataFrame) -> Result<BTreeMap<String, Vec<Strin
     let mut mapping: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for row_index in 0..dataframe.height() {
         let row = row_to_static(dataframe.get_row(row_index)?);
-        let text_unit_id = string_at_for_workflow(&row, 0, "id")?;
-        let document_id = string_at_for_workflow(&row, 4, "document_id")?;
+        let text_unit_id = string_at(&row, 0, "id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
+        let document_id = string_at(&row, 4, "document_id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
         mapping.entry(document_id).or_default().push(text_unit_id);
     }
     Ok(mapping)
-}
-
-fn row_to_static(row: Row<'_>) -> Row<'static> {
-    Row::new(row.0.into_iter().map(AnyValue::into_static).collect())
-}
-
-fn string_at_for_workflow(
-    row: &Row<'static>,
-    index: usize,
-    column: &'static str,
-) -> Result<String> {
-    string_at(row, index, column).map_err(|source| GraphLoomError::InvalidData {
-        workflow: CREATE_FINAL_DOCUMENTS_WORKFLOW,
-        message: source.to_string(),
-    })
 }

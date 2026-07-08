@@ -16,8 +16,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    common::{invalid_data, string_value},
-    graph::{list_at, row_to_static},
+    common::{invalid_data, list_at, row_to_static, string_value},
     input_documents::list_column,
 };
 use crate::{
@@ -434,7 +433,7 @@ fn read_relationships(dataframe: &DataFrame) -> Result<Vec<RelationshipRow>> {
             weight: weights
                 .get(index)
                 .ok_or_else(|| invalid_data(CREATE_COMMUNITIES_WORKFLOW, "missing weight"))?,
-            text_unit_ids: list_at(&row, text_unit_ids_index)?,
+            text_unit_ids: list_at(&row, text_unit_ids_index, CREATE_COMMUNITIES_WORKFLOW)?,
         });
     }
     Ok(rows)

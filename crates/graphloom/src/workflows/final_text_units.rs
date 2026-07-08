@@ -7,8 +7,7 @@ use polars_core::{frame::row::Row, prelude::*};
 
 use super::{
     base_text_units::{TextUnitRow, text_units_dataframe},
-    common::{invalid_data, string_value},
-    graph::{list_at, row_to_static},
+    common::{invalid_data, list_at, row_to_static, string_value},
 };
 use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
@@ -168,7 +167,7 @@ fn build_multi_ref_map(
     for index in 0..dataframe.height() {
         let row_id = string_value(ids.get(index), "id", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?;
         let row = row_to_static(dataframe.get_row(index)?);
-        for text_unit_id in list_at(&row, text_unit_ids_index)? {
+        for text_unit_id in list_at(&row, text_unit_ids_index, CREATE_FINAL_TEXT_UNITS_WORKFLOW)? {
             mapping
                 .entry(text_unit_id)
                 .or_default()

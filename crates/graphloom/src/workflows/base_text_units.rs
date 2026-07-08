@@ -8,10 +8,11 @@ use graphloom_llm::{TiktokenTokenizer, Tokenizer};
 use polars_core::{frame::row::Row, prelude::*};
 use serde_json::{Map, Value, json};
 
-use super::input_documents::list_column;
-use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+use super::{
+    common::{optional_string_at, string_at},
+    input_documents::list_column,
 };
+use crate::{GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput};
 
 /// Workflow name.
 pub const CREATE_BASE_TEXT_UNITS_WORKFLOW: &str = "create_base_text_units";
@@ -207,35 +208,12 @@ fn metadata_transform(document: &TextDocument, prepend_metadata: &[String]) -> M
 
 fn document_from_row(row: &Row<'static>) -> Result<TextDocument> {
     Ok(TextDocument::new(
-        string_at(row, 0, "id")?,
-        string_at(row, 3, "text")?,
+        string_at(row, 0, "id", CREATE_BASE_TEXT_UNITS_WORKFLOW)?,
+        string_at(row, 3, "text", CREATE_BASE_TEXT_UNITS_WORKFLOW)?,
         optional_string_at(row, 2).unwrap_or_default(),
         optional_string_at(row, 5),
         optional_string_at(row, 6)
             .map(|raw| serde_json::from_str(&raw))
             .transpose()?,
     ))
-}
-
-pub(crate) fn string_at(row: &Row<'static>, index: usize, column: &'static str) -> Result<String> {
-    row.0
-        .get(index)
-        .and_then(any_value_to_string)
-        .ok_or_else(|| GraphLoomError::InvalidData {
-            workflow: CREATE_BASE_TEXT_UNITS_WORKFLOW,
-            message: format!("missing string column {column}"),
-        })
-}
-
-pub(crate) fn optional_string_at(row: &Row<'static>, index: usize) -> Option<String> {
-    row.0.get(index).and_then(any_value_to_string)
-}
-
-fn any_value_to_string(value: &AnyValue<'_>) -> Option<String> {
-    match value {
-        AnyValue::String(value) => Some((*value).to_owned()),
-        AnyValue::StringOwned(value) => Some(value.to_string()),
-        AnyValue::Null => None,
-        _ => None,
-    }
 }

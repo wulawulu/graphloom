@@ -11,13 +11,13 @@ use graphloom_llm::{
     ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, OpenAiCompletionModel,
     PromptLoader, TiktokenTokenizer, Tokenizer, parse_graph_tuples,
 };
-use polars_core::{frame::row::Row, prelude::*};
+use polars_core::prelude::*;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    base_text_units::{optional_string_at, string_at},
+    common::{f64_at, i64_at, list_at, row_to_static, string_at, string_list_or_string_at},
     input_documents::list_column,
 };
 use crate::{
@@ -793,11 +793,11 @@ fn read_entity_rows(dataframe: &DataFrame) -> Result<Vec<SummarizedEntityRow>> {
     for row_index in 0..dataframe.height() {
         let row = row_to_static(dataframe.get_row(row_index)?);
         rows.push(SummarizedEntityRow {
-            title: string_at(&row, 0, "title")?,
-            entity_type: string_at(&row, 1, "type")?,
-            description: string_list_or_string_at(&row, 2).join("\n"),
-            text_unit_ids: list_at(&row, 3)?,
-            frequency: i64_at(&row, 4, "frequency")?,
+            title: string_at(&row, 0, "title", EXTRACT_GRAPH_WORKFLOW)?,
+            entity_type: string_at(&row, 1, "type", EXTRACT_GRAPH_WORKFLOW)?,
+            description: string_list_or_string_at(&row, 2, EXTRACT_GRAPH_WORKFLOW).join("\n"),
+            text_unit_ids: list_at(&row, 3, EXTRACT_GRAPH_WORKFLOW)?,
+            frequency: i64_at(&row, 4, "frequency", EXTRACT_GRAPH_WORKFLOW)?,
         });
     }
     Ok(rows)
@@ -808,11 +808,11 @@ fn read_relationship_rows(dataframe: &DataFrame) -> Result<Vec<SummarizedRelatio
     for row_index in 0..dataframe.height() {
         let row = row_to_static(dataframe.get_row(row_index)?);
         rows.push(SummarizedRelationshipRow {
-            source: string_at(&row, 0, "source")?,
-            target: string_at(&row, 1, "target")?,
-            description: string_list_or_string_at(&row, 2).join("\n"),
-            text_unit_ids: list_at(&row, 3)?,
-            weight: f64_at(&row, 4, "weight")?,
+            source: string_at(&row, 0, "source", EXTRACT_GRAPH_WORKFLOW)?,
+            target: string_at(&row, 1, "target", EXTRACT_GRAPH_WORKFLOW)?,
+            description: string_list_or_string_at(&row, 2, EXTRACT_GRAPH_WORKFLOW).join("\n"),
+            text_unit_ids: list_at(&row, 3, EXTRACT_GRAPH_WORKFLOW)?,
+            weight: f64_at(&row, 4, "weight", EXTRACT_GRAPH_WORKFLOW)?,
         });
     }
     Ok(rows)
@@ -1022,62 +1022,6 @@ fn xml_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-pub(crate) fn row_to_static(row: Row<'_>) -> Row<'static> {
-    Row::new(row.0.into_iter().map(AnyValue::into_static).collect())
-}
-
-pub(crate) fn list_at(row: &Row<'static>, index: usize) -> Result<Vec<String>> {
-    let Some(value) = row.0.get(index) else {
-        return Ok(Vec::new());
-    };
-    match value {
-        AnyValue::List(series) => {
-            let strings = series.str()?;
-            Ok((0..series.len())
-                .filter_map(|index| strings.get(index).map(str::to_owned))
-                .collect())
-        }
-        AnyValue::Null => Ok(Vec::new()),
-        AnyValue::String(value) => Ok(vec![(*value).to_owned()]),
-        AnyValue::StringOwned(value) => Ok(vec![value.to_string()]),
-        _ => Err(invalid_data("expected string list column")),
-    }
-}
-
-fn string_list_or_string_at(row: &Row<'static>, index: usize) -> Vec<String> {
-    let values = list_at(row, index)
-        .ok()
-        .filter(|values| !values.is_empty())
-        .or_else(|| optional_string_at(row, index).map(|value| vec![value]));
-    let Some(values) = values else {
-        return Vec::new();
-    };
-    values
-}
-
-fn i64_at(row: &Row<'static>, index: usize, column: &'static str) -> Result<i64> {
-    row.0
-        .get(index)
-        .and_then(|value| match value {
-            AnyValue::Int64(value) => Some(*value),
-            AnyValue::Int32(value) => Some(i64::from(*value)),
-            AnyValue::UInt32(value) => Some(i64::from(*value)),
-            _ => None,
-        })
-        .ok_or_else(|| invalid_data(&format!("missing integer column {column}")))
-}
-
-fn f64_at(row: &Row<'static>, index: usize, column: &'static str) -> Result<f64> {
-    row.0
-        .get(index)
-        .and_then(|value| match value {
-            AnyValue::Float64(value) => Some(*value),
-            AnyValue::Float32(value) => Some(f64::from(*value)),
-            _ => None,
-        })
-        .ok_or_else(|| invalid_data(&format!("missing float column {column}")))
 }
 
 fn invalid_data(message: &str) -> GraphLoomError {
