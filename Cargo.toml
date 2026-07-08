@@ -19,13 +19,14 @@ async-openai = { version = "0.41.1", default-features = false, features = ["byot
 bytes = "1.12.0"
 chrono = "0.4.45"
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
+csv = "1.4.0"
 dashmap = "6.1.0"
 dotenvy = "0.15.7"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 html-escape = "0.2.14"
 network_partitions = { git = "https://github.com/graspologic-org/graspologic-native.git", rev = "773181488b4e5b81925e302b972b294fd51f61a4", package = "network_partitions" }
-polars-core = { version = "0.54.4", default-features = false, features = ["rows"] }
+polars-core = { version = "0.54.4", default-features = false, features = ["dtype-struct", "rows"] }
 polars-io = { version = "0.54.4", default-features = false, features = ["parquet"] }
 rand = "0.10.2"
 regex = "1.12.4"

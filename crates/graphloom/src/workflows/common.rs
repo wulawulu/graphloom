@@ -30,3 +30,14 @@ pub(crate) fn resolve_completion_model(
         config.concurrent_requests,
     )?))
 }
+
+pub(crate) fn resolve_completion_encoding_model<'a>(
+    config: &'a GraphRagConfig,
+    model_id: &str,
+) -> &'a str {
+    config
+        .completion_models
+        .get(model_id)
+        .and_then(|model| model.encoding_model.as_deref())
+        .unwrap_or(config.chunking.encoding_model.as_str())
+}

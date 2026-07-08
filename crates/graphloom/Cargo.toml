@@ -17,6 +17,7 @@ homepage.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+csv.workspace = true
 futures-util.workspace = true
 graphloom-cache.workspace = true
 graphloom-chunking.workspace = true

@@ -63,6 +63,20 @@ pub(crate) fn list_column_at(
     list_at(&row, index, workflow)
 }
 
+pub(crate) fn i64_list_column_at(
+    dataframe: &DataFrame,
+    row_index: usize,
+    column: &'static str,
+    workflow: &'static str,
+) -> Result<Vec<i64>> {
+    let index = column_index(dataframe, column, workflow)?;
+    let row = row_to_static(dataframe.get_row(row_index)?);
+    let Some(value) = row.0.get(index) else {
+        return Ok(Vec::new());
+    };
+    any_value_to_i64_list(value, workflow)
+}
+
 pub(crate) fn string_list_or_string_column_at(
     dataframe: &DataFrame,
     row_index: usize,
@@ -133,6 +147,19 @@ pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {
     Ok(Series::new(name.into(), series_rows).into())
 }
 
+pub(crate) fn i64_list_column(name: &str, rows: &[Vec<i64>]) -> Result<Column> {
+    if rows.is_empty() {
+        return Ok(
+            Series::new_empty(name.into(), &DataType::List(Box::new(DataType::Int64))).into(),
+        );
+    }
+    let series_rows = rows
+        .iter()
+        .map(|values| Series::new("item".into(), values.as_slice()))
+        .collect::<Vec<_>>();
+    Ok(Series::new(name.into(), series_rows).into())
+}
+
 fn column_index(
     dataframe: &DataFrame,
     column: &'static str,
@@ -149,7 +176,6 @@ fn any_value_to_string(value: &AnyValue<'_>) -> Option<String> {
     match value {
         AnyValue::String(value) => Some((*value).to_owned()),
         AnyValue::StringOwned(value) => Some(value.to_string()),
-        AnyValue::Null => None,
         _ => None,
     }
 }
@@ -166,5 +192,18 @@ fn any_value_to_string_list(value: &AnyValue<'_>, workflow: &'static str) -> Res
         AnyValue::String(value) => Ok(vec![(*value).to_owned()]),
         AnyValue::StringOwned(value) => Ok(vec![value.to_string()]),
         _ => Err(invalid_data(workflow, "expected string list column")),
+    }
+}
+
+fn any_value_to_i64_list(value: &AnyValue<'_>, workflow: &'static str) -> Result<Vec<i64>> {
+    match value {
+        AnyValue::List(series) => {
+            let integers = series.i64()?;
+            Ok((0..series.len())
+                .filter_map(|index| integers.get(index))
+                .collect())
+        }
+        AnyValue::Null => Ok(Vec::new()),
+        _ => Err(invalid_data(workflow, "expected i64 list column")),
     }
 }

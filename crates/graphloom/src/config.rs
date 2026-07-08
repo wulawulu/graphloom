@@ -1,4 +1,4 @@
-//! GraphRAG-compatible configuration models used by Step 5.
+//! GraphRAG-compatible configuration models used by indexing workflows.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +12,7 @@ const DEFAULT_COMPLETION_MODEL_ID: &str = "default_completion_model";
 const DEFAULT_EXTRACT_GRAPH_MODEL_INSTANCE_NAME: &str = "extract_graph";
 const DEFAULT_SUMMARIZE_MODEL_INSTANCE_NAME: &str = "summarize_descriptions";
 const DEFAULT_EXTRACT_CLAIMS_MODEL_INSTANCE_NAME: &str = "extract_claims";
+const DEFAULT_COMMUNITY_REPORTS_MODEL_INSTANCE_NAME: &str = "community_reporting";
 const DEFAULT_CLAIM_DESCRIPTION: &str =
     "Any claims or facts that could be relevant to information discovery.";
 const DEFAULT_INPUT_TYPE: &str = "file";
@@ -23,6 +24,8 @@ const DEFAULT_MAX_SUMMARY_LENGTH: usize = 500;
 const DEFAULT_MAX_INPUT_TOKENS: usize = 4_000;
 const DEFAULT_MAX_CLUSTER_SIZE: u32 = 10;
 const DEFAULT_CLUSTER_SEED: u64 = 0xDEAD_BEEF;
+const DEFAULT_COMMUNITY_REPORT_MAX_LENGTH: usize = 2_000;
+const DEFAULT_COMMUNITY_REPORT_MAX_INPUT_LENGTH: usize = 8_000;
 
 fn default_entity_types() -> Vec<String> {
     ["organization", "person", "geo", "event"]
@@ -193,6 +196,44 @@ impl Default for ClusterGraphConfig {
     }
 }
 
+/// Community report generation configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CommunityReportsConfig {
+    /// Completion model id.
+    #[serde(alias = "completion_model_id")]
+    pub completion_model_id: String,
+    /// Model instance/cache namespace name.
+    #[serde(alias = "model_instance_name")]
+    pub model_instance_name: String,
+    /// Optional graph-context prompt path or inline prompt override.
+    #[serde(alias = "graph_prompt", skip_serializing_if = "Option::is_none")]
+    pub graph_prompt: Option<String>,
+    /// Optional text-context prompt retained for `GraphRAG` config compatibility.
+    #[serde(alias = "text_prompt", skip_serializing_if = "Option::is_none")]
+    pub text_prompt: Option<String>,
+    /// Maximum report length passed into the prompt.
+    #[serde(alias = "max_length")]
+    pub max_length: usize,
+    /// Maximum input context tokens.
+    #[serde(alias = "max_input_length")]
+    pub max_input_length: usize,
+}
+
+impl Default for CommunityReportsConfig {
+    fn default() -> Self {
+        Self {
+            completion_model_id: DEFAULT_COMPLETION_MODEL_ID.to_owned(),
+            model_instance_name: DEFAULT_COMMUNITY_REPORTS_MODEL_INSTANCE_NAME.to_owned(),
+            graph_prompt: None,
+            text_prompt: None,
+            max_length: DEFAULT_COMMUNITY_REPORT_MAX_LENGTH,
+            max_input_length: DEFAULT_COMMUNITY_REPORT_MAX_INPUT_LENGTH,
+        }
+    }
+}
+
 /// Snapshot configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -239,6 +280,9 @@ pub struct GraphRagConfig {
     /// Graph clustering config.
     #[serde(alias = "cluster_graph")]
     pub cluster_graph: ClusterGraphConfig,
+    /// Community report generation config.
+    #[serde(alias = "community_reports")]
+    pub community_reports: CommunityReportsConfig,
     /// Snapshot config.
     pub snapshots: SnapshotsConfig,
     /// Future-compatible sections retained as dynamic values.
@@ -259,6 +303,7 @@ impl Default for GraphRagConfig {
             summarize_descriptions: SummarizeDescriptionsConfig::default(),
             extract_claims: ExtractClaimsConfig::default(),
             cluster_graph: ClusterGraphConfig::default(),
+            community_reports: CommunityReportsConfig::default(),
             snapshots: SnapshotsConfig::default(),
             sections: BTreeMap::new(),
         }
@@ -266,11 +311,11 @@ impl Default for GraphRagConfig {
 }
 
 impl GraphRagConfig {
-    /// Return the configured workflow order or the standard Step-5 prefix.
+    /// Return the configured workflow order or the standard indexing workflow order.
     #[must_use]
     pub fn workflow_order(&self) -> Vec<String> {
         if self.workflows.is_empty() {
-            crate::workflows::STEP7_WORKFLOWS
+            crate::workflows::STEP8_WORKFLOWS
                 .iter()
                 .map(|workflow| (*workflow).to_owned())
                 .collect()

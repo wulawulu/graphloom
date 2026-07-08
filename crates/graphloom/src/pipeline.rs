@@ -91,7 +91,7 @@ impl PipelineFactory {
         Self { registry }
     }
 
-    /// Build the standard Step-5 pipeline prefix.
+    /// Build the standard indexing pipeline.
     ///
     /// # Errors
     ///

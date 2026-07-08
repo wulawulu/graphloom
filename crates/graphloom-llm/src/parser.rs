@@ -76,7 +76,6 @@ pub struct ClaimRecord {
 
 /// Community report JSON output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CommunityReport {
     /// Report title.
     pub title: String,
@@ -85,7 +84,7 @@ pub struct CommunityReport {
     /// Impact or importance rating.
     pub rating: f64,
     /// Rating explanation.
-    #[serde(alias = "rating_explanation")]
+    #[serde(rename = "rating_explanation", alias = "ratingExplanation")]
     pub rating_explanation: String,
     /// Detailed findings.
     pub findings: Vec<CommunityFinding>,
@@ -93,7 +92,6 @@ pub struct CommunityReport {
 
 /// Community report finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CommunityFinding {
     /// Finding summary.
     pub summary: String,

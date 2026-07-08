@@ -8,10 +8,11 @@ use polars_core::prelude::*;
 use serde_json::json;
 
 use crate::{
-    CREATE_COMMUNITIES_WORKFLOW, CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW,
-    EXTRACT_GRAPH_WORKFLOW, FINALIZE_GRAPH_WORKFLOW, GraphRagConfig, PipelineFactory,
-    PipelineRunContext, WorkflowRegistry, register_step5_workflows, register_step6_workflows,
-    register_step7_workflows,
+    CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
+    CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
+    FINALIZE_GRAPH_WORKFLOW, GraphRagConfig, PipelineFactory, PipelineRunContext, WorkflowRegistry,
+    register_step5_workflows, register_step6_workflows, register_step7_workflows,
+    register_step8_workflows,
 };
 
 #[test]
@@ -49,8 +50,59 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.cluster_graph.max_cluster_size, 10);
     assert!(config.cluster_graph.use_lcc);
     assert_eq!(config.cluster_graph.seed, 0xDEAD_BEEF);
+    assert_eq!(
+        config.community_reports.completion_model_id,
+        "default_completion_model"
+    );
+    assert_eq!(
+        config.community_reports.model_instance_name,
+        "community_reporting"
+    );
+    assert_eq!(config.community_reports.max_length, 2_000);
+    assert_eq!(config.community_reports.max_input_length, 8_000);
     assert_eq!(config.sections["async_mode"], "asyncio");
     assert_eq!(config.sections["local_search"]["enabled"], true);
+}
+
+#[test]
+fn test_should_deserialize_community_reports_camel_and_snake_case() {
+    let camel = serde_json::from_value::<GraphRagConfig>(json!({
+        "communityReports": {
+            "completionModelId": "chat",
+            "modelInstanceName": "community_reporting",
+            "graphPrompt": "prompts/community_report.txt",
+            "textPrompt": "prompts/community_report_text.txt",
+            "maxLength": 123,
+            "maxInputLength": 456
+        }
+    }))
+    .expect("camel case config should deserialize");
+    assert_eq!(camel.community_reports.completion_model_id, "chat");
+    assert_eq!(
+        camel.community_reports.graph_prompt.as_deref(),
+        Some("prompts/community_report.txt")
+    );
+    assert_eq!(camel.community_reports.max_length, 123);
+    assert_eq!(camel.community_reports.max_input_length, 456);
+
+    let snake = serde_json::from_value::<GraphRagConfig>(json!({
+        "community_reports": {
+            "completion_model_id": "chat",
+            "model_instance_name": "reports",
+            "graph_prompt": "graph.txt",
+            "text_prompt": "text.txt",
+            "max_length": 321,
+            "max_input_length": 654
+        }
+    }))
+    .expect("snake case config should deserialize");
+    assert_eq!(snake.community_reports.model_instance_name, "reports");
+    assert_eq!(
+        snake.community_reports.text_prompt.as_deref(),
+        Some("text.txt")
+    );
+    assert_eq!(snake.community_reports.max_length, 321);
+    assert_eq!(snake.community_reports.max_input_length, 654);
 }
 
 #[derive(Debug)]
@@ -71,6 +123,14 @@ impl InputReader for MemoryInputReader {
 }
 
 fn string_list_column(name: &str, values: &[Vec<String>]) -> Column {
+    let series = values
+        .iter()
+        .map(|values| Series::new(name.into(), values.as_slice()))
+        .collect::<Vec<_>>();
+    Series::new(name.into(), series).into()
+}
+
+fn i64_list_column(name: &str, values: &[Vec<i64>]) -> Column {
     let series = values
         .iter()
         .map(|values| Series::new(name.into(), values.as_slice()))
@@ -488,5 +548,173 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
             .expect("covariate ids should be string list")
             .get(0)
             .is_some()
+    );
+}
+
+#[test]
+fn test_should_default_workflow_order_to_step8() {
+    let order = GraphRagConfig::default().workflow_order();
+
+    assert_eq!(
+        order.last().map(String::as_str),
+        Some(CREATE_COMMUNITY_REPORTS_WORKFLOW)
+    );
+}
+
+#[tokio::test]
+async fn test_should_run_create_community_reports_workflow() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "entities",
+            df!(
+                "id" => ["entity-a", "entity-b"],
+                "human_readable_id" => [0i64, 1i64],
+                "title" => ["ALICE", "BOB"],
+                "description" => ["Alice, lead", "Bob\nresearcher"],
+                "degree" => [2i64, 1i64],
+            )
+            .expect("entities dataframe should build"),
+        )
+        .await
+        .expect("entities should write");
+    provider
+        .write_dataframe(
+            "relationships",
+            df!(
+                "id" => ["rel-1"],
+                "human_readable_id" => [0i64],
+                "source" => ["ALICE"],
+                "target" => ["BOB"],
+                "description" => ["Alice works with Bob"],
+                "combined_degree" => [3i64],
+            )
+            .expect("relationships dataframe should build"),
+        )
+        .await
+        .expect("relationships should write");
+    let mut communities = df!(
+        "community" => [1i64, 0i64],
+        "level" => [1i64, 0i64],
+        "parent" => [0i64, -1i64],
+        "period" => ["2026-07-08", "2026-07-08"],
+        "size" => [2i64, 2i64],
+    )
+    .expect("communities dataframe should build");
+    communities
+        .insert_column(3, i64_list_column("children", &[vec![], vec![1]]))
+        .expect("children should build");
+    communities
+        .insert_column(
+            4,
+            string_list_column(
+                "entity_ids",
+                &[
+                    vec!["entity-a".to_owned(), "entity-b".to_owned()],
+                    vec!["entity-a".to_owned(), "entity-b".to_owned()],
+                ],
+            ),
+        )
+        .expect("entity ids should build");
+    provider
+        .write_dataframe("communities", communities)
+        .await
+        .expect("communities should write");
+    provider
+        .write_dataframe(
+            "covariates",
+            df!(
+                "id" => ["claim-1"],
+                "human_readable_id" => [0i64],
+                "covariate_type" => ["claim"],
+                "type" => ["REPORT"],
+                "description" => ["Alice reports Bob"],
+                "subject_id" => ["ALICE"],
+                "object_id" => ["BOB"],
+                "status" => ["TRUE"],
+                "start_date" => ["2026-07-07"],
+                "end_date" => ["2026-07-07"],
+                "source_text" => ["Alice reports Bob"],
+                "text_unit_id" => ["tu-1"],
+            )
+            .expect("covariates dataframe should build"),
+        )
+        .await
+        .expect("covariates should write");
+
+    let model = Arc::new(MockCompletionModel::new(
+        "default_completion_model",
+        vec![
+            "{\"title\":\"Child\",\"summary\":\"Child \
+             summary\",\"rating\":6,\"rating_explanation\":\"Child \
+             reason\",\"findings\":[{\"summary\":\"Child finding\",\"explanation\":\"Child \
+             explanation\"}]}"
+                .to_owned(),
+            "{\"title\":\"Parent\",\"summary\":\"Parent \
+             summary\",\"rating\":7,\"rating_explanation\":\"Parent \
+             reason\",\"findings\":[{\"summary\":\"Parent finding\",\"explanation\":\"Parent \
+             explanation\"}]}"
+                .to_owned(),
+        ],
+    ));
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_completion_model("default_completion_model", model);
+    let mut registry = WorkflowRegistry::new();
+    register_step8_workflows(&mut registry);
+    let mut config = GraphRagConfig::default();
+    config.extract_claims.enabled = true;
+    config.workflows = vec![CREATE_COMMUNITY_REPORTS_WORKFLOW.to_owned()];
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step8 workflow should be registered");
+
+    let outputs = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("community reports workflow should run");
+
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].input_rows, 2);
+    assert_eq!(outputs[0].output_rows, 2);
+    assert_eq!(context.stats.report_count, 2);
+    let reports = provider
+        .read_dataframe("community_reports")
+        .await
+        .expect("community reports should exist");
+    assert_eq!(reports.height(), 2);
+    assert_eq!(
+        reports.column("human_readable_id").expect("hrid").dtype(),
+        &DataType::Int64
+    );
+    assert_eq!(
+        reports.column("rank").expect("rank").dtype(),
+        &DataType::Float64
+    );
+    assert_eq!(
+        reports.column("children").expect("children").dtype(),
+        &DataType::List(Box::new(DataType::Int64))
+    );
+    assert!(matches!(
+        reports.column("findings").expect("findings").dtype(),
+        DataType::List(inner) if matches!(inner.as_ref(), DataType::Struct(_))
+    ));
+    assert_eq!(
+        reports
+            .column("community")
+            .expect("community")
+            .i64()
+            .expect("community should be i64")
+            .get(0),
+        Some(1),
+    );
+    assert!(
+        reports
+            .column("full_content_json")
+            .expect("json")
+            .str()
+            .expect("json string")
+            .get(0)
+            .expect("json value")
+            .contains("rating_explanation")
     );
 }
