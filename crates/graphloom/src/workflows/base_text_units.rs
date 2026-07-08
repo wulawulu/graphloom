@@ -5,12 +5,13 @@ use futures_util::StreamExt;
 use graphloom_chunking::{Chunker, MetadataTransform, TextTransform, add_metadata, create_chunker};
 use graphloom_input::{TextDocument, gen_sha512_hash};
 use graphloom_llm::{TiktokenTokenizer, Tokenizer};
-use polars_core::{frame::row::Row, prelude::*};
-use serde_json::{Map, Value, json};
+use polars_core::frame::row::Row;
+use serde_json::Value;
 
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{list_column, optional_string_at, string_at},
+    dataframe::{optional_string_at, string_at},
+    operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
 /// Workflow name.
@@ -120,85 +121,6 @@ fn append_document_chunks(
         rows.push(row);
     }
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TextUnitRow {
-    pub(crate) id: String,
-    pub(crate) human_readable_id: usize,
-    pub(crate) text: String,
-    pub(crate) n_tokens: usize,
-    pub(crate) document_id: String,
-    pub(crate) entity_ids: Vec<String>,
-    pub(crate) relationship_ids: Vec<String>,
-    pub(crate) covariate_ids: Vec<String>,
-}
-
-impl TextUnitRow {
-    pub(crate) fn to_value(&self) -> Value {
-        let mut object = Map::new();
-        object.insert("id".to_owned(), Value::String(self.id.clone()));
-        object.insert(
-            "human_readable_id".to_owned(),
-            json!(self.human_readable_id),
-        );
-        object.insert("text".to_owned(), Value::String(self.text.clone()));
-        object.insert("n_tokens".to_owned(), json!(self.n_tokens));
-        object.insert(
-            "document_id".to_owned(),
-            Value::String(self.document_id.clone()),
-        );
-        object.insert("entity_ids".to_owned(), json!(self.entity_ids));
-        object.insert("relationship_ids".to_owned(), json!(self.relationship_ids));
-        object.insert("covariate_ids".to_owned(), json!(self.covariate_ids));
-        Value::Object(object)
-    }
-}
-
-pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
-    let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
-    let human_ids = rows
-        .iter()
-        .map(|row| row.human_readable_id as u64)
-        .collect::<Vec<_>>();
-    let texts = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
-    let n_tokens = rows
-        .iter()
-        .map(|row| row.n_tokens as u64)
-        .collect::<Vec<_>>();
-    let document_ids = rows
-        .iter()
-        .map(|row| row.document_id.as_str())
-        .collect::<Vec<_>>();
-    let mut dataframe = df!(
-        "id" => ids,
-        "human_readable_id" => human_ids,
-        "text" => texts,
-        "n_tokens" => n_tokens,
-        "document_id" => document_ids,
-    )?;
-    dataframe.with_column(list_column(
-        "entity_ids",
-        &rows
-            .iter()
-            .map(|row| row.entity_ids.clone())
-            .collect::<Vec<_>>(),
-    )?)?;
-    dataframe.with_column(list_column(
-        "relationship_ids",
-        &rows
-            .iter()
-            .map(|row| row.relationship_ids.clone())
-            .collect::<Vec<_>>(),
-    )?)?;
-    dataframe.with_column(list_column(
-        "covariate_ids",
-        &rows
-            .iter()
-            .map(|row| row.covariate_ids.clone())
-            .collect::<Vec<_>>(),
-    )?)?;
-    Ok(dataframe)
 }
 
 fn metadata_transform(document: &TextDocument, prepend_metadata: &[String]) -> MetadataTransform {

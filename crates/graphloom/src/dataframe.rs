@@ -104,6 +104,46 @@ pub(crate) fn i64_column_value(
     }
 }
 
+pub(crate) fn usize_column_value(
+    dataframe: &DataFrame,
+    row_index: usize,
+    column: &'static str,
+    workflow: &'static str,
+) -> Result<usize> {
+    let series = dataframe.column(column)?;
+    let value = series.get(row_index)?;
+    match value {
+        AnyValue::UInt64(value) => usize::try_from(value).map_err(|source| {
+            invalid_data(
+                workflow,
+                &format!("column {column} is too large for usize: {source}"),
+            )
+        }),
+        AnyValue::UInt32(value) => usize::try_from(value).map_err(|source| {
+            invalid_data(
+                workflow,
+                &format!("column {column} is too large for usize: {source}"),
+            )
+        }),
+        AnyValue::Int64(value) => usize::try_from(value).map_err(|source| {
+            invalid_data(
+                workflow,
+                &format!("column {column} must be non-negative and fit usize: {source}"),
+            )
+        }),
+        AnyValue::Int32(value) => usize::try_from(value).map_err(|source| {
+            invalid_data(
+                workflow,
+                &format!("column {column} must be non-negative and fit usize: {source}"),
+            )
+        }),
+        _ => Err(invalid_data(
+            workflow,
+            &format!("missing unsigned integer column {column}"),
+        )),
+    }
+}
+
 pub(crate) fn f64_column_value(
     dataframe: &DataFrame,
     row_index: usize,

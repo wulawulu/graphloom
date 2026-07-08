@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use polars_core::{frame::row::Row, prelude::*};
+use polars_core::prelude::*;
 
-use super::base_text_units::{TextUnitRow, text_units_dataframe};
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{invalid_data, list_at, row_to_static, string_value},
+    dataframe::{invalid_data, list_at, row_to_static, string_value, usize_column_value},
+    operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
 /// Workflow name.
@@ -111,11 +111,15 @@ fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
     let document_ids = dataframe.column("document_id")?.str()?;
     let mut rows = Vec::with_capacity(dataframe.height());
     for index in 0..dataframe.height() {
-        let row = row_to_static(dataframe.get_row(index)?);
         rows.push(TextUnitInput {
             id: string_value(ids.get(index), "id", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
             text: string_value(texts.get(index), "text", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
-            n_tokens: usize_at(&row, 3, "n_tokens")?,
+            n_tokens: usize_column_value(
+                dataframe,
+                index,
+                "n_tokens",
+                CREATE_FINAL_TEXT_UNITS_WORKFLOW,
+            )?,
             document_id: string_value(
                 document_ids.get(index),
                 "document_id",
@@ -124,28 +128,6 @@ fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
         });
     }
     Ok(rows)
-}
-
-fn usize_at(row: &Row<'static>, index: usize, column: &'static str) -> Result<usize> {
-    row.0
-        .get(index)
-        .and_then(any_value_to_usize)
-        .ok_or_else(|| {
-            invalid_data(
-                CREATE_FINAL_TEXT_UNITS_WORKFLOW,
-                &format!("missing {column}"),
-            )
-        })
-}
-
-fn any_value_to_usize(value: &AnyValue<'_>) -> Option<usize> {
-    match value {
-        AnyValue::UInt64(value) => usize::try_from(*value).ok(),
-        AnyValue::UInt32(value) => usize::try_from(*value).ok(),
-        AnyValue::Int64(value) => usize::try_from(*value).ok(),
-        AnyValue::Int32(value) => usize::try_from(*value).ok(),
-        _ => None,
-    }
 }
 
 fn build_multi_ref_map(
@@ -191,4 +173,112 @@ fn build_covariate_map(dataframe: &DataFrame) -> Result<BTreeMap<String, Vec<Str
         mapping.entry(text_unit_id).or_default().push(id);
     }
     Ok(mapping)
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_core::prelude::*;
+
+    use super::*;
+    use crate::dataframe::list_column;
+
+    #[test]
+    fn test_should_read_text_units_by_column_name() {
+        let dataframe = df!(
+            "document_id" => ["doc-1"],
+            "n_tokens" => [7u64],
+            "text" => ["Alice reports Bob."],
+            "id" => ["tu-1"],
+        )
+        .expect("dataframe should build");
+
+        let rows = read_text_units(&dataframe).expect("text units should decode");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "tu-1");
+        assert_eq!(rows[0].n_tokens, 7);
+        assert_eq!(rows[0].document_id, "doc-1");
+    }
+
+    #[test]
+    fn test_should_error_on_wrong_text_unit_token_type() {
+        let dataframe = df!(
+            "id" => ["tu-1"],
+            "text" => ["Alice reports Bob."],
+            "n_tokens" => ["seven"],
+            "document_id" => ["doc-1"],
+        )
+        .expect("dataframe should build");
+
+        let error = read_text_units(&dataframe).expect_err("n_tokens type should fail");
+
+        assert!(error.to_string().contains("n_tokens"));
+    }
+
+    #[test]
+    fn test_should_build_text_unit_reference_maps() {
+        let mut entities =
+            df!("id" => ["entity-1", "entity-2"]).expect("entities dataframe should build");
+        entities
+            .with_column(
+                list_column(
+                    "text_unit_ids",
+                    &[
+                        vec!["tu-1".to_owned(), "tu-2".to_owned()],
+                        vec!["tu-1".to_owned()],
+                    ],
+                )
+                .expect("entity text unit ids should build"),
+            )
+            .expect("entity text unit ids should append");
+        let mut relationships =
+            df!("id" => ["rel-1"]).expect("relationships dataframe should build");
+        relationships
+            .with_column(
+                list_column("text_unit_ids", &[vec!["tu-1".to_owned()]])
+                    .expect("relationship text unit ids should build"),
+            )
+            .expect("relationship text unit ids should append");
+        let covariates = df!(
+            "id" => ["claim-1", "claim-2"],
+            "text_unit_id" => ["tu-1", "tu-1"],
+        )
+        .expect("covariates dataframe should build");
+
+        let entity_map = build_multi_ref_map(&entities, "entity").expect("entity map");
+        let relationship_map =
+            build_multi_ref_map(&relationships, "relationship").expect("relationship map");
+        let covariate_map = build_covariate_map(&covariates).expect("covariate map");
+
+        assert_eq!(
+            entity_map.get("tu-1").expect("tu-1 entities"),
+            &vec!["entity-1".to_owned(), "entity-2".to_owned()]
+        );
+        assert_eq!(
+            relationship_map.get("tu-1").expect("tu-1 relationships"),
+            &vec!["rel-1".to_owned()]
+        );
+        assert_eq!(
+            covariate_map.get("tu-1").expect("tu-1 covariates"),
+            &vec!["claim-1".to_owned(), "claim-2".to_owned()]
+        );
+        assert_eq!(
+            cloned_vec_or_empty(entity_map.get("missing")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn test_should_error_on_wrong_reference_list_type() {
+        let dataframe = df!(
+            "id" => ["entity-1"],
+            "text_unit_ids" => [42i64],
+        )
+        .expect("dataframe should build");
+
+        let error =
+            build_multi_ref_map(&dataframe, "entity").expect_err("text_unit_ids type should fail");
+
+        assert!(error.to_string().contains("string list"));
+    }
 }

@@ -1,23 +1,19 @@
 //! Community creation workflow.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use html_escape::decode_html_entities;
-use network_partitions::{
-    clustering::Clustering,
-    leiden::{self, HierarchicalCluster},
-    network::prelude::{CompactNetwork, Edge, LabeledNetwork, LabeledNetworkBuilder},
-};
 use polars_core::prelude::*;
-use rand::{SeedableRng, rngs::SmallRng};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
     dataframe::{invalid_data, list_at, list_column, row_to_static, string_value},
+    operations::communities::{
+        ClusterRelationship, CommunityCluster, cluster_graph as cluster_relationship_graph,
+    },
 };
 
 /// Workflow name.
@@ -88,14 +84,6 @@ struct RelationshipRow {
     text_unit_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct CommunityCluster {
-    level: i64,
-    community: i64,
-    parent: i64,
-    titles: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 struct CommunityRow {
     id: String,
@@ -119,7 +107,15 @@ fn create_communities(
     use_lcc: bool,
     seed: u64,
 ) -> Result<Vec<CommunityRow>> {
-    let clusters = cluster_graph(relationships, max_cluster_size, use_lcc, seed)?;
+    let cluster_input = relationships
+        .iter()
+        .map(|relationship| ClusterRelationship {
+            source: relationship.source.clone(),
+            target: relationship.target.clone(),
+            weight: relationship.weight,
+        })
+        .collect::<Vec<_>>();
+    let clusters = cluster_relationship_graph(&cluster_input, max_cluster_size, use_lcc, seed)?;
     let title_to_entity_id = entities
         .iter()
         .map(|entity| (entity.title.as_str(), entity.id.as_str()))
@@ -148,6 +144,7 @@ fn create_communities(
         if relationship_ids.is_empty() {
             continue;
         }
+        let size = entity_ids.len();
         rows.push(CommunityRow {
             id: Uuid::new_v4().to_string(),
             human_readable_id: cluster.community,
@@ -160,7 +157,7 @@ fn create_communities(
             relationship_ids,
             text_unit_ids,
             period: period.clone(),
-            size: cluster.titles.len(),
+            size,
         });
     }
 
@@ -179,201 +176,6 @@ fn create_communities(
         }
     }
     Ok(rows)
-}
-
-fn cluster_graph(
-    relationships: &[RelationshipRow],
-    max_cluster_size: u32,
-    use_lcc: bool,
-    seed: u64,
-) -> Result<Vec<CommunityCluster>> {
-    let edges = prepare_cluster_edges(relationships, use_lcc);
-    let mut builder = LabeledNetworkBuilder::new();
-    let labeled_network: LabeledNetwork<String> = builder.build(edges.into_iter(), true);
-    let compact_network: &CompactNetwork = labeled_network.compact();
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let internal = leiden::hierarchical_leiden(
-        compact_network,
-        None::<Clustering>,
-        Some(1),
-        Some(1.0),
-        Some(0.001),
-        &mut rng,
-        true,
-        max_cluster_size,
-        None,
-    )
-    .map_err(|source| GraphLoomError::InvalidData {
-        workflow: CREATE_COMMUNITIES_WORKFLOW,
-        message: format!("{source:?}"),
-    })?;
-    let mut node_map: BTreeMap<(i64, i64, i64), Vec<String>> = BTreeMap::new();
-    for cluster in internal {
-        let key = cluster_key(&cluster)?;
-        node_map
-            .entry(key)
-            .or_default()
-            .push(labeled_network.label_for(cluster.node).to_owned());
-    }
-
-    Ok(node_map
-        .into_iter()
-        .map(|((level, community, parent), mut titles)| {
-            titles.sort();
-            CommunityCluster {
-                level,
-                community,
-                parent,
-                titles,
-            }
-        })
-        .collect())
-}
-
-fn cluster_key(cluster: &HierarchicalCluster) -> Result<(i64, i64, i64)> {
-    Ok((
-        i64::from(cluster.level),
-        cluster_index_to_i64(cluster.cluster, "community")?,
-        cluster
-            .parent_cluster
-            .map_or(Ok(-1), |parent| cluster_index_to_i64(parent, "parent"))?,
-    ))
-}
-
-fn cluster_index_to_i64(value: usize, column: &'static str) -> Result<i64> {
-    i64::try_from(value).map_err(|source| GraphLoomError::InvalidData {
-        workflow: CREATE_COMMUNITIES_WORKFLOW,
-        message: format!("{column} cluster index is too large for i64: {source}"),
-    })
-}
-
-fn prepare_cluster_edges(relationships: &[RelationshipRow], use_lcc: bool) -> Vec<Edge> {
-    let mut pair_indexes = BTreeMap::new();
-    let mut deduped = Vec::<Option<ClusterEdge>>::new();
-    for relationship in relationships {
-        let (source, target) = sorted_pair(&relationship.source, &relationship.target);
-        let next_index = deduped.len();
-        if let Some(previous_index) =
-            pair_indexes.insert((source.clone(), target.clone()), next_index)
-            && let Some(previous) = deduped.get_mut(previous_index)
-        {
-            *previous = None;
-        }
-        deduped.push(Some(ClusterEdge {
-            source,
-            target,
-            weight: relationship.weight,
-        }));
-    }
-    let mut edges = deduped.into_iter().flatten().collect::<Vec<_>>();
-    if use_lcc {
-        edges = stable_lcc(edges);
-    } else {
-        sort_edges(&mut edges);
-    }
-    edges
-        .into_iter()
-        .map(|edge| (edge.source, edge.target, edge.weight))
-        .collect()
-}
-
-#[derive(Debug, Clone)]
-struct ClusterEdge {
-    source: String,
-    target: String,
-    weight: f64,
-}
-
-fn stable_lcc(edges: Vec<ClusterEdge>) -> Vec<ClusterEdge> {
-    if edges.is_empty() {
-        return Vec::new();
-    }
-    let mut normalized = edges
-        .into_iter()
-        .map(|edge| {
-            let source = normalize_node_name(&edge.source);
-            let target = normalize_node_name(&edge.target);
-            ClusterEdge {
-                source,
-                target,
-                weight: edge.weight,
-            }
-        })
-        .collect::<Vec<_>>();
-    let lcc_nodes = largest_connected_component(&normalized);
-    normalized.retain(|edge| lcc_nodes.contains(&edge.source) && lcc_nodes.contains(&edge.target));
-
-    let mut by_pair = BTreeMap::new();
-    for edge in normalized {
-        let (source, target) = sorted_pair(&edge.source, &edge.target);
-        by_pair.entry((source, target)).or_insert(edge.weight);
-    }
-    by_pair
-        .into_iter()
-        .map(|((source, target), weight)| ClusterEdge {
-            source,
-            target,
-            weight,
-        })
-        .collect()
-}
-
-fn sort_edges(edges: &mut [ClusterEdge]) {
-    edges.sort_by(|left, right| {
-        left.source
-            .cmp(&right.source)
-            .then_with(|| left.target.cmp(&right.target))
-    });
-}
-
-fn largest_connected_component(edges: &[ClusterEdge]) -> BTreeSet<String> {
-    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for edge in edges {
-        adjacency
-            .entry(edge.source.clone())
-            .or_default()
-            .insert(edge.target.clone());
-        adjacency
-            .entry(edge.target.clone())
-            .or_default()
-            .insert(edge.source.clone());
-    }
-    let mut visited = BTreeSet::new();
-    let mut largest = BTreeSet::new();
-    for node in adjacency.keys() {
-        if visited.contains(node) {
-            continue;
-        }
-        let mut component = BTreeSet::new();
-        let mut queue = VecDeque::from([node.clone()]);
-        visited.insert(node.clone());
-        while let Some(current) = queue.pop_front() {
-            component.insert(current.clone());
-            if let Some(neighbors) = adjacency.get(&current) {
-                for neighbor in neighbors {
-                    if visited.insert(neighbor.clone()) {
-                        queue.push_back(neighbor.clone());
-                    }
-                }
-            }
-        }
-        if component.len() > largest.len() {
-            largest = component;
-        }
-    }
-    largest
-}
-
-fn normalize_node_name(name: &str) -> String {
-    decode_html_entities(name).trim().to_uppercase()
-}
-
-fn sorted_pair(left: &str, right: &str) -> (String, String) {
-    if left <= right {
-        (left.to_owned(), right.to_owned())
-    } else {
-        (right.to_owned(), left.to_owned())
-    }
 }
 
 fn intra_community_relationships(
@@ -513,4 +315,105 @@ fn community_value(row: &CommunityRow) -> Value {
         "period": row.period,
         "size": row.size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_core::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn test_should_write_community_schema_in_graphrag_order() {
+        let rows = vec![CommunityRow {
+            id: "community-1".to_owned(),
+            human_readable_id: 0,
+            community: 0,
+            level: 0,
+            parent: -1,
+            children: vec![1, 2],
+            title: "Community 0".to_owned(),
+            entity_ids: vec!["entity-1".to_owned(), "entity-2".to_owned()],
+            relationship_ids: vec!["rel-1".to_owned()],
+            text_unit_ids: vec!["tu-1".to_owned()],
+            period: "2026-07-08".to_owned(),
+            size: 2,
+        }];
+
+        let dataframe = communities_dataframe(&rows).expect("dataframe should build");
+
+        assert_eq!(
+            column_names(&dataframe),
+            [
+                "id",
+                "human_readable_id",
+                "community",
+                "level",
+                "parent",
+                "children",
+                "title",
+                "entity_ids",
+                "relationship_ids",
+                "text_unit_ids",
+                "period",
+                "size",
+            ]
+        );
+        assert_eq!(
+            dataframe.column("children").expect("children").dtype(),
+            &DataType::List(Box::new(DataType::Int64))
+        );
+        assert_eq!(
+            dataframe.column("entity_ids").expect("entity_ids").dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            dataframe
+                .column("relationship_ids")
+                .expect("relationship_ids")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            dataframe
+                .column("text_unit_ids")
+                .expect("text_unit_ids")
+                .dtype(),
+            &DataType::List(Box::new(DataType::String))
+        );
+        assert_eq!(
+            dataframe.column("size").expect("size").dtype(),
+            &DataType::UInt64
+        );
+    }
+
+    #[test]
+    fn test_should_size_community_by_mapped_entity_ids() {
+        let entities = vec![EntityRow {
+            id: "entity-alice".to_owned(),
+            title: "ALICE".to_owned(),
+        }];
+        let relationships = vec![RelationshipRow {
+            id: "rel-1".to_owned(),
+            source: "ALICE".to_owned(),
+            target: "BOB".to_owned(),
+            weight: 1.0,
+            text_unit_ids: vec!["tu-1".to_owned()],
+        }];
+
+        let rows = create_communities(&entities, &relationships, 10, false, 42)
+            .expect("communities should build");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity_ids, vec!["entity-alice"]);
+        assert_eq!(rows[0].size, 1);
+    }
+
+    fn column_names(dataframe: &DataFrame) -> Vec<&str> {
+        dataframe
+            .get_column_names()
+            .into_iter()
+            .map(|name| name.as_str())
+            .collect()
+    }
 }
