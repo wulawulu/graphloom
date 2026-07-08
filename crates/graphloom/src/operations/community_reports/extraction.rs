@@ -12,7 +12,8 @@ use serde::Serialize;
 
 use super::{
     ClaimContextRow, CommunityInputRow, CommunityLocalContext, CommunityReportFindingRow,
-    CommunityReportRow, EntityContextRow, RelationshipContextRow, build_local_contexts,
+    CommunityReportRow, ContextRecords, EntityContextRow, RelationshipContextRow, ReportContextRow,
+    build_local_contexts,
 };
 use crate::{Result, dataframe::invalid_data};
 
@@ -107,6 +108,7 @@ pub(crate) async fn create_community_reports(
                 let result = extract_report_for_community(
                     model,
                     prompt_loader,
+                    tokenizer,
                     task,
                     config,
                     callbacks.warning,
@@ -144,11 +146,11 @@ fn resolve_report_context(
     let Some(local_context) = local_contexts.get(&community.community) else {
         return Ok(String::new());
     };
-    if !local_context.exceeds_limit && local_context.token_count <= max_input_length {
+    if !local_context.was_truncated && local_context.full_token_count <= max_input_length {
         return Ok(local_context.context.clone());
     }
 
-    let mut children = community
+    let mut children_by_size = community
         .children
         .iter()
         .filter_map(|child| {
@@ -157,14 +159,14 @@ fn resolve_report_context(
                 .map(|context| (*child, context.token_count))
         })
         .collect::<Vec<_>>();
-    children.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    if children.is_empty() {
+    children_by_size.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if children_by_size.is_empty() {
         return Ok(local_context.context.clone());
     }
 
     let mut report_children = Vec::new();
-    let mut detail_children = children.iter().map(|(child, _)| *child).collect::<Vec<_>>();
-    for (child, _) in &children {
+    let mut detail_children = stable_children(community);
+    for (child, _) in &children_by_size {
         if reports_by_community.contains_key(child) {
             report_children.push(*child);
             detail_children.retain(|detail_child| detail_child != child);
@@ -180,15 +182,20 @@ fn resolve_report_context(
         }
     }
 
-    let mut report_rows = Vec::new();
+    let mut report_records = ContextRecords::default();
     let mut best = String::new();
-    for (child, _) in children {
+    for (child, _) in children_by_size {
         if let Some(report) = reports_by_community.get(&child) {
-            report_rows.push((child, report.full_content.clone()));
-            let candidate = super::context::render_reports_section(&report_rows)?;
+            let mut candidate_records = report_records.clone();
+            candidate_records.add_report(ReportContextRow {
+                community: child,
+                full_content: report.full_content.clone(),
+            });
+            let candidate = super::context::render_context(&candidate_records)?;
             if tokenizer.count(&candidate)? > max_input_length {
-                break;
+                continue;
             }
+            report_records = candidate_records;
             best = candidate;
         }
     }
@@ -205,37 +212,56 @@ fn render_mixed_child_context(
     local_contexts: &BTreeMap<i64, CommunityLocalContext>,
     reports_by_community: &BTreeMap<i64, CommunityReportRow>,
 ) -> Result<String> {
-    let mut sections = Vec::new();
-    let report_rows = report_children
-        .iter()
-        .filter_map(|community| {
-            reports_by_community
-                .get(community)
-                .map(|report| (*community, report.full_content.clone()))
-        })
-        .collect::<Vec<_>>();
-    if !report_rows.is_empty() {
-        sections.push(super::context::render_reports_section(&report_rows)?);
+    let mut records = ContextRecords::default();
+    for community in report_children {
+        if let Some(report) = reports_by_community.get(community) {
+            records.add_report(ReportContextRow {
+                community: *community,
+                full_content: report.full_content.clone(),
+            });
+        }
     }
     let mut detail_children = detail_children.to_vec();
     detail_children.sort_unstable();
     for child in detail_children {
-        if let Some(context) = local_contexts.get(&child)
-            && !context.context.is_empty()
-        {
-            sections.push(context.context.clone());
+        if let Some(context) = local_contexts.get(&child) {
+            records.merge_details(&context.full_records);
         }
     }
-    Ok(sections.join("\n"))
+    super::context::render_context(&records)
+}
+
+fn stable_children(community: &CommunityInputRow) -> Vec<i64> {
+    let mut children = community.children.clone();
+    children.sort_unstable();
+    children
 }
 
 async fn extract_report_for_community(
     model: &dyn CompletionModel,
     prompt_loader: &PromptLoader,
+    tokenizer: &dyn Tokenizer,
     task: ReportTask,
     config: CommunityReportExtractionConfig<'_>,
     warning: &(dyn Fn(&str) + Sync),
 ) -> Result<Option<CommunityReportRow>> {
+    if task.context.trim().is_empty() {
+        warning(&format!(
+            "community report {} skipped because context is empty",
+            task.community.community
+        ));
+        return Ok(None);
+    }
+    let token_count = tokenizer.count(&task.context)?;
+    if token_count > config.max_input_length {
+        return Err(invalid_data(
+            COMMUNITY_REPORTS_CONTEXT,
+            &format!(
+                "community report {} context exceeded max_input_length: {token_count} > {}",
+                task.community.community, config.max_input_length
+            ),
+        ));
+    }
     let rendered_prompt = prompt_loader
         .render(
             DefaultPrompt::CommunityReport,
@@ -374,7 +400,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use graphloom_llm::{CompletionResponse, LlmError, TiktokenTokenizer};
+    use graphloom_llm::{CompletionResponse, LlmError, TiktokenTokenizer, Tokenizer};
     use tokio::time::sleep;
 
     use super::*;
@@ -526,11 +552,407 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_should_skip_empty_context_without_calling_model() {
+        let tokenizer = WordCountTokenizer;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = CapturingReportModel {
+            calls: Arc::clone(&calls),
+            prompts: Arc::new(Mutex::new(Vec::new())),
+            fail_marker: None,
+        };
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let entities = vec![entity_with_description(
+            "entity-a",
+            0,
+            "OVERSIZED",
+            1,
+            "one two three",
+        )];
+        let communities = vec![community(7, 0, -1, Vec::new(), vec!["entity-a"])];
+
+        let rows = create_community_reports(
+            &model,
+            &PromptLoader::new("."),
+            &tokenizer,
+            CommunityReportOperationInput {
+                entities: &entities,
+                relationships: &[],
+                communities: &communities,
+                claims: &[],
+            },
+            CommunityReportExtractionConfig {
+                prompt_path: None,
+                max_report_length: 2_000,
+                max_input_length: 0,
+                concurrency: 1,
+            },
+            CommunityReportCallbacks {
+                progress: &|completed, total| {
+                    progress
+                        .lock()
+                        .expect("progress lock")
+                        .push((completed, total));
+                },
+                warning: &|message| {
+                    warnings
+                        .lock()
+                        .expect("warnings lock")
+                        .push(message.to_owned());
+                },
+            },
+        )
+        .await
+        .expect("operation should skip empty context");
+
+        assert!(rows.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            progress.lock().expect("progress lock").last().copied(),
+            Some((1, 1))
+        );
+        assert!(
+            warnings
+                .lock()
+                .expect("warnings lock")
+                .iter()
+                .any(|warning| warning.contains("community report 7 skipped"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_use_parent_local_context_when_full_context_fits() {
+        let tokenizer = WordCountTokenizer;
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let model = CapturingReportModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+            prompts: Arc::clone(&prompts),
+            fail_marker: None,
+        };
+        let entities = vec![
+            entity_with_description("entity-a", 0, "ALICE", 2, "alice"),
+            entity_with_description("entity-b", 1, "BOB", 1, "bob"),
+        ];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
+            community(0, 0, -1, vec![1], vec!["entity-a", "entity-b"]),
+        ];
+
+        let rows = create_community_reports(
+            &model,
+            &PromptLoader::new("."),
+            &tokenizer,
+            CommunityReportOperationInput {
+                entities: &entities,
+                relationships: &[],
+                communities: &communities,
+                claims: &[],
+            },
+            CommunityReportExtractionConfig {
+                prompt_path: None,
+                max_report_length: 2_000,
+                max_input_length: 100,
+                concurrency: 1,
+            },
+            CommunityReportCallbacks {
+                progress: &|_, _| {},
+                warning: &|_| {},
+            },
+        )
+        .await
+        .expect("reports should build");
+
+        assert_eq!(rows.len(), 2);
+        let prompts = prompts.lock().expect("prompts lock");
+        let parent_prompt = prompts.last().expect("parent prompt");
+        assert!(!parent_prompt.contains("----Reports-----"));
+        assert!(parent_prompt.contains("ALICE"));
+        assert!(parent_prompt.contains("BOB"));
+    }
+
+    #[tokio::test]
+    async fn test_should_replace_oversized_child_detail_with_report() {
+        let tokenizer = WordCountTokenizer;
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let model = CapturingReportModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+            prompts: Arc::clone(&prompts),
+            fail_marker: None,
+        };
+        let entities = vec![
+            entity_with_description(
+                "entity-a",
+                0,
+                "ALICE",
+                3,
+                "alpha one two three four five six seven eight nine ten eleven twelve",
+            ),
+            entity_with_description("entity-b", 1, "BOB", 2, "beta one two three four"),
+        ];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-b"]),
+            community(0, 0, -1, vec![1, 2], vec!["entity-a", "entity-b"]),
+        ];
+
+        let rows = create_community_reports(
+            &model,
+            &PromptLoader::new("."),
+            &tokenizer,
+            CommunityReportOperationInput {
+                entities: &entities,
+                relationships: &[],
+                communities: &communities,
+                claims: &[],
+            },
+            CommunityReportExtractionConfig {
+                prompt_path: None,
+                max_report_length: 2_000,
+                max_input_length: 26,
+                concurrency: 1,
+            },
+            CommunityReportCallbacks {
+                progress: &|_, _| {},
+                warning: &|_| {},
+            },
+        )
+        .await
+        .expect("reports should build");
+
+        assert_eq!(rows.len(), 3);
+        let prompts = prompts.lock().expect("prompts lock");
+        let parent_prompt = prompts.last().expect("parent prompt");
+        assert!(parent_prompt.contains("----Reports-----"));
+        assert!(parent_prompt.contains("# Captured 1"));
+        assert!(!parent_prompt.contains("alpha one two three four five six seven eight"));
+        assert!(parent_prompt.contains("BOB"));
+    }
+
+    #[tokio::test]
+    async fn test_should_keep_failed_child_detail_and_use_other_child_report() {
+        let tokenizer = WordCountTokenizer;
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let model = CapturingReportModel {
+            calls: Arc::new(AtomicUsize::new(0)),
+            prompts: Arc::clone(&prompts),
+            fail_marker: Some("FAIL_CHILD"),
+        };
+        let entities = vec![
+            entity_with_description("entity-a", 0, "FAIL_CHILD", 3, "failed small"),
+            entity_with_description(
+                "entity-b",
+                1,
+                "BOB",
+                2,
+                "beta one two three four five six seven eight",
+            ),
+        ];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-b"]),
+            community(0, 0, -1, vec![1, 2], vec!["entity-a", "entity-b"]),
+        ];
+
+        let rows = create_community_reports(
+            &model,
+            &PromptLoader::new("."),
+            &tokenizer,
+            CommunityReportOperationInput {
+                entities: &entities,
+                relationships: &[],
+                communities: &communities,
+                claims: &[],
+            },
+            CommunityReportExtractionConfig {
+                prompt_path: None,
+                max_report_length: 2_000,
+                max_input_length: 21,
+                concurrency: 1,
+            },
+            CommunityReportCallbacks {
+                progress: &|_, _| {},
+                warning: &|_| {},
+            },
+        )
+        .await
+        .expect("operation should continue");
+
+        assert_eq!(rows.len(), 2);
+        let prompts = prompts.lock().expect("prompts lock");
+        let parent_prompt = prompts.last().expect("parent prompt");
+        assert!(parent_prompt.contains("# Captured 2"));
+        assert!(parent_prompt.contains("FAIL_CHILD"));
+        assert!(!parent_prompt.contains("# Captured 1"));
+    }
+
+    #[test]
+    fn test_should_substitute_children_by_token_count_then_community() {
+        let tokenizer = WordCountTokenizer;
+        let entities = vec![
+            entity_with_description("entity-a", 0, "ALICE", 1, "one two three four five six"),
+            entity_with_description("entity-b", 1, "BOB", 1, "one two three four five six"),
+            entity_with_description("entity-c", 2, "CAROL", 1, "tiny"),
+        ];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-b"]),
+            community(3, 1, 0, Vec::new(), vec!["entity-c"]),
+            community(
+                0,
+                0,
+                -1,
+                vec![1, 2, 3],
+                vec!["entity-a", "entity-b", "entity-c"],
+            ),
+        ];
+        let local_contexts =
+            build_local_contexts(&communities, &entities, &[], &[], &tokenizer, 100)
+                .expect("contexts");
+        let reports = reports_by_community(&[(1, "first"), (2, "second"), (3, "third")]);
+
+        let context = resolve_report_context(
+            communities.last().expect("parent"),
+            &local_contexts,
+            &reports,
+            &tokenizer,
+            24,
+        )
+        .expect("context");
+
+        assert!(
+            context.find("# Report 1").expect("report 1")
+                < context.find("# Report 2").expect("report 2")
+        );
+        assert!(context.contains("CAROL"));
+    }
+
+    #[test]
+    fn test_should_use_reports_only_fallback_with_token_limit() {
+        let tokenizer = WordCountTokenizer;
+        let entities = vec![
+            entity_with_description("entity-a", 0, "ALICE", 1, "one two three four"),
+            entity_with_description("entity-b", 1, "BOB", 1, "one two three four"),
+        ];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-b"]),
+            community(0, 0, -1, vec![1, 2], vec!["entity-a", "entity-b"]),
+        ];
+        let local_contexts =
+            build_local_contexts(&communities, &entities, &[], &[], &tokenizer, 100)
+                .expect("contexts");
+        let reports = reports_by_community(&[
+            (1, "one two three four five six seven eight nine ten"),
+            (2, "small"),
+        ]);
+
+        let context = resolve_report_context(
+            communities.last().expect("parent"),
+            &local_contexts,
+            &reports,
+            &tokenizer,
+            8,
+        )
+        .expect("context");
+
+        assert!(context.contains("----Reports-----"));
+        assert!(!context.contains("one two three four five six seven eight nine ten"));
+        assert!(context.contains("# Report 2"));
+        assert!(tokenizer.count(&context).expect("count") <= 8);
+        assert!(!context.contains("-----Entities-----"));
+    }
+
+    #[test]
+    fn test_should_render_each_mixed_detail_section_once() {
+        let tokenizer = WordCountTokenizer;
+        let entities = vec![
+            entity_with_description("entity-a", 0, "ALICE", 1, "one two three four"),
+            entity_with_description("entity-b", 1, "BOB", 1, "two three four five"),
+            entity_with_description("entity-c", 2, "CAROL", 1, "three four five six"),
+        ];
+        let relationships = vec![
+            relationship(10, "ALICE", "BOB", "works", 5),
+            relationship(11, "BOB", "CAROL", "knows", 4),
+        ];
+        let claims = vec![claim(1, "ALICE"), claim(2, "BOB")];
+        let communities = vec![
+            community(1, 1, 0, Vec::new(), vec!["entity-a", "entity-b"]),
+            community(2, 1, 0, Vec::new(), vec!["entity-b", "entity-c"]),
+            community(
+                0,
+                0,
+                -1,
+                vec![1, 2],
+                vec!["entity-a", "entity-b", "entity-c"],
+            ),
+        ];
+        let local_contexts = build_local_contexts(
+            &communities,
+            &entities,
+            &relationships,
+            &claims,
+            &tokenizer,
+            100,
+        )
+        .expect("contexts");
+        let reports = reports_by_community(&[(1, "small")]);
+
+        let context =
+            render_mixed_child_context(&[1], &[2], &local_contexts, &reports).expect("context");
+
+        assert_eq!(context.matches("-----Entities-----").count(), 1);
+        assert_eq!(context.matches("-----Claims-----").count(), 1);
+        assert_eq!(context.matches("-----Relationships-----").count(), 1);
+    }
+
     #[derive(Debug)]
     struct DelayedReportModel {
         in_flight: Arc<AtomicUsize>,
         max_in_flight: Arc<AtomicUsize>,
         fail_alice: bool,
+    }
+
+    #[derive(Debug)]
+    struct CapturingReportModel {
+        calls: Arc<AtomicUsize>,
+        prompts: Arc<Mutex<Vec<String>>>,
+        fail_marker: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl CompletionModel for CapturingReportModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            let prompt = request
+                .messages
+                .first()
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.prompts
+                .lock()
+                .expect("prompts lock")
+                .push(prompt.clone());
+            if call == 1
+                && self
+                    .fail_marker
+                    .is_some_and(|marker| prompt.contains(marker))
+            {
+                return Err(LlmError::InvalidResponse {
+                    model_instance: "test".to_owned(),
+                    operation: "completion",
+                    message: "forced failure".to_owned(),
+                });
+            }
+            Ok(CompletionResponse {
+                content: json_report(&format!("Captured {call}")),
+                usage: None,
+                request_id: None,
+            })
+        }
     }
 
     #[async_trait]
@@ -632,5 +1054,119 @@ mod tests {
                 size: 1,
             },
         ]
+    }
+
+    fn community(
+        community: i64,
+        level: i64,
+        parent: i64,
+        children: Vec<i64>,
+        entity_ids: Vec<&str>,
+    ) -> CommunityInputRow {
+        CommunityInputRow {
+            community,
+            level,
+            parent,
+            children,
+            entity_ids: entity_ids.into_iter().map(str::to_owned).collect(),
+            period: "2026-07-08".to_owned(),
+            size: 1,
+        }
+    }
+
+    fn entity_with_description(
+        id: &str,
+        human_readable_id: i64,
+        title: &str,
+        degree: i64,
+        description: &str,
+    ) -> EntityContextRow {
+        EntityContextRow {
+            id: id.to_owned(),
+            human_readable_id,
+            title: title.to_owned(),
+            description: description.to_owned(),
+            degree,
+        }
+    }
+
+    fn relationship(
+        human_readable_id: i64,
+        source: &str,
+        target: &str,
+        description: &str,
+        combined_degree: i64,
+    ) -> RelationshipContextRow {
+        RelationshipContextRow {
+            id: format!("rel-{human_readable_id}"),
+            human_readable_id,
+            source: source.to_owned(),
+            target: target.to_owned(),
+            description: description.to_owned(),
+            combined_degree,
+        }
+    }
+
+    fn claim(human_readable_id: i64, subject_id: &str) -> ClaimContextRow {
+        ClaimContextRow {
+            human_readable_id,
+            subject_id: subject_id.to_owned(),
+            claim_type: "TYPE".to_owned(),
+            status: "TRUE".to_owned(),
+            description: "claim".to_owned(),
+        }
+    }
+
+    fn reports_by_community(rows: &[(i64, &str)]) -> BTreeMap<i64, CommunityReportRow> {
+        rows.iter()
+            .map(|(community, summary)| {
+                (
+                    *community,
+                    CommunityReportRow {
+                        id: format!("report-{community}"),
+                        human_readable_id: *community,
+                        community: *community,
+                        level: 1,
+                        parent: 0,
+                        children: Vec::new(),
+                        title: format!("Report {community}"),
+                        summary: (*summary).to_owned(),
+                        full_content: format!("# Report {community}\n\n{summary}"),
+                        rank: 5.0,
+                        rating_explanation: "ok".to_owned(),
+                        findings: Vec::new(),
+                        full_content_json: "{}".to_owned(),
+                        period: "2026-07-08".to_owned(),
+                        size: 1,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn json_report(title: &str) -> String {
+        format!(
+            r#"{{"title":"{title}","summary":"Summary","rating":5,"rating_explanation":"Reason","findings":[{{"summary":"Finding","explanation":"Explanation"}}]}}"#
+        )
+    }
+
+    #[derive(Debug)]
+    struct WordCountTokenizer;
+
+    impl Tokenizer for WordCountTokenizer {
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            Ok(vec![0; self.count(text)?])
+        }
+
+        fn decode(&self, _tokens: &[u32]) -> graphloom_llm::Result<String> {
+            Ok(String::new())
+        }
+
+        fn count(&self, text: &str) -> graphloom_llm::Result<usize> {
+            Ok(text
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|token| !token.is_empty())
+                .count())
+        }
     }
 }

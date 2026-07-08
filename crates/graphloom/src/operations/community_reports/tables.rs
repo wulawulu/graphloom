@@ -310,7 +310,7 @@ mod tests {
         dataframe
             .get_column_names()
             .into_iter()
-            .map(|name| name.as_str())
+            .map(PlSmallStr::as_str)
             .collect()
     }
 }

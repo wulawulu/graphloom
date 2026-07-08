@@ -1,8 +1,15 @@
-use std::{pin::Pin, sync::Arc};
+use std::{
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
+use async_trait::async_trait;
 use futures_util::{Stream, stream};
 use graphloom_input::{DocumentStream, InputReader, TextDocument, gen_sha512_hash};
-use graphloom_llm::MockCompletionModel;
+use graphloom_llm::{CompletionModel, CompletionRequest, CompletionResponse, MockCompletionModel};
 use graphloom_storage::{MemoryStorage, MemoryTableProvider, Storage, TableProvider};
 use polars_core::prelude::*;
 use serde_json::json;
@@ -564,35 +571,98 @@ fn test_should_default_workflow_order_to_step8() {
 #[tokio::test]
 async fn test_should_run_create_community_reports_workflow() {
     let provider = Arc::new(MemoryTableProvider::new());
+    write_step8_report_inputs(&provider).await;
+
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturingWorkflowReportModel {
+        prompts: Arc::clone(&prompts),
+        calls: AtomicUsize::new(0),
+    });
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_completion_model("default_completion_model", model);
+    let mut registry = WorkflowRegistry::new();
+    register_step8_workflows(&mut registry);
+    let mut config = GraphRagConfig::default();
+    config.extract_claims.enabled = true;
+    config.community_reports.max_input_length = 80;
+    config.workflows = vec![CREATE_COMMUNITY_REPORTS_WORKFLOW.to_owned()];
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step8 workflow should be registered");
+
+    let outputs = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("community reports workflow should run");
+
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].input_rows, 2);
+    assert_eq!(outputs[0].output_rows, 2);
+    assert_eq!(context.stats.report_count, 2);
+    {
+        let prompts = prompts.lock().expect("prompts lock");
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[0].contains("----Reports-----"));
+        assert!(prompts[1].contains("----Reports-----"));
+        assert!(prompts[1].contains("# Child"));
+    }
+    let reports = provider
+        .read_dataframe("community_reports")
+        .await
+        .expect("community reports should exist");
+    assert_step8_report_schema(&reports);
+}
+
+async fn write_step8_report_inputs(provider: &MemoryTableProvider) {
+    write_step8_entities(provider).await;
+    write_step8_relationships(provider).await;
+    write_step8_communities(provider).await;
+    write_step8_covariates(provider).await;
+}
+
+async fn write_step8_entities(provider: &MemoryTableProvider) {
     provider
         .write_dataframe(
             "entities",
             df!(
-                "id" => ["entity-a", "entity-b"],
-                "human_readable_id" => [0i64, 1i64],
-                "title" => ["ALICE", "BOB"],
-                "description" => ["Alice, lead", "Bob\nresearcher"],
-                "degree" => [2i64, 1i64],
+                "id" => ["entity-a", "entity-b", "entity-c"],
+                "human_readable_id" => [0i64, 1i64, 2i64],
+                "title" => ["ALICE", "BOB", "CAROL"],
+                "description" => [
+                    "Alice, lead",
+                    "Bob\nresearcher",
+                    "Carol one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty",
+                ],
+                "degree" => [3i64, 2i64, 1i64],
             )
             .expect("entities dataframe should build"),
         )
         .await
         .expect("entities should write");
+}
+
+async fn write_step8_relationships(provider: &MemoryTableProvider) {
     provider
         .write_dataframe(
             "relationships",
             df!(
-                "id" => ["rel-1"],
-                "human_readable_id" => [0i64],
-                "source" => ["ALICE"],
-                "target" => ["BOB"],
-                "description" => ["Alice works with Bob"],
-                "combined_degree" => [3i64],
+                "id" => ["rel-1", "rel-2"],
+                "human_readable_id" => [0i64, 1i64],
+                "source" => ["ALICE", "CAROL"],
+                "target" => ["BOB", "ALICE"],
+                "description" => [
+                    "Alice works with Bob",
+                    "Carol collaborates with Alice on one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen",
+                ],
+                "combined_degree" => [3i64, 2i64],
             )
             .expect("relationships dataframe should build"),
         )
         .await
         .expect("relationships should write");
+}
+
+async fn write_step8_communities(provider: &MemoryTableProvider) {
     let mut communities = df!(
         "community" => [1i64, 0i64],
         "level" => [1i64, 0i64],
@@ -611,7 +681,11 @@ async fn test_should_run_create_community_reports_workflow() {
                 "entity_ids",
                 &[
                     vec!["entity-a".to_owned(), "entity-b".to_owned()],
-                    vec!["entity-a".to_owned(), "entity-b".to_owned()],
+                    vec![
+                        "entity-a".to_owned(),
+                        "entity-b".to_owned(),
+                        "entity-c".to_owned(),
+                    ],
                 ],
             ),
         )
@@ -620,6 +694,9 @@ async fn test_should_run_create_community_reports_workflow() {
         .write_dataframe("communities", communities)
         .await
         .expect("communities should write");
+}
+
+async fn write_step8_covariates(provider: &MemoryTableProvider) {
     provider
         .write_dataframe(
             "covariates",
@@ -641,46 +718,9 @@ async fn test_should_run_create_community_reports_workflow() {
         )
         .await
         .expect("covariates should write");
+}
 
-    let model = Arc::new(MockCompletionModel::new(
-        "default_completion_model",
-        vec![
-            "{\"title\":\"Child\",\"summary\":\"Child \
-             summary\",\"rating\":6,\"rating_explanation\":\"Child \
-             reason\",\"findings\":[{\"summary\":\"Child finding\",\"explanation\":\"Child \
-             explanation\"}]}"
-                .to_owned(),
-            "{\"title\":\"Parent\",\"summary\":\"Parent \
-             summary\",\"rating\":7,\"rating_explanation\":\"Parent \
-             reason\",\"findings\":[{\"summary\":\"Parent finding\",\"explanation\":\"Parent \
-             explanation\"}]}"
-                .to_owned(),
-        ],
-    ));
-    let mut context = PipelineRunContext::new(provider.clone())
-        .with_completion_model("default_completion_model", model);
-    let mut registry = WorkflowRegistry::new();
-    register_step8_workflows(&mut registry);
-    let mut config = GraphRagConfig::default();
-    config.extract_claims.enabled = true;
-    config.workflows = vec![CREATE_COMMUNITY_REPORTS_WORKFLOW.to_owned()];
-    let pipeline = PipelineFactory::new(registry)
-        .standard(&config)
-        .expect("step8 workflow should be registered");
-
-    let outputs = pipeline
-        .run(&config, &mut context)
-        .await
-        .expect("community reports workflow should run");
-
-    assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].input_rows, 2);
-    assert_eq!(outputs[0].output_rows, 2);
-    assert_eq!(context.stats.report_count, 2);
-    let reports = provider
-        .read_dataframe("community_reports")
-        .await
-        .expect("community reports should exist");
+fn assert_step8_report_schema(reports: &DataFrame) {
     assert_eq!(reports.height(), 2);
     assert_eq!(
         reports.column("human_readable_id").expect("hrid").dtype(),
@@ -717,4 +757,38 @@ async fn test_should_run_create_community_reports_workflow() {
             .expect("json value")
             .contains("rating_explanation")
     );
+}
+
+#[derive(Debug)]
+struct CapturingWorkflowReportModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl CompletionModel for CapturingWorkflowReportModel {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> graphloom_llm::Result<CompletionResponse> {
+        let prompt = request
+            .messages
+            .into_iter()
+            .next()
+            .map(|message| message.content)
+            .unwrap_or_default();
+        self.prompts.lock().expect("prompts lock").push(prompt);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let title = if call == 0 { "Child" } else { "Parent" };
+        Ok(CompletionResponse {
+            content: format!(
+                "{{\"title\":\"{title}\",\"summary\":\"{title} \
+                 summary\",\"rating\":7,\"rating_explanation\":\"{title} \
+                 reason\",\"findings\":[{{\"summary\":\"{title} \
+                 finding\",\"explanation\":\"{title} explanation\"}}]}}"
+            ),
+            usage: None,
+            request_id: None,
+        })
+    }
 }
