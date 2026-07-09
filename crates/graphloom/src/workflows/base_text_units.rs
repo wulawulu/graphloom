@@ -110,7 +110,7 @@ fn append_document_chunks(
             human_readable_id: rows.len() as i64,
             text: chunk.text,
             n_tokens: n_tokens as i64,
-            document_ids: vec![document.id.clone()],
+            document_id: document.id.clone(),
             entity_ids: Vec::new(),
             relationship_ids: Vec::new(),
             covariate_ids: Vec::new(),

@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    io::ErrorKind,
     path::{Component, Path, PathBuf},
 };
 
@@ -40,6 +41,12 @@ pub struct ProjectPaths {
     pub vector_db_uri: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPath {
+    pub(crate) lexical: PathBuf,
+    pub(crate) resolved: PathBuf,
+}
+
 impl ProjectPaths {
     /// Resolve project paths from config.
     ///
@@ -62,6 +69,7 @@ impl ProjectPaths {
             vector_db_uri,
         };
         paths.validate_destructive_paths()?;
+        paths.validate_vector_path_safety()?;
         Ok(paths)
     }
 
@@ -71,7 +79,11 @@ impl ProjectPaths {
     ///
     /// Returns an error if output could delete project, input, cache, or logs.
     pub fn validate_destructive_paths(&self) -> Result<()> {
-        reject_symlink_components(&self.output_dir)?;
+        reject_symlink_components(
+            &self.output_dir,
+            "inspect output path",
+            "output directory must not contain symlink components",
+        )?;
         let output = canonical_or_normalized(&self.output_dir);
         let root = canonical_or_normalized(&self.root);
         let input = canonical_or_normalized(&self.input_dir);
@@ -116,6 +128,61 @@ impl ProjectPaths {
                 &self.output_dir,
                 "output directory must not be home directory",
             );
+        }
+        Ok(())
+    }
+
+    /// Validate that the vector DB path cannot target destructive project paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vector DB path is unsafe for reset.
+    pub(crate) fn validate_vector_path_safety(&self) -> Result<()> {
+        let vector = resolve_existing_ancestor(&self.vector_db_uri)?;
+        let root = resolve_existing_ancestor(&self.root)?;
+        let output = resolve_existing_ancestor(&self.output_dir)?;
+        let input = resolve_existing_ancestor(&self.input_dir)?;
+        let cache = resolve_existing_ancestor(&self.cache_dir)?;
+        let reporting = resolve_existing_ancestor(&self.reporting_dir)?;
+
+        if is_filesystem_root(&vector.resolved) {
+            return unsafe_output(
+                &self.vector_db_uri,
+                "vector DB path must not be filesystem root",
+            );
+        }
+        if vector.resolved == root.resolved || root.resolved.starts_with(&vector.resolved) {
+            return unsafe_output(
+                &self.vector_db_uri,
+                "vector DB path must not be project root or an ancestor of project root",
+            );
+        }
+        if vector.resolved == output.resolved || output.resolved.starts_with(&vector.resolved) {
+            return unsafe_output(
+                &self.vector_db_uri,
+                "vector DB path must not equal output or be an ancestor of output",
+            );
+        }
+        for (path, label) in [
+            (&input.resolved, "input"),
+            (&cache.resolved, "cache"),
+            (&reporting.resolved, "logs"),
+        ] {
+            if vector.resolved.starts_with(path) || path.starts_with(&vector.resolved) {
+                return unsafe_output(
+                    &self.vector_db_uri,
+                    &format!("vector DB path must not overlap {label} directory"),
+                );
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let home = resolve_existing_ancestor(&home)?;
+            if vector.resolved == home.resolved || home.resolved.starts_with(&vector.resolved) {
+                return unsafe_output(
+                    &self.vector_db_uri,
+                    "vector DB path must not be home directory or an ancestor of home directory",
+                );
+            }
         }
         Ok(())
     }
@@ -180,19 +247,63 @@ fn unsafe_output<T>(path: &Path, message: &str) -> Result<T> {
     })
 }
 
-fn reject_symlink_components(path: &Path) -> Result<()> {
+pub(crate) fn resolve_existing_ancestor(path: &Path) -> Result<ResolvedPath> {
+    let lexical = absolute_lexical(path)?;
+    let mut current = PathBuf::new();
+    let mut existing = None;
+    for component in lexical.components() {
+        current.push(component.as_os_str());
+        match current.symlink_metadata() {
+            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
+                return unsafe_output(path, "path must not contain symlink components");
+            }
+            Ok(_) => {
+                existing = Some(current.clone());
+            }
+            Err(source) if source.kind() == ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(GraphLoomError::Io {
+                    operation: "inspect path",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    let existing = existing.unwrap_or_else(|| lexical.clone());
+    let suffix = lexical
+        .strip_prefix(&existing)
+        .map_or_else(|_| PathBuf::new(), Path::to_path_buf);
+    let resolved_ancestor = existing
+        .canonicalize()
+        .map_err(|source| GraphLoomError::Io {
+            operation: "canonicalize path ancestor",
+            path: existing.clone(),
+            source,
+        })?;
+    Ok(ResolvedPath {
+        lexical,
+        resolved: normalize_path(&resolved_ancestor.join(suffix)),
+    })
+}
+
+fn reject_symlink_components(
+    path: &Path,
+    operation: &'static str,
+    message: &'static str,
+) -> Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
         match current.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return unsafe_output(path, "output directory must not contain symlink components");
+            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
+                return unsafe_output(path, message);
             }
             Ok(_) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
             Err(source) => {
                 return Err(GraphLoomError::Io {
-                    operation: "inspect output path",
+                    operation,
                     path: current,
                     source,
                 });
@@ -200,6 +311,35 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn absolute_lexical(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| GraphLoomError::Io {
+                operation: "get current directory",
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path)
+    };
+    Ok(normalize_path(&absolute))
+}
+
+#[cfg(windows)]
+fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn resolve_path(root: &Path, value: &str) -> PathBuf {

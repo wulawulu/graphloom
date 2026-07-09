@@ -26,8 +26,8 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   need to run CLI validation first. Future query and prompt-tuning APIs will
   live under the same API layer.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
-  exit codes to the API. `graphloom index` loads project configuration and calls
-  `graphloom::api::build_index`.
+  exit codes to the API indexing layer. `graphloom index` loads project
+  configuration and performs CLI validation before dry-run output or indexing.
 - `graphloom init` is a CLI-only project scaffold command. It writes default
   settings, `.env`, `input/`, and prompt files, but is not part of the public
   indexing API. Model names passed through `--model` and `--embedding` are
@@ -172,6 +172,22 @@ demo/logs/indexing-engine.log
 validated output storage and resets GraphLoom-managed LanceDB vector indices
 before running the standard pipeline. Cache is preserved.
 
+Runtime preflight validates provider construction, managed vector schemas, and
+write access for output, logs, cache when enabled, and the vector database path
+before any output is cleared. Vector database paths are resolved through their
+existing ancestors and must not use symlink or reparse-point components to
+escape the project layout.
+
+When the LanceDB database is inside the output directory, such as the default
+`output/lancedb`, GraphLoom closes the preflight LanceDB connection before
+clearing output, then reconnects and recreates the managed vector tables. This
+keeps the lifecycle compatible with platforms that do not allow deleting files
+held by an open database connection.
+
+The final `text_units` Parquet table follows the GraphRAG 3.1.0 canonical
+schema with scalar `document_id: String`. `documents.text_unit_ids` remains a
+`List(String)` reverse lookup.
+
 ## Current Support
 
 Supported:
@@ -182,6 +198,7 @@ Supported:
 - JSON file cache
 - OpenAI-compatible completion and embedding models
 - LanceDB vector storage
+- Linux and Windows CI
 
 Not yet supported:
 

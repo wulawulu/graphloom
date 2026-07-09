@@ -69,7 +69,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
                 human_readable_id: index as i64,
                 text: text_unit.text,
                 n_tokens: text_unit.n_tokens,
-                document_ids: text_unit.document_ids,
+                document_id: text_unit.document_id,
                 entity_ids: cloned_vec_or_empty(entity_map.get(&text_unit.id)),
                 relationship_ids: cloned_vec_or_empty(relationship_map.get(&text_unit.id)),
                 covariate_ids: cloned_vec_or_empty(covariate_map.get(&text_unit.id)),
@@ -95,7 +95,7 @@ struct TextUnitInput {
     id: String,
     text: String,
     n_tokens: i64,
-    document_ids: Vec<String>,
+    document_id: String,
 }
 
 fn cloned_vec_or_empty(values: Option<&Vec<String>>) -> Vec<String> {
@@ -108,19 +108,9 @@ fn cloned_vec_or_empty(values: Option<&Vec<String>>) -> Vec<String> {
 fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
     let ids = dataframe.column("id")?.str()?;
     let texts = dataframe.column("text")?.str()?;
-    let document_ids_index = dataframe
-        .get_column_names()
-        .iter()
-        .position(|name| name.as_str() == "document_ids")
-        .ok_or_else(|| {
-            invalid_data(
-                CREATE_FINAL_TEXT_UNITS_WORKFLOW,
-                "missing text unit document_ids",
-            )
-        })?;
+    let document_ids = dataframe.column("document_id")?.str()?;
     let mut rows = Vec::with_capacity(dataframe.height());
     for index in 0..dataframe.height() {
-        let row = row_to_static(dataframe.get_row(index)?);
         rows.push(TextUnitInput {
             id: string_value(ids.get(index), "id", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
             text: string_value(texts.get(index), "text", CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
@@ -130,7 +120,11 @@ fn read_text_units(dataframe: &DataFrame) -> Result<Vec<TextUnitInput>> {
                 "n_tokens",
                 CREATE_FINAL_TEXT_UNITS_WORKFLOW,
             )?,
-            document_ids: list_at(&row, document_ids_index, CREATE_FINAL_TEXT_UNITS_WORKFLOW)?,
+            document_id: string_value(
+                document_ids.get(index),
+                "document_id",
+                CREATE_FINAL_TEXT_UNITS_WORKFLOW,
+            )?,
         });
     }
     Ok(rows)
@@ -190,25 +184,20 @@ mod tests {
 
     #[test]
     fn test_should_read_text_units_by_column_name() {
-        let mut dataframe = df!(
+        let dataframe = df!(
             "n_tokens" => [7i64],
             "text" => ["Alice reports Bob."],
             "id" => ["tu-1"],
+            "document_id" => ["doc-1"],
         )
         .expect("dataframe should build");
-        dataframe
-            .with_column(
-                list_column("document_ids", &[vec!["doc-1".to_owned()]])
-                    .expect("document ids should build"),
-            )
-            .expect("document ids should append");
 
         let rows = read_text_units(&dataframe).expect("text units should decode");
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "tu-1");
         assert_eq!(rows[0].n_tokens, 7);
-        assert_eq!(rows[0].document_ids, vec!["doc-1"]);
+        assert_eq!(rows[0].document_id, "doc-1");
     }
 
     #[test]
@@ -217,7 +206,7 @@ mod tests {
             "id" => ["tu-1"],
             "text" => ["Alice reports Bob."],
             "n_tokens" => ["seven"],
-            "document_ids" => [Series::new("item".into(), ["doc-1"])],
+            "document_id" => ["doc-1"],
         )
         .expect("dataframe should build");
 

@@ -475,6 +475,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_reject_non_finite_vectors() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let schema = schema("entity_description", 2);
+        let store = connect_store(&tempdir).await;
+        store.ensure_index(&schema).await.expect("ensure index");
+
+        for vector in [
+            vec![f32::NAN, 0.0],
+            vec![f32::INFINITY, 0.0],
+            vec![f32::NEG_INFINITY, 0.0],
+        ] {
+            let error = store
+                .upsert_documents(
+                    &schema,
+                    &[VectorDocument {
+                        id: "bad-vector".to_owned(),
+                        vector,
+                    }],
+                )
+                .await
+                .expect_err("non-finite vector should fail");
+
+            assert!(error.to_string().contains("non-finite"));
+            assert_eq!(store.count(&schema).await.expect("count"), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn test_should_reject_schema_mismatch() {
         let tempdir = TempDir::new().expect("tempdir");
         let store = connect_store(&tempdir).await;

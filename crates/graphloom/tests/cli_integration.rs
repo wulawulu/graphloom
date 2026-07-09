@@ -108,6 +108,119 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
     assert!(tempdir.path().join("cache").exists());
 }
 
+#[tokio::test]
+async fn test_should_write_text_units_in_graphrag_3_1_schema() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    run_minimal_standard_index(tempdir.path(), &server.uri()).await;
+
+    let provider = ParquetTableProvider::new(tempdir.path().join("output")).expect("provider");
+    let text_units = provider
+        .read_dataframe("text_units")
+        .await
+        .expect("text_units");
+    let documents = provider
+        .read_dataframe("documents")
+        .await
+        .expect("documents");
+
+    assert_columns(
+        &text_units,
+        &[
+            "id",
+            "human_readable_id",
+            "text",
+            "n_tokens",
+            "document_id",
+            "entity_ids",
+            "relationship_ids",
+            "covariate_ids",
+        ],
+    );
+    assert_dtype(&text_units, "document_id", &DataType::String);
+    assert!(
+        text_units.column("document_ids").is_err(),
+        "GraphRAG 3.1 text_units must not contain document_ids"
+    );
+    let document_ids = string_set(&documents, "id");
+    let text_unit_ids = string_set(&text_units, "id");
+    assert_subset(&string_set(&text_units, "document_id"), &document_ids);
+    for document_id in &document_ids {
+        let mut reverse = BTreeSet::new();
+        let document_id_column = documents.column("id").expect("id").str().expect("id str");
+        for row_index in 0..documents.height() {
+            if document_id_column.get(row_index) == Some(document_id.as_str()) {
+                let row = documents.get_row(row_index).expect("document row");
+                let text_unit_ids_index = documents
+                    .get_column_names()
+                    .iter()
+                    .position(|name| name.as_str() == "text_unit_ids")
+                    .expect("text_unit_ids");
+                if let Some(value) = row.0.get(text_unit_ids_index) {
+                    reverse.extend(any_value_to_strings(value));
+                }
+            }
+        }
+        let forward = (0..text_units.height())
+            .filter_map(|row_index| {
+                let ids = text_units.column("id").ok()?.str().ok()?;
+                let document_id_values = text_units.column("document_id").ok()?.str().ok()?;
+                (document_id_values.get(row_index) == Some(document_id.as_str()))
+                    .then(|| ids.get(row_index).map(str::to_owned))
+                    .flatten()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(reverse, forward);
+    }
+    assert_subset(
+        &list_string_set(&documents, "text_unit_ids"),
+        &text_unit_ids,
+    );
+}
+
+async fn run_minimal_standard_index(root: &std::path::Path, server_uri: &str) {
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "init",
+            "--root",
+            root.to_str().expect("utf8 root"),
+            "--model",
+            "gpt-test",
+            "--embedding",
+            "embed-test",
+        ])
+        .assert()
+        .success();
+    tokio::fs::write(
+        root.join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("write input");
+    tokio::fs::write(root.join(".env"), "GRAPHRAG_API_KEY=test-key\n")
+        .await
+        .expect("write env");
+    patch_settings(root, server_uri).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args(["index", "--root", root.to_str().expect("utf8 root")])
+        .assert()
+        .success();
+}
+
 async fn assert_full_rerun_resets_vector_ids(
     root: &std::path::Path,
     first_document_ids: &BTreeSet<String>,
@@ -855,7 +968,7 @@ fn assert_parquet_column_order(frames: &OutputFrames) {
             "human_readable_id",
             "text",
             "n_tokens",
-            "document_ids",
+            "document_id",
             "entity_ids",
             "relationship_ids",
             "covariate_ids",
@@ -928,7 +1041,7 @@ fn assert_parquet_column_order(frames: &OutputFrames) {
 
 fn assert_parquet_dtypes(frames: &OutputFrames) {
     assert_common_dtypes(&frames.documents, &["title", "text"]);
-    assert_common_dtypes(&frames.text_units, &["text"]);
+    assert_common_dtypes(&frames.text_units, &["text", "document_id"]);
     assert_common_dtypes(&frames.entities, &["title", "type", "description"]);
     assert_common_dtypes(&frames.relationships, &["source", "target", "description"]);
     assert_common_dtypes(&frames.communities, &["title", "period"]);
@@ -973,12 +1086,7 @@ fn assert_parquet_dtypes(frames: &OutputFrames) {
         (&frames.documents, &["text_unit_ids"][..]),
         (
             &frames.text_units,
-            &[
-                "document_ids",
-                "entity_ids",
-                "relationship_ids",
-                "covariate_ids",
-            ][..],
+            &["entity_ids", "relationship_ids", "covariate_ids"][..],
         ),
         (&frames.entities, &["text_unit_ids"][..]),
         (&frames.relationships, &["text_unit_ids"][..]),
@@ -1020,7 +1128,7 @@ fn assert_reference_integrity(frames: &OutputFrames) {
         &text_unit_ids,
     );
     assert_subset(
-        &list_string_set(&frames.text_units, "document_ids"),
+        &string_set(&frames.text_units, "document_id"),
         &document_ids,
     );
     assert_subset(

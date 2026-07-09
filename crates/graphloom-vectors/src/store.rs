@@ -61,6 +61,10 @@ pub trait VectorStore: Send + Sync + Debug {
 
     /// List all document ids in an index.
     ///
+    /// This operation may perform a full index scan and is intended for diagnostics,
+    /// maintenance, compatibility validation, and tests. It should not be used on
+    /// latency-sensitive query paths.
+    ///
     /// # Errors
     ///
     /// Returns an error when provider read or decoding fails.

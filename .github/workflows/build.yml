@@ -17,7 +17,9 @@ jobs:
   build-rust:
     strategy:
       matrix:
-        platform: [ubuntu-latest]
+        platform:
+          - ubuntu-latest
+          - windows-latest
     runs-on: ${{ matrix.platform }}
     # services:
     #   postgres:
@@ -49,9 +51,9 @@ jobs:
       - name: Check code format
         run: cargo fmt --all -- --check
       - name: Check the package for errors
-        run: cargo check --all
+        run: cargo check --workspace --all-targets --all-features
       - name: Lint rust sources
-        run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Execute rust tests
         run: cargo nextest run --all-features
       - name: Generate a changelog

@@ -85,7 +85,7 @@ pub(crate) async fn build_validated_index(
     let mut runtime = preflight_index_runtime(&project, cache_enabled, options.callbacks).await?;
     tracing::info!(project_root = %project.root.display(), "preparing full index");
     prepare_full_index(&project, &mut runtime).await?;
-    let mut runtime = runtime.into_runtime(project.config.clone(), &project.root);
+    let mut runtime = runtime.into_runtime(project.config.clone(), &project.root)?;
     tracing::info!(project_root = %project.root.display(), "index run started");
     tracing::info!(project_root = %project.root.display(), "running indexing pipeline");
     let outputs = runtime

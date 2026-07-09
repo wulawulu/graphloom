@@ -161,7 +161,111 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
             "case {case:?} must not clear old output"
         );
         assert_old_vector_still_exists(tempdir.path(), &old_config).await;
+        assert_no_write_probe_files(tempdir.path()).await;
     }
+}
+
+#[tokio::test]
+async fn test_should_drop_inside_output_lancedb_before_clearing_output() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    prepare_old_output_and_vector(tempdir.path(), &mut config).await;
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("inside-output index should succeed");
+
+    assert!(!tempdir.path().join("output").join("sentinel.txt").exists());
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("reopen lancedb");
+    for embedding in ALL_EMBEDDINGS {
+        let schema = config.vector_store.schema_for(embedding);
+        assert!(
+            store.count(&schema).await.expect("managed table count") > 0,
+            "{embedding} should be recreated and populated"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_reject_vector_child_symlink_before_destructive_reset() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let external = TempDir::new().expect("external");
+    let mut config = test_config("http://127.0.0.1:1");
+    let external_db = external.path().join("lancedb");
+    prepare_old_output_and_vector_at(tempdir.path(), &mut config, external_db.clone()).await;
+    let old_config = config.clone();
+    let vector_link = tempdir.path().join("output").join("lancedb");
+    std::os::unix::fs::symlink(&external_db, &vector_link).expect("vector symlink");
+    config.vector_store.db_uri = vector_link.to_string_lossy().to_string();
+
+    let error = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("vector symlink should fail before reset");
+
+    assert!(error.to_string().contains("symlink"));
+    assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
+    assert_old_vector_exists(&old_config).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_reject_vector_ancestor_symlink_before_destructive_reset() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let external = TempDir::new().expect("external");
+    let mut config = test_config("http://127.0.0.1:1");
+    let external_db = external.path().join("db");
+    prepare_old_output_and_vector_at(tempdir.path(), &mut config, external_db).await;
+    let old_config = config.clone();
+    let vector_link = tempdir.path().join("vector-link");
+    std::os::unix::fs::symlink(external.path(), &vector_link).expect("vector ancestor symlink");
+    config.vector_store.db_uri = vector_link.join("db").to_string_lossy().to_string();
+
+    let error = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("vector ancestor symlink should fail before reset");
+
+    assert!(error.to_string().contains("symlink"));
+    assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
+    assert_old_vector_exists(&old_config).await;
 }
 
 #[tokio::test]
@@ -435,6 +539,15 @@ async fn assert_standard_outputs(root: &std::path::Path, config: &GraphRagConfig
 }
 
 async fn prepare_old_output_and_vector(root: &std::path::Path, config: &mut GraphRagConfig) {
+    let vector_db_uri = root.join("output").join("lancedb");
+    prepare_old_output_and_vector_at(root, config, vector_db_uri).await;
+}
+
+async fn prepare_old_output_and_vector_at(
+    root: &std::path::Path,
+    config: &mut GraphRagConfig,
+    vector_db_uri: impl Into<std::path::PathBuf>,
+) {
     tokio::fs::create_dir_all(root.join("input"))
         .await
         .expect("input");
@@ -447,11 +560,7 @@ async fn prepare_old_output_and_vector(root: &std::path::Path, config: &mut Grap
     tokio::fs::write(root.join("output").join("sentinel.txt"), "keep")
         .await
         .expect("sentinel");
-    config.vector_store.db_uri = root
-        .join("output")
-        .join("lancedb")
-        .to_string_lossy()
-        .to_string();
+    config.vector_store.db_uri = vector_db_uri.into().to_string_lossy().to_string();
     let store = LanceDbVectorStore::connect(&config.vector_store)
         .await
         .expect("lancedb");
@@ -475,6 +584,10 @@ async fn assert_old_vector_still_exists(root: &std::path::Path, config: &GraphRa
         .join("lancedb")
         .to_string_lossy()
         .to_string();
+    assert_old_vector_exists(&config).await;
+}
+
+async fn assert_old_vector_exists(config: &GraphRagConfig) {
     let store = LanceDbVectorStore::connect(&config.vector_store)
         .await
         .expect("lancedb");
@@ -486,6 +599,32 @@ async fn assert_old_vector_still_exists(root: &std::path::Path, config: &GraphRa
             .expect("get old")
             .is_some()
     );
+}
+
+async fn assert_no_write_probe_files(root: &std::path::Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if metadata.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".graphloom-write-probe-"))
+        {
+            panic!(
+                "write probe file should not be left behind: {}",
+                path.display()
+            );
+        }
+        if metadata.is_dir() {
+            let mut entries = tokio::fs::read_dir(&path).await.expect("read dir");
+            while let Some(entry) = entries.next_entry().await.expect("dir entry") {
+                pending.push(entry.path());
+            }
+        }
+    }
 }
 
 async fn apply_invalid_case(
