@@ -21,14 +21,17 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 
 - `graphloom::api` exposes programmatic entry points. The current public API is
   `build_index`, which runs standard indexing and returns structured workflow
-  output and pipeline stats. Future query and prompt-tuning APIs will live under
+  output and pipeline stats. `build_index` validates configuration before it
+  clears output or resets managed vector tables, so API callers do not need to
+  run CLI validation first. Future query and prompt-tuning APIs will live under
   the same API layer.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API. `graphloom index` loads project configuration and calls
   `graphloom::api::build_index`.
 - `graphloom init` is a CLI-only project scaffold command. It writes default
   settings, `.env`, `input/`, and prompt files, but is not part of the public
-  indexing API.
+  indexing API. Model names passed through `--model` and `--embedding` are
+  written through structured YAML serialization rather than string replacement.
 
 ## Initialize a Project
 
@@ -48,6 +51,10 @@ demo/
 
 The default prompts are embedded in the binary and are based on Microsoft
 GraphRAG 3.1.0 prompt content under the MIT License.
+
+`init` performs path and symlink preflight before creating directories or
+writing managed files. If a project path, `input/`, `prompts/`, or managed file
+target is unsafe, the command fails without leaving a partial scaffold.
 
 ## API Key
 
@@ -72,6 +79,10 @@ GraphLoom currently supports UTF-8 text input files:
 ```bash
 echo "Alice works with Bob." > demo/input/document.txt
 ```
+
+`input.file_pattern` is matched against logical storage paths that use `/` as
+the separator, including on Windows. For example, `^subdir/.*\.txt$` matches
+`demo/input/subdir/document.txt`.
 
 ## Index
 
@@ -100,10 +111,10 @@ generate_text_embeddings
 graphloom index --root ./demo --dry-run
 ```
 
-Dry run loads and parses project configuration, validates non-destructive
-settings, prints a redacted summary, and shows the workflow list. It does not
-call models, create output, create cache, create logs, connect LanceDB, or
-modify the current working directory.
+Dry run loads and parses project configuration, performs the same full preflight
+validation as indexing, prints a redacted summary, and shows the workflow list.
+It does not call models, create output, create cache, create logs, connect
+LanceDB, or modify the current working directory.
 
 ## Disable Cache
 
@@ -140,9 +151,9 @@ demo/cache/
 demo/logs/indexing-engine.log
 ```
 
-`graphloom index` is a full rebuild. It clears validated output storage and
-resets GraphLoom-managed LanceDB vector indices before running the standard
-pipeline. Cache is preserved.
+`graphloom index` is a full rebuild. After validation succeeds, it clears
+validated output storage and resets GraphLoom-managed LanceDB vector indices
+before running the standard pipeline. Cache is preserved.
 
 ## Current Support
 

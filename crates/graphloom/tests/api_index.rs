@@ -5,7 +5,7 @@ use graphloom::{
     api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
-use graphloom_vectors::{LanceDbVectorStore, VectorStore};
+use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
@@ -54,17 +54,144 @@ async fn test_should_build_standard_index_via_public_api() {
 
     assert!(!result.workflow_outputs.is_empty());
     assert!(result.stats.document_count > 0);
-    assert!(
-        callbacks
-            .started()
-            .contains(&"load_input_documents".to_owned())
-    );
-    assert!(
-        callbacks
-            .completed()
-            .contains(&"generate_text_embeddings".to_owned())
-    );
+    let expected_order = test_config(&server.uri()).workflow_order();
+    assert_eq!(callbacks.started(), expected_order);
+    assert_eq!(callbacks.completed(), expected_order);
     assert_standard_outputs(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_validate_before_destructive_reset() {
+    for case in [
+        InvalidConfigCase::InvalidRegex,
+        InvalidConfigCase::MissingModel,
+        InvalidConfigCase::MissingPrompt,
+        InvalidConfigCase::MissingInput,
+        InvalidConfigCase::UnsupportedProvider,
+        InvalidConfigCase::InvalidTokenizer,
+    ] {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = test_config("http://127.0.0.1:1");
+        prepare_old_output_and_vector(tempdir.path(), &mut config).await;
+        apply_invalid_case(tempdir.path(), &mut config, case).await;
+
+        let error = build_index(
+            config.clone(),
+            BuildIndexOptions {
+                project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
+                cache_mode: CacheMode::Configured,
+                callbacks: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("invalid config should fail");
+
+        assert!(
+            !error.to_string().is_empty(),
+            "case {case:?} should return a useful error"
+        );
+        assert!(
+            tempdir.path().join("output").join("sentinel.txt").is_file(),
+            "case {case:?} must not clear output before validation"
+        );
+        assert_old_vector_still_exists(tempdir.path(), &config).await;
+    }
+}
+
+#[tokio::test]
+async fn test_should_run_api_without_callbacks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input dir");
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+
+    let result = build_index(
+        test_config(&server.uri()),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("build index");
+
+    assert!(!result.workflow_outputs.is_empty());
+    assert!(!tempdir.path().join("cache").exists());
+}
+
+#[tokio::test]
+async fn test_should_fan_out_callbacks_in_api() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input dir");
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    let first = Arc::new(RecordingCallbacks::default());
+    let second = Arc::new(RecordingCallbacks::default());
+
+    let result = build_index(
+        test_config(&server.uri()),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: vec![first.clone(), second.clone()],
+        },
+    )
+    .await
+    .expect("build index");
+    let expected = result.workflow_outputs.iter().map(|_| ()).count();
+    assert_eq!(first.started().len(), expected);
+    assert_eq!(second.started(), first.started());
+    assert_eq!(second.completed(), first.completed());
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InvalidConfigCase {
+    InvalidRegex,
+    MissingModel,
+    MissingPrompt,
+    MissingInput,
+    UnsupportedProvider,
+    InvalidTokenizer,
 }
 
 #[derive(Debug, Default)]
@@ -186,6 +313,95 @@ async fn assert_standard_outputs(root: &std::path::Path) {
     for embedding in ALL_EMBEDDINGS {
         let schema = config.vector_store.schema_for(embedding);
         assert!(store.count(&schema).await.expect("count") > 0);
+    }
+}
+
+async fn prepare_old_output_and_vector(root: &std::path::Path, config: &mut GraphRagConfig) {
+    tokio::fs::create_dir_all(root.join("input"))
+        .await
+        .expect("input");
+    tokio::fs::write(root.join("input").join("document.txt"), "Alice")
+        .await
+        .expect("input file");
+    tokio::fs::create_dir_all(root.join("output"))
+        .await
+        .expect("output");
+    tokio::fs::write(root.join("output").join("sentinel.txt"), "keep")
+        .await
+        .expect("sentinel");
+    config.vector_store.db_uri = root
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .to_string();
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("lancedb");
+    let schema = config.vector_store.schema_for("entity_description");
+    store
+        .upsert_documents(
+            &schema,
+            &[VectorDocument {
+                id: "old-id".to_owned(),
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }],
+        )
+        .await
+        .expect("old vector");
+}
+
+async fn assert_old_vector_still_exists(root: &std::path::Path, config: &GraphRagConfig) {
+    let mut config = config.clone();
+    config.vector_store.db_uri = root
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .to_string();
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("lancedb");
+    let schema = config.vector_store.schema_for("entity_description");
+    assert!(
+        store
+            .get_by_id(&schema, "old-id")
+            .await
+            .expect("get old")
+            .is_some()
+    );
+}
+
+async fn apply_invalid_case(
+    root: &std::path::Path,
+    config: &mut GraphRagConfig,
+    case: InvalidConfigCase,
+) {
+    match case {
+        InvalidConfigCase::InvalidRegex => {
+            "[".clone_into(&mut config.input.file_pattern);
+        }
+        InvalidConfigCase::MissingModel => {
+            config.completion_models.remove("default_completion_model");
+        }
+        InvalidConfigCase::MissingPrompt => {
+            config.extract_graph.prompt = Some("prompts/missing.txt".to_owned());
+        }
+        InvalidConfigCase::MissingInput => {
+            tokio::fs::remove_dir_all(root.join("input"))
+                .await
+                .expect("remove input");
+        }
+        InvalidConfigCase::UnsupportedProvider => {
+            "azure".clone_into(
+                &mut config
+                    .completion_models
+                    .get_mut("default_completion_model")
+                    .expect("model")
+                    .provider_type,
+            );
+        }
+        InvalidConfigCase::InvalidTokenizer => {
+            "definitely-not-an-encoding".clone_into(&mut config.chunking.encoding_model);
+        }
     }
 }
 

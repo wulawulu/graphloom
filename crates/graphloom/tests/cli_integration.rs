@@ -6,6 +6,7 @@ use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
 use predicates::prelude::*;
 use serde_json::{Value, json};
+use serde_yaml::Mapping;
 use tempfile::TempDir;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
@@ -88,6 +89,7 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         .stdout(predicate::str::contains("Index completed successfully"));
 
     assert_standard_outputs(tempdir.path()).await;
+    assert_log_redaction_and_success(tempdir.path()).await;
     let first_document_ids = table_ids(tempdir.path(), "documents").await;
     let first_entity_count = lancedb_count(tempdir.path(), "entity_description").await;
     assert!(tempdir.path().join("cache").exists());
@@ -208,6 +210,56 @@ async fn test_should_disable_cache_only_for_current_run() {
 }
 
 #[tokio::test]
+async fn test_should_run_graph_extraction_gleaning_end_to_end() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder_with_gleaning)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme. Bob manages Acme.",
+    )
+    .await
+    .expect("input");
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    patch_settings_with_max_gleanings(tempdir.path(), &server.uri(), 2).await;
+
+    run_index(tempdir.path(), &[]);
+    let requests = server.received_requests().await.expect("requests");
+    assert!(
+        requests.iter().any(request_last_message_contains(
+            "MANY entities and relationships"
+        )),
+        "graph extraction should request a continuation"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(request_last_message_contains("single letter Y or N")),
+        "graph extraction should run the gleaning loop check"
+    );
+    assert!(
+        entity_titles(tempdir.path()).await.contains("BOB"),
+        "entity discovered during continuation should be merged into output",
+    );
+}
+
+#[tokio::test]
 async fn test_should_fail_dry_run_when_prompt_is_missing() {
     let tempdir = TempDir::new().expect("tempdir");
     init_project(tempdir.path());
@@ -259,6 +311,158 @@ async fn test_should_fail_dry_run_when_no_input_matches_pattern() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no matching input files"));
+}
+
+#[tokio::test]
+async fn test_should_report_common_preflight_errors_without_resetting_output() {
+    for (case, expected) in [
+        (CliPreflightCase::InvalidRegex, "input.file_pattern"),
+        (
+            CliPreflightCase::UnsupportedProvider,
+            "unsupported provider azure",
+        ),
+        (CliPreflightCase::UnsupportedAuth, "unsupported auth method"),
+        (
+            CliPreflightCase::UnsupportedRetry,
+            "unsupported retry strategy constant",
+        ),
+        (
+            CliPreflightCase::UnsupportedInput,
+            "unsupported input type csv",
+        ),
+        (
+            CliPreflightCase::UnsupportedInputStorage,
+            "unsupported input storage blob",
+        ),
+        (
+            CliPreflightCase::UnsupportedOutputStorage,
+            "unsupported output storage blob",
+        ),
+        (
+            CliPreflightCase::UnsupportedCacheStorage,
+            "unsupported cache storage memory",
+        ),
+        (
+            CliPreflightCase::UnsupportedReportingStorage,
+            "unsupported reporting storage memory",
+        ),
+        (
+            CliPreflightCase::UnsafeOutputRoot,
+            "output directory must not be project root",
+        ),
+        (
+            CliPreflightCase::OutputAncestorOfLogs,
+            "output directory must not be an ancestor",
+        ),
+        (CliPreflightCase::UnknownWorkflow, "not_a_workflow"),
+        (CliPreflightCase::MissingClaimsModel, "missing_claim_model"),
+        (
+            CliPreflightCase::InvalidTokenizer,
+            "definitely-not-an-encoding",
+        ),
+    ] {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(tempdir.path());
+        tokio::fs::write(
+            tempdir.path().join(".env"),
+            "GRAPHRAG_API_KEY=super-secret-key\n",
+        )
+        .await
+        .expect("env");
+        tokio::fs::write(tempdir.path().join("input").join("document.txt"), "Alice")
+            .await
+            .expect("input");
+        tokio::fs::create_dir(tempdir.path().join("output"))
+            .await
+            .expect("output");
+        tokio::fs::write(tempdir.path().join("output").join("sentinel.txt"), "keep")
+            .await
+            .expect("sentinel");
+        apply_cli_preflight_case(tempdir.path(), case).await;
+
+        Command::cargo_bin("graphloom")
+            .expect("binary")
+            .args([
+                "index",
+                "--root",
+                tempdir.path().to_str().expect("utf8 root"),
+                "--dry-run",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected))
+            .stderr(predicate::str::contains("super-secret-key").not());
+        assert!(
+            tempdir.path().join("output").join("sentinel.txt").is_file(),
+            "preflight error {expected} should not clear output",
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_should_log_workflow_failure_without_secret() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(tempdir.path(), &server.uri()).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("super-secret-key").not());
+
+    let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
+        .await
+        .expect("log");
+    assert!(log.contains("workflow error") || log.contains("event=\"failed\""));
+    assert!(!log.contains("super-secret-key"));
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CliPreflightCase {
+    InvalidRegex,
+    UnsupportedProvider,
+    UnsupportedAuth,
+    UnsupportedRetry,
+    UnsupportedInput,
+    UnsupportedInputStorage,
+    UnsupportedOutputStorage,
+    UnsupportedCacheStorage,
+    UnsupportedReportingStorage,
+    UnsafeOutputRoot,
+    OutputAncestorOfLogs,
+    UnknownWorkflow,
+    MissingClaimsModel,
+    InvalidTokenizer,
 }
 
 async fn assert_standard_outputs(root: &std::path::Path) {
@@ -316,6 +520,15 @@ async fn assert_standard_outputs(root: &std::path::Path) {
     }
 }
 
+async fn assert_log_redaction_and_success(root: &std::path::Path) {
+    let log = tokio::fs::read_to_string(root.join("logs").join("indexing-engine.log"))
+        .await
+        .expect("log");
+    assert!(log.contains("index run started"));
+    assert!(log.contains("index completed"));
+    assert!(!log.contains("super-secret-key"));
+}
+
 async fn table_ids(root: &std::path::Path, table: &str) -> BTreeSet<String> {
     let provider = ParquetTableProvider::new(root.join("output")).expect("provider");
     let dataframe = provider.read_dataframe(table).await.expect("read table");
@@ -324,6 +537,23 @@ async fn table_ids(root: &std::path::Path, table: &str) -> BTreeSet<String> {
         .expect("id column")
         .str()
         .expect("id strings")
+        .iter()
+        .flatten()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn entity_titles(root: &std::path::Path) -> BTreeSet<String> {
+    let provider = ParquetTableProvider::new(root.join("output")).expect("provider");
+    let dataframe = provider
+        .read_dataframe("entities")
+        .await
+        .expect("read entities");
+    dataframe
+        .column("title")
+        .expect("title column")
+        .str()
+        .expect("title strings")
         .iter()
         .flatten()
         .map(ToOwned::to_owned)
@@ -348,6 +578,14 @@ async fn lancedb_count(root: &std::path::Path, embedding_name: &str) -> usize {
 }
 
 async fn patch_settings(root: &std::path::Path, server_uri: &str) {
+    patch_settings_with_max_gleanings(root, server_uri, 0).await;
+}
+
+async fn patch_settings_with_max_gleanings(
+    root: &std::path::Path,
+    server_uri: &str,
+    max_gleanings: usize,
+) {
     let path = root.join("settings.yaml");
     let settings = tokio::fs::read_to_string(&path).await.expect("settings");
     let settings = settings
@@ -356,10 +594,116 @@ async fn patch_settings(root: &std::path::Path, server_uri: &str) {
             &format!("api_key: ${{GRAPHRAG_API_KEY}}\n    api_base: {server_uri}/v1"),
         )
         .replace("vector_size: 3072", "vector_size: 4")
-        .replace("max_gleanings: 1", "max_gleanings: 0");
+        .replace(
+            "max_gleanings: 1",
+            &format!("max_gleanings: {max_gleanings}"),
+        );
     tokio::fs::write(path, settings)
         .await
         .expect("patch settings");
+}
+
+async fn apply_cli_preflight_case(root: &std::path::Path, case: CliPreflightCase) {
+    let path = root.join("settings.yaml");
+    let settings = tokio::fs::read_to_string(&path).await.expect("settings");
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&settings).expect("settings yaml");
+    for (yaml_path, replacement) in cli_preflight_mutations(case) {
+        set_yaml(&mut value, &yaml_path, replacement);
+    }
+    tokio::fs::write(
+        path,
+        serde_yaml::to_string(&value).expect("serialize settings"),
+    )
+    .await
+    .expect("write settings");
+}
+
+fn cli_preflight_mutations(case: CliPreflightCase) -> Vec<(Vec<&'static str>, serde_yaml::Value)> {
+    let string = |value: &str| serde_yaml::Value::String(value.to_owned());
+    match case {
+        CliPreflightCase::InvalidRegex => vec![(vec!["input", "file_pattern"], string("["))],
+        CliPreflightCase::UnsupportedProvider => vec![(
+            vec![
+                "completion_models",
+                "default_completion_model",
+                "model_provider",
+            ],
+            string("azure"),
+        )],
+        CliPreflightCase::UnsupportedAuth => vec![(
+            vec![
+                "completion_models",
+                "default_completion_model",
+                "auth_method",
+            ],
+            string("azure_managed_identity"),
+        )],
+        CliPreflightCase::UnsupportedRetry => vec![(
+            vec![
+                "completion_models",
+                "default_completion_model",
+                "retry",
+                "type",
+            ],
+            string("constant"),
+        )],
+        CliPreflightCase::UnsupportedInput => vec![(vec!["input", "type"], string("csv"))],
+        CliPreflightCase::UnsupportedInputStorage => {
+            vec![(vec!["input_storage", "type"], string("blob"))]
+        }
+        CliPreflightCase::UnsupportedOutputStorage => {
+            vec![(vec!["output_storage", "type"], string("blob"))]
+        }
+        CliPreflightCase::UnsupportedCacheStorage => {
+            vec![(vec!["cache", "storage", "type"], string("memory"))]
+        }
+        CliPreflightCase::UnsupportedReportingStorage => {
+            vec![(vec!["reporting", "type"], string("memory"))]
+        }
+        CliPreflightCase::UnsafeOutputRoot => {
+            vec![(vec!["output_storage", "base_dir"], string("."))]
+        }
+        CliPreflightCase::OutputAncestorOfLogs => vec![
+            (vec!["output_storage", "base_dir"], string("logs")),
+            (vec!["reporting", "base_dir"], string("logs/index")),
+        ],
+        CliPreflightCase::UnknownWorkflow => vec![(
+            vec!["workflows"],
+            serde_yaml::Value::Sequence(vec![string("not_a_workflow")]),
+        )],
+        CliPreflightCase::MissingClaimsModel => vec![
+            (
+                vec!["extract_claims", "enabled"],
+                serde_yaml::Value::Bool(true),
+            ),
+            (
+                vec!["extract_claims", "completion_model_id"],
+                string("missing_claim_model"),
+            ),
+        ],
+        CliPreflightCase::InvalidTokenizer => {
+            vec![(
+                vec!["chunking", "encoding_model"],
+                string("definitely-not-an-encoding"),
+            )]
+        }
+    }
+}
+
+fn set_yaml(value: &mut serde_yaml::Value, path: &[&str], replacement: serde_yaml::Value) {
+    let mut current = value;
+    for segment in &path[..path.len().saturating_sub(1)] {
+        current = current
+            .as_mapping_mut()
+            .expect("mapping")
+            .entry(serde_yaml::Value::String((*segment).to_owned()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(Mapping::default()));
+    }
+    let leaf = path.last().expect("leaf");
+    current
+        .as_mapping_mut()
+        .expect("mapping")
+        .insert(serde_yaml::Value::String((*leaf).to_owned()), replacement);
 }
 
 fn init_project(root: &std::path::Path) {
@@ -404,7 +748,14 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
          Acme<|>5)##(\"relationship\"<|>ALICE<|>BOB<|>Alice and Bob collaborated on Project \
          Atlas<|>4)##<|COMPLETE|>"
             .to_owned()
-    } else if last.contains("Return output as a well-formed JSON-formatted string") {
+    } else {
+        chat_content_for_non_extraction(last)
+    };
+    chat_response(&content)
+}
+
+fn chat_content_for_non_extraction(last: &str) -> String {
+    if last.contains("Return output as a well-formed JSON-formatted string") {
         json!({
             "title": "Alice, Bob, and Acme",
             "summary": "Alice, Bob, and Acme form a connected work community.",
@@ -420,7 +771,10 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
         .to_string()
     } else {
         "A concise summary of the provided descriptions.".to_owned()
-    };
+    }
+}
+
+fn chat_response(content: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "id": "chatcmpl-test",
         "object": "chat.completion",
@@ -433,6 +787,45 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
         }],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     }))
+}
+
+fn chat_responder_with_gleaning(request: &Request) -> ResponseTemplate {
+    let body = request.body_json::<Value>().expect("chat request json");
+    let messages = body["messages"].as_array().expect("messages");
+    let last = messages
+        .last()
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    let content = if last.contains("MANY entities and relationships") {
+        "(\"entity\"<|>BOB<|>person<|>Bob manages Acme)##(\"relationship\"<|>BOB<|>ACME<|>Bob \
+         manages Acme<|>5)##<|COMPLETE|>"
+            .to_owned()
+    } else if last.contains("single letter Y or N") {
+        "N".to_owned()
+    } else if last.contains("Given a text document") {
+        "(\"entity\"<|>ALICE<|>person<|>Alice works for \
+         Acme)##(\"entity\"<|>ACME<|>organization<|>Acme employs \
+         Alice)##(\"relationship\"<|>ALICE<|>ACME<|>Alice works for Acme<|>5)##"
+            .to_owned()
+    } else {
+        chat_content_for_non_extraction(last)
+    };
+    chat_response(&content)
+}
+
+fn request_last_message_contains(needle: &str) -> impl FnMut(&wiremock::Request) -> bool + '_ {
+    move |request| {
+        request
+            .body_json::<Value>()
+            .ok()
+            .and_then(|body| {
+                body["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .and_then(|message| message["content"].as_str().map(str::to_owned))
+            })
+            .is_some_and(|content| content.contains(needle))
+    }
 }
 
 fn embedding_responder(request: &Request) -> ResponseTemplate {

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_yaml::Value as YamlValue;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -75,36 +76,188 @@ pub const PROMPT_ASSETS: &[(&str, &str)] = &[
 ///
 /// Returns an error when the root cannot be created or managed files cannot be written.
 pub async fn init_project(args: &InitArgs) -> Result<()> {
-    let root = normalize_existing_parent(&args.root)?;
-    let settings = root.join("settings.yaml");
-    if tokio::fs::try_exists(&settings)
-        .await
-        .map_err(|source| CliError::Io {
-            operation: "check settings",
-            path: settings.clone(),
-            source,
-        })?
-        && !args.force
-    {
-        return Err(CliError::AlreadyInitialized { root });
-    }
+    let plan = InitPlan::build(args).await?;
+    execute_plan(&plan).await?;
 
-    create_dir(&root).await?;
-    create_dir(&root.join("input")).await?;
-    create_dir(&root.join("prompts")).await?;
-
-    let settings_content = SETTINGS
-        .replace("__COMPLETION_MODEL__", &args.model)
-        .replace("__EMBEDDING_MODEL__", &args.embedding);
-    write_managed_file(&settings, &settings_content, true).await?;
-    write_managed_file(&root.join(".env"), DOTENV, args.force).await?;
-
-    for (name, content) in PROMPT_ASSETS {
-        write_managed_file(&root.join("prompts").join(name), content, args.force).await?;
-    }
-
-    println!("Initialized GraphLoom project at {}", root.display());
+    println!("Initialized GraphLoom project at {}", plan.root.display());
     Ok(())
+}
+
+#[derive(Debug)]
+struct InitPlan {
+    root: PathBuf,
+    directories: Vec<PathBuf>,
+    files: Vec<ManagedFilePlan>,
+}
+
+#[derive(Debug)]
+struct ManagedFilePlan {
+    path: PathBuf,
+    content: String,
+    overwrite: bool,
+}
+
+impl InitPlan {
+    async fn build(args: &InitArgs) -> Result<Self> {
+        validate_model_argument("model", &args.model)?;
+        validate_model_argument("embedding", &args.embedding)?;
+        let root = normalize_existing_parent(&args.root)?;
+        reject_symlink_ancestors(&root).await?;
+        reject_symlink(&root).await?;
+        let settings = root.join("settings.yaml");
+        if tokio::fs::try_exists(&settings)
+            .await
+            .map_err(|source| CliError::Io {
+                operation: "check settings",
+                path: settings.clone(),
+                source,
+            })?
+            && !args.force
+        {
+            return Err(CliError::AlreadyInitialized { root });
+        }
+
+        let settings_content = render_settings(&args.model, &args.embedding)?;
+        let mut plan = Self {
+            root: root.clone(),
+            directories: vec![root.clone(), root.join("input"), root.join("prompts")],
+            files: vec![
+                ManagedFilePlan {
+                    path: settings,
+                    content: settings_content,
+                    overwrite: true,
+                },
+                ManagedFilePlan {
+                    path: root.join(".env"),
+                    content: DOTENV.to_owned(),
+                    overwrite: args.force,
+                },
+            ],
+        };
+        plan.files
+            .extend(PROMPT_ASSETS.iter().map(|(name, content)| ManagedFilePlan {
+                path: root.join("prompts").join(name),
+                content: (*content).to_owned(),
+                overwrite: args.force,
+            }));
+        plan.preflight().await?;
+        Ok(plan)
+    }
+
+    async fn preflight(&self) -> Result<()> {
+        for directory in &self.directories {
+            preflight_directory(directory).await?;
+        }
+        for file in &self.files {
+            preflight_managed_file(file).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn execute_plan(plan: &InitPlan) -> Result<()> {
+    for directory in &plan.directories {
+        create_dir(directory).await?;
+    }
+    for file in &plan.files {
+        write_managed_file(&file.path, &file.content, file.overwrite).await?;
+    }
+    Ok(())
+}
+
+fn validate_model_argument(name: &str, value: &str) -> Result<()> {
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(CliError::InvalidModel {
+            model_id: name.to_owned(),
+            message: "model names must not contain NUL or control characters".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn render_settings(model: &str, embedding: &str) -> Result<String> {
+    let mut value: YamlValue =
+        serde_yaml::from_str(SETTINGS).map_err(|source| CliError::ConfigParse {
+            path: PathBuf::from("<built-in settings.yaml>"),
+            source: Box::new(source),
+        })?;
+    set_yaml_path(
+        &mut value,
+        &["completion_models", "default_completion_model", "model"],
+        model,
+    )?;
+    set_yaml_path(
+        &mut value,
+        &["embedding_models", "default_embedding_model", "model"],
+        embedding,
+    )?;
+    serde_yaml::to_string(&value).map_err(|source| CliError::ConfigParse {
+        path: PathBuf::from("<built-in settings.yaml>"),
+        source: Box::new(source),
+    })
+}
+
+fn set_yaml_path(value: &mut YamlValue, path: &[&str], replacement: &str) -> Result<()> {
+    let mut current = value;
+    for segment in &path[..path.len().saturating_sub(1)] {
+        current = current
+            .get_mut(*segment)
+            .ok_or_else(|| CliError::InvalidRoot {
+                path: PathBuf::from("<built-in settings.yaml>"),
+                message: format!("missing settings key {segment}"),
+            })?;
+    }
+    let leaf = path.last().copied().ok_or_else(|| CliError::InvalidRoot {
+        path: PathBuf::from("<built-in settings.yaml>"),
+        message: "empty settings key path".to_owned(),
+    })?;
+    let Some(slot) = current.get_mut(leaf) else {
+        return Err(CliError::InvalidRoot {
+            path: PathBuf::from("<built-in settings.yaml>"),
+            message: format!("missing settings key {leaf}"),
+        });
+    };
+    *slot = YamlValue::String(replacement.to_owned());
+    Ok(())
+}
+
+async fn preflight_directory(path: &Path) -> Result<()> {
+    reject_symlink_ancestors(path).await?;
+    reject_symlink(path).await?;
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(CliError::InvalidRoot {
+            path: path.to_path_buf(),
+            message: "expected directory path".to_owned(),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CliError::Io {
+            operation: "stat directory",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+async fn preflight_managed_file(file: &ManagedFilePlan) -> Result<()> {
+    if let Some(parent) = file.path.parent() {
+        reject_symlink_ancestors(parent).await?;
+        reject_symlink(parent).await?;
+    }
+    reject_symlink(&file.path).await?;
+    match tokio::fs::metadata(&file.path).await {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(CliError::InvalidRoot {
+            path: file.path.clone(),
+            message: "refusing to overwrite non-file managed path".to_owned(),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CliError::Io {
+            operation: "stat managed file",
+            path: file.path.clone(),
+            source,
+        }),
+    }
 }
 
 async fn create_dir(path: &Path) -> Result<()> {
@@ -306,6 +459,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_write_model_names_with_yaml_safe_serialization() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let completion = "vendor:model#v1 \"quoted\"";
+        let embedding = "embed:model#v2 [brackets]";
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: completion.to_owned(),
+            embedding: embedding.to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+
+        let settings = tokio::fs::read_to_string(tempdir.path().join("settings.yaml"))
+            .await
+            .expect("settings");
+        let config: crate::GraphRagConfig = serde_yaml::from_str(&settings).expect("config");
+        assert_eq!(
+            config.completion_models["default_completion_model"].model,
+            completion
+        );
+        assert_eq!(
+            config.embedding_models["default_embedding_model"].model,
+            embedding
+        );
+        assert_eq!(config.output_storage.base_dir, "output");
+        assert_eq!(config.input_storage.base_dir, "input");
+        assert_eq!(
+            config.extract_graph.prompt.as_deref(),
+            Some("prompts/extract_graph.txt")
+        );
+        assert!(config.sections.contains_key("local_search"));
+        assert!(config.sections.contains_key("global_search"));
+        assert!(config.sections.contains_key("drift_search"));
+        assert!(config.sections.contains_key("basic_search"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_control_character_model_name_without_side_effects() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("project");
+        let error = init_project(&InitArgs {
+            root: root.clone(),
+            model: "bad\nmodel".to_owned(),
+            embedding: "embedding".to_owned(),
+            force: false,
+        })
+        .await
+        .expect_err("control characters should fail");
+
+        assert!(error.to_string().contains("control"));
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
     async fn test_should_fail_when_already_initialized_without_force() {
         let tempdir = TempDir::new().expect("tempdir");
         let settings = tempdir.path().join("settings.yaml");
@@ -461,6 +669,15 @@ mod tests {
             .await
             .expect_err("symlink target should fail");
         assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            tokio::fs::read_to_string(&external)
+                .await
+                .expect("external"),
+            "external"
+        );
+        assert!(!tempdir.path().join(".env").exists());
+        assert!(!tempdir.path().join("input").exists());
+        assert!(!tempdir.path().join("prompts").exists());
     }
 
     #[cfg(unix)]
@@ -475,5 +692,61 @@ mod tests {
             .await
             .expect_err("symlink parent should fail");
         assert!(error.to_string().contains("symlink"));
+        assert!(!tempdir.path().join("settings.yaml").exists());
+        assert!(!tempdir.path().join(".env").exists());
+        assert!(
+            tokio::fs::read_dir(external.path())
+                .await
+                .expect("external prompts")
+                .next_entry()
+                .await
+                .expect("read external")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_root_without_side_effects() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        let project = external.path().join("project");
+        tokio::fs::create_dir(&project).await.expect("project");
+        let link = tempdir.path().join("project-link");
+        std::os::unix::fs::symlink(&project, &link).expect("symlink");
+
+        let error = init_project(&args(&link, false))
+            .await
+            .expect_err("symlink root should fail");
+        assert!(error.to_string().contains("symlink"));
+        assert!(!project.join("input").exists());
+        assert!(!project.join("prompts").exists());
+        assert!(!project.join("settings.yaml").exists());
+        assert!(!project.join(".env").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_input_directory_without_side_effects() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("input")).expect("symlink");
+
+        let error = init_project(&args(tempdir.path(), false))
+            .await
+            .expect_err("symlink input should fail");
+        assert!(error.to_string().contains("symlink"));
+        assert!(!tempdir.path().join("settings.yaml").exists());
+        assert!(!tempdir.path().join(".env").exists());
+        assert!(!tempdir.path().join("prompts").exists());
+        assert!(
+            tokio::fs::read_dir(external.path())
+                .await
+                .expect("external input")
+                .next_entry()
+                .await
+                .expect("read external")
+                .is_none()
+        );
     }
 }

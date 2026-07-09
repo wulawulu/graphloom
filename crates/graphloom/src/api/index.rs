@@ -9,6 +9,7 @@ use std::{
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunStats, Result, WorkflowCallbacks,
     WorkflowFunctionOutput,
+    config::load::{ValidationMode, validate_index_project},
     runtime::{build_runtime, prepare_full_index},
 };
 
@@ -67,9 +68,14 @@ pub async fn build_index(
     let started = Instant::now();
     let cache_enabled = matches!(options.cache_mode, CacheMode::Configured);
     let project = crate::project::LoadedProject::from_config(options.project_root, config)?;
+    tracing::info!(project_root = %project.root.display(), "validating index configuration");
+    validate_index_project(&project, ValidationMode::Full).await?;
+    tracing::info!(project_root = %project.root.display(), "preparing full index");
     prepare_full_index(&project).await?;
+    tracing::info!(project_root = %project.root.display(), "building indexing runtime");
     let mut runtime = build_runtime(&project, cache_enabled, options.callbacks).await?;
     tracing::info!(project_root = %project.root.display(), "index run started");
+    tracing::info!(project_root = %project.root.display(), "running indexing pipeline");
     let outputs = runtime
         .pipeline
         .run(&runtime.config, &mut runtime.context)

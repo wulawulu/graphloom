@@ -1,8 +1,14 @@
 //! Project configuration paths.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path, PathBuf},
+};
 
-use crate::{GraphLoomError, GraphRagConfig, Result};
+use crate::{
+    CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
+    FINALIZE_GRAPH_WORKFLOW, GraphLoomError, GraphRagConfig, Result,
+};
 
 /// Loaded `GraphLoom` project.
 #[derive(Debug, Clone)]
@@ -114,20 +120,42 @@ impl ProjectPaths {
         Ok(())
     }
 
-    /// Resolve configured prompt paths that are expected to exist.
+    /// Resolve configured prompt paths used by active workflows.
     #[must_use]
-    pub fn prompt_paths(&self, config: &GraphRagConfig) -> Vec<PathBuf> {
-        [
-            config.extract_graph.prompt.as_deref(),
-            config.summarize_descriptions.prompt.as_deref(),
-            config.extract_claims.prompt.as_deref(),
-            config.community_reports.graph_prompt.as_deref(),
-            config.community_reports.text_prompt.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|path| resolve_path(&self.root, path))
-        .collect()
+    pub fn active_prompt_paths(
+        &self,
+        config: &GraphRagConfig,
+        active: &BTreeSet<String>,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if active.contains(EXTRACT_GRAPH_WORKFLOW) {
+            if let Some(path) = config.extract_graph.prompt.as_deref() {
+                paths.push(resolve_path(&self.root, path));
+            }
+            if let Some(path) = config.summarize_descriptions.prompt.as_deref() {
+                paths.push(resolve_path(&self.root, path));
+            }
+        }
+        if active.contains(FINALIZE_GRAPH_WORKFLOW)
+            && let Some(path) = config.summarize_descriptions.prompt.as_deref()
+        {
+            paths.push(resolve_path(&self.root, path));
+        }
+        if active.contains(EXTRACT_COVARIATES_WORKFLOW)
+            && config.extract_claims.enabled
+            && let Some(path) = config.extract_claims.prompt.as_deref()
+        {
+            paths.push(resolve_path(&self.root, path));
+        }
+        if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
+            if let Some(path) = config.community_reports.graph_prompt.as_deref() {
+                paths.push(resolve_path(&self.root, path));
+            }
+            if let Some(path) = config.community_reports.text_prompt.as_deref() {
+                paths.push(resolve_path(&self.root, path));
+            }
+        }
+        paths
     }
 }
 

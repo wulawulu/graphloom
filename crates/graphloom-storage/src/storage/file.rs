@@ -43,6 +43,29 @@ impl FileStorage {
         })
     }
 
+    /// Create a storage rooted at an existing directory without creating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata cannot be read or the path is not a directory.
+    pub fn existing(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        let metadata = root.metadata().map_err(|source| StorageError::Filesystem {
+            path: root.clone(),
+            source,
+        })?;
+        if !metadata.is_dir() {
+            return Err(StorageError::InvalidPath {
+                path: root.display().to_string(),
+                reason: "storage root must be a directory",
+            });
+        }
+        Ok(Self {
+            root,
+            namespace: PathBuf::new(),
+        })
+    }
+
     fn logical_path(&self, name: &str) -> Result<PathBuf> {
         Ok(self
             .root

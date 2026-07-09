@@ -6,11 +6,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use graphloom_llm::TiktokenTokenizer;
+use graphloom_storage::{FileStorage, Storage};
 use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    GraphLoomError, GraphRagConfig, Result, WorkflowRegistry,
+    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
+    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, FINALIZE_GRAPH_WORKFLOW,
+    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphLoomError, GraphRagConfig,
+    LOAD_INPUT_DOCUMENTS_WORKFLOW, Result, WorkflowRegistry,
     project::{LoadedProject, ProjectPaths},
     register_step9_workflows,
 };
@@ -265,22 +270,32 @@ pub async fn validate_project(project: &LoadedProject, skip_optional: bool) -> R
     validate_optional(project).await
 }
 
+/// Validate an index project before building or dry-running an index.
+///
+/// # Errors
+///
+/// Returns an error for unsupported, unsafe, or incomplete indexing settings.
+pub async fn validate_index_project(project: &LoadedProject, mode: ValidationMode) -> Result<()> {
+    validate_project(project, matches!(mode, ValidationMode::SkipOptional)).await
+}
+
+/// Validation depth for index requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationMode {
+    /// Validate all preflight checks that can run without model calls or output mutation.
+    Full,
+    /// Skip optional existence/model/tokenizer checks while retaining safety checks.
+    SkipOptional,
+}
+
 fn validate_required(project: &LoadedProject) -> Result<()> {
     validate_storage("input", &project.config.input_storage.storage_type)?;
     validate_storage("output", &project.config.output_storage.storage_type)?;
-    validate_storage("cache storage", &project.config.cache.storage.storage_type)?;
+    validate_storage("cache", &project.config.cache.storage.storage_type)?;
     validate_reporting(&project.config.reporting.reporting_type)?;
     validate_input(&project.config.input.input_type)?;
     validate_cache(&project.config.cache.cache_type)?;
     project.paths.validate_destructive_paths()?;
-    project
-        .config
-        .validate_embed_text()
-        .map_err(|message| GraphLoomError::InvalidModel {
-            model_id: project.config.embed_text.embedding_model_id.clone(),
-            message,
-        })?;
-
     let mut registry = WorkflowRegistry::new();
     register_step9_workflows(&mut registry);
     registry
@@ -292,15 +307,26 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
 }
 
 async fn validate_optional(project: &LoadedProject) -> Result<()> {
-    let completion_models = referenced_completion_models(&project.config);
+    let active = active_workflows(&project.config);
+    let completion_models = referenced_completion_models(&project.config, &active);
     for model_id in completion_models {
         let model = require_model(&project.config.completion_models, &model_id)?;
         validate_model(&model_id, model)?;
     }
-    let embedding_model_id = project.config.embed_text.embedding_model_id.clone();
-    let embedding_model = require_model(&project.config.embedding_models, &embedding_model_id)?;
-    validate_model(&embedding_model_id, embedding_model)?;
-    for path in project.paths.prompt_paths(&project.config) {
+    if active.contains(GENERATE_TEXT_EMBEDDINGS_WORKFLOW) {
+        project
+            .config
+            .validate_embed_text()
+            .map_err(|message| GraphLoomError::InvalidModel {
+                model_id: project.config.embed_text.embedding_model_id.clone(),
+                message,
+            })?;
+        let embedding_model_id = project.config.embed_text.embedding_model_id.clone();
+        let embedding_model = require_model(&project.config.embedding_models, &embedding_model_id)?;
+        validate_model(&embedding_model_id, embedding_model)?;
+    }
+    validate_chunking_if_needed(project, &active)?;
+    for path in project.paths.active_prompt_paths(&project.config, &active) {
         if !tokio::fs::try_exists(&path)
             .await
             .map_err(|source| GraphLoomError::Io {
@@ -312,13 +338,14 @@ async fn validate_optional(project: &LoadedProject) -> Result<()> {
             return Err(GraphLoomError::MissingPrompt { path });
         }
     }
-    if !tokio::fs::try_exists(&project.paths.input_dir)
-        .await
-        .map_err(|source| GraphLoomError::Io {
-            operation: "check input directory",
-            path: project.paths.input_dir.clone(),
-            source,
-        })?
+    if active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW)
+        && !tokio::fs::try_exists(&project.paths.input_dir)
+            .await
+            .map_err(|source| GraphLoomError::Io {
+                operation: "check input directory",
+                path: project.paths.input_dir.clone(),
+                source,
+            })?
     {
         return Err(GraphLoomError::MissingInput {
             message: format!(
@@ -327,16 +354,18 @@ async fn validate_optional(project: &LoadedProject) -> Result<()> {
             ),
         });
     }
-    let file_pattern = Regex::new(&project.config.input.file_pattern).map_err(|source| {
-        GraphLoomError::InvalidModel {
-            model_id: "input.file_pattern".to_owned(),
-            message: source.to_string(),
+    if active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW) {
+        let file_pattern = Regex::new(&project.config.input.file_pattern).map_err(|source| {
+            GraphLoomError::InvalidModel {
+                model_id: "input.file_pattern".to_owned(),
+                message: source.to_string(),
+            }
+        })?;
+        if input_file_count(&project.paths.input_dir, &file_pattern).await? == 0 {
+            return Err(GraphLoomError::MissingInput {
+                message: "no matching input files found".to_owned(),
+            });
         }
-    })?;
-    if input_file_count(&project.paths.input_dir, &file_pattern).await? == 0 {
-        return Err(GraphLoomError::MissingInput {
-            message: "no matching input files found".to_owned(),
-        });
     }
     Ok(())
 }
@@ -353,15 +382,59 @@ fn require_model<'a>(
         })
 }
 
-fn referenced_completion_models(config: &GraphRagConfig) -> BTreeSet<String> {
+fn referenced_completion_models(
+    config: &GraphRagConfig,
+    active: &BTreeSet<String>,
+) -> BTreeSet<String> {
     let mut models = BTreeSet::new();
-    models.insert(config.extract_graph.completion_model_id.clone());
-    models.insert(config.summarize_descriptions.completion_model_id.clone());
-    models.insert(config.community_reports.completion_model_id.clone());
-    if config.extract_claims.enabled {
+    if active.contains(EXTRACT_GRAPH_WORKFLOW) {
+        models.insert(config.extract_graph.completion_model_id.clone());
+        models.insert(config.summarize_descriptions.completion_model_id.clone());
+    }
+    if active.contains(FINALIZE_GRAPH_WORKFLOW) {
+        models.insert(config.summarize_descriptions.completion_model_id.clone());
+    }
+    if active.contains(EXTRACT_COVARIATES_WORKFLOW) && config.extract_claims.enabled {
         models.insert(config.extract_claims.completion_model_id.clone());
     }
+    if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
+        models.insert(config.community_reports.completion_model_id.clone());
+    }
     models
+}
+
+fn active_workflows(config: &GraphRagConfig) -> BTreeSet<String> {
+    config.workflow_order().into_iter().collect()
+}
+
+fn validate_chunking_if_needed(project: &LoadedProject, active: &BTreeSet<String>) -> Result<()> {
+    if ![
+        CREATE_BASE_TEXT_UNITS_WORKFLOW,
+        EXTRACT_GRAPH_WORKFLOW,
+        CREATE_COMMUNITY_REPORTS_WORKFLOW,
+        GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+    ]
+    .iter()
+    .any(|workflow| active.contains(*workflow))
+    {
+        return Ok(());
+    }
+    if project.config.chunking.overlap >= project.config.chunking.size.get() {
+        return Err(GraphLoomError::InvalidModel {
+            model_id: "chunking".to_owned(),
+            message: format!(
+                "overlap {} must be smaller than size {}",
+                project.config.chunking.overlap, project.config.chunking.size,
+            ),
+        });
+    }
+    TiktokenTokenizer::new(&project.config.chunking.encoding_model).map_err(|source| {
+        GraphLoomError::InvalidModel {
+            model_id: "chunking.encoding_model".to_owned(),
+            message: source.to_string(),
+        }
+    })?;
+    Ok(())
 }
 
 fn validate_model(model_id: &str, model: &graphloom_llm::ModelConfig) -> Result<()> {
@@ -420,49 +493,12 @@ fn validate_cache(cache_type: &str) -> Result<()> {
 }
 
 async fn input_file_count(root: &Path, file_pattern: &Regex) -> Result<usize> {
-    let mut count = 0usize;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let mut entries =
-            tokio::fs::read_dir(&path)
-                .await
-                .map_err(|source| GraphLoomError::Io {
-                    operation: "read input directory",
-                    path: path.clone(),
-                    source,
-                })?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|source| GraphLoomError::Io {
-                operation: "read input directory entry",
-                path: path.clone(),
-                source,
-            })?
-        {
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|source| GraphLoomError::Io {
-                    operation: "read input file type",
-                    path: entry.path(),
-                    source,
-                })?;
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file()
-                && entry
-                    .path()
-                    .strip_prefix(root)
-                    .ok()
-                    .and_then(Path::to_str)
-                    .is_some_and(|path| file_pattern.is_match(path))
-            {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-    Ok(count)
+    let storage = FileStorage::existing(root)?;
+    let files = storage.list("").await?;
+    Ok(files
+        .iter()
+        .filter(|name| file_pattern.is_match(name))
+        .count())
 }
 
 /// Return a redacted summary of a config.
@@ -689,6 +725,82 @@ embedding_models:
             .await
             .expect_err("txt pattern should not match");
         assert!(error.to_string().contains("no matching input files"));
+    }
+
+    #[tokio::test]
+    async fn test_should_match_input_pattern_against_storage_logical_path() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::create_dir_all(tempdir.path().join("input").join("subdir"))
+            .await
+            .expect("subdir");
+        tokio::fs::write(
+            tempdir
+                .path()
+                .join("input")
+                .join("subdir")
+                .join("document.txt"),
+            "Alice",
+        )
+        .await
+        .expect("nested input");
+
+        project.config.input.file_pattern = "^subdir/.*\\.txt$".to_owned();
+        validate_project(&project, false)
+            .await
+            .expect("logical path pattern should match");
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_only_active_workflow_dependencies() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.workflows = vec![
+            "load_input_documents".to_owned(),
+            "create_base_text_units".to_owned(),
+            "create_final_documents".to_owned(),
+        ];
+        project.config.completion_models.clear();
+        project.config.embedding_models.clear();
+
+        validate_project(&project, false)
+            .await
+            .expect("prefix workflows should not require LLM models");
+
+        project.config.workflows.push("extract_graph".to_owned());
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("extract_graph should require its model");
+        assert!(error.to_string().contains("default_completion_model"));
+    }
+
+    #[tokio::test]
+    async fn test_should_require_embedding_model_only_when_embeddings_are_active() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.workflows = crate::workflows::STEP8_WORKFLOWS
+            .iter()
+            .map(|workflow| (*workflow).to_owned())
+            .collect();
+        project.config.embedding_models.clear();
+        validate_project(&project, false)
+            .await
+            .expect("step8 should not require embedding model");
+
+        project
+            .config
+            .workflows
+            .push("generate_text_embeddings".to_owned());
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("step9 should require embedding model");
+        assert!(error.to_string().contains("default_embedding_model"));
     }
 
     #[tokio::test]

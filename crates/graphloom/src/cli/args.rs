@@ -52,9 +52,9 @@ pub struct InitArgs {
     pub force: bool,
 }
 
-/// Indexing method.
+/// CLI indexing method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum IndexMethod {
+pub enum IndexMethodArg {
     /// Standard full indexing pipeline.
     Standard,
 }
@@ -71,7 +71,7 @@ pub struct IndexArgs {
     pub root: PathBuf,
     /// Indexing method.
     #[arg(short = 'm', long = "method", default_value = "standard")]
-    pub method: String,
+    pub method: IndexMethodArg,
     /// Print more detailed progress.
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,

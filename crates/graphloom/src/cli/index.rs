@@ -8,12 +8,22 @@ use crate::{
     PipelineRunStats, WorkflowCallbacks,
     api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_index},
     cli::{
-        args::IndexArgs,
+        args::{IndexArgs, IndexMethodArg},
         callbacks::ConsoleWorkflowCallbacks,
         error::{CliError, Result},
     },
-    config::load::{load_project_config, redacted_config_summary, validate_project},
+    config::load::{
+        ValidationMode, load_project_config, redacted_config_summary, validate_index_project,
+    },
 };
+
+impl From<IndexMethodArg> for IndexingMethod {
+    fn from(value: IndexMethodArg) -> Self {
+        match value {
+            IndexMethodArg::Standard => Self::Standard,
+        }
+    }
+}
 
 /// Execute `graphloom index`.
 ///
@@ -21,13 +31,17 @@ use crate::{
 ///
 /// Returns a config, runtime, or pipeline error.
 pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
-    if args.method != "standard" {
-        return Err(CliError::UnsupportedMethod {
-            method: args.method.clone(),
-        });
-    }
     let project = load_project_config(&args.root).await?;
-    validate_project(&project, args.skip_validation).await?;
+    let method = IndexingMethod::from(args.method);
+    validate_index_project(
+        &project,
+        if args.skip_validation {
+            ValidationMode::SkipOptional
+        } else {
+            ValidationMode::Full
+        },
+    )
+    .await?;
     if args.dry_run {
         let summary = redacted_config_summary(&project.config)?;
         println!("Dry run for {}", project.root.display());
@@ -56,7 +70,7 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
         project.config,
         BuildIndexOptions {
             project_root: project.root,
-            method: IndexingMethod::Standard,
+            method,
             cache_mode: if args.cache_enabled() {
                 CacheMode::Configured
             } else {
@@ -99,7 +113,12 @@ async fn init_logging(
         .with(file_layer);
     Ok(match tracing::subscriber::set_global_default(subscriber) {
         Ok(()) => Some(guard),
-        Err(_) => None,
+        Err(source) => {
+            drop(guard);
+            return Err(CliError::RuntimeBuild {
+                source: Box::new(source),
+            });
+        }
     })
 }
 
@@ -127,7 +146,7 @@ mod tests {
         let tempdir = TempDir::new().expect("tempdir");
         let error = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),
-            method: "fast".to_owned(),
+            method: IndexMethodArg::Standard,
             verbose: false,
             dry_run: false,
             cache: true,
@@ -135,13 +154,9 @@ mod tests {
             skip_validation: true,
         })
         .await
-        .expect_err("fast is unsupported");
+        .expect_err("missing settings should fail before indexing");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported indexing method fast")
-        );
+        assert!(error.to_string().contains("no settings"));
     }
 
     #[tokio::test]
@@ -170,7 +185,7 @@ mod tests {
 
         let result = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),
-            method: "standard".to_owned(),
+            method: IndexMethodArg::Standard,
             verbose: false,
             dry_run: true,
             cache: true,

@@ -6,7 +6,7 @@ pub mod error;
 pub mod index;
 pub mod init;
 
-pub use args::{Cli, Command, IndexArgs, IndexMethod, InitArgs};
+pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs};
 pub use error::{CliError, Result};
 pub use index::run as run_index;
 pub use init::init_project;
