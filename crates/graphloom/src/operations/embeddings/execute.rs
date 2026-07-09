@@ -52,6 +52,7 @@ pub(crate) async fn embed_text_rows(
     cache: Option<Arc<dyn Cache>>,
 ) -> Result<EmbeddingBatchOutput> {
     validate_config(config)?;
+    validate_source_ids(rows, &config.embedding_name)?;
     let mut output = EmbeddingBatchOutput {
         attempted_rows: rows.len(),
         ..EmbeddingBatchOutput::default()
@@ -78,25 +79,12 @@ pub(crate) async fn embed_text_rows(
     results.sort_by_key(|result| result.index);
 
     let vectors_by_row = collect_row_vectors(rows.len(), &results)?;
-    let mut ids = BTreeSet::new();
     for (row_index, vectors) in vectors_by_row.into_iter().enumerate() {
         let Some(vector) = reconstitute_vectors(vectors, config, row_index)? else {
             output.skipped_rows = output.skipped_rows.saturating_add(1);
             continue;
         };
         let row = &rows[row_index];
-        if row.id.is_empty() {
-            return Err(invalid_data(format!(
-                "{} source row id must not be empty",
-                config.embedding_name
-            )));
-        }
-        if !ids.insert(row.id.as_str()) {
-            return Err(invalid_data(format!(
-                "{} duplicate source id {} in one flush",
-                config.embedding_name, row.id
-            )));
-        }
         output.documents.push(VectorDocument {
             id: row.id.clone(),
             vector,
@@ -130,6 +118,24 @@ fn validate_config(config: &EmbeddingOperationConfig) -> Result<()> {
         return Err(invalid_data(
             "expected_vector_size must be greater than zero",
         ));
+    }
+    Ok(())
+}
+
+fn validate_source_ids(rows: &[EmbeddingSourceRow], embedding_name: &str) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    for row in rows {
+        if row.id.is_empty() {
+            return Err(invalid_data(format!(
+                "{embedding_name} source row id must not be empty"
+            )));
+        }
+        if !ids.insert(row.id.as_str()) {
+            return Err(invalid_data(format!(
+                "{embedding_name} duplicate source id {}",
+                row.id
+            )));
+        }
     }
     Ok(())
 }
@@ -414,6 +420,7 @@ mod tests {
     use async_trait::async_trait;
     use graphloom_cache::MemoryCache;
     use graphloom_llm::{EmbeddingModel, LlmError, Usage};
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -563,6 +570,172 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1, 1]
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_duplicate_source_ids_before_model_or_cache_use() {
+        for rows in [
+            vec![
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: "first".to_owned(),
+                },
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: "second".to_owned(),
+                },
+            ],
+            vec![
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: "normal".to_owned(),
+                },
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: String::new(),
+                },
+            ],
+            vec![
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: String::new(),
+                },
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: "normal".to_owned(),
+                },
+            ],
+            vec![
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: String::new(),
+                },
+                EmbeddingSourceRow {
+                    id: "duplicate".to_owned(),
+                    text: "   ".to_owned(),
+                },
+            ],
+        ] {
+            let cache = Arc::new(MemoryCache::new());
+            let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
+            let request = EmbeddingRequest {
+                input: rows.iter().map(|row| row.text.clone()).collect(),
+                dimensions: None,
+                cache_namespace: Some("text_embedding".to_owned()),
+            };
+            let key = embedding_request_cache_key(&request).expect("cache key");
+
+            let error = embed_text_rows(
+                &rows,
+                &operation_config(),
+                model.clone(),
+                Arc::new(CharTokenizer),
+                Some(cache.clone()),
+            )
+            .await
+            .expect_err("duplicate id should fail");
+
+            assert!(error.to_string().contains("text_unit_text"));
+            assert!(error.to_string().contains("duplicate"));
+            assert_eq!(model.calls(), 0);
+            assert!(!cache.has(&key).await.expect("cache has should work"));
+        }
+    }
+
+    #[derive(Debug)]
+    struct OutOfOrderEmbeddingModel {
+        first_started: Notify,
+        second_done: Notify,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl OutOfOrderEmbeddingModel {
+        fn new() -> Self {
+            Self {
+                first_started: Notify::new(),
+                second_done: Notify::new(),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            }
+        }
+
+        fn enter(&self) {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(current, Ordering::SeqCst);
+        }
+
+        fn exit(&self) {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingModel for OutOfOrderEmbeddingModel {
+        async fn embed(
+            &self,
+            request: EmbeddingRequest,
+        ) -> graphloom_llm::Result<EmbeddingResponse> {
+            self.enter();
+            let input = request.input.first().cloned().unwrap_or_default();
+            let vector = if input == "first" {
+                self.first_started.notify_one();
+                self.second_done.notified().await;
+                vec![1.0, 0.0]
+            } else if input == "second" {
+                self.first_started.notified().await;
+                self.second_done.notify_one();
+                vec![0.0, 1.0]
+            } else {
+                vec![0.5, 0.5]
+            };
+            self.exit();
+            Ok(EmbeddingResponse {
+                embeddings: vec![vector],
+                usage: None,
+                request_id: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_restore_row_vector_mapping_after_out_of_order_batches() {
+        let model = Arc::new(OutOfOrderEmbeddingModel::new());
+        let rows = [
+            EmbeddingSourceRow {
+                id: "first-id".to_owned(),
+                text: "first".to_owned(),
+            },
+            EmbeddingSourceRow {
+                id: "second-id".to_owned(),
+                text: "second".to_owned(),
+            },
+        ];
+
+        let output = embed_text_rows(
+            &rows,
+            &EmbeddingOperationConfig {
+                batch_size: 1,
+                batch_max_tokens: 8,
+                concurrency: 2,
+                ..operation_config()
+            },
+            model.clone(),
+            Arc::new(CharTokenizer),
+            None,
+        )
+        .await
+        .expect("embedding should succeed");
+
+        assert_eq!(model.max_in_flight(), 2);
+        assert_eq!(output.documents[0].id, "first-id");
+        assert_eq!(output.documents[0].vector, vec![1.0, 0.0]);
+        assert_eq!(output.documents[1].id, "second-id");
+        assert_eq!(output.documents[1].vector, vec![0.0, 1.0]);
     }
 
     #[tokio::test]

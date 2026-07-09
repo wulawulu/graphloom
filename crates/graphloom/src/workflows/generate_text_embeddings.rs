@@ -1,6 +1,9 @@
 //! Text embedding generation workflow.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -287,9 +290,17 @@ async fn process_field_inner(
         index_name: schema.index_name.clone(),
     };
     let mut completed = 0usize;
+    let mut seen_source_ids = BTreeSet::new();
 
     while let Some(row) = rows.next().await {
-        buffer.push(source_row(field, indices, &row?)?);
+        let source_row = source_row(field, indices, &row?)?;
+        if !seen_source_ids.insert(source_row.id.clone()) {
+            return Err(invalid_data(
+                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                &format!("{} duplicate source id {}", field.name, source_row.id),
+            ));
+        }
+        buffer.push(source_row);
         if buffer.len() >= flush_size {
             flush_buffer(
                 context,
@@ -629,6 +640,23 @@ mod tests {
         )
         .expect_err("float description should fail");
         assert!(error.to_string().contains("description"));
+
+        let community = fields
+            .get(COMMUNITY_FULL_CONTENT_EMBEDDING)
+            .expect("community field");
+        let community_indices = SourceIndices {
+            id: 0,
+            text_columns: BTreeMap::from([("full_content", 1)]),
+        };
+        let error = source_row(
+            community,
+            &community_indices,
+            &row(vec![AnyValue::String("report-1"), AnyValue::Int64(42)]),
+        )
+        .expect_err("int full_content should fail");
+        assert!(error.to_string().contains("community_full_content"));
+        assert!(error.to_string().contains("full_content"));
+        assert!(error.to_string().contains("Int64"));
     }
 
     #[test]

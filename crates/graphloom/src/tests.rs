@@ -952,6 +952,263 @@ async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configur
     assert!(error.to_string().contains("embedding model"));
 }
 
+#[tokio::test]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "VectorStoreConfig is non_exhaustive outside graphloom-vectors and must be \
+              customized after Default"
+)]
+async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_overwrite() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "text_units",
+            df!(
+                "id" => ["duplicate", "duplicate"],
+                "text" => ["first", "second"],
+            )
+            .expect("text units dataframe should build"),
+        )
+        .await
+        .expect("text_units should write");
+
+    let tempdir = TempDir::new().expect("tempdir should create");
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_embedding_model("default_embedding_model", model.clone());
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    let mut vector_store = VectorStoreConfig::default();
+    vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
+    vector_store.vector_size = 2;
+    let mut config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        concurrent_requests: 1,
+        snapshots: crate::SnapshotsConfig {
+            embeddings: true,
+            ..Default::default()
+        },
+        vector_store,
+        ..Default::default()
+    };
+    config.embed_text.batch_size = 1;
+    config.embed_text.names = vec![crate::TEXT_UNIT_TEXT_EMBEDDING.to_owned()];
+    config.embedding_models.clear();
+
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step9 pipeline should build");
+    let error = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect_err("duplicate id should fail");
+
+    assert!(error.to_string().contains("text_unit_text"));
+    assert!(error.to_string().contains("duplicate"));
+    assert_eq!(model.inputs(), vec!["first".to_owned()]);
+
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("store should reopen");
+    let schema = config
+        .vector_store
+        .schema_for(crate::TEXT_UNIT_TEXT_EMBEDDING);
+    let document = store
+        .get_by_id(&schema, "duplicate")
+        .await
+        .expect("get duplicate")
+        .expect("first flush should remain committed");
+    assert_eq!(document.vector, vec![1.0, 0.0]);
+
+    let snapshots = provider
+        .child(Some("embeddings"))
+        .expect("snapshot namespace should open");
+    assert!(
+        !snapshots
+            .has(crate::TEXT_UNIT_TEXT_EMBEDDING)
+            .await
+            .expect("snapshot has should work")
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "VectorStoreConfig is non_exhaustive outside graphloom-vectors and must be \
+              customized after Default"
+)]
+async fn test_should_allow_same_source_id_in_different_embedding_fields() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "text_units",
+            df!("id" => ["shared-id"], "text" => ["text"]).expect("text units"),
+        )
+        .await
+        .expect("text_units should write");
+    provider
+        .write_dataframe(
+            "entities",
+            df!(
+                "id" => ["shared-id"],
+                "title" => ["Alice"],
+                "description" => ["Engineer"],
+            )
+            .expect("entities"),
+        )
+        .await
+        .expect("entities should write");
+
+    let tempdir = TempDir::new().expect("tempdir should create");
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = PipelineRunContext::new(provider)
+        .with_embedding_model("default_embedding_model", model.clone());
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    let mut vector_store = VectorStoreConfig::default();
+    vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
+    vector_store.vector_size = 2;
+    let mut config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        vector_store,
+        ..Default::default()
+    };
+    config.embed_text.names = vec![
+        crate::TEXT_UNIT_TEXT_EMBEDDING.to_owned(),
+        crate::ENTITY_DESCRIPTION_EMBEDDING.to_owned(),
+    ];
+    config.embedding_models.clear();
+
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step9 pipeline should build");
+    pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("same id across fields should be valid");
+
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("store should reopen");
+    let text_schema = config
+        .vector_store
+        .schema_for(crate::TEXT_UNIT_TEXT_EMBEDDING);
+    let entity_schema = config
+        .vector_store
+        .schema_for(crate::ENTITY_DESCRIPTION_EMBEDDING);
+    assert!(
+        store
+            .get_by_id(&text_schema, "shared-id")
+            .await
+            .expect("get text")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_by_id(&entity_schema, "shared-id")
+            .await
+            .expect("get entity")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "VectorStoreConfig is non_exhaustive outside graphloom-vectors and must be \
+              customized after Default"
+)]
+async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "text_units",
+            df!("id" => ["tu-1"], "text" => ["hello"]).expect("first text units"),
+        )
+        .await
+        .expect("first text_units should write");
+
+    let tempdir = TempDir::new().expect("tempdir should create");
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    let mut vector_store = VectorStoreConfig::default();
+    vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
+    vector_store.vector_size = 2;
+    let mut config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        snapshots: crate::SnapshotsConfig {
+            embeddings: true,
+            ..Default::default()
+        },
+        vector_store,
+        ..Default::default()
+    };
+    config.embed_text.names = vec![crate::TEXT_UNIT_TEXT_EMBEDDING.to_owned()];
+    config.embedding_models.clear();
+
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step9 pipeline should build");
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_embedding_model("default_embedding_model", model);
+    pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("first run should succeed");
+
+    let snapshots = provider
+        .child(Some("embeddings"))
+        .expect("snapshot namespace should open");
+    let first = snapshots
+        .read_dataframe(crate::TEXT_UNIT_TEXT_EMBEDDING)
+        .await
+        .expect("first snapshot should exist");
+    assert_eq!(first.height(), 1);
+    assert_eq!(
+        first
+            .column("id")
+            .expect("id")
+            .str()
+            .expect("id string")
+            .get(0),
+        Some("tu-1")
+    );
+
+    provider
+        .write_dataframe(
+            "text_units",
+            df!("id" => ["tu-2"], "text" => ["   "]).expect("second text units"),
+        )
+        .await
+        .expect("second text_units should write");
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = PipelineRunContext::new(provider.clone())
+        .with_embedding_model("default_embedding_model", model);
+    pipeline
+        .run(&config, &mut context)
+        .await
+        .expect("second run should succeed");
+
+    let second = snapshots
+        .read_dataframe(crate::TEXT_UNIT_TEXT_EMBEDDING)
+        .await
+        .expect("second snapshot should exist");
+    assert_eq!(second.height(), 0);
+    assert_eq!(
+        second
+            .get_column_names()
+            .iter()
+            .map(|name| name.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["id".to_owned(), "embedding".to_owned()]
+    );
+    assert_eq!(
+        second.column("embedding").expect("embedding").dtype(),
+        &DataType::List(Box::new(DataType::Float32))
+    );
+}
+
 #[derive(Debug, Default)]
 struct CapturingEmbeddingModel {
     inputs: Mutex<Vec<String>>,
@@ -975,7 +1232,7 @@ impl EmbeddingModel for CapturingEmbeddingModel {
                 .input
                 .iter()
                 .map(|input| {
-                    if input.contains("Alice") {
+                    if input == "first" || input.contains("Alice") {
                         vec![1.0, 0.0]
                     } else {
                         vec![0.0, 1.0]
