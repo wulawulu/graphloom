@@ -16,10 +16,16 @@ const DEFAULT_EXTRACT_CLAIMS_MODEL_INSTANCE_NAME: &str = "extract_claims";
 const DEFAULT_COMMUNITY_REPORTS_MODEL_INSTANCE_NAME: &str = "community_reporting";
 const DEFAULT_CLAIM_DESCRIPTION: &str =
     "Any claims or facts that could be relevant to information discovery.";
-const DEFAULT_INPUT_TYPE: &str = "file";
+const DEFAULT_INPUT_TYPE: &str = "text";
 const DEFAULT_FILE_PATTERN: &str = r".*\.txt$";
 const DEFAULT_TEXT_COLUMN: &str = "text";
 const DEFAULT_TITLE_COLUMN: &str = "title";
+const DEFAULT_FILE_STORAGE_TYPE: &str = "file";
+const DEFAULT_JSON_CACHE_TYPE: &str = "json";
+const DEFAULT_INPUT_BASE_DIR: &str = "input";
+const DEFAULT_OUTPUT_BASE_DIR: &str = "output";
+const DEFAULT_CACHE_BASE_DIR: &str = "cache";
+const DEFAULT_REPORTING_BASE_DIR: &str = "logs";
 const DEFAULT_MAX_GLEANINGS: usize = 1;
 const DEFAULT_MAX_SUMMARY_LENGTH: usize = 500;
 const DEFAULT_MAX_INPUT_TOKENS: usize = 4_000;
@@ -87,6 +93,142 @@ impl Default for InputConfig {
             text_column: DEFAULT_TEXT_COLUMN.to_owned(),
             title_column: DEFAULT_TITLE_COLUMN.to_owned(),
             metadata: Vec::new(),
+        }
+    }
+}
+
+fn default_file_storage_type() -> String {
+    DEFAULT_FILE_STORAGE_TYPE.to_owned()
+}
+
+fn default_json_cache_type() -> String {
+    DEFAULT_JSON_CACHE_TYPE.to_owned()
+}
+
+fn default_input_base_dir() -> String {
+    DEFAULT_INPUT_BASE_DIR.to_owned()
+}
+
+fn default_output_base_dir() -> String {
+    DEFAULT_OUTPUT_BASE_DIR.to_owned()
+}
+
+fn default_cache_base_dir() -> String {
+    DEFAULT_CACHE_BASE_DIR.to_owned()
+}
+
+fn default_reporting_base_dir() -> String {
+    DEFAULT_REPORTING_BASE_DIR.to_owned()
+}
+
+/// File/blob/cosmos storage configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct StorageConfig {
+    /// Storage provider type.
+    #[serde(
+        rename = "type",
+        alias = "storage_type",
+        default = "default_file_storage_type"
+    )]
+    pub storage_type: String,
+    /// Base directory or provider-specific root.
+    #[serde(alias = "base_dir")]
+    pub base_dir: String,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            storage_type: default_file_storage_type(),
+            base_dir: default_input_base_dir(),
+        }
+    }
+}
+
+impl StorageConfig {
+    fn output_default() -> Self {
+        Self {
+            storage_type: default_file_storage_type(),
+            base_dir: default_output_base_dir(),
+        }
+    }
+}
+
+/// Reporting sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ReportingConfig {
+    /// Reporting provider type.
+    #[serde(
+        rename = "type",
+        alias = "reporting_type",
+        default = "default_file_storage_type"
+    )]
+    pub reporting_type: String,
+    /// Reporting base directory.
+    #[serde(alias = "base_dir", default = "default_reporting_base_dir")]
+    pub base_dir: String,
+}
+
+impl Default for ReportingConfig {
+    fn default() -> Self {
+        Self {
+            reporting_type: default_file_storage_type(),
+            base_dir: default_reporting_base_dir(),
+        }
+    }
+}
+
+/// Cache storage configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CacheStorageConfig {
+    /// Cache storage provider type.
+    #[serde(
+        rename = "type",
+        alias = "storage_type",
+        default = "default_file_storage_type"
+    )]
+    pub storage_type: String,
+    /// Cache storage base directory.
+    #[serde(alias = "base_dir", default = "default_cache_base_dir")]
+    pub base_dir: String,
+}
+
+impl Default for CacheStorageConfig {
+    fn default() -> Self {
+        Self {
+            storage_type: default_file_storage_type(),
+            base_dir: default_cache_base_dir(),
+        }
+    }
+}
+
+/// LLM cache configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CacheConfig {
+    /// Cache provider type.
+    #[serde(
+        rename = "type",
+        alias = "cache_type",
+        default = "default_json_cache_type"
+    )]
+    pub cache_type: String,
+    /// Cache storage.
+    pub storage: CacheStorageConfig,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_type: default_json_cache_type(),
+            storage: CacheStorageConfig::default(),
         }
     }
 }
@@ -359,6 +501,16 @@ pub struct GraphRagConfig {
     pub concurrent_requests: usize,
     /// Input config.
     pub input: InputConfig,
+    /// Input storage config.
+    #[serde(alias = "input_storage")]
+    pub input_storage: StorageConfig,
+    /// Output storage config.
+    #[serde(alias = "output_storage", default = "StorageConfig::output_default")]
+    pub output_storage: StorageConfig,
+    /// Reporting config.
+    pub reporting: ReportingConfig,
+    /// Cache config.
+    pub cache: CacheConfig,
     /// Chunking config.
     pub chunking: ChunkingConfig,
     /// Configured workflow order. Empty means standard order.
@@ -398,6 +550,10 @@ impl Default for GraphRagConfig {
             embedding_models: BTreeMap::new(),
             concurrent_requests: DEFAULT_CONCURRENT_REQUESTS,
             input: InputConfig::default(),
+            input_storage: StorageConfig::default(),
+            output_storage: StorageConfig::output_default(),
+            reporting: ReportingConfig::default(),
+            cache: CacheConfig::default(),
             chunking: ChunkingConfig::default(),
             workflows: Vec::new(),
             extract_graph: ExtractGraphConfig::default(),

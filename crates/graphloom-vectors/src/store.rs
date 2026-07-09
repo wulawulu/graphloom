@@ -34,6 +34,13 @@ pub trait VectorStore: Send + Sync + Debug {
     /// Returns an error when the provider cannot create or validate the index.
     async fn ensure_index(&self, schema: &VectorIndexSchema) -> Result<()>;
 
+    /// Drop and recreate an index/table with the provided schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider cannot reset or recreate the index.
+    async fn reset_index(&self, schema: &VectorIndexSchema) -> Result<()>;
+
     /// Upsert vector documents into an index.
     ///
     /// # Errors

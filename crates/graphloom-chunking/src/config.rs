@@ -19,6 +19,7 @@ pub const DEFAULT_ENCODING_MODEL: &str = "o200k_base";
 #[non_exhaustive]
 pub enum ChunkerType {
     /// Strict token sliding-window chunking compatible with Microsoft `GraphRAG`.
+    #[serde(alias = "tokens")]
     #[default]
     TokenOverlap,
     /// Text-structure-aware chunking based on semantic text boundaries.
@@ -34,16 +35,19 @@ pub enum ChunkerType {
 #[non_exhaustive]
 pub struct ChunkingConfig {
     /// Chunker implementation to create.
-    #[serde(default)]
+    #[serde(rename = "type", alias = "chunker_type", default)]
     pub chunker_type: ChunkerType,
     /// Tokenizer encoding model.
     #[serde(default = "default_encoding_model")]
     pub encoding_model: String,
     /// Maximum tokens per chunk.
+    #[serde(default = "default_chunk_size")]
     pub size: NonZeroUsize,
     /// Overlap tokens between adjacent chunks.
+    #[serde(default)]
     pub overlap: usize,
     /// Metadata fields from the source document to prepend on each chunk.
+    #[serde(default)]
     pub prepend_metadata: Vec<String>,
 }
 
@@ -90,4 +94,8 @@ impl Default for ChunkingConfig {
 
 fn default_encoding_model() -> String {
     DEFAULT_ENCODING_MODEL.to_owned()
+}
+
+fn default_chunk_size() -> NonZeroUsize {
+    NonZeroUsize::new(1200).unwrap_or(NonZeroUsize::MIN)
 }

@@ -1,0 +1,625 @@
+//! Project config loading and validation.
+
+use std::{
+    collections::BTreeMap,
+    env,
+    path::{Path, PathBuf},
+};
+
+use graphloom::{GraphRagConfig, WorkflowRegistry, register_step9_workflows};
+use serde_json::Value;
+
+use crate::{
+    error::{CliError, Result},
+    project::{LoadedProject, ProjectPaths},
+};
+
+/// Load a project config from a root directory or concrete config file.
+///
+/// # Errors
+///
+/// Returns an error when settings are missing, environment substitution fails,
+/// or the config cannot be parsed.
+pub async fn load_project_config(root_or_config: impl AsRef<Path>) -> Result<LoadedProject> {
+    load_project_config_with_env(root_or_config.as_ref(), &BTreeMap::new()).await
+}
+
+/// Load a project config with extra environment values used by tests.
+///
+/// # Errors
+///
+/// Returns a load or parse error.
+pub async fn load_project_config_with_env(
+    root_or_config: &Path,
+    process_env: &BTreeMap<String, String>,
+) -> Result<LoadedProject> {
+    let config_path = find_config_path(root_or_config).await?;
+    let root = config_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let dotenv = read_dotenv(&root.join(".env")).await?;
+    let raw = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|source| CliError::Io {
+            operation: "read settings",
+            path: config_path.clone(),
+            source,
+        })?;
+    let expanded = substitute_env(&raw, &dotenv, process_env)?;
+    let mut config = parse_config(&config_path, &expanded)?;
+    let paths = ProjectPaths::resolve(&root, &config)?;
+    config.vector_store.db_uri = paths.vector_db_uri.to_string_lossy().to_string();
+    Ok(LoadedProject {
+        root: paths.root.clone(),
+        config_path,
+        config,
+        paths,
+    })
+}
+
+async fn find_config_path(root_or_config: &Path) -> Result<PathBuf> {
+    if root_or_config.is_file() {
+        return Ok(root_or_config.to_path_buf());
+    }
+    if !root_or_config.is_dir() {
+        return Err(CliError::InvalidRoot {
+            path: root_or_config.to_path_buf(),
+            message: "root must be a directory or settings file".to_owned(),
+        });
+    }
+    for name in ["settings.yaml", "settings.yml", "settings.json"] {
+        let path = root_or_config.join(name);
+        if tokio::fs::try_exists(&path)
+            .await
+            .map_err(|source| CliError::Io {
+                operation: "check settings",
+                path: path.clone(),
+                source,
+            })?
+        {
+            return Ok(path);
+        }
+    }
+    Err(CliError::MissingSettings {
+        root: root_or_config.to_path_buf(),
+    })
+}
+
+fn parse_config(path: &Path, raw: &str) -> Result<GraphRagConfig> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("yaml" | "yml") => serde_yaml::from_str(raw).map_err(|source| CliError::ConfigParse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }),
+        Some("json") => serde_json::from_str(raw).map_err(|source| CliError::ConfigParse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }),
+        _ => Err(CliError::UnsupportedConfigFormat {
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
+async fn read_dotenv(path: &Path) -> Result<BTreeMap<String, String>> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => {
+            return Err(CliError::Io {
+                operation: "read .env",
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    parse_dotenv(&raw)
+}
+
+fn parse_dotenv(raw: &str) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(CliError::DotenvParse {
+                line: index.saturating_add(1),
+            });
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(CliError::DotenvParse {
+                line: index.saturating_add(1),
+            });
+        }
+        values.insert(key.to_owned(), unquote(value.trim()));
+    }
+    Ok(values)
+}
+
+fn unquote(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'))
+    {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn substitute_env(
+    raw: &str,
+    dotenv: &BTreeMap<String, String>,
+    test_env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut output = String::with_capacity(raw.len());
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            output.push(chars[index]);
+            index = index.saturating_add(1);
+            continue;
+        }
+        let Some(next) = chars.get(index.saturating_add(1)).copied() else {
+            output.push('$');
+            break;
+        };
+        if next == '$' {
+            output.push('$');
+            index = index.saturating_add(2);
+            continue;
+        }
+        let (name, consumed) = if next == '{' {
+            let mut end = index.saturating_add(2);
+            while end < chars.len() && chars[end] != '}' {
+                end = end.saturating_add(1);
+            }
+            if end >= chars.len() {
+                output.push('$');
+                index = index.saturating_add(1);
+                continue;
+            }
+            (
+                chars[index.saturating_add(2)..end]
+                    .iter()
+                    .collect::<String>(),
+                end.saturating_sub(index).saturating_add(1),
+            )
+        } else if is_env_start(next) {
+            let mut end = index.saturating_add(1);
+            while end < chars.len() && is_env_continue(chars[end]) {
+                end = end.saturating_add(1);
+            }
+            (
+                chars[index.saturating_add(1)..end]
+                    .iter()
+                    .collect::<String>(),
+                end.saturating_sub(index),
+            )
+        } else {
+            output.push('$');
+            index = index.saturating_add(1);
+            continue;
+        };
+        output.push_str(&lookup_env(&name, dotenv, test_env)?);
+        index = index.saturating_add(consumed);
+    }
+    Ok(output)
+}
+
+fn is_env_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_env_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn lookup_env(
+    name: &str,
+    dotenv: &BTreeMap<String, String>,
+    test_env: &BTreeMap<String, String>,
+) -> Result<String> {
+    if let Some(value) = test_env.get(name) {
+        return Ok(value.clone());
+    }
+    if let Ok(value) = env::var(name) {
+        return Ok(value);
+    }
+    dotenv
+        .get(name)
+        .cloned()
+        .ok_or_else(|| CliError::MissingEnvironmentVariable {
+            name: name.to_owned(),
+        })
+}
+
+/// Validate config values required for standard indexing.
+///
+/// # Errors
+///
+/// Returns an error for unsupported or unsafe settings.
+pub async fn validate_project(project: &LoadedProject, skip_optional: bool) -> Result<()> {
+    validate_required(project)?;
+    if skip_optional {
+        return Ok(());
+    }
+    validate_optional(project).await
+}
+
+fn validate_required(project: &LoadedProject) -> Result<()> {
+    validate_storage("input", &project.config.input_storage.storage_type)?;
+    validate_storage("output", &project.config.output_storage.storage_type)?;
+    validate_storage("cache storage", &project.config.cache.storage.storage_type)?;
+    validate_reporting(&project.config.reporting.reporting_type)?;
+    validate_input(&project.config.input.input_type)?;
+    validate_cache(&project.config.cache.cache_type)?;
+    project.paths.validate_destructive_paths()?;
+    project
+        .config
+        .validate_embed_text()
+        .map_err(|message| CliError::InvalidModel {
+            model_id: project.config.embed_text.embedding_model_id.clone(),
+            message,
+        })?;
+
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    registry
+        .validate_names(&project.config.workflow_order())
+        .map_err(|source| CliError::RuntimeBuild {
+            source: Box::new(source),
+        })?;
+    Ok(())
+}
+
+async fn validate_optional(project: &LoadedProject) -> Result<()> {
+    for (model_id, model) in project
+        .config
+        .completion_models
+        .iter()
+        .chain(project.config.embedding_models.iter())
+    {
+        if !model.provider_type().eq_ignore_ascii_case("openai") {
+            return Err(CliError::UnsupportedProvider {
+                provider: model.provider_type().to_owned(),
+            });
+        }
+        if !model.auth_method.eq_ignore_ascii_case("api_key") {
+            return Err(CliError::UnsupportedAuthMethod {
+                auth_method: model.auth_method.clone(),
+            });
+        }
+        model
+            .validate_openai_compatible(model_id)
+            .map_err(|source| CliError::InvalidModel {
+                model_id: model_id.clone(),
+                message: source.to_string(),
+            })?;
+    }
+    require_model(
+        &project.config.completion_models,
+        &project.config.extract_graph.completion_model_id,
+    )?;
+    require_model(
+        &project.config.completion_models,
+        &project.config.summarize_descriptions.completion_model_id,
+    )?;
+    require_model(
+        &project.config.completion_models,
+        &project.config.community_reports.completion_model_id,
+    )?;
+    require_model(
+        &project.config.embedding_models,
+        &project.config.embed_text.embedding_model_id,
+    )?;
+    for path in project.paths.prompt_paths(&project.config) {
+        if !tokio::fs::try_exists(&path)
+            .await
+            .map_err(|source| CliError::Io {
+                operation: "check prompt",
+                path: path.clone(),
+                source,
+            })?
+        {
+            return Err(CliError::MissingPrompt { path });
+        }
+    }
+    if !tokio::fs::try_exists(&project.paths.input_dir)
+        .await
+        .map_err(|source| CliError::Io {
+            operation: "check input directory",
+            path: project.paths.input_dir.clone(),
+            source,
+        })?
+    {
+        return Err(CliError::MissingInput {
+            message: format!(
+                "input directory {} does not exist",
+                project.paths.input_dir.display()
+            ),
+        });
+    }
+    if input_file_count(&project.paths.input_dir).await? == 0 {
+        return Err(CliError::MissingInput {
+            message: "no matching input files found".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn require_model(
+    models: &BTreeMap<String, graphloom_llm::ModelConfig>,
+    model_id: &str,
+) -> Result<()> {
+    if models.contains_key(model_id) {
+        Ok(())
+    } else {
+        Err(CliError::InvalidModel {
+            model_id: model_id.to_owned(),
+            message: "model is not configured".to_owned(),
+        })
+    }
+}
+
+fn validate_storage(kind: &'static str, storage_type: &str) -> Result<()> {
+    if storage_type.eq_ignore_ascii_case("file") {
+        Ok(())
+    } else {
+        Err(CliError::UnsupportedStorage {
+            kind,
+            storage_type: storage_type.to_owned(),
+        })
+    }
+}
+
+fn validate_reporting(reporting_type: &str) -> Result<()> {
+    validate_storage("reporting", reporting_type)
+}
+
+fn validate_input(input_type: &str) -> Result<()> {
+    if input_type.eq_ignore_ascii_case("text") || input_type.eq_ignore_ascii_case("file") {
+        Ok(())
+    } else {
+        Err(CliError::UnsupportedInput {
+            input_type: input_type.to_owned(),
+        })
+    }
+}
+
+fn validate_cache(cache_type: &str) -> Result<()> {
+    if cache_type.eq_ignore_ascii_case("json") || cache_type.eq_ignore_ascii_case("none") {
+        Ok(())
+    } else {
+        Err(CliError::UnsupportedStorage {
+            kind: "cache",
+            storage_type: cache_type.to_owned(),
+        })
+    }
+}
+
+async fn input_file_count(root: &Path) -> Result<usize> {
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|source| CliError::Io {
+                operation: "read input directory",
+                path: path.clone(),
+                source,
+            })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|source| CliError::Io {
+            operation: "read input directory entry",
+            path: path.clone(),
+            source,
+        })? {
+            let file_type = entry.file_type().await.map_err(|source| CliError::Io {
+                operation: "read input file type",
+                path: entry.path(),
+                source,
+            })?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    == Some("txt")
+            {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Return a redacted summary of a config.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
+pub fn redacted_config_summary(config: &GraphRagConfig) -> Result<Value> {
+    let mut value = serde_json::to_value(config).map_err(|source| CliError::ConfigParse {
+        path: PathBuf::from("<config>"),
+        source: Box::new(source),
+    })?;
+    crate::error::redact_json(&mut value);
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{InitArgs, init_project};
+
+    #[tokio::test]
+    async fn test_should_load_initialized_yaml_without_changing_cwd() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "custom-chat".to_owned(),
+            embedding: "custom-embedding".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input write");
+        tokio::fs::write(
+            tempdir.path().join(".env"),
+            "GRAPHRAG_API_KEY=super-secret-key\n",
+        )
+        .await
+        .expect("dotenv write");
+
+        let cwd = std::env::current_dir().expect("cwd");
+        let project = load_project_config(tempdir.path()).await.expect("load");
+        assert_eq!(std::env::current_dir().expect("cwd after"), cwd);
+
+        assert_eq!(
+            project.config.completion_models["default_completion_model"].model,
+            "custom-chat"
+        );
+        assert_eq!(
+            project.config.embedding_models["default_embedding_model"].model,
+            "custom-embedding"
+        );
+        assert_eq!(
+            project.config.completion_models["default_completion_model"].provider_type(),
+            "openai"
+        );
+        assert_eq!(
+            project.config.completion_models["default_completion_model"].auth_method,
+            "api_key"
+        );
+        assert_eq!(project.config.input.input_type, "text");
+        assert_eq!(project.config.input_storage.base_dir, "input");
+        assert_eq!(project.config.output_storage.base_dir, "output");
+        assert_eq!(project.config.cache.storage.base_dir, "cache");
+        assert_eq!(project.config.reporting.base_dir, "logs");
+        assert_eq!(project.config.vector_store.vector_size, 3_072);
+        assert!(project.config.sections.contains_key("local_search"));
+        assert!(project.config.sections.contains_key("global_search"));
+        assert!(project.config.sections.contains_key("drift_search"));
+        assert!(project.config.sections.contains_key("basic_search"));
+        validate_project(&project, false).await.expect("validate");
+
+        let summary = redacted_config_summary(&project.config).expect("summary");
+        let text = serde_json::to_string(&summary).expect("summary json");
+        assert!(!text.contains("super-secret-key"));
+        assert!(text.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn test_should_support_yml_json_and_env_precedence() {
+        let tempdir = TempDir::new().expect("tempdir");
+        tokio::fs::write(
+            tempdir.path().join(".env"),
+            "GRAPHRAG_API_KEY=from-dotenv\n",
+        )
+        .await
+        .expect("dotenv");
+        tokio::fs::write(
+            tempdir.path().join("settings.yml"),
+            r"
+completion_models:
+  default_completion_model:
+    model_provider: openai
+    model: gpt
+    auth_method: api_key
+    api_key: $GRAPHRAG_API_KEY
+embedding_models:
+  default_embedding_model:
+    model_provider: openai
+    model: emb
+    auth_method: api_key
+    api_key: ${GRAPHRAG_API_KEY}
+",
+        )
+        .await
+        .expect("settings");
+        let mut env = BTreeMap::new();
+        env.insert("GRAPHRAG_API_KEY".to_owned(), "from-env".to_owned());
+        let yml = load_project_config_with_env(tempdir.path(), &env)
+            .await
+            .expect("load yml");
+        assert_eq!(
+            yml.config.completion_models["default_completion_model"]
+                .api_key
+                .as_deref(),
+            Some("from-env")
+        );
+
+        tokio::fs::remove_file(tempdir.path().join("settings.yml"))
+            .await
+            .expect("remove yml");
+        tokio::fs::write(
+            tempdir.path().join("settings.json"),
+            r#"{
+  "completion_models": {
+    "default_completion_model": {
+      "model_provider": "openai",
+      "model": "gpt",
+      "auth_method": "api_key",
+      "api_key": "${GRAPHRAG_API_KEY}"
+    }
+  },
+  "embedding_models": {
+    "default_embedding_model": {
+      "model_provider": "openai",
+      "model": "emb",
+      "auth_method": "api_key",
+      "api_key": "$GRAPHRAG_API_KEY"
+    }
+  }
+}"#,
+        )
+        .await
+        .expect("json");
+        let json = load_project_config_with_env(tempdir.path(), &BTreeMap::new())
+            .await
+            .expect("load json");
+        assert_eq!(
+            json.config.embedding_models["default_embedding_model"]
+                .api_key
+                .as_deref(),
+            Some("from-dotenv")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_on_missing_env_and_malformed_dotenv() {
+        let tempdir = TempDir::new().expect("tempdir");
+        tokio::fs::write(
+            tempdir.path().join("settings.yaml"),
+            "completion_models:\n  default_completion_model:\n    model: gpt\n    api_key: \
+             ${MISSING}\n",
+        )
+        .await
+        .expect("settings");
+        let error = load_project_config(tempdir.path())
+            .await
+            .expect_err("missing env");
+        assert!(error.to_string().contains("MISSING"));
+
+        tokio::fs::write(tempdir.path().join(".env"), "not-valid\n")
+            .await
+            .expect("dotenv");
+        let error = load_project_config(tempdir.path())
+            .await
+            .expect_err("bad dotenv");
+        assert!(error.to_string().contains("line 1"));
+    }
+}

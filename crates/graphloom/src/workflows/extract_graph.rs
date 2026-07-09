@@ -54,7 +54,7 @@ impl Workflow for ExtractGraphWorkflow {
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
-        let prompt_loader = PromptLoader::new(".");
+        let prompt_loader = PromptLoader::new(context.prompt_root());
         let concurrency = config.concurrent_requests.max(1);
 
         let extraction_prompt = config.extract_graph.prompt.clone();

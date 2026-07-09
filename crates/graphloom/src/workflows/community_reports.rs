@@ -75,7 +75,7 @@ impl Workflow for CreateCommunityReportsWorkflow {
             &config.community_reports.completion_model_id,
         );
         let tokenizer = TiktokenTokenizer::new(encoding_model)?;
-        let prompt_loader = PromptLoader::new(".");
+        let prompt_loader = PromptLoader::new(context.prompt_root());
         let rows = create_community_reports(
             model.as_ref(),
             &prompt_loader,

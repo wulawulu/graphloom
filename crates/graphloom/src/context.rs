@@ -1,6 +1,6 @@
 //! Runtime context shared by workflows.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use graphloom_cache::Cache;
 use graphloom_input::InputReader;
@@ -39,6 +39,8 @@ pub struct PipelineRunContext {
     pub state: BTreeMap<String, Value>,
     /// Input reader used by `load_input_documents`.
     pub input_reader: Option<Arc<dyn InputReader>>,
+    /// Project root used to resolve prompt paths.
+    pub project_root: Option<PathBuf>,
 }
 
 impl PipelineRunContext {
@@ -58,6 +60,7 @@ impl PipelineRunContext {
             callbacks: Arc::new(NoopWorkflowCallbacks),
             state: BTreeMap::new(),
             input_reader: None,
+            project_root: None,
         }
     }
 
@@ -102,5 +105,20 @@ impl PipelineRunContext {
     pub fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {
         self.vector_store = Some(vector_store);
         self
+    }
+
+    /// Attach a project root for prompt path resolution.
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: impl Into<PathBuf>) -> Self {
+        self.project_root = Some(project_root.into());
+        self
+    }
+
+    /// Return the prompt root, defaulting to current-directory semantics for library callers.
+    #[must_use]
+    pub fn prompt_root(&self) -> PathBuf {
+        self.project_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 }

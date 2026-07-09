@@ -162,12 +162,15 @@ fn test_should_match_graphrag_cache_key_for_multiline_message() {
 #[test]
 fn test_should_parse_graphrag_snake_case_model_config() {
     let config: ModelConfig = serde_json::from_value(serde_json::json!({
-        "type": "openai",
+        "model_provider": "openai",
         "model": "gpt-4o-mini",
+        "auth_method": "api_key",
         "api_key": "sk-test",
         "api_base": "https://example.test/v1",
-        "max_retries": 3,
-        "retry_strategy": "exponential_backoff",
+        "retry": {
+            "type": "exponential_backoff",
+            "max_retries": 3
+        },
         "tokens_per_minute": 1000,
         "requests_per_minute": 60,
         "encoding_model": "cl100k_base"
@@ -176,8 +179,28 @@ fn test_should_parse_graphrag_snake_case_model_config() {
 
     assert_eq!(config.api_key.as_deref(), Some("sk-test"));
     assert_eq!(config.api_base.as_deref(), Some("https://example.test/v1"));
-    assert_eq!(config.max_retries, 3);
+    assert_eq!(config.provider_type(), "openai");
+    assert_eq!(config.auth_method, "api_key");
+    assert_eq!(config.effective_retry_strategy(), "exponential_backoff");
+    assert_eq!(config.effective_max_retries(), 3);
     assert_eq!(config.encoding_model.as_deref(), Some("cl100k_base"));
+}
+
+#[test]
+fn test_should_parse_legacy_model_config_fields() {
+    let config: ModelConfig = serde_json::from_value(serde_json::json!({
+        "type": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-test",
+        "max_retries": 4,
+        "retry_strategy": "immediate"
+    }))
+    .expect("legacy config should parse");
+
+    assert_eq!(config.provider_type(), "openai");
+    assert_eq!(config.auth_method, "api_key");
+    assert_eq!(config.effective_retry_strategy(), "immediate");
+    assert_eq!(config.effective_max_retries(), 4);
 }
 
 #[test]
@@ -189,7 +212,8 @@ fn test_should_default_model_config_retries() {
     }))
     .expect("config should parse");
 
-    assert_eq!(config.max_retries, 1);
+    assert_eq!(config.effective_max_retries(), 1);
+    assert_eq!(config.effective_retry_strategy(), "exponential_backoff");
 }
 
 #[test]
@@ -203,6 +227,48 @@ fn test_should_reject_zero_model_config_retries() {
     .expect("config should parse");
 
     assert!(config.validate_openai_compatible("chat").is_err());
+}
+
+#[test]
+fn test_should_reject_unsupported_provider_auth_and_placeholder_key() {
+    let unsupported_provider: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "azure",
+        "model": "gpt",
+        "api_key": "sk-test"
+    }))
+    .expect("config");
+    assert!(
+        unsupported_provider
+            .validate_openai_compatible("chat")
+            .expect_err("azure unsupported")
+            .to_string()
+            .contains("only openai")
+    );
+
+    let unsupported_auth: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "openai",
+        "model": "gpt",
+        "auth_method": "azure_managed_identity",
+        "api_key": "sk-test"
+    }))
+    .expect("config");
+    assert!(
+        unsupported_auth
+            .validate_openai_compatible("chat")
+            .expect_err("auth unsupported")
+            .to_string()
+            .contains("only api_key")
+    );
+
+    let placeholder: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "openai",
+        "model": "gpt",
+        "auth_method": "api_key",
+        "api_key": "<API_KEY>"
+    }))
+    .expect("config");
+    assert!(placeholder.validate_openai_compatible("chat").is_err());
+    assert!(!format!("{placeholder:?}").contains("<API_KEY>"));
 }
 
 #[tokio::test]
@@ -228,6 +294,44 @@ async fn test_should_render_default_prompt_with_tera_values() {
 
     assert!(rendered.contains("Entity_types: PERSON"));
     assert!(rendered.contains("Text: Alice met Bob."));
+}
+
+#[tokio::test]
+async fn test_should_render_graphrag_format_prompt_file_relative_to_project_root() {
+    #[derive(Debug, Serialize)]
+    struct Values<'a> {
+        input_text: &'a str,
+        max_report_length: usize,
+    }
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let prompt_dir = tempdir.path().join("prompts");
+    tokio::fs::create_dir(&prompt_dir)
+        .await
+        .expect("prompt dir");
+    tokio::fs::write(
+        prompt_dir.join("community_report_graph.txt"),
+        "JSON example: {{\"title\":\"x\"}}\nText: {input_text}\nLimit: {max_report_length}",
+    )
+    .await
+    .expect("prompt write");
+
+    let loader = PromptLoader::new(tempdir.path());
+    let rendered = loader
+        .render(
+            crate::DefaultPrompt::CommunityReport,
+            Some(std::path::Path::new("prompts/community_report_graph.txt")),
+            &Values {
+                input_text: "Alice",
+                max_report_length: 12,
+            },
+        )
+        .await
+        .expect("prompt should render");
+
+    assert!(rendered.contains(r#"{"title":"x"}"#));
+    assert!(rendered.contains("Text: Alice"));
+    assert!(rendered.contains("Limit: 12"));
 }
 
 #[tokio::test]
@@ -274,12 +378,14 @@ fn model_config() -> ModelConfig {
     ModelConfig {
         provider_type: "openai".to_owned(),
         model: "gpt-4o-mini".to_owned(),
+        auth_method: "api_key".to_owned(),
         api_key: Some("sk-test".to_owned()),
         api_base: None,
         organization: None,
         timeout: None,
         max_retries: 1,
         retry_strategy: None,
+        retry: None,
         tokens_per_minute: None,
         requests_per_minute: None,
         encoding_model: Some("cl100k_base".to_owned()),

@@ -79,6 +79,18 @@ impl VectorStore for LanceDbVectorStore {
         Ok(())
     }
 
+    async fn reset_index(&self, schema: &VectorIndexSchema) -> Result<()> {
+        schema.validate()?;
+        if self.table_exists(&schema.index_name).await? {
+            self.connection.drop_table(&schema.index_name, &[]).await?;
+        }
+        self.connection
+            .create_empty_table(&schema.index_name, arrow_schema(schema)?)
+            .execute()
+            .await?;
+        Ok(())
+    }
+
     async fn upsert_documents(
         &self,
         schema: &VectorIndexSchema,
@@ -498,5 +510,72 @@ mod tests {
                 .vector,
             vec![0.0, 1.0]
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_reset_only_selected_lancedb_index() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let store = connect_store(&tempdir).await;
+        let reset_schema = schema("custom_text_units", 2);
+        let other_schema = schema("entity_description", 2);
+
+        store
+            .upsert_documents(
+                &reset_schema,
+                &[
+                    VectorDocument {
+                        id: "a".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "b".to_owned(),
+                        vector: vec![0.0, 1.0],
+                    },
+                ],
+            )
+            .await
+            .expect("seed reset index");
+        store
+            .upsert_documents(
+                &other_schema,
+                &[VectorDocument {
+                    id: "other".to_owned(),
+                    vector: vec![0.5, 0.5],
+                }],
+            )
+            .await
+            .expect("seed other index");
+        assert_eq!(store.count(&reset_schema).await.expect("count"), 2);
+
+        store
+            .reset_index(&reset_schema)
+            .await
+            .expect("reset selected index");
+        assert_eq!(store.count(&reset_schema).await.expect("reset count"), 0);
+        assert_eq!(store.count(&other_schema).await.expect("other count"), 1);
+
+        store
+            .upsert_documents(
+                &reset_schema,
+                &[VectorDocument {
+                    id: "c".to_owned(),
+                    vector: vec![0.25, 0.75],
+                }],
+            )
+            .await
+            .expect("write after reset");
+
+        let reopened = connect_store(&tempdir).await;
+        assert_eq!(reopened.count(&reset_schema).await.expect("count"), 1);
+        assert_eq!(
+            reopened
+                .get_by_id(&reset_schema, "c")
+                .await
+                .expect("get")
+                .expect("document")
+                .vector,
+            vec![0.25, 0.75]
+        );
+        assert_eq!(reopened.count(&other_schema).await.expect("other count"), 1);
     }
 }

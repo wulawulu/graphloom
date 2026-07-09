@@ -53,6 +53,16 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.chunking.overlap, 8);
     assert_eq!(config.chunking.prepend_metadata, vec!["title"]);
     assert_eq!(config.extract_graph.max_gleanings, 1);
+    assert_eq!(config.input.input_type, "text");
+    assert_eq!(config.input_storage.storage_type, "file");
+    assert_eq!(config.input_storage.base_dir, "input");
+    assert_eq!(config.output_storage.storage_type, "file");
+    assert_eq!(config.output_storage.base_dir, "output");
+    assert_eq!(config.reporting.reporting_type, "file");
+    assert_eq!(config.reporting.base_dir, "logs");
+    assert_eq!(config.cache.cache_type, "json");
+    assert_eq!(config.cache.storage.storage_type, "file");
+    assert_eq!(config.cache.storage.base_dir, "cache");
     assert_eq!(
         config.summarize_descriptions.model_instance_name,
         "summarize_descriptions",
@@ -74,6 +84,44 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.community_reports.max_input_length, 8_000);
     assert_eq!(config.sections["async_mode"], "asyncio");
     assert_eq!(config.sections["local_search"]["enabled"], true);
+}
+
+#[test]
+fn test_should_deserialize_graphrag_storage_cache_and_query_sections() {
+    let config = serde_yaml::from_str::<GraphRagConfig>(
+        r"
+input:
+  type: file
+input_storage:
+  type: file
+  base_dir: input_data
+output_storage:
+  type: file
+  base_dir: output_data
+reporting:
+  type: file
+  base_dir: log_data
+cache:
+  type: none
+  storage:
+    type: file
+    base_dir: cache_data
+local_search:
+  prompt: prompts/local_search_system_prompt.txt
+",
+    )
+    .expect("config should deserialize");
+
+    assert_eq!(config.input.input_type, "file");
+    assert_eq!(config.input_storage.base_dir, "input_data");
+    assert_eq!(config.output_storage.base_dir, "output_data");
+    assert_eq!(config.reporting.base_dir, "log_data");
+    assert_eq!(config.cache.cache_type, "none");
+    assert_eq!(config.cache.storage.base_dir, "cache_data");
+    assert_eq!(
+        config.sections["local_search"]["prompt"],
+        "prompts/local_search_system_prompt.txt"
+    );
 }
 
 #[test]

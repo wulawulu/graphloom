@@ -52,7 +52,7 @@ impl Workflow for ExtractCovariatesWorkflow {
             &config.extract_claims.model_instance_name,
             EXTRACT_COVARIATES_WORKFLOW,
         )?;
-        let prompt_loader = PromptLoader::new(".");
+        let prompt_loader = PromptLoader::new(context.prompt_root());
         let entity_types = default_claim_entity_types();
         let rows = extract_covariates(
             model.as_ref(),

@@ -35,9 +35,10 @@ pub mod workflows;
 
 pub use callbacks::{NoopWorkflowCallbacks, WorkflowCallbacks};
 pub use config::{
-    ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, ClusterGraphConfig, CommunityReportsConfig,
-    DEFAULT_EMBEDDINGS, ENTITY_DESCRIPTION_EMBEDDING, EmbedTextConfig, ExtractClaimsConfig,
-    ExtractGraphConfig, GraphRagConfig, InputConfig, SnapshotsConfig, SummarizeDescriptionsConfig,
+    ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig, CacheStorageConfig,
+    ClusterGraphConfig, CommunityReportsConfig, DEFAULT_EMBEDDINGS, ENTITY_DESCRIPTION_EMBEDDING,
+    EmbedTextConfig, ExtractClaimsConfig, ExtractGraphConfig, GraphRagConfig, InputConfig,
+    ReportingConfig, SnapshotsConfig, StorageConfig, SummarizeDescriptionsConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
 };
 pub use context::PipelineRunContext;

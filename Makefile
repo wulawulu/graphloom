@@ -4,6 +4,15 @@ build:
 test:
 	@cargo nextest run --all-features
 
+test-cli:
+	@cargo nextest run -p graphloom-cli --all-features
+
+test-integration:
+	@cargo nextest run -p graphloom-cli --test cli_integration
+
+test-all:
+	@cargo nextest run --all-features
+
 check-agent-sync:
 	@cmp -s CLAUDE.md AGENTS.md || { \
 		echo "AGENTS.md must stay in sync with CLAUDE.md"; \
@@ -30,4 +39,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test check-agent-sync release update-submodule
+.PHONY: build test test-cli test-integration test-all check-agent-sync release update-submodule

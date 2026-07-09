@@ -102,7 +102,7 @@ impl CompletionModel for OpenAiCompletionModel {
             provider_error(
                 &self.model_instance,
                 "completion",
-                self.config.max_retries,
+                self.config.effective_max_retries(),
                 source,
             )
         })?;
@@ -110,7 +110,7 @@ impl CompletionModel for OpenAiCompletionModel {
             provider_error(
                 &self.model_instance,
                 "completion",
-                self.config.max_retries,
+                self.config.effective_max_retries(),
                 source,
             )
         })?;
@@ -134,7 +134,7 @@ impl EmbeddingModel for OpenAiEmbeddingModel {
             provider_error(
                 &self.model_instance,
                 "embedding",
-                self.config.max_retries,
+                self.config.effective_max_retries(),
                 source,
             )
         })?;
@@ -147,7 +147,7 @@ impl EmbeddingModel for OpenAiEmbeddingModel {
                 provider_error(
                     &self.model_instance,
                     "embedding",
-                    self.config.max_retries,
+                    self.config.effective_max_retries(),
                     source,
                 )
             })?;
@@ -348,7 +348,7 @@ impl From<EmbeddingUsage> for Usage {
 fn openai_client(config: &ModelConfig, concurrent_requests: usize) -> Client<OpenAIConfig> {
     let client = Client::with_config(OpenAiModelConfig(config).into());
     let retry_layer = OpenAIRetryLayer::new(
-        usize::try_from(config.max_retries.saturating_sub(1)).unwrap_or(usize::MAX),
+        usize::try_from(config.effective_max_retries().saturating_sub(1)).unwrap_or(usize::MAX),
     );
     let concurrent_requests = concurrent_requests.max(1);
     let transport = ReqwestService::default();

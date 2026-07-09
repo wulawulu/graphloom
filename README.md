@@ -1,24 +1,158 @@
-![](https://github.com/tyrchen/rust-lib-template/workflows/build/badge.svg)
+# GraphLoom
 
-# graphloom
+GraphLoom is a Rust implementation compatible with Microsoft GraphRAG indexing.
+The current compatibility target is Microsoft GraphRAG 3.1.0.
 
-description of the crate
-
-## How to use it
+## Install
 
 ```bash
-$ cargo generate --git https://github.com/tyrchen/rust-lib-template
+cargo install --path crates/graphloom-cli
 ```
 
-## Agent support
+For development:
 
-Generated projects include agent-facing guidance for both Codex and Claude:
+```bash
+cargo run -p graphloom-cli -- --help
+```
 
-- `AGENTS.md` for Codex project instructions.
-- `.agents/skills/{spec,research,impl}` for Codex skills.
-- `CLAUDE.md` and `.claude/skills/{spec,research,impl}` for Claude Code compatibility.
+## Initialize a Project
 
-Have fun with this crate!
+```bash
+graphloom init --root ./demo
+```
+
+This creates:
+
+```text
+demo/
+├── settings.yaml
+├── .env
+├── input/
+└── prompts/
+```
+
+The default prompts are embedded in the binary and are based on Microsoft
+GraphRAG 3.1.0 prompt content under the MIT License.
+
+## API Key
+
+Edit:
+
+```text
+demo/.env
+```
+
+Set:
+
+```dotenv
+GRAPHRAG_API_KEY=<your API key>
+```
+
+Do not commit `.env` or API keys to git.
+
+## Input
+
+GraphLoom currently supports UTF-8 text input files:
+
+```bash
+echo "Alice works with Bob." > demo/input/document.txt
+```
+
+## Index
+
+```bash
+graphloom index --root ./demo
+```
+
+This runs the full standard indexing pipeline:
+
+```text
+load_input_documents
+create_base_text_units
+create_final_documents
+extract_graph
+finalize_graph
+extract_covariates
+create_communities
+create_final_text_units
+create_community_reports
+generate_text_embeddings
+```
+
+## Dry Run
+
+```bash
+graphloom index --root ./demo --dry-run
+```
+
+Dry run loads and parses project configuration, validates non-destructive
+settings, prints a redacted summary, and shows the workflow list. It does not
+call models, create output, create cache, create logs, connect LanceDB, or
+modify the current working directory.
+
+## Disable Cache
+
+```bash
+graphloom index --root ./demo --no-cache
+```
+
+`--no-cache` disables cache for the current run only. Existing cache files are
+not deleted.
+
+## Force Init
+
+```bash
+graphloom init --root ./demo --force
+```
+
+Force init overwrites `settings.yaml`, `.env`, and GraphLoom-managed default
+prompt files with matching names. It does not delete `input/`, user input
+files, unknown files under the project root, or extra prompt files.
+
+## Outputs
+
+Successful indexing writes:
+
+```text
+demo/output/documents.parquet
+demo/output/text_units.parquet
+demo/output/entities.parquet
+demo/output/relationships.parquet
+demo/output/communities.parquet
+demo/output/community_reports.parquet
+demo/output/lancedb/
+demo/cache/
+demo/logs/indexing-engine.log
+```
+
+`graphloom index` is a full rebuild. It clears validated output storage and
+resets GraphLoom-managed LanceDB vector indices before running the standard
+pipeline. Cache is preserved.
+
+## Current Support
+
+Supported:
+
+- standard indexing
+- UTF-8 text input
+- file storage
+- JSON file cache
+- OpenAI-compatible completion and embedding models
+- LanceDB vector storage
+
+Not yet supported:
+
+- query commands
+- update commands
+- prompt tuning
+- Azure OpenAI or Azure managed identity
+- blob storage, CosmosDB, or Azure AI Search
+- CSV, JSON, or JSONL input
+- Python compatibility tests
+
+The Parquet, settings, prompt, and LanceDB layouts are designed toward
+GraphRAG 3.1.0 compatibility. Python interoperability validation is intentionally
+left for a later step.
 
 ## License
 
