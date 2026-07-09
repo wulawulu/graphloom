@@ -35,11 +35,7 @@ pub(crate) fn resolve_completion_encoding_model<'a>(
     config: &'a GraphRagConfig,
     model_id: &str,
 ) -> &'a str {
-    config
-        .completion_models
-        .get(model_id)
-        .and_then(|model| model.encoding_model.as_deref())
-        .unwrap_or(config.chunking.encoding_model.as_str())
+    crate::config::effective_completion_encoding(config, model_id)
 }
 
 pub(crate) fn resolve_embedding_model(
@@ -71,9 +67,5 @@ pub(crate) fn resolve_embedding_encoding_model<'a>(
     config: &'a GraphRagConfig,
     model_id: &str,
 ) -> &'a str {
-    config
-        .embedding_models
-        .get(model_id)
-        .and_then(|model| model.encoding_model.as_deref())
-        .unwrap_or(config.chunking.encoding_model.as_str())
+    crate::config::effective_embedding_encoding(config, model_id)
 }

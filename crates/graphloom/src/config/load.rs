@@ -13,9 +13,9 @@ use serde_json::Value;
 
 use crate::{
     CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
-    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, FINALIZE_GRAPH_WORKFLOW,
-    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphLoomError, GraphRagConfig,
-    LOAD_INPUT_DOCUMENTS_WORKFLOW, Result, WorkflowRegistry,
+    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+    GraphLoomError, GraphRagConfig, LOAD_INPUT_DOCUMENTS_WORKFLOW, Result, WorkflowRegistry,
+    config::{effective_completion_encoding, effective_embedding_encoding},
     project::{LoadedProject, ProjectPaths},
     register_step9_workflows,
 };
@@ -391,9 +391,6 @@ fn referenced_completion_models(
         models.insert(config.extract_graph.completion_model_id.clone());
         models.insert(config.summarize_descriptions.completion_model_id.clone());
     }
-    if active.contains(FINALIZE_GRAPH_WORKFLOW) {
-        models.insert(config.summarize_descriptions.completion_model_id.clone());
-    }
     if active.contains(EXTRACT_COVARIATES_WORKFLOW) && config.extract_claims.enabled {
         models.insert(config.extract_claims.completion_model_id.clone());
     }
@@ -408,15 +405,15 @@ fn active_workflows(config: &GraphRagConfig) -> BTreeSet<String> {
 }
 
 fn validate_chunking_if_needed(project: &LoadedProject, active: &BTreeSet<String>) -> Result<()> {
-    if ![
+    let needs_chunking = [
         CREATE_BASE_TEXT_UNITS_WORKFLOW,
         EXTRACT_GRAPH_WORKFLOW,
         CREATE_COMMUNITY_REPORTS_WORKFLOW,
         GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
     ]
     .iter()
-    .any(|workflow| active.contains(*workflow))
-    {
+    .any(|workflow| active.contains(*workflow));
+    if !needs_chunking {
         return Ok(());
     }
     if project.config.chunking.overlap >= project.config.chunking.size.get() {
@@ -428,12 +425,43 @@ fn validate_chunking_if_needed(project: &LoadedProject, active: &BTreeSet<String
             ),
         });
     }
-    TiktokenTokenizer::new(&project.config.chunking.encoding_model).map_err(|source| {
-        GraphLoomError::InvalidModel {
-            model_id: "chunking.encoding_model".to_owned(),
+    let mut encodings = BTreeSet::new();
+    if active.contains(CREATE_BASE_TEXT_UNITS_WORKFLOW) || active.contains(EXTRACT_GRAPH_WORKFLOW) {
+        encodings.insert((
+            "chunking.encoding_model".to_owned(),
+            project.config.chunking.encoding_model.as_str(),
+        ));
+    }
+    if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
+        encodings.insert((
+            format!(
+                "completion_models.{}.encoding_model",
+                project.config.community_reports.completion_model_id
+            ),
+            effective_completion_encoding(
+                &project.config,
+                &project.config.community_reports.completion_model_id,
+            ),
+        ));
+    }
+    if active.contains(GENERATE_TEXT_EMBEDDINGS_WORKFLOW) {
+        encodings.insert((
+            format!(
+                "embedding_models.{}.encoding_model",
+                project.config.embed_text.embedding_model_id
+            ),
+            effective_embedding_encoding(
+                &project.config,
+                &project.config.embed_text.embedding_model_id,
+            ),
+        ));
+    }
+    for (model_id, encoding) in encodings {
+        TiktokenTokenizer::new(encoding).map_err(|source| GraphLoomError::InvalidModel {
+            model_id,
             message: source.to_string(),
-        }
-    })?;
+        })?;
+    }
     Ok(())
 }
 
@@ -836,6 +864,76 @@ embedding_models:
             .await
             .expect_err("missing claims model should fail");
         assert!(error.to_string().contains("missing_claim_model"));
+    }
+
+    #[tokio::test]
+    async fn test_should_not_require_summarize_dependencies_for_finalize_graph_only() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        project.config.workflows = vec!["finalize_graph".to_owned()];
+        project.config.completion_models.clear();
+        project.config.summarize_descriptions.prompt = Some("prompts/missing.txt".to_owned());
+
+        validate_project(&project, false)
+            .await
+            .expect("finalize_graph should not require summarizer model or prompt");
+    }
+
+    #[tokio::test]
+    async fn test_should_require_summarize_dependencies_for_extract_graph() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.workflows = vec!["extract_graph".to_owned()];
+        project.config.summarize_descriptions.completion_model_id = "missing_summarizer".to_owned();
+
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("extract_graph should require summarizer model");
+
+        assert!(error.to_string().contains("missing_summarizer"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_effective_completion_encoding_for_community_reports() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        project.config.workflows = vec!["create_community_reports".to_owned()];
+        project
+            .config
+            .completion_models
+            .get_mut("default_completion_model")
+            .expect("model")
+            .encoding_model = Some("definitely-not-an-encoding".to_owned());
+
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("invalid community report encoding should fail");
+
+        assert!(error.to_string().contains("default_completion_model"));
+        assert!(error.to_string().contains("definitely-not-an-encoding"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_effective_embedding_encoding_for_text_embeddings() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        project.config.workflows = vec!["generate_text_embeddings".to_owned()];
+        project
+            .config
+            .embedding_models
+            .get_mut("default_embedding_model")
+            .expect("model")
+            .encoding_model = Some("definitely-not-an-encoding".to_owned());
+
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("invalid embedding encoding should fail");
+
+        assert!(error.to_string().contains("default_embedding_model"));
+        assert!(error.to_string().contains("definitely-not-an-encoding"));
     }
 
     async fn initialized_project(root: &std::path::Path) -> LoadedProject {

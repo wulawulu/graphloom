@@ -59,6 +59,13 @@ pub trait VectorStore: Send + Sync + Debug {
     /// Returns an error when provider read fails.
     async fn count(&self, schema: &VectorIndexSchema) -> Result<usize>;
 
+    /// List all document ids in an index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider read or decoding fails.
+    async fn ids(&self, schema: &VectorIndexSchema) -> Result<Vec<String>>;
+
     /// Fetch one document by id.
     ///
     /// # Errors

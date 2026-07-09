@@ -303,19 +303,23 @@ async fn extract_report_for_community(
     let report = match parse_community_report(&response.content) {
         Ok(report) => report,
         Err(source) => {
-            warning(&format!(
-                "community report {} returned invalid JSON: {source}",
-                task.community.community
+            return Err(invalid_data(
+                COMMUNITY_REPORTS_CONTEXT,
+                &format!(
+                    "community report {} returned invalid JSON: {source}",
+                    task.community.community
+                ),
             ));
-            return Ok(None);
         }
     };
     if let Err(source) = validate_report(&report) {
-        warning(&format!(
-            "community report {} failed validation: {source}",
-            task.community.community
+        return Err(invalid_data(
+            COMMUNITY_REPORTS_CONTEXT,
+            &format!(
+                "community report {} failed validation: {source}",
+                task.community.community
+            ),
         ));
-        return Ok(None);
     }
     materialize_report(&task.community, &report).map(Some)
 }

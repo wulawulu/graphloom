@@ -11,7 +11,7 @@ pub(crate) struct TextUnitRow {
     pub(crate) human_readable_id: i64,
     pub(crate) text: String,
     pub(crate) n_tokens: i64,
-    pub(crate) document_id: String,
+    pub(crate) document_ids: Vec<String>,
     pub(crate) entity_ids: Vec<String>,
     pub(crate) relationship_ids: Vec<String>,
     pub(crate) covariate_ids: Vec<String>,
@@ -27,10 +27,7 @@ impl TextUnitRow {
         );
         object.insert("text".to_owned(), Value::String(self.text.clone()));
         object.insert("n_tokens".to_owned(), json!(self.n_tokens));
-        object.insert(
-            "document_id".to_owned(),
-            Value::String(self.document_id.clone()),
-        );
+        object.insert("document_ids".to_owned(), json!(self.document_ids));
         object.insert("entity_ids".to_owned(), json!(self.entity_ids));
         object.insert("relationship_ids".to_owned(), json!(self.relationship_ids));
         object.insert("covariate_ids".to_owned(), json!(self.covariate_ids));
@@ -46,17 +43,19 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
         .collect::<Vec<_>>();
     let texts = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
     let n_tokens = rows.iter().map(|row| row.n_tokens).collect::<Vec<_>>();
-    let document_ids = rows
-        .iter()
-        .map(|row| row.document_id.as_str())
-        .collect::<Vec<_>>();
     let mut dataframe = df!(
         "id" => ids,
         "human_readable_id" => human_ids,
         "text" => texts,
         "n_tokens" => n_tokens,
-        "document_id" => document_ids,
     )?;
+    dataframe.with_column(list_column(
+        "document_ids",
+        &rows
+            .iter()
+            .map(|row| row.document_ids.clone())
+            .collect::<Vec<_>>(),
+    )?)?;
     dataframe.with_column(list_column(
         "entity_ids",
         &rows
@@ -94,7 +93,7 @@ mod tests {
             human_readable_id: 0,
             text: "Alice reports Bob.".to_owned(),
             n_tokens: 4,
-            document_id: "doc-1".to_owned(),
+            document_ids: vec!["doc-1".to_owned()],
             entity_ids: Vec::new(),
             relationship_ids: Vec::new(),
             covariate_ids: Vec::new(),

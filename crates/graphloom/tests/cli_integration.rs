@@ -1,9 +1,16 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use assert_cmd::Command;
 use graphloom::{ALL_EMBEDDINGS, GraphRagConfig};
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
+use polars_core::prelude::{AnyValue, DataFrame, DataType, PlSmallStr};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use serde_yaml::Mapping;
@@ -12,6 +19,8 @@ use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
+
+static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test]
 async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub() {
@@ -91,11 +100,21 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
     assert_standard_outputs(tempdir.path()).await;
     assert_log_redaction_and_success(tempdir.path()).await;
     let first_document_ids = table_ids(tempdir.path(), "documents").await;
-    let first_entity_count = lancedb_count(tempdir.path(), "entity_description").await;
+    let first_vector_ids = managed_vector_ids(tempdir.path()).await;
     assert!(tempdir.path().join("cache").exists());
 
+    assert_full_rerun_resets_vector_ids(tempdir.path(), &first_document_ids, &first_vector_ids)
+        .await;
+    assert!(tempdir.path().join("cache").exists());
+}
+
+async fn assert_full_rerun_resets_vector_ids(
+    root: &std::path::Path,
+    first_document_ids: &BTreeSet<String>,
+    first_vector_ids: &std::collections::BTreeMap<String, BTreeSet<String>>,
+) {
     tokio::fs::write(
-        tempdir.path().join("input").join("document.txt"),
+        root.join("input").join("document.txt"),
         "Carol founded Beta.",
     )
     .await
@@ -105,23 +124,49 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         .args([
             "index",
             "--root",
-            tempdir.path().to_str().expect("utf8 root"),
+            root.to_str().expect("utf8 root"),
+            "--no-cache",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index completed successfully"));
 
-    let second_document_ids = table_ids(tempdir.path(), "documents").await;
+    let second_document_ids = table_ids(root, "documents").await;
+    let second_vector_ids = managed_vector_ids(root).await;
     assert!(
         first_document_ids.is_disjoint(&second_document_ids),
         "full rerun should replace document output instead of appending"
     );
+    for embedding_name in ALL_EMBEDDINGS {
+        let old_ids = first_vector_ids.get(*embedding_name).expect("old ids");
+        let new_ids = second_vector_ids.get(*embedding_name).expect("new ids");
+        assert!(
+            old_ids.is_disjoint(new_ids),
+            "{embedding_name} full rerun should remove old vector ids"
+        );
+        assert!(
+            !new_ids.is_empty(),
+            "{embedding_name} should contain second-run vector ids"
+        );
+    }
     assert_eq!(
-        lancedb_count(tempdir.path(), "entity_description").await,
-        first_entity_count,
-        "managed LanceDB reset should prevent count doubling"
+        second_vector_ids
+            .get("entity_description")
+            .expect("entity ids"),
+        &table_ids(root, "entities").await
     );
-    assert!(tempdir.path().join("cache").exists());
+    assert_eq!(
+        second_vector_ids
+            .get("community_full_content")
+            .expect("community ids"),
+        &table_ids(root, "community_reports").await
+    );
+    assert_eq!(
+        second_vector_ids
+            .get("text_unit_text")
+            .expect("text unit ids"),
+        &table_ids(root, "text_units").await
+    );
 }
 
 #[tokio::test]
@@ -290,6 +335,86 @@ async fn test_should_fail_dry_run_when_prompt_is_missing() {
 }
 
 #[tokio::test]
+async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_side_effect_free() {
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    tokio::fs::remove_file(tempdir.path().join("prompts").join("extract_graph.txt"))
+        .await
+        .expect("remove prompt");
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing prompt file"))
+        .stderr(predicate::str::contains("super-secret-key").not());
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--skip-validation",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("workflow extract_graph failed"))
+        .stderr(predicate::str::contains("super-secret-key").not());
+
+    let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
+        .await
+        .expect("log");
+    assert!(log.contains("index run started"));
+    assert!(log.contains("workflow_name=extract_graph") || log.contains("extract_graph"));
+    assert!(!log.contains("super-secret-key"));
+
+    let dry_run_root = TempDir::new().expect("dry run tempdir");
+    init_project(dry_run_root.path());
+    tokio::fs::write(
+        dry_run_root.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("dry input");
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            dry_run_root.path().to_str().expect("utf8 root"),
+            "--dry-run",
+            "--skip-validation",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workflows:"))
+        .stdout(predicate::str::contains("<API_KEY>").not());
+    assert!(!dry_run_root.path().join("output").exists());
+    assert!(!dry_run_root.path().join("cache").exists());
+    assert!(!dry_run_root.path().join("logs").exists());
+    assert!(!dry_run_root.path().join("output").join("lancedb").exists());
+}
+
+#[tokio::test]
 async fn test_should_fail_dry_run_when_no_input_matches_pattern() {
     let tempdir = TempDir::new().expect("tempdir");
     init_project(tempdir.path());
@@ -447,6 +572,113 @@ async fn test_should_log_workflow_failure_without_secret() {
     assert!(!log.contains("super-secret-key"));
 }
 
+#[tokio::test]
+async fn test_should_fail_embedding_cardinality_mismatch_without_secret() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_cardinality_mismatch_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(tempdir.path(), &server.uri()).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("generate_text_embeddings"))
+        .stderr(predicate::str::contains("super-secret-key").not());
+
+    let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
+        .await
+        .expect("log");
+    assert!(log.contains("generate_text_embeddings"));
+    assert!(log.contains("expected") && log.contains("embeddings"));
+    assert!(!log.contains("super-secret-key"));
+}
+
+#[tokio::test]
+async fn test_should_fail_malformed_community_report_without_secret() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder_malformed_report)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(tempdir.path(), &server.uri()).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("create_community_reports"))
+        .stderr(predicate::str::contains("super-secret-key").not());
+
+    assert!(
+        !tempdir
+            .path()
+            .join("output")
+            .join("community_reports.parquet")
+            .exists(),
+        "malformed report must not be accepted as an empty successful report",
+    );
+    let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
+        .await
+        .expect("log");
+    assert!(log.contains("create_community_reports"));
+    assert!(!log.contains("super-secret-key"));
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CliPreflightCase {
     InvalidRegex,
@@ -498,6 +730,7 @@ async fn assert_standard_outputs(root: &std::path::Path) {
         assert!(dataframe.height() > 0, "{table} should be non-empty");
         assert!(dataframe.column("id").is_ok(), "{table} should have id");
     }
+    assert_parquet_schema_and_integrity(&provider).await;
 
     let settings = tokio::fs::read_to_string(root.join("settings.yaml"))
         .await
@@ -514,10 +747,414 @@ async fn assert_standard_outputs(root: &std::path::Path) {
             .await
             .expect("lancedb"),
     );
+    assert_lancedb_content(root, &config, store.as_ref()).await;
+    let reopened = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("reopen lancedb");
+    assert_lancedb_content(root, &config, &reopened).await;
+}
+
+async fn assert_lancedb_content(
+    root: &std::path::Path,
+    config: &GraphRagConfig,
+    store: &dyn graphloom_vectors::VectorStore,
+) {
+    let expected_sources = [
+        ("entity_description", table_ids(root, "entities").await),
+        (
+            "community_full_content",
+            table_ids(root, "community_reports").await,
+        ),
+        ("text_unit_text", table_ids(root, "text_units").await),
+    ];
     for embedding in ALL_EMBEDDINGS {
         let schema = config.vector_store.schema_for(embedding);
-        assert!(store.count(&schema).await.expect("count") > 0);
+        let ids = store
+            .ids(&schema)
+            .await
+            .expect("vector ids")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let expected = expected_sources
+            .iter()
+            .find_map(|(name, ids)| (*name == *embedding).then_some(ids))
+            .expect("expected ids");
+        assert_eq!(&ids, expected, "{embedding} ids should match source table");
+        assert_eq!(store.count(&schema).await.expect("count"), ids.len());
+        for id in ids {
+            let document = store
+                .get_by_id(&schema, &id)
+                .await
+                .expect("get vector")
+                .expect("vector document");
+            assert_eq!(document.vector.len(), schema.vector_size);
+            assert!(
+                document.vector.iter().all(|value| value.is_finite()),
+                "{embedding} vector {id} should contain only finite values",
+            );
+        }
     }
+}
+
+struct OutputFrames {
+    documents: DataFrame,
+    text_units: DataFrame,
+    entities: DataFrame,
+    relationships: DataFrame,
+    communities: DataFrame,
+    community_reports: DataFrame,
+}
+
+async fn assert_parquet_schema_and_integrity(provider: &ParquetTableProvider) {
+    let frames = OutputFrames {
+        documents: provider
+            .read_dataframe("documents")
+            .await
+            .expect("documents"),
+        text_units: provider
+            .read_dataframe("text_units")
+            .await
+            .expect("text_units"),
+        entities: provider.read_dataframe("entities").await.expect("entities"),
+        relationships: provider
+            .read_dataframe("relationships")
+            .await
+            .expect("relationships"),
+        communities: provider
+            .read_dataframe("communities")
+            .await
+            .expect("communities"),
+        community_reports: provider
+            .read_dataframe("community_reports")
+            .await
+            .expect("community_reports"),
+    };
+
+    assert_parquet_column_order(&frames);
+    assert_parquet_dtypes(&frames);
+    assert_reference_integrity(&frames);
+}
+
+fn assert_parquet_column_order(frames: &OutputFrames) {
+    assert_columns(
+        &frames.documents,
+        &[
+            "id",
+            "human_readable_id",
+            "title",
+            "text",
+            "text_unit_ids",
+            "creation_date",
+            "raw_data",
+        ],
+    );
+    assert_columns(
+        &frames.text_units,
+        &[
+            "id",
+            "human_readable_id",
+            "text",
+            "n_tokens",
+            "document_ids",
+            "entity_ids",
+            "relationship_ids",
+            "covariate_ids",
+        ],
+    );
+    assert_columns(
+        &frames.entities,
+        &[
+            "id",
+            "human_readable_id",
+            "title",
+            "type",
+            "description",
+            "text_unit_ids",
+            "frequency",
+            "degree",
+        ],
+    );
+    assert_columns(
+        &frames.relationships,
+        &[
+            "id",
+            "human_readable_id",
+            "source",
+            "target",
+            "description",
+            "weight",
+            "combined_degree",
+            "text_unit_ids",
+        ],
+    );
+    assert_columns(
+        &frames.communities,
+        &[
+            "id",
+            "human_readable_id",
+            "community",
+            "level",
+            "parent",
+            "children",
+            "title",
+            "entity_ids",
+            "relationship_ids",
+            "text_unit_ids",
+            "period",
+            "size",
+        ],
+    );
+    assert_columns(
+        &frames.community_reports,
+        &[
+            "id",
+            "human_readable_id",
+            "community",
+            "level",
+            "parent",
+            "children",
+            "title",
+            "summary",
+            "full_content",
+            "rank",
+            "rating_explanation",
+            "findings",
+            "full_content_json",
+            "period",
+            "size",
+        ],
+    );
+}
+
+fn assert_parquet_dtypes(frames: &OutputFrames) {
+    assert_common_dtypes(&frames.documents, &["title", "text"]);
+    assert_common_dtypes(&frames.text_units, &["text"]);
+    assert_common_dtypes(&frames.entities, &["title", "type", "description"]);
+    assert_common_dtypes(&frames.relationships, &["source", "target", "description"]);
+    assert_common_dtypes(&frames.communities, &["title", "period"]);
+    assert_common_dtypes(
+        &frames.community_reports,
+        &[
+            "title",
+            "summary",
+            "full_content",
+            "rating_explanation",
+            "full_content_json",
+            "period",
+        ],
+    );
+    for (dataframe, integer_columns) in [
+        (&frames.documents, &["human_readable_id"][..]),
+        (&frames.text_units, &["human_readable_id", "n_tokens"][..]),
+        (
+            &frames.entities,
+            &["human_readable_id", "frequency", "degree"][..],
+        ),
+        (
+            &frames.relationships,
+            &["human_readable_id", "combined_degree"][..],
+        ),
+        (
+            &frames.communities,
+            &["human_readable_id", "community", "level", "parent", "size"][..],
+        ),
+        (
+            &frames.community_reports,
+            &["human_readable_id", "community", "level", "parent", "size"][..],
+        ),
+    ] {
+        for column in integer_columns {
+            assert_dtype(dataframe, column, &DataType::Int64);
+        }
+    }
+    assert_dtype(&frames.relationships, "weight", &DataType::Float64);
+    assert_dtype(&frames.community_reports, "rank", &DataType::Float64);
+    for (dataframe, list_columns) in [
+        (&frames.documents, &["text_unit_ids"][..]),
+        (
+            &frames.text_units,
+            &[
+                "document_ids",
+                "entity_ids",
+                "relationship_ids",
+                "covariate_ids",
+            ][..],
+        ),
+        (&frames.entities, &["text_unit_ids"][..]),
+        (&frames.relationships, &["text_unit_ids"][..]),
+        (
+            &frames.communities,
+            &["entity_ids", "relationship_ids", "text_unit_ids"][..],
+        ),
+    ] {
+        for column in list_columns {
+            assert_dtype(
+                dataframe,
+                column,
+                &DataType::List(Box::new(DataType::String)),
+            );
+        }
+    }
+    assert_dtype(
+        &frames.communities,
+        "children",
+        &DataType::List(Box::new(DataType::Int64)),
+    );
+    assert_dtype(
+        &frames.community_reports,
+        "children",
+        &DataType::List(Box::new(DataType::Int64)),
+    );
+}
+
+fn assert_reference_integrity(frames: &OutputFrames) {
+    let document_ids = string_set(&frames.documents, "id");
+    let text_unit_ids = string_set(&frames.text_units, "id");
+    let entity_ids = string_set(&frames.entities, "id");
+    let entity_titles = string_set(&frames.entities, "title");
+    let relationship_ids = string_set(&frames.relationships, "id");
+    let community_keys = i64_set(&frames.communities, "community");
+
+    assert_subset(
+        &list_string_set(&frames.documents, "text_unit_ids"),
+        &text_unit_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.text_units, "document_ids"),
+        &document_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.text_units, "entity_ids"),
+        &entity_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.text_units, "relationship_ids"),
+        &relationship_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.entities, "text_unit_ids"),
+        &text_unit_ids,
+    );
+    assert_subset(&string_set(&frames.relationships, "source"), &entity_titles);
+    assert_subset(&string_set(&frames.relationships, "target"), &entity_titles);
+    assert_subset(
+        &list_string_set(&frames.relationships, "text_unit_ids"),
+        &text_unit_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.communities, "entity_ids"),
+        &entity_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.communities, "relationship_ids"),
+        &relationship_ids,
+    );
+    assert_subset(
+        &list_string_set(&frames.communities, "text_unit_ids"),
+        &text_unit_ids,
+    );
+    assert_subset_i64(
+        &i64_set(&frames.community_reports, "community"),
+        &community_keys,
+    );
+}
+
+fn assert_columns(dataframe: &DataFrame, expected: &[&str]) {
+    assert_eq!(column_names(dataframe), expected);
+}
+
+fn column_names(dataframe: &DataFrame) -> Vec<&str> {
+    dataframe
+        .get_column_names()
+        .into_iter()
+        .map(PlSmallStr::as_str)
+        .collect()
+}
+
+fn assert_common_dtypes(dataframe: &DataFrame, string_columns: &[&str]) {
+    assert_dtype(dataframe, "id", &DataType::String);
+    for column in string_columns {
+        assert_dtype(dataframe, column, &DataType::String);
+    }
+}
+
+fn assert_dtype(dataframe: &DataFrame, column: &str, expected: &DataType) {
+    assert_eq!(
+        dataframe.column(column).expect("column").dtype(),
+        expected,
+        "{column} dtype mismatch",
+    );
+}
+
+fn string_set(dataframe: &DataFrame, column: &str) -> BTreeSet<String> {
+    dataframe
+        .column(column)
+        .expect("column")
+        .str()
+        .expect("string column")
+        .iter()
+        .flatten()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn i64_set(dataframe: &DataFrame, column: &str) -> BTreeSet<i64> {
+    dataframe
+        .column(column)
+        .expect("column")
+        .i64()
+        .expect("i64 column")
+        .iter()
+        .flatten()
+        .collect()
+}
+
+fn list_string_set(dataframe: &DataFrame, column: &str) -> BTreeSet<String> {
+    let column_index = dataframe
+        .get_column_names()
+        .iter()
+        .position(|name| name.as_str() == column)
+        .expect("list column");
+    let mut values = BTreeSet::new();
+    for row_index in 0..dataframe.height() {
+        let row = dataframe.get_row(row_index).expect("row");
+        if let Some(value) = row.0.get(column_index) {
+            values.extend(any_value_to_strings(value));
+        }
+    }
+    values
+}
+
+fn any_value_to_strings(value: &AnyValue<'_>) -> Vec<String> {
+    match value {
+        AnyValue::List(series) => series
+            .str()
+            .expect("string list")
+            .iter()
+            .flatten()
+            .map(ToOwned::to_owned)
+            .collect(),
+        AnyValue::Null => Vec::new(),
+        AnyValue::String(value) => vec![(*value).to_owned()],
+        AnyValue::StringOwned(value) => vec![value.to_string()],
+        other => panic!("expected string list, got {other:?}"),
+    }
+}
+
+fn assert_subset(actual: &BTreeSet<String>, expected: &BTreeSet<String>) {
+    assert!(
+        actual.is_subset(expected),
+        "unexpected references: {:?}",
+        actual.difference(expected).collect::<Vec<_>>(),
+    );
+}
+
+fn assert_subset_i64(actual: &BTreeSet<i64>, expected: &BTreeSet<i64>) {
+    assert!(
+        actual.is_subset(expected),
+        "unexpected integer references: {:?}",
+        actual.difference(expected).collect::<Vec<_>>(),
+    );
 }
 
 async fn assert_log_redaction_and_success(root: &std::path::Path) {
@@ -560,7 +1197,9 @@ async fn entity_titles(root: &std::path::Path) -> BTreeSet<String> {
         .collect()
 }
 
-async fn lancedb_count(root: &std::path::Path, embedding_name: &str) -> usize {
+async fn managed_vector_ids(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<String, BTreeSet<String>> {
     let settings = tokio::fs::read_to_string(root.join("settings.yaml"))
         .await
         .expect("settings");
@@ -573,8 +1212,15 @@ async fn lancedb_count(root: &std::path::Path, embedding_name: &str) -> usize {
     let store = LanceDbVectorStore::connect(&config.vector_store)
         .await
         .expect("lancedb");
-    let schema = config.vector_store.schema_for(embedding_name);
-    store.count(&schema).await.expect("count")
+    let mut ids = std::collections::BTreeMap::new();
+    for embedding_name in ALL_EMBEDDINGS {
+        let schema = config.vector_store.schema_for(embedding_name);
+        ids.insert(
+            (*embedding_name).to_owned(),
+            store.ids(&schema).await.expect("ids").into_iter().collect(),
+        );
+    }
+    ids
 }
 
 async fn patch_settings(root: &std::path::Path, server_uri: &str) {
@@ -739,7 +1385,12 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
         .last()
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default();
-    let content = if last.contains("Given a text document") {
+    let content = if last.contains("Given a text document") && last.contains("Carol founded Beta") {
+        "(\"entity\"<|>CAROL<|>person<|>Carol founded \
+         Beta)##(\"entity\"<|>BETA<|>organization<|>Beta was founded by \
+         Carol)##(\"relationship\"<|>CAROL<|>BETA<|>Carol founded Beta<|>5)##<|COMPLETE|>"
+            .to_owned()
+    } else if last.contains("Given a text document") {
         "(\"entity\"<|>ALICE<|>person<|>Alice works for Acme and collaborates with \
          Bob)##(\"entity\"<|>BOB<|>person<|>Bob manages Acme and collaborates with \
          Alice)##(\"entity\"<|>ACME<|>organization<|>Acme is managed by Bob and employs \
@@ -756,22 +1407,48 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
 
 fn chat_content_for_non_extraction(last: &str) -> String {
     if last.contains("Return output as a well-formed JSON-formatted string") {
-        json!({
-            "title": "Alice, Bob, and Acme",
-            "summary": "Alice, Bob, and Acme form a connected work community.",
-            "rating": 5.0,
-            "rating_explanation": "The community is small but coherent.",
-            "findings": [
-                {
-                    "summary": "Collaboration",
-                    "explanation": "Alice and Bob collaborate through Acme [Data: Entities (0, 1); Relationships (0)]."
-                }
-            ]
-        })
-        .to_string()
+        let sequence = REPORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        if mentions_carol_beta(last) {
+            json!({
+                "title": format!("Carol and Beta {sequence}"),
+                "summary": format!("Carol and Beta form a founder-company community {sequence}."),
+                "rating": 6.0,
+                "rating_explanation": "The community captures a founding relationship.",
+                "findings": [
+                    {
+                        "summary": "Founding",
+                        "explanation": "Carol founded Beta [Data: Entities (0, 1); Relationships (0)]."
+                    }
+                ]
+            })
+            .to_string()
+        } else {
+            json!({
+                "title": format!("Alice, Bob, and Acme {sequence}"),
+                "summary": format!("Alice, Bob, and Acme form a connected work community {sequence}."),
+                "rating": 5.0,
+                "rating_explanation": "The community is small but coherent.",
+                "findings": [
+                    {
+                        "summary": "Collaboration",
+                        "explanation": "Alice and Bob collaborate through Acme [Data: Entities (0, 1); Relationships (0)]."
+                    }
+                ]
+            })
+            .to_string()
+        }
+    } else if mentions_carol_beta(last) {
+        "Carol founded Beta summary.".to_owned()
     } else {
         "A concise summary of the provided descriptions.".to_owned()
     }
+}
+
+fn mentions_carol_beta(value: &str) -> bool {
+    value.contains("CAROL")
+        || value.contains("BETA")
+        || value.contains("Carol")
+        || value.contains("Beta")
 }
 
 fn chat_response(content: &str) -> ResponseTemplate {
@@ -813,6 +1490,26 @@ fn chat_responder_with_gleaning(request: &Request) -> ResponseTemplate {
     chat_response(&content)
 }
 
+fn chat_responder_malformed_report(request: &Request) -> ResponseTemplate {
+    let body = request.body_json::<Value>().expect("chat request json");
+    let messages = body["messages"].as_array().expect("messages");
+    let last = messages
+        .last()
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    let content = if last.contains("Return output as a well-formed JSON-formatted string") {
+        "not valid json".to_owned()
+    } else if last.contains("Given a text document") {
+        "(\"entity\"<|>ALICE<|>person<|>Alice works for \
+         Acme)##(\"entity\"<|>ACME<|>organization<|>Acme employs \
+         Alice)##(\"relationship\"<|>ALICE<|>ACME<|>Alice works for Acme<|>5)##<|COMPLETE|>"
+            .to_owned()
+    } else {
+        "A concise summary of the provided descriptions.".to_owned()
+    };
+    chat_response(&content)
+}
+
 fn request_last_message_contains(needle: &str) -> impl FnMut(&wiremock::Request) -> bool + '_ {
     move |request| {
         request
@@ -842,6 +1539,29 @@ fn embedding_responder(request: &Request) -> ResponseTemplate {
                 "object": "embedding",
                 "index": index,
                 "embedding": [1.0, 0.0, 0.0, tail]
+            })
+        })
+        .collect::<Vec<_>>();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "object": "list",
+        "data": data,
+        "model": "embed-test",
+        "usage": {"prompt_tokens": inputs.len(), "total_tokens": inputs.len()}
+    }))
+}
+
+fn embedding_cardinality_mismatch_responder(request: &Request) -> ResponseTemplate {
+    let body = request
+        .body_json::<Value>()
+        .expect("embedding request json");
+    let inputs = body["input"].as_array().expect("input");
+    let response_count = inputs.len().saturating_sub(1);
+    let data = (0..response_count)
+        .map(|index| {
+            json!({
+                "object": "embedding",
+                "index": index,
+                "embedding": [1.0, 0.0, 0.0, 0.0]
             })
         })
         .collect::<Vec<_>>();

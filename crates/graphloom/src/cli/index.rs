@@ -6,7 +6,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     PipelineRunStats, WorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_index},
+    api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
     cli::{
         args::{IndexArgs, IndexMethodArg},
         callbacks::ConsoleWorkflowCallbacks,
@@ -66,10 +66,11 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
     let _log_guard = init_logging(&project.paths.reporting_dir, args.verbose).await?;
     let callback =
         Arc::new(ConsoleWorkflowCallbacks::new(args.verbose)) as Arc<dyn WorkflowCallbacks>;
-    let result = build_index(
-        project.config,
+    let project_root = project.root.clone();
+    let result = build_validated_index(
+        project,
         BuildIndexOptions {
-            project_root: project.root,
+            project_root,
             method,
             cache_mode: if args.cache_enabled() {
                 CacheMode::Configured

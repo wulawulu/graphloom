@@ -1,10 +1,13 @@
 //! Runtime assembly for standard indexing.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 use graphloom_cache::JsonCache;
-use graphloom_input::FileInputReader;
-use graphloom_storage::{FileStorage, ParquetTableProvider, Storage};
+use graphloom_input::{FileInputReader, InputReader};
+use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
 
 use crate::{
@@ -23,16 +26,30 @@ pub struct IndexRuntime {
     pub pipeline: Pipeline,
 }
 
-/// Build a runtime for standard indexing.
+/// Providers and pipeline that passed non-destructive runtime preflight.
+#[derive(Debug)]
+pub(crate) struct PreparedIndexRuntime {
+    input_reader: Arc<dyn InputReader>,
+    input_storage: Arc<dyn Storage>,
+    output_provider: Arc<dyn TableProvider>,
+    output_storage: Arc<dyn Storage>,
+    cache: Option<Arc<dyn graphloom_cache::Cache>>,
+    vector_store: Arc<dyn VectorStore>,
+    callbacks: Arc<dyn WorkflowCallbacks>,
+    pipeline: Pipeline,
+}
+
+/// Build standard-index providers and pipeline without clearing output or resetting vectors.
 ///
 /// # Errors
 ///
-/// Returns an error when providers cannot be created.
-pub async fn build_runtime(
+/// Returns an error when provider construction, vector config, or pipeline build fails.
+pub(crate) async fn preflight_index_runtime(
     project: &LoadedProject,
     cache_enabled: bool,
     callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
-) -> Result<IndexRuntime> {
+) -> Result<PreparedIndexRuntime> {
+    validate_managed_vector_schemas(&project.config)?;
     let output_provider = Arc::new(
         ParquetTableProvider::new(&project.paths.output_dir).map_err(|source| {
             GraphLoomError::RuntimeBuild {
@@ -81,15 +98,6 @@ pub async fn build_runtime(
     );
     let callbacks = crate::callbacks::callback_chain(callbacks);
 
-    let mut context = PipelineRunContext::new(output_provider)
-        .with_input_reader(input_reader)
-        .with_vector_store(vector_store)
-        .with_callbacks(callbacks)
-        .with_project_root(&project.root);
-    context.input_storage = Some(input_storage);
-    context.output_storage = Some(output_storage);
-    context.cache = cache;
-
     let mut registry = WorkflowRegistry::new();
     register_step9_workflows(&mut registry);
     let pipeline = PipelineFactory::new(registry)
@@ -98,9 +106,14 @@ pub async fn build_runtime(
             source: Box::new(source),
         })?;
 
-    Ok(IndexRuntime {
-        config: project.config.clone(),
-        context,
+    Ok(PreparedIndexRuntime {
+        input_reader,
+        input_storage,
+        output_provider,
+        output_storage,
+        cache,
+        vector_store,
+        callbacks,
         pipeline,
     })
 }
@@ -110,15 +123,41 @@ pub async fn build_runtime(
 /// # Errors
 ///
 /// Returns an error when cleanup fails.
-pub async fn prepare_full_index(project: &LoadedProject) -> Result<()> {
+pub(crate) async fn prepare_full_index(
+    project: &LoadedProject,
+    runtime: &mut PreparedIndexRuntime,
+) -> Result<()> {
     project.paths.validate_destructive_paths()?;
-    clear_output_dir(&project.paths.output_dir).await?;
-    let store = LanceDbVectorStore::connect(&project.config.vector_store)
-        .await
-        .map_err(|source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        })?;
-    reset_managed_indices(&store, &project.config).await
+    match vector_location(&project.paths.output_dir, &project.paths.vector_db_uri) {
+        VectorLocation::InsideOutput => {
+            clear_output_dir(&project.paths.output_dir).await?;
+            runtime.vector_store = connect_vector_store(&project.config).await?;
+            reset_managed_indices(runtime.vector_store.as_ref(), &project.config).await
+        }
+        VectorLocation::OutsideOutput => {
+            reset_managed_indices(runtime.vector_store.as_ref(), &project.config).await?;
+            clear_output_dir(&project.paths.output_dir).await
+        }
+    }
+}
+
+impl PreparedIndexRuntime {
+    pub(crate) fn into_runtime(self, config: GraphRagConfig, project_root: &Path) -> IndexRuntime {
+        let mut context = PipelineRunContext::new(self.output_provider)
+            .with_input_reader(self.input_reader)
+            .with_vector_store(self.vector_store)
+            .with_callbacks(self.callbacks)
+            .with_project_root(project_root);
+        context.input_storage = Some(self.input_storage);
+        context.output_storage = Some(self.output_storage);
+        context.cache = self.cache;
+
+        IndexRuntime {
+            config,
+            context,
+            pipeline: self.pipeline,
+        }
+    }
 }
 
 async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig) -> Result<()> {
@@ -134,6 +173,35 @@ async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig)
     Ok(())
 }
 
+fn validate_managed_vector_schemas(config: &GraphRagConfig) -> Result<()> {
+    config
+        .vector_store
+        .validate()
+        .map_err(|source| GraphLoomError::RuntimeBuild {
+            source: Box::new(source),
+        })?;
+    for embedding_name in ALL_EMBEDDINGS {
+        config
+            .vector_store
+            .schema_for(embedding_name)
+            .validate()
+            .map_err(|source| GraphLoomError::RuntimeBuild {
+                source: Box::new(source),
+            })?;
+    }
+    Ok(())
+}
+
+async fn connect_vector_store(config: &GraphRagConfig) -> Result<Arc<dyn VectorStore>> {
+    Ok(Arc::new(
+        LanceDbVectorStore::connect(&config.vector_store)
+            .await
+            .map_err(|source| GraphLoomError::RuntimeBuild {
+                source: Box::new(source),
+            })?,
+    ))
+}
+
 async fn clear_output_dir(path: &Path) -> Result<()> {
     let storage = FileStorage::new(path).map_err(|source| GraphLoomError::RuntimeBuild {
         source: Box::new(source),
@@ -144,4 +212,32 @@ async fn clear_output_dir(path: &Path) -> Result<()> {
         .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VectorLocation {
+    InsideOutput,
+    OutsideOutput,
+}
+
+fn vector_location(output_dir: &Path, vector_db_uri: &Path) -> VectorLocation {
+    if normalize_lexical(vector_db_uri).starts_with(normalize_lexical(output_dir)) {
+        VectorLocation::InsideOutput
+    } else {
+        VectorLocation::OutsideOutput
+    }
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }

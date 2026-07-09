@@ -10,7 +10,8 @@ use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunStats, Result, WorkflowCallbacks,
     WorkflowFunctionOutput,
     config::load::{ValidationMode, validate_index_project},
-    runtime::{build_runtime, prepare_full_index},
+    project::LoadedProject,
+    runtime::{preflight_index_runtime, prepare_full_index},
 };
 
 /// Supported indexing method.
@@ -62,18 +63,29 @@ pub async fn build_index(
     config: GraphRagConfig,
     options: BuildIndexOptions,
 ) -> Result<IndexRunResult> {
+    let project = LoadedProject::from_config(options.project_root.clone(), config)?;
+    tracing::info!(project_root = %project.root.display(), "validating index configuration");
+    validate_index_project(&project, ValidationMode::Full).await?;
+    build_validated_index(project, options).await
+}
+
+/// Build an index for a project that has already passed the desired validation depth.
+///
+/// This is crate-private so callers cannot bypass required/safety validation.
+pub(crate) async fn build_validated_index(
+    project: LoadedProject,
+    options: BuildIndexOptions,
+) -> Result<IndexRunResult> {
     match options.method {
         IndexingMethod::Standard => {}
     }
     let started = Instant::now();
     let cache_enabled = matches!(options.cache_mode, CacheMode::Configured);
-    let project = crate::project::LoadedProject::from_config(options.project_root, config)?;
-    tracing::info!(project_root = %project.root.display(), "validating index configuration");
-    validate_index_project(&project, ValidationMode::Full).await?;
+    tracing::info!(project_root = %project.root.display(), "preflighting indexing runtime");
+    let mut runtime = preflight_index_runtime(&project, cache_enabled, options.callbacks).await?;
     tracing::info!(project_root = %project.root.display(), "preparing full index");
-    prepare_full_index(&project).await?;
-    tracing::info!(project_root = %project.root.display(), "building indexing runtime");
-    let mut runtime = build_runtime(&project, cache_enabled, options.callbacks).await?;
+    prepare_full_index(&project, &mut runtime).await?;
+    let mut runtime = runtime.into_runtime(project.config.clone(), &project.root);
     tracing::info!(project_root = %project.root.display(), "index run started");
     tracing::info!(project_root = %project.root.display(), "running indexing pipeline");
     let outputs = runtime

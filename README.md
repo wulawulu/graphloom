@@ -21,10 +21,10 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 
 - `graphloom::api` exposes programmatic entry points. The current public API is
   `build_index`, which runs standard indexing and returns structured workflow
-  output and pipeline stats. `build_index` validates configuration before it
-  clears output or resets managed vector tables, so API callers do not need to
-  run CLI validation first. Future query and prompt-tuning APIs will live under
-  the same API layer.
+  output and pipeline stats. `build_index` always performs full validation
+  before it clears output or resets managed vector tables, so API callers do not
+  need to run CLI validation first. Future query and prompt-tuning APIs will
+  live under the same API layer.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API. `graphloom index` loads project configuration and calls
   `graphloom::api::build_index`.
@@ -115,6 +115,23 @@ Dry run loads and parses project configuration, performs the same full preflight
 validation as indexing, prints a redacted summary, and shows the workflow list.
 It does not call models, create output, create cache, create logs, connect
 LanceDB, or modify the current working directory.
+
+## Skip Optional Validation
+
+```bash
+graphloom index --root ./demo --skip-validation
+```
+
+`--skip-validation` is a CLI-only escape hatch for optional preflight checks. It
+skips model, prompt, input-existence, and tokenizer checks that may be
+environment-specific, but it does not skip configuration parsing, provider type
+checks, workflow name checks, path safety, destructive-output safety, or runtime
+provider preflight. Public Rust callers using `graphloom::api::build_index`
+always get full validation.
+
+If a future Web or application embedding needs a skip mode, it should use a
+separate controlled application API rather than weakening the public
+`build_index` default.
 
 ## Disable Cache
 

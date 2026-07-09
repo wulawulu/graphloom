@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use graphloom::{
     ALL_EMBEDDINGS, GraphRagConfig, PipelineRunStats, WorkflowCallbacks,
@@ -37,11 +40,18 @@ async fn test_should_build_standard_index_via_public_api() {
     )
     .await
     .expect("input");
-    let config = test_config(&server.uri());
+    let mut config = test_config(&server.uri());
+    let mut custom_schema = graphloom_vectors::VectorIndexSchema::default();
+    custom_schema.index_name = "custom_entity_descriptions".to_owned();
+    custom_schema.vector_size = 4;
+    config
+        .vector_store
+        .index_schema
+        .insert("entity_description".to_owned(), custom_schema);
     let callbacks = Arc::new(RecordingCallbacks::default());
 
     let result = build_index(
-        config,
+        config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
             method: IndexingMethod::Standard,
@@ -57,7 +67,20 @@ async fn test_should_build_standard_index_via_public_api() {
     let expected_order = test_config(&server.uri()).workflow_order();
     assert_eq!(callbacks.started(), expected_order);
     assert_eq!(callbacks.completed(), expected_order);
-    assert_standard_outputs(tempdir.path()).await;
+    assert_standard_outputs(tempdir.path(), &config).await;
+    let mut vector_config = config.vector_store;
+    vector_config.db_uri = tempdir
+        .path()
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .to_string();
+    let store = LanceDbVectorStore::connect(&vector_config)
+        .await
+        .expect("lancedb");
+    let custom_schema = vector_config.schema_for("entity_description");
+    assert_eq!(custom_schema.index_name, "custom_entity_descriptions");
+    assert!(store.count(&custom_schema).await.expect("custom count") > 0);
 }
 
 #[tokio::test]
@@ -96,6 +119,48 @@ async fn test_should_validate_before_destructive_reset() {
             "case {case:?} must not clear output before validation"
         );
         assert_old_vector_still_exists(tempdir.path(), &config).await;
+    }
+}
+
+#[tokio::test]
+async fn test_should_preflight_runtime_failures_before_destructive_reset() {
+    for case in [
+        RuntimePreflightCase::InvalidVectorSize,
+        RuntimePreflightCase::InvalidVectorIndexName,
+        RuntimePreflightCase::UnwritableVectorParent,
+        RuntimePreflightCase::OutputPathIsFile,
+        RuntimePreflightCase::CachePathIsFile,
+        RuntimePreflightCase::InputPathIsFile,
+        RuntimePreflightCase::InvalidCompletionEncoding,
+        RuntimePreflightCase::InvalidEmbeddingEncoding,
+    ] {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = test_config("http://127.0.0.1:1");
+        prepare_old_output_and_vector(tempdir.path(), &mut config).await;
+        let old_config = config.clone();
+        apply_runtime_preflight_case(tempdir.path(), &mut config, case).await;
+
+        let error = build_index(
+            config,
+            BuildIndexOptions {
+                project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
+                cache_mode: CacheMode::Configured,
+                callbacks: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("runtime preflight case should fail");
+
+        assert!(
+            !error.to_string().is_empty(),
+            "case {case:?} should return a useful error"
+        );
+        assert!(
+            tempdir.path().join("output").join("sentinel.txt").is_file(),
+            "case {case:?} must not clear old output"
+        );
+        assert_old_vector_still_exists(tempdir.path(), &old_config).await;
     }
 }
 
@@ -184,6 +249,48 @@ async fn test_should_fan_out_callbacks_in_api() {
     assert_eq!(second.completed(), first.completed());
 }
 
+#[tokio::test]
+async fn test_should_fail_embedding_dimension_mismatch_with_workflow_source_chain() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_dimension_mismatch_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input dir");
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+
+    let error = build_index(
+        test_config(&server.uri()),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("dimension mismatch should fail");
+    let error_text = format!("{error:#}");
+
+    assert!(error_text.contains("generate_text_embeddings"));
+    assert!(error_text.contains("expected dimension 4, got 3"));
+}
+
 #[derive(Debug, Clone, Copy)]
 enum InvalidConfigCase {
     InvalidRegex,
@@ -192,6 +299,18 @@ enum InvalidConfigCase {
     MissingInput,
     UnsupportedProvider,
     InvalidTokenizer,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RuntimePreflightCase {
+    InvalidVectorSize,
+    InvalidVectorIndexName,
+    UnwritableVectorParent,
+    OutputPathIsFile,
+    CachePathIsFile,
+    InputPathIsFile,
+    InvalidCompletionEncoding,
+    InvalidEmbeddingEncoding,
 }
 
 #[derive(Debug, Default)]
@@ -285,7 +404,7 @@ extract_claims:
     .expect("config")
 }
 
-async fn assert_standard_outputs(root: &std::path::Path) {
+async fn assert_standard_outputs(root: &std::path::Path, config: &GraphRagConfig) {
     let provider = ParquetTableProvider::new(root.join("output")).expect("provider");
     for table in [
         "documents",
@@ -300,8 +419,7 @@ async fn assert_standard_outputs(root: &std::path::Path) {
         assert!(dataframe.column("id").is_ok(), "{table} should have id");
     }
 
-    let config = test_config("http://127.0.0.1:1");
-    let mut config = config;
+    let mut config = config.clone();
     config.vector_store.db_uri = root
         .join("output")
         .join("lancedb")
@@ -405,6 +523,67 @@ async fn apply_invalid_case(
     }
 }
 
+async fn apply_runtime_preflight_case(
+    root: &Path,
+    config: &mut GraphRagConfig,
+    case: RuntimePreflightCase,
+) {
+    match case {
+        RuntimePreflightCase::InvalidVectorSize => {
+            config.vector_store.vector_size = 0;
+        }
+        RuntimePreflightCase::InvalidVectorIndexName => {
+            let mut schema = graphloom_vectors::VectorIndexSchema::default();
+            "bad-name".clone_into(&mut schema.index_name);
+            schema.vector_size = 4;
+            config
+                .vector_store
+                .index_schema
+                .insert("entity_description".to_owned(), schema);
+        }
+        RuntimePreflightCase::UnwritableVectorParent => {
+            let file = root.join("vector-parent-file");
+            tokio::fs::write(&file, "not a directory")
+                .await
+                .expect("vector parent file");
+            config.vector_store.db_uri = file.join("db").to_string_lossy().to_string();
+        }
+        RuntimePreflightCase::OutputPathIsFile => {
+            tokio::fs::write(root.join("output-file"), "not a directory")
+                .await
+                .expect("output file");
+            "output-file".clone_into(&mut config.output_storage.base_dir);
+        }
+        RuntimePreflightCase::CachePathIsFile => {
+            tokio::fs::write(root.join("cache"), "not a directory")
+                .await
+                .expect("cache file");
+        }
+        RuntimePreflightCase::InputPathIsFile => {
+            tokio::fs::remove_dir_all(root.join("input"))
+                .await
+                .expect("remove input dir");
+            tokio::fs::write(root.join("input"), "not a directory")
+                .await
+                .expect("input file");
+        }
+        RuntimePreflightCase::InvalidCompletionEncoding => {
+            config
+                .completion_models
+                .get_mut("default_completion_model")
+                .expect("completion model")
+                .encoding_model = Some("definitely-not-an-encoding".to_owned());
+        }
+        RuntimePreflightCase::InvalidEmbeddingEncoding => {
+            config
+                .embedding_models
+                .get_mut("default_embedding_model")
+                .expect("embedding model")
+                .encoding_model = Some("definitely-not-an-encoding".to_owned());
+        }
+    }
+}
+
 fn chat_responder(request: &Request) -> ResponseTemplate {
     let body = request.body_json::<Value>().expect("chat request json");
     let messages = body["messages"].as_array().expect("messages");
@@ -461,6 +640,30 @@ fn embedding_responder(request: &Request) -> ResponseTemplate {
                 "object": "embedding",
                 "index": index,
                 "embedding": [1.0, 0.0, 0.0, tail]
+            })
+        })
+        .collect::<Vec<_>>();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "object": "list",
+        "data": data,
+        "model": "embed-test",
+        "usage": {"prompt_tokens": inputs.len(), "total_tokens": inputs.len()}
+    }))
+}
+
+fn embedding_dimension_mismatch_responder(request: &Request) -> ResponseTemplate {
+    let body = request
+        .body_json::<Value>()
+        .expect("embedding request json");
+    let inputs = body["input"].as_array().expect("input");
+    let data = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            json!({
+                "object": "embedding",
+                "index": index,
+                "embedding": [1.0, 0.0, 0.0]
             })
         })
         .collect::<Vec<_>>();

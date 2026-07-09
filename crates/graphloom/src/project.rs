@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW, GraphLoomError, GraphRagConfig, Result,
+    GraphLoomError, GraphRagConfig, Result,
 };
 
 /// Loaded `GraphLoom` project.
@@ -135,11 +135,6 @@ impl ProjectPaths {
             if let Some(path) = config.summarize_descriptions.prompt.as_deref() {
                 paths.push(resolve_path(&self.root, path));
             }
-        }
-        if active.contains(FINALIZE_GRAPH_WORKFLOW)
-            && let Some(path) = config.summarize_descriptions.prompt.as_deref()
-        {
-            paths.push(resolve_path(&self.root, path));
         }
         if active.contains(EXTRACT_COVARIATES_WORKFLOW)
             && config.extract_claims.enabled

@@ -1,6 +1,6 @@
 //! Project initialization.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_yaml::Value as YamlValue;
 use tokio::io::AsyncWriteExt;
@@ -101,9 +101,10 @@ impl InitPlan {
     async fn build(args: &InitArgs) -> Result<Self> {
         validate_model_argument("model", &args.model)?;
         validate_model_argument("embedding", &args.embedding)?;
-        let root = normalize_existing_parent(&args.root)?;
-        reject_symlink_ancestors(&root).await?;
-        reject_symlink(&root).await?;
+        let raw_root = absolute_unresolved(&args.root)?;
+        reject_symlink_ancestors(&raw_root).await?;
+        reject_symlink(&raw_root).await?;
+        let root = normalize_lexical(&raw_root);
         let settings = root.join("settings.yaml");
         if tokio::fs::try_exists(&settings)
             .await
@@ -358,7 +359,13 @@ async fn reject_symlink(path: &Path) -> Result<()> {
             path: path.to_path_buf(),
             message: "refusing to overwrite symlink".to_owned(),
         }),
-        Ok(_) | Err(_) => Ok(()),
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CliError::Io {
+            operation: "check symlink",
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -407,24 +414,32 @@ async fn cleanup_tmp(path: &Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
-fn normalize_existing_parent(path: &Path) -> Result<PathBuf> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        && parent.exists()
-    {
-        let parent = parent.canonicalize().map_err(|source| CliError::Io {
-            operation: "canonicalize parent",
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        let name = path.file_name().ok_or_else(|| CliError::InvalidRoot {
-            path: path.to_path_buf(),
-            message: "root path has no final component".to_owned(),
-        })?;
-        return Ok(parent.join(name));
+fn absolute_unresolved(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|source| CliError::Io {
+                operation: "get current directory",
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path))
     }
-    Ok(path.to_path_buf())
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -723,6 +738,77 @@ mod tests {
         assert!(!project.join("prompts").exists());
         assert!(!project.join("settings.yaml").exists());
         assert!(!project.join(".env").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_ancestor_before_normalization_without_side_effects() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        let link = tempdir.path().join("ancestor-link");
+        std::os::unix::fs::symlink(external.path(), &link).expect("symlink");
+        let root = link.join("project");
+
+        let error = init_project(&args(&root, false))
+            .await
+            .expect_err("symlink ancestor should fail");
+
+        assert!(error.to_string().contains("symlink"));
+        assert!(!external.path().join("project").exists());
+        assert!(!external.path().join("input").exists());
+        assert!(!external.path().join("prompts").exists());
+        assert!(!external.path().join("settings.yaml").exists());
+        assert!(!external.path().join(".env").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_ancestor_hidden_by_parent_component() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        let link = tempdir.path().join("ancestor-link");
+        std::os::unix::fs::symlink(external.path(), &link).expect("symlink");
+        let root = link.join("..").join("project");
+
+        let error = init_project(&args(&root, false))
+            .await
+            .expect_err("symlink ancestor hidden by .. should fail");
+
+        assert!(error.to_string().contains("symlink"));
+        assert!(!tempdir.path().join("project").exists());
+        assert!(!external.path().join("project").exists());
+    }
+
+    #[tokio::test]
+    async fn test_should_return_non_not_found_symlink_metadata_errors() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let file = tempdir.path().join("file");
+        tokio::fs::write(&file, "not a directory")
+            .await
+            .expect("file");
+        let child = file.join("child");
+
+        let error = reject_symlink(&child)
+            .await
+            .expect_err("not a directory must not be swallowed");
+
+        assert!(error.to_string().contains("check symlink"));
+    }
+
+    #[tokio::test]
+    async fn test_should_return_non_not_found_ancestor_metadata_errors() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let file = tempdir.path().join("file");
+        tokio::fs::write(&file, "not a directory")
+            .await
+            .expect("file");
+        let child = file.join("child").join("project");
+
+        let error = reject_symlink_ancestors(&child)
+            .await
+            .expect_err("not a directory must not be swallowed");
+
+        assert!(error.to_string().contains("check parent symlink"));
     }
 
     #[cfg(unix)]

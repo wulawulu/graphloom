@@ -8,7 +8,7 @@ use polars_core::prelude::DataFrame;
 use super::input_documents::{DocumentRow, documents_dataframe};
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{optional_string_at, row_to_static, string_at},
+    dataframe::{list_at, optional_string_at, row_to_static, string_at},
 };
 
 /// Workflow name.
@@ -78,8 +78,12 @@ fn text_unit_mapping(dataframe: &DataFrame) -> Result<BTreeMap<String, Vec<Strin
     for row_index in 0..dataframe.height() {
         let row = row_to_static(dataframe.get_row(row_index)?);
         let text_unit_id = string_at(&row, 0, "id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
-        let document_id = string_at(&row, 4, "document_id", CREATE_FINAL_DOCUMENTS_WORKFLOW)?;
-        mapping.entry(document_id).or_default().push(text_unit_id);
+        for document_id in list_at(&row, 4, CREATE_FINAL_DOCUMENTS_WORKFLOW)? {
+            mapping
+                .entry(document_id)
+                .or_default()
+                .push(text_unit_id.clone());
+        }
     }
     Ok(mapping)
 }

@@ -598,3 +598,29 @@ impl GraphRagConfig {
         Ok(())
     }
 }
+
+/// Return the tokenizer encoding used by a completion model, falling back to chunking.
+#[must_use]
+pub(crate) fn effective_completion_encoding<'a>(
+    config: &'a GraphRagConfig,
+    model_id: &str,
+) -> &'a str {
+    config
+        .completion_models
+        .get(model_id)
+        .and_then(|model| model.encoding_model.as_deref())
+        .unwrap_or(config.chunking.encoding_model.as_str())
+}
+
+/// Return the tokenizer encoding used by an embedding model, falling back to chunking.
+#[must_use]
+pub(crate) fn effective_embedding_encoding<'a>(
+    config: &'a GraphRagConfig,
+    model_id: &str,
+) -> &'a str {
+    config
+        .embedding_models
+        .get(model_id)
+        .and_then(|model| model.encoding_model.as_deref())
+        .unwrap_or(config.chunking.encoding_model.as_str())
+}

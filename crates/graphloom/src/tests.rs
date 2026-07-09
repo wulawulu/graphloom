@@ -415,9 +415,14 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
         "human_readable_id" => [7i64],
         "text" => ["Alice reports Bob."],
         "n_tokens" => [4i64],
-        "document_id" => ["doc-1"],
     )
     .expect("text units dataframe should build");
+    text_units
+        .with_column(string_list_column(
+            "document_ids",
+            &[vec!["doc-1".to_owned()]],
+        ))
+        .expect("document ids column should build");
     text_units
         .with_column(string_list_column("entity_ids", &[Vec::<String>::new()]))
         .expect("entity ids column should build");

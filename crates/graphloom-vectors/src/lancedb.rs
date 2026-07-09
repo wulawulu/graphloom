@@ -119,6 +119,34 @@ impl VectorStore for LanceDbVectorStore {
         table.count_rows(None).await.map_err(VectorError::from)
     }
 
+    async fn ids(&self, schema: &VectorIndexSchema) -> Result<Vec<String>> {
+        schema.validate()?;
+        let table = self.open_table(schema).await?;
+        let mut stream = table
+            .query()
+            .select(Select::columns(&[&schema.id_field]))
+            .execute()
+            .await?;
+        let mut ids = Vec::new();
+
+        while let Some(batch) = stream.try_next().await? {
+            let id_column = batch
+                .column_by_name(&schema.id_field)
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| VectorError::InvalidDocument {
+                    index_name: schema.index_name.clone(),
+                    message: format!("id field {} is not Utf8", schema.id_field),
+                })?;
+            for row_index in 0..batch.num_rows() {
+                if !id_column.is_null(row_index) {
+                    ids.push(id_column.value(row_index).to_owned());
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
     async fn get_by_id(
         &self,
         schema: &VectorIndexSchema,
