@@ -13,11 +13,11 @@ const DEFAULT_VECTOR_FIELD: &str = "vector";
 
 /// Vector store provider type.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum VectorStoreType {
     /// Local or remote `LanceDB` store.
     #[default]
+    #[serde(rename = "lancedb")]
     LanceDb,
 }
 
@@ -28,7 +28,7 @@ impl<'de> Deserialize<'de> for VectorStoreType {
     {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
-            "lancedb" => Ok(Self::LanceDb),
+            "lancedb" | "lance_db" => Ok(Self::LanceDb),
             other => Err(serde::de::Error::custom(format!(
                 "unsupported vector store type {other}; only lancedb is supported",
             ))),
@@ -61,7 +61,7 @@ impl Default for VectorIndexSchema {
             index_name: String::new(),
             id_field: DEFAULT_ID_FIELD.to_owned(),
             vector_field: DEFAULT_VECTOR_FIELD.to_owned(),
-            vector_size: DEFAULT_VECTOR_SIZE,
+            vector_size: 0,
         }
     }
 }
@@ -171,15 +171,10 @@ impl VectorStoreConfig {
                 message: "vector_size must be greater than zero".to_owned(),
             });
         }
-        for (embedding_name, schema) in &self.index_schema {
+        for embedding_name in self.index_schema.keys() {
             validate_identifier("embedding name", embedding_name)?;
             let resolved = self.schema_for(embedding_name);
             resolved.validate()?;
-            if schema.vector_size == 0 {
-                return Err(VectorError::InvalidConfig {
-                    message: format!("{embedding_name} vector_size must be greater than zero"),
-                });
-            }
         }
         Ok(())
     }
@@ -227,12 +222,81 @@ mod tests {
     }
 
     #[test]
+    fn test_should_inherit_global_vector_size_for_partial_index_schema() {
+        let config: VectorStoreConfig = serde_yaml::from_str(
+            r"
+type: lancedb
+dbUri: output/lancedb
+vectorSize: 1024
+indexSchema:
+  entity_description:
+    indexName: custom_entities
+",
+        )
+        .expect("config should deserialize");
+
+        let schema = config.schema_for("entity_description");
+        assert_eq!(schema.index_name, "custom_entities");
+        assert_eq!(schema.vector_size, 1024);
+        config.validate().expect("config should validate");
+    }
+
+    #[test]
+    fn test_should_allow_per_index_vector_size_override() {
+        let config: VectorStoreConfig = serde_yaml::from_str(
+            r"
+type: lancedb
+dbUri: output/lancedb
+vectorSize: 1024
+indexSchema:
+  entity_description:
+    vectorSize: 1536
+",
+        )
+        .expect("config should deserialize");
+
+        assert_eq!(config.schema_for("entity_description").vector_size, 1536);
+        assert_eq!(config.schema_for("text_unit_text").vector_size, 1024);
+    }
+
+    #[test]
+    fn test_should_reject_zero_global_vector_size() {
+        let config = VectorStoreConfig {
+            vector_size: 0,
+            ..VectorStoreConfig::default()
+        };
+
+        let error = config.validate().expect_err("zero global vector size");
+        assert!(error.to_string().contains("vector_size"));
+    }
+
+    #[test]
+    fn test_should_serde_lancedb_provider_round_trip() {
+        let original = VectorStoreConfig::default();
+        let json = serde_json::to_string(&original).expect("json serialize");
+        assert!(json.contains(r#""type":"lancedb""#));
+        let from_json: VectorStoreConfig = serde_json::from_str(&json).expect("json deserialize");
+        assert_eq!(from_json, original);
+
+        let yaml = serde_yaml::to_string(&original).expect("yaml serialize");
+        assert!(yaml.contains("type: lancedb"));
+        let from_yaml: VectorStoreConfig = serde_yaml::from_str(&yaml).expect("yaml deserialize");
+        assert_eq!(from_yaml, original);
+    }
+
+    #[test]
     fn test_should_reject_unsupported_vector_store_type() {
         let error = serde_json::from_value::<VectorStoreConfig>(json!({
             "type": "memory",
         }))
         .expect_err("memory vector store must not deserialize");
 
+        assert!(error.to_string().contains("only lancedb is supported"));
+
+        let error = serde_json::from_value::<VectorStoreConfig>(json!({
+            "type": "unknown",
+        }))
+        .expect_err("unknown vector store must not deserialize");
         assert!(error.to_string().contains("only lancedb is supported"));
     }
 

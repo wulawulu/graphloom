@@ -18,7 +18,9 @@ mod tokenizer;
 #[cfg(test)]
 mod tests;
 
-pub use cache_key::{completion_cache_key, embedding_cache_key, graphrag_cache_key};
+pub use cache_key::{
+    completion_cache_key, embedding_cache_key, embedding_request_cache_key, graphrag_cache_key,
+};
 pub use error::{LlmError, Result};
 pub use mock::{MockCompletionModel, MockEmbeddingModel};
 pub use model::{

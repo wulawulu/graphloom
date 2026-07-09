@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use graphloom_cache::Cache;
 use graphloom_llm::TiktokenTokenizer;
 use graphloom_storage::{Table, TableProvider};
 use graphloom_vectors::{VectorDocument, VectorIndexSchema, VectorStore, create_vector_store};
@@ -86,16 +87,6 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
                 message,
             })?;
 
-        let model_config = config
-            .embedding_models
-            .get(&config.embed_text.embedding_model_id)
-            .ok_or_else(|| GraphLoomError::InvalidData {
-                workflow: GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                message: format!(
-                    "embedding model {} is not configured",
-                    config.embed_text.embedding_model_id
-                ),
-            })?;
         let model = resolve_embedding_model(
             config,
             context,
@@ -111,6 +102,11 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
             Some(store) => Arc::clone(store),
             None => create_vector_store(&config.vector_store).await?,
         };
+        let embedding_cache = context
+            .cache
+            .as_ref()
+            .map(|cache| cache.child(&config.embed_text.model_instance_name))
+            .transpose()?;
 
         let field_map = embedding_fields();
         let snapshot_provider = if config.snapshots.embeddings {
@@ -153,8 +149,8 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
                 &schema,
                 Arc::clone(&vector_store),
                 Arc::clone(&model),
-                model_config,
                 Arc::clone(&tokenizer),
+                embedding_cache.as_ref().map(Arc::clone),
                 snapshot_provider.as_ref().map(Arc::clone),
             )
             .await?;
@@ -185,8 +181,8 @@ async fn process_field(
     schema: &VectorIndexSchema,
     vector_store: Arc<dyn VectorStore>,
     model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    model_config: &graphloom_llm::ModelConfig,
     tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
+    embedding_cache: Option<Arc<dyn Cache>>,
     snapshot_provider: Option<Arc<dyn TableProvider>>,
 ) -> Result<FieldSummary> {
     let mut source = context
@@ -208,8 +204,8 @@ async fn process_field(
         schema,
         vector_store,
         model,
-        model_config,
         tokenizer,
+        embedding_cache,
         &mut *source,
         &indices,
         &mut snapshot,
@@ -228,8 +224,16 @@ async fn process_field(
             Ok(summary)
         }
         Err(error) => {
-            if let Some(snapshot) = snapshot.as_mut() {
-                snapshot.abort().await?;
+            if let Some(snapshot) = snapshot.as_mut()
+                && let Err(abort_error) = snapshot.abort().await
+            {
+                context.callbacks.warning(
+                    GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                    &format!(
+                        "embedding {} snapshot abort failed after primary error: {abort_error}",
+                        field.name
+                    ),
+                );
             }
             Err(error)
         }
@@ -248,8 +252,8 @@ async fn process_field_inner(
     schema: &VectorIndexSchema,
     vector_store: Arc<dyn VectorStore>,
     model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    model_config: &graphloom_llm::ModelConfig,
     tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
+    embedding_cache: Option<Arc<dyn Cache>>,
     source: &mut dyn Table,
     indices: &SourceIndices,
     snapshot: &mut Option<Box<dyn Table>>,
@@ -294,8 +298,8 @@ async fn process_field_inner(
                 &vector_store,
                 schema,
                 Arc::clone(&model),
-                model_config,
                 Arc::clone(&tokenizer),
+                embedding_cache.as_ref().map(Arc::clone),
                 snapshot,
                 &mut summary,
                 &mut completed,
@@ -312,8 +316,8 @@ async fn process_field_inner(
             &vector_store,
             schema,
             model,
-            model_config,
             tokenizer,
+            embedding_cache,
             snapshot,
             &mut summary,
             &mut completed,
@@ -341,23 +345,16 @@ async fn flush_buffer(
     vector_store: &Arc<dyn VectorStore>,
     schema: &VectorIndexSchema,
     model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    model_config: &graphloom_llm::ModelConfig,
     tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
+    embedding_cache: Option<Arc<dyn Cache>>,
     snapshot: &mut Option<Box<dyn Table>>,
     summary: &mut FieldSummary,
     completed: &mut usize,
     total: usize,
 ) -> Result<()> {
     let rows = std::mem::take(buffer);
-    let output = embed_text_rows(
-        &rows,
-        operation_config,
-        model,
-        model_config,
-        tokenizer,
-        context.cache.as_ref().map(Arc::clone),
-    )
-    .await?;
+    let output =
+        embed_text_rows(&rows, operation_config, model, tokenizer, embedding_cache).await?;
     vector_store
         .upsert_documents(schema, &output.documents)
         .await?;
@@ -417,18 +414,19 @@ fn source_row(
     indices: &SourceIndices,
     row: &Row<'static>,
 ) -> Result<EmbeddingSourceRow> {
-    let id = required_string(row, indices.id, field.id_column)?;
-    if id.is_empty() {
-        return Err(invalid_data(
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-            &format!("{} source id must not be empty", field.name),
-        ));
-    }
+    let id = required_string(row, indices.id, field.name, field.id_column)?;
     let text = match field.mapper {
-        TextMapper::Single(column) => optional_string(row, indices.text_columns[column]),
+        TextMapper::Single(column) => {
+            nullable_string(row, indices.text_columns[column], field.name, column)?
+        }
         TextMapper::EntityDescription => {
-            let title = optional_string(row, indices.text_columns["title"]);
-            let description = optional_string(row, indices.text_columns["description"]);
+            let title = nullable_string(row, indices.text_columns["title"], field.name, "title")?;
+            let description = nullable_string(
+                row,
+                indices.text_columns["description"],
+                field.name,
+                "description",
+            )?;
             let combined = format!("{title}:{description}");
             if combined == ":" {
                 String::new()
@@ -440,25 +438,65 @@ fn source_row(
     Ok(EmbeddingSourceRow { id, text })
 }
 
-fn required_string(row: &Row<'static>, index: usize, column: &str) -> Result<String> {
-    optional_string_value(row.0.get(index)).ok_or_else(|| {
+fn required_string(
+    row: &Row<'static>,
+    index: usize,
+    embedding_name: &str,
+    column: &str,
+) -> Result<String> {
+    let value = row.0.get(index).ok_or_else(|| {
         invalid_data(
             GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-            &format!("missing string column {column}"),
+            &format!("{embedding_name} column {column} is missing"),
         )
-    })
+    })?;
+    let id = match value {
+        AnyValue::String(value) => (*value).to_owned(),
+        AnyValue::StringOwned(value) => value.to_string(),
+        AnyValue::Null => {
+            return Err(invalid_data(
+                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                &format!("{embedding_name} column {column} expected non-empty String, got Null"),
+            ));
+        }
+        other => {
+            return Err(invalid_data(
+                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                &format!(
+                    "{embedding_name} column {column} expected non-empty String, got {other:?}"
+                ),
+            ));
+        }
+    };
+    if id.is_empty() {
+        return Err(invalid_data(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            &format!("{embedding_name} column {column} must not be empty"),
+        ));
+    }
+    Ok(id)
 }
 
-fn optional_string(row: &Row<'static>, index: usize) -> String {
-    optional_string_value(row.0.get(index)).unwrap_or_default()
-}
-
-fn optional_string_value(value: Option<&AnyValue<'_>>) -> Option<String> {
+fn nullable_string(
+    row: &Row<'static>,
+    index: usize,
+    embedding_name: &str,
+    column: &str,
+) -> Result<String> {
+    let value = row.0.get(index).ok_or_else(|| {
+        invalid_data(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            &format!("{embedding_name} column {column} is missing"),
+        )
+    })?;
     match value {
-        Some(AnyValue::String(value)) => Some((*value).to_owned()),
-        Some(AnyValue::StringOwned(value)) => Some(value.to_string()),
-        Some(AnyValue::Null) => Some(String::new()),
-        _ => None,
+        AnyValue::String(value) => Ok((*value).to_owned()),
+        AnyValue::StringOwned(value) => Ok(value.to_string()),
+        AnyValue::Null => Ok(String::new()),
+        other => Err(invalid_data(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            &format!("{embedding_name} column {column} expected String or Null, got {other:?}"),
+        )),
     }
 }
 
@@ -532,4 +570,138 @@ fn embedding_fields() -> BTreeMap<&'static str, EmbeddingField> {
             },
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_core::prelude::AnyValue;
+
+    use super::*;
+
+    fn row(values: Vec<AnyValue<'static>>) -> Row<'static> {
+        Row(values)
+    }
+
+    #[test]
+    fn test_should_fail_fast_on_non_string_text_columns() {
+        let fields = embedding_fields();
+        let text = fields.get(TEXT_UNIT_TEXT_EMBEDDING).expect("text field");
+        let text_indices = SourceIndices {
+            id: 0,
+            text_columns: BTreeMap::from([("text", 1)]),
+        };
+        let error = source_row(
+            text,
+            &text_indices,
+            &row(vec![AnyValue::String("tu-1"), AnyValue::Int64(7)]),
+        )
+        .expect_err("int text should fail");
+        assert!(error.to_string().contains("text_unit_text"));
+        assert!(error.to_string().contains("text"));
+
+        let entity = fields
+            .get(ENTITY_DESCRIPTION_EMBEDDING)
+            .expect("entity field");
+        let entity_indices = SourceIndices {
+            id: 0,
+            text_columns: BTreeMap::from([("title", 1), ("description", 2)]),
+        };
+        let error = source_row(
+            entity,
+            &entity_indices,
+            &row(vec![
+                AnyValue::String("e-1"),
+                AnyValue::Boolean(true),
+                AnyValue::String("Engineer"),
+            ]),
+        )
+        .expect_err("boolean title should fail");
+        assert!(error.to_string().contains("title"));
+
+        let error = source_row(
+            entity,
+            &entity_indices,
+            &row(vec![
+                AnyValue::String("e-1"),
+                AnyValue::String("Alice"),
+                AnyValue::Float64(1.0),
+            ]),
+        )
+        .expect_err("float description should fail");
+        assert!(error.to_string().contains("description"));
+    }
+
+    #[test]
+    fn test_should_fail_fast_on_non_string_id_and_skip_null_text() {
+        let fields = embedding_fields();
+        let text = fields.get(TEXT_UNIT_TEXT_EMBEDDING).expect("text field");
+        let indices = SourceIndices {
+            id: 0,
+            text_columns: BTreeMap::from([("text", 1)]),
+        };
+
+        let error = source_row(
+            text,
+            &indices,
+            &row(vec![AnyValue::Int64(1), AnyValue::Null]),
+        )
+        .expect_err("numeric id should fail");
+        assert!(error.to_string().contains("expected non-empty String"));
+
+        let source = source_row(
+            text,
+            &indices,
+            &row(vec![AnyValue::String("tu-1"), AnyValue::Null]),
+        )
+        .expect("null text should map to empty text");
+        assert_eq!(source.text, "");
+    }
+
+    #[test]
+    fn test_should_preserve_entity_title_description_separator() {
+        let fields = embedding_fields();
+        let entity = fields
+            .get(ENTITY_DESCRIPTION_EMBEDDING)
+            .expect("entity field");
+        let indices = SourceIndices {
+            id: 0,
+            text_columns: BTreeMap::from([("title", 1), ("description", 2)]),
+        };
+
+        let title_only = source_row(
+            entity,
+            &indices,
+            &row(vec![
+                AnyValue::String("e-1"),
+                AnyValue::String("Alice"),
+                AnyValue::Null,
+            ]),
+        )
+        .expect("title only");
+        assert_eq!(title_only.text, "Alice:");
+
+        let description_only = source_row(
+            entity,
+            &indices,
+            &row(vec![
+                AnyValue::String("e-2"),
+                AnyValue::Null,
+                AnyValue::String("Engineer"),
+            ]),
+        )
+        .expect("description only");
+        assert_eq!(description_only.text, ":Engineer");
+
+        let empty = source_row(
+            entity,
+            &indices,
+            &row(vec![
+                AnyValue::String("e-3"),
+                AnyValue::Null,
+                AnyValue::Null,
+            ]),
+        )
+        .expect("empty entity text");
+        assert_eq!(empty.text, "");
+    }
 }

@@ -11,7 +11,7 @@ use futures_util::{Stream, stream};
 use graphloom_input::{DocumentStream, InputReader, TextDocument, gen_sha512_hash};
 use graphloom_llm::{
     CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, EmbeddingRequest,
-    EmbeddingResponse, MockCompletionModel, ModelConfig,
+    EmbeddingResponse, MockCompletionModel,
 };
 use graphloom_storage::{MemoryStorage, MemoryTableProvider, Storage, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore, VectorStoreConfig};
@@ -825,10 +825,7 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
         vector_store,
         ..Default::default()
     };
-    config.embedding_models.insert(
-        "default_embedding_model".to_owned(),
-        test_embedding_model_config(),
-    );
+    config.embedding_models.clear();
 
     let pipeline = PipelineFactory::new(registry)
         .standard(&config)
@@ -844,6 +841,14 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
     assert_eq!(context.stats.embedding_count, 3);
     assert_eq!(context.stats.llm_request_count, 3);
     assert!(model.inputs().iter().any(|input| input == "Alice:Engineer"));
+    let summaries = &outputs[0].result;
+    assert_eq!(summaries.len(), 3);
+    for summary in summaries {
+        let input_rows = summary["input_rows"].as_u64().expect("input rows");
+        let embedded_rows = summary["embedded_rows"].as_u64().expect("embedded rows");
+        let skipped_rows = summary["skipped_rows"].as_u64().expect("skipped rows");
+        assert_eq!(embedded_rows + skipped_rows, input_rows);
+    }
 
     let store = LanceDbVectorStore::connect(&config.vector_store)
         .await
@@ -917,20 +922,34 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
     );
 }
 
-fn test_embedding_model_config() -> ModelConfig {
-    ModelConfig {
-        provider_type: "mock".to_owned(),
-        model: "mock".to_owned(),
-        api_key: None,
-        api_base: None,
-        organization: None,
-        timeout: None,
-        max_retries: 1,
-        retry_strategy: None,
-        tokens_per_minute: None,
-        requests_per_minute: None,
-        encoding_model: Some("cl100k_base".to_owned()),
-    }
+#[tokio::test]
+async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configured() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    provider
+        .write_dataframe(
+            "text_units",
+            df!("id" => ["tu-1"], "text" => ["hello"]).expect("text units"),
+        )
+        .await
+        .expect("text_units should write");
+    let mut context = PipelineRunContext::new(provider);
+    let mut registry = WorkflowRegistry::new();
+    register_step9_workflows(&mut registry);
+    let mut config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        ..Default::default()
+    };
+    config.embedding_models.clear();
+
+    let pipeline = PipelineFactory::new(registry)
+        .standard(&config)
+        .expect("step9 pipeline should build");
+    let error = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect_err("missing model should fail");
+
+    assert!(error.to_string().contains("embedding model"));
 }
 
 #[derive(Debug, Default)]

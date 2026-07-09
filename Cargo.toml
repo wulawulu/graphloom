@@ -27,7 +27,7 @@ dotenvy = "0.15.7"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 html-escape = "0.2.14"
-lancedb = "0.31.0"
+lancedb = { version = "0.31.0", default-features = false }
 network_partitions = { git = "https://github.com/graspologic-org/graspologic-native.git", rev = "773181488b4e5b81925e302b972b294fd51f61a4", package = "network_partitions" }
 polars-core = { version = "0.54.4", default-features = false, features = ["dtype-struct", "rows"] }
 polars-io = { version = "0.54.4", default-features = false, features = ["parquet"] }

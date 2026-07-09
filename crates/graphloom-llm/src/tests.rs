@@ -3,8 +3,8 @@ use serde::Serialize;
 use crate::{
     ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, EmbeddingModel,
     EmbeddingRequest, MockCompletionModel, MockEmbeddingModel, ModelConfig, PromptLoader,
-    Tokenizer, completion_cache_key, embedding_cache_key, graphrag_cache_key, parse_claim_tuples,
-    parse_community_report, parse_graph_tuples,
+    Tokenizer, completion_cache_key, embedding_cache_key, embedding_request_cache_key,
+    graphrag_cache_key, parse_claim_tuples, parse_community_report, parse_graph_tuples,
 };
 
 #[test]
@@ -82,6 +82,49 @@ fn test_should_create_deterministic_cache_keys() {
     assert_eq!(
         embedding_cache_key("embed", &config, &embedding).expect("embedding key should hash"),
         "c1acdf25b4b7df2452b560f79939baf569a89d280b13221dbe8bf15a3259e337_v4"
+    );
+}
+
+#[test]
+fn test_should_create_canonical_embedding_request_cache_keys() {
+    let base = EmbeddingRequest {
+        input: vec!["hello".to_owned(), "world".to_owned()],
+        dimensions: Some(3),
+        cache_namespace: Some("a".to_owned()),
+    };
+    let same = EmbeddingRequest {
+        cache_namespace: Some("b".to_owned()),
+        ..base.clone()
+    };
+    let changed_input = EmbeddingRequest {
+        input: vec!["hello!".to_owned(), "world".to_owned()],
+        ..base.clone()
+    };
+    let changed_order = EmbeddingRequest {
+        input: vec!["world".to_owned(), "hello".to_owned()],
+        ..base.clone()
+    };
+    let changed_dimensions = EmbeddingRequest {
+        dimensions: Some(4),
+        ..base.clone()
+    };
+
+    let key = embedding_request_cache_key(&base).expect("base key");
+    assert_eq!(
+        key,
+        embedding_request_cache_key(&same).expect("same request key")
+    );
+    assert_ne!(
+        key,
+        embedding_request_cache_key(&changed_input).expect("changed input key")
+    );
+    assert_ne!(
+        key,
+        embedding_request_cache_key(&changed_order).expect("changed order key")
+    );
+    assert_ne!(
+        key,
+        embedding_request_cache_key(&changed_dimensions).expect("changed dimensions key")
     );
 }
 

@@ -66,14 +66,14 @@ pub fn completion_cache_key(
 
 /// Create a GraphRAG-compatible embedding cache key.
 ///
+/// The key intentionally covers only the embedding request payload (`input` and
+/// optional `dimensions`). Model-instance isolation belongs to the caller's
+/// cache namespace, for example `Cache::child(model_instance_name)`.
+///
 /// # Errors
 ///
 /// Returns an error if the key payload cannot be represented.
-pub fn embedding_cache_key(
-    _model_instance: &str,
-    _config: &ModelConfig,
-    request: &EmbeddingRequest,
-) -> Result<String> {
+pub fn embedding_request_cache_key(request: &EmbeddingRequest) -> Result<String> {
     let mut payload = Map::new();
     payload.insert(
         "input".to_owned(),
@@ -92,6 +92,23 @@ pub fn embedding_cache_key(
         );
     }
     graphrag_cache_key(&Value::Object(payload))
+}
+
+/// Create a GraphRAG-compatible embedding cache key.
+///
+/// Model instance arguments are retained for compatibility. Namespace
+/// isolation is handled by the cache provider, so this delegates to
+/// [`embedding_request_cache_key`].
+///
+/// # Errors
+///
+/// Returns an error if the key payload cannot be represented.
+pub fn embedding_cache_key(
+    _model_instance: &str,
+    _config: &ModelConfig,
+    request: &EmbeddingRequest,
+) -> Result<String> {
+    embedding_request_cache_key(request)
 }
 
 /// Create a GraphRAG-compatible cache key from raw model call kwargs.

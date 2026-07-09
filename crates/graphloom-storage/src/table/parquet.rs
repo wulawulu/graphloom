@@ -168,7 +168,7 @@ impl Table for ParquetTable {
 
     async fn close(&mut self) -> Result<()> {
         self.check_open()?;
-        if self.pending.height() == 0 {
+        if self.pending.height() == 0 && (!self.truncate || self.pending.width() == 0) {
             self.closed = true;
             return Ok(());
         }
@@ -265,4 +265,74 @@ fn write_parquet_dataframe(mut dataframe: DataFrame) -> Result<Vec<u8>> {
         .finish(&mut dataframe)
         .map_err(StorageError::Polars)?;
     Ok(buffer.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_core::prelude::{DataFrame, DataType, NamedFrom, Series};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn empty_embedding_dataframe() -> DataFrame {
+        DataFrame::new(
+            0,
+            vec![
+                Series::new_empty("id".into(), &DataType::String).into(),
+                Series::new_empty(
+                    "embedding".into(),
+                    &DataType::List(Box::new(DataType::Float32)),
+                )
+                .into(),
+            ],
+        )
+        .expect("empty dataframe")
+    }
+
+    fn one_embedding_dataframe() -> DataFrame {
+        let rows = vec![Series::new("item".into(), [1.0_f32, 0.0])];
+        DataFrame::new(
+            1,
+            vec![
+                Series::new("id".into(), ["old"]).into(),
+                Series::new("embedding".into(), rows).into(),
+            ],
+        )
+        .expect("one-row dataframe")
+    }
+
+    #[tokio::test]
+    async fn test_should_commit_empty_truncate_table_with_schema() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let provider = ParquetTableProvider::new(tempdir.path()).expect("provider");
+        provider
+            .write_dataframe("embeddings", one_embedding_dataframe())
+            .await
+            .expect("seed");
+
+        let mut table = provider.open("embeddings", true).await.expect("open");
+        table
+            .write(empty_embedding_dataframe())
+            .await
+            .expect("write empty schema");
+        table.close().await.expect("close");
+
+        let dataframe = provider
+            .read_dataframe("embeddings")
+            .await
+            .expect("empty table should exist");
+        assert_eq!(dataframe.height(), 0);
+        assert_eq!(
+            dataframe
+                .get_column_names()
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "embedding"]
+        );
+        assert_eq!(
+            dataframe.column("embedding").expect("embedding").dtype(),
+            &DataType::List(Box::new(DataType::Float32))
+        );
+    }
 }
