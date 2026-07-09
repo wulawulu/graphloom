@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    ffi::OsString,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
 };
@@ -79,71 +80,66 @@ impl ProjectPaths {
     ///
     /// Returns an error if output could delete project, input, cache, or logs.
     pub fn validate_destructive_paths(&self) -> Result<()> {
-        reject_symlink_components(
-            &self.output_dir,
-            "inspect output path",
-            "output directory must not contain symlink components",
-        )?;
-        let output = canonical_or_normalized(&self.output_dir);
-        let root = canonical_or_normalized(&self.root);
-        let input = canonical_or_normalized(&self.input_dir);
-        let cache = canonical_or_normalized(&self.cache_dir);
-        let reporting = canonical_or_normalized(&self.reporting_dir);
+        self.validate_destructive_paths_with_home(user_home_dir().as_deref())
+    }
 
-        if output == root {
+    fn validate_destructive_paths_with_home(&self, home: Option<&Path>) -> Result<()> {
+        let output = resolve_path_rejecting_links(&self.output_dir)?;
+        let root = resolve_path_following_links(&self.root)?;
+        let input = resolve_path_following_links(&self.input_dir)?;
+        let cache = resolve_path_following_links(&self.cache_dir)?;
+        let reporting = resolve_path_following_links(&self.reporting_dir)?;
+
+        if output.resolved == root.resolved {
             return unsafe_output(
                 &self.output_dir,
                 "output directory must not be project root",
             );
         }
-        if output == input {
+        if output.resolved == input.resolved {
             return unsafe_output(&self.output_dir, "output directory must not equal input");
         }
-        if output == cache {
+        if output.resolved == cache.resolved {
             return unsafe_output(&self.output_dir, "output directory must not equal cache");
         }
-        if output == reporting {
+        if output.resolved == reporting.resolved {
             return unsafe_output(&self.output_dir, "output directory must not equal logs");
         }
-        if root.starts_with(&output)
-            || input.starts_with(&output)
-            || cache.starts_with(&output)
-            || reporting.starts_with(&output)
+        if root.resolved.starts_with(&output.resolved)
+            || input.resolved.starts_with(&output.resolved)
+            || cache.resolved.starts_with(&output.resolved)
+            || reporting.resolved.starts_with(&output.resolved)
         {
             return unsafe_output(
                 &self.output_dir,
                 "output directory must not be an ancestor of project, input, cache, or logs",
             );
         }
-        if is_filesystem_root(&output) {
+        if is_filesystem_root(&output.resolved) {
             return unsafe_output(
                 &self.output_dir,
                 "output directory must not be filesystem root",
             );
         }
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
-            && output == canonical_or_normalized(&home)
-        {
-            return unsafe_output(
-                &self.output_dir,
-                "output directory must not be home directory",
-            );
+        if let Some(home) = home {
+            let home = resolve_path_following_links(home)?;
+            if output.resolved == home.resolved || home.resolved.starts_with(&output.resolved) {
+                return unsafe_output(
+                    &self.output_dir,
+                    "output directory must not be home directory or an ancestor of home directory",
+                );
+            }
         }
         Ok(())
     }
 
-    /// Validate that the vector DB path cannot target destructive project paths.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the vector DB path is unsafe for reset.
-    pub(crate) fn validate_vector_path_safety(&self) -> Result<()> {
-        let vector = resolve_existing_ancestor(&self.vector_db_uri)?;
-        let root = resolve_existing_ancestor(&self.root)?;
-        let output = resolve_existing_ancestor(&self.output_dir)?;
-        let input = resolve_existing_ancestor(&self.input_dir)?;
-        let cache = resolve_existing_ancestor(&self.cache_dir)?;
-        let reporting = resolve_existing_ancestor(&self.reporting_dir)?;
+    fn validate_vector_path_safety_with_home(&self, home: Option<&Path>) -> Result<()> {
+        let vector = resolve_path_rejecting_links(&self.vector_db_uri)?;
+        let root = resolve_path_following_links(&self.root)?;
+        let output = resolve_path_rejecting_links(&self.output_dir)?;
+        let input = resolve_path_following_links(&self.input_dir)?;
+        let cache = resolve_path_following_links(&self.cache_dir)?;
+        let reporting = resolve_path_following_links(&self.reporting_dir)?;
 
         if is_filesystem_root(&vector.resolved) {
             return unsafe_output(
@@ -175,8 +171,8 @@ impl ProjectPaths {
                 );
             }
         }
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            let home = resolve_existing_ancestor(&home)?;
+        if let Some(home) = home {
+            let home = resolve_path_following_links(home)?;
             if vector.resolved == home.resolved || home.resolved.starts_with(&vector.resolved) {
                 return unsafe_output(
                     &self.vector_db_uri,
@@ -185,6 +181,15 @@ impl ProjectPaths {
             }
         }
         Ok(())
+    }
+
+    /// Validate that the vector DB path cannot target destructive project paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vector DB path is unsafe for reset.
+    pub(crate) fn validate_vector_path_safety(&self) -> Result<()> {
+        self.validate_vector_path_safety_with_home(user_home_dir().as_deref())
     }
 
     /// Resolve configured prompt paths used by active workflows.
@@ -247,14 +252,42 @@ fn unsafe_output<T>(path: &Path, message: &str) -> Result<T> {
     })
 }
 
-pub(crate) fn resolve_existing_ancestor(path: &Path) -> Result<ResolvedPath> {
+/// Resolve a destructive path while rejecting symlink or reparse-point components.
+///
+/// Use this for paths that may be recursively deleted or reset, such as output
+/// and vector database locations.
+pub(crate) fn resolve_path_rejecting_links(path: &Path) -> Result<ResolvedPath> {
+    resolve_path_with_existing_ancestor(path, LinkPolicy::Reject)
+}
+
+/// Resolve a non-destructive comparison path by following existing links.
+///
+/// Use this for input, cache, reporting, root, and home-directory paths that
+/// should participate in safety comparisons by their real filesystem location
+/// without being rejected solely because they contain links.
+pub(crate) fn resolve_path_following_links(path: &Path) -> Result<ResolvedPath> {
+    resolve_path_with_existing_ancestor(path, LinkPolicy::Follow)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkPolicy {
+    Reject,
+    Follow,
+}
+
+fn resolve_path_with_existing_ancestor(
+    path: &Path,
+    link_policy: LinkPolicy,
+) -> Result<ResolvedPath> {
     let lexical = absolute_lexical(path)?;
     let mut current = PathBuf::new();
     let mut existing = None;
     for component in lexical.components() {
         current.push(component.as_os_str());
         match current.symlink_metadata() {
-            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
+            Ok(metadata)
+                if link_policy == LinkPolicy::Reject && is_symlink_or_reparse(&metadata) =>
+            {
                 return unsafe_output(path, "path must not contain symlink components");
             }
             Ok(_) => {
@@ -287,30 +320,23 @@ pub(crate) fn resolve_existing_ancestor(path: &Path) -> Result<ResolvedPath> {
     })
 }
 
-fn reject_symlink_components(
-    path: &Path,
-    operation: &'static str,
-    message: &'static str,
-) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match current.symlink_metadata() {
-            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
-                return unsafe_output(path, message);
-            }
-            Ok(_) => {}
-            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(GraphLoomError::Io {
-                    operation,
-                    path: current,
-                    source,
-                });
-            }
-        }
+pub(crate) fn user_home_dir() -> Option<PathBuf> {
+    user_home_dir_from_env(|name| std::env::var_os(name))
+}
+
+pub(crate) fn user_home_dir_from_env(get: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let non_empty = |name| get(name).filter(|value| !value.is_empty());
+    if let Some(home) = non_empty("HOME") {
+        return Some(normalize_path(&PathBuf::from(home)));
     }
-    Ok(())
+    if let Some(userprofile) = non_empty("USERPROFILE") {
+        return Some(normalize_path(&PathBuf::from(userprofile)));
+    }
+    let homedrive = non_empty("HOMEDRIVE")?;
+    let homepath = non_empty("HOMEPATH")?;
+    let mut home = PathBuf::from(homedrive);
+    home.push(homepath);
+    Some(normalize_path(&home))
 }
 
 fn absolute_lexical(path: &Path) -> Result<PathBuf> {
@@ -351,10 +377,6 @@ fn resolve_path(root: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn canonical_or_normalized(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| normalize_path(path))
-}
-
 fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
 }
@@ -385,11 +407,15 @@ fn absolute_normalized(path: &Path) -> Result<PathBuf> {
             })?
             .join(path)
     };
-    Ok(canonical_or_normalized(&absolute))
+    Ok(absolute
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(&absolute)))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, ffi::OsString};
+
     use tempfile::TempDir;
 
     use super::*;
@@ -397,17 +423,7 @@ mod tests {
     #[test]
     fn test_should_reject_output_ancestor_of_reporting_dir() {
         let tempdir = TempDir::new().expect("tempdir");
-        let config: GraphRagConfig = serde_yaml::from_str(
-            r"
-output_storage:
-  type: file
-  base_dir: logs
-reporting:
-  type: file
-  base_dir: logs/index
-",
-        )
-        .expect("config");
+        let config = config_with_paths("input", "logs", "cache", "logs/index", "output/lancedb");
 
         let error = ProjectPaths::resolve(tempdir.path(), &config)
             .expect_err("output ancestor of logs should fail");
@@ -421,17 +437,306 @@ reporting:
         let external = TempDir::new().expect("external");
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("output-link"))
             .expect("symlink");
-        let config: GraphRagConfig = serde_yaml::from_str(
-            r"
-output_storage:
-  type: file
-  base_dir: output-link/index
-",
-        )
-        .expect("config");
+        let config = config_with_paths(
+            "input",
+            "output-link/index",
+            "cache",
+            "logs",
+            "output/lancedb",
+        );
 
         let error = ProjectPaths::resolve(tempdir.path(), &config)
             .expect_err("symlink output escape should fail");
         assert!(error.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_allow_input_symlink_when_vector_path_is_separate() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
+            .expect("input symlink");
+
+        let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+
+        ProjectPaths::resolve(tempdir.path(), &config).expect("input symlink should be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_allow_cache_symlink_when_vector_path_is_separate() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
+            .expect("cache symlink");
+
+        let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+
+        ProjectPaths::resolve(tempdir.path(), &config).expect("cache symlink should be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_allow_reporting_symlink_when_vector_path_is_separate() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("logs"))
+            .expect("logs symlink");
+
+        let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+
+        ProjectPaths::resolve(tempdir.path(), &config).expect("logs symlink should be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_vector_overlap_with_resolved_input_symlink() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
+            .expect("input symlink");
+        let vector = external.path().join("vector");
+        let config = config_with_paths(
+            "input",
+            "output",
+            "cache",
+            "logs",
+            &vector.to_string_lossy(),
+        );
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("vector overlapping resolved input should fail");
+
+        assert!(error.to_string().contains("overlap input"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_vector_overlap_with_resolved_cache_symlink() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
+            .expect("cache symlink");
+        let vector = external.path().join("vector");
+        let config = config_with_paths(
+            "input",
+            "output",
+            "cache",
+            "logs",
+            &vector.to_string_lossy(),
+        );
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("vector overlapping resolved cache should fail");
+
+        assert!(error.to_string().contains("overlap cache"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_vector_overlap_with_resolved_reporting_symlink() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("logs"))
+            .expect("logs symlink");
+        let vector = external.path().join("vector");
+        let config = config_with_paths(
+            "input",
+            "output",
+            "cache",
+            "logs",
+            &vector.to_string_lossy(),
+        );
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("vector overlapping resolved logs should fail");
+
+        assert!(error.to_string().contains("overlap logs"));
+    }
+
+    #[test]
+    fn test_should_resolve_home_from_home_env() {
+        let home = user_home_dir_from_env(env_getter(&[("HOME", "/home/alice")])).expect("home");
+
+        assert_eq!(home, PathBuf::from("/home/alice"));
+    }
+
+    #[test]
+    fn test_should_skip_empty_home_and_use_userprofile() {
+        let home =
+            user_home_dir_from_env(env_getter(&[("HOME", ""), ("USERPROFILE", "/users/alice")]))
+                .expect("home");
+
+        assert_eq!(home, PathBuf::from("/users/alice"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_resolve_windows_home_from_userprofile() {
+        let home = user_home_dir_from_env(env_getter(&[("USERPROFILE", r"C:\Users\Alice")]))
+            .expect("home");
+
+        assert_eq!(home, PathBuf::from(r"C:\Users\Alice"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_resolve_windows_home_from_homedrive_and_homepath() {
+        let home = user_home_dir_from_env(env_getter(&[
+            ("HOMEDRIVE", r"C:"),
+            ("HOMEPATH", r"\Users\Alice"),
+        ]))
+        .expect("home");
+
+        assert_eq!(home, PathBuf::from(r"C:\Users\Alice"));
+    }
+
+    #[test]
+    fn test_should_prioritize_home_over_userprofile() {
+        let home = user_home_dir_from_env(env_getter(&[
+            ("HOME", "/home/alice"),
+            ("USERPROFILE", "/users/bob"),
+        ]))
+        .expect("home");
+
+        assert_eq!(home, PathBuf::from("/home/alice"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_output_equal_to_home() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let home = tempdir.path().join("home");
+        let project = tempdir.path().join("project");
+        tokio::fs::create_dir(&home).await.expect("home dir");
+        tokio::fs::create_dir(&project).await.expect("project dir");
+        let config = config_with_paths(
+            "input",
+            &home.to_string_lossy(),
+            "cache",
+            "logs",
+            "output/lancedb",
+        );
+        let paths = project_paths(&project, &config);
+
+        let error = paths
+            .validate_destructive_paths_with_home(Some(&home))
+            .expect_err("output equal home should fail");
+
+        assert!(error.to_string().contains("home directory"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_vector_equal_to_home() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let home = tempdir.path().join("home");
+        let project = tempdir.path().join("project");
+        tokio::fs::create_dir(&home).await.expect("home dir");
+        tokio::fs::create_dir(&project).await.expect("project dir");
+        let config = config_with_paths("input", "output", "cache", "logs", &home.to_string_lossy());
+        let paths = project_paths(&project, &config);
+
+        let error = paths
+            .validate_vector_path_safety_with_home(Some(&home))
+            .expect_err("vector equal home should fail");
+
+        assert!(error.to_string().contains("home directory"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_vector_ancestor_of_home() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let home_parent = tempdir.path().join("home-parent");
+        let home = home_parent.join("home");
+        let project = tempdir.path().join("project");
+        tokio::fs::create_dir(&home_parent)
+            .await
+            .expect("home parent dir");
+        tokio::fs::create_dir(&home).await.expect("home dir");
+        tokio::fs::create_dir(&project).await.expect("project dir");
+        let config = config_with_paths(
+            "input",
+            "output",
+            "cache",
+            "logs",
+            &home_parent.to_string_lossy(),
+        );
+        let paths = project_paths(&project, &config);
+
+        let error = paths
+            .validate_vector_path_safety_with_home(Some(&home))
+            .expect_err("vector ancestor of home should fail");
+
+        assert!(error.to_string().contains("home directory"));
+    }
+
+    #[tokio::test]
+    async fn test_should_allow_vector_inside_home_project() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let home = tempdir.path().join("home");
+        tokio::fs::create_dir(&home).await.expect("home dir");
+        let config = config_with_paths(
+            "home/project/input",
+            "home/project/output",
+            "home/project/cache",
+            "home/project/logs",
+            "home/project/output/lancedb",
+        );
+        let paths = project_paths(tempdir.path(), &config);
+
+        paths
+            .validate_vector_path_safety_with_home(Some(&home))
+            .expect("vector under home project should be allowed");
+    }
+
+    fn env_getter(values: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        let values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), OsString::from(value)))
+            .collect::<BTreeMap<_, _>>();
+        move |key| values.get(key).cloned()
+    }
+
+    fn project_paths(root: &Path, config: &GraphRagConfig) -> ProjectPaths {
+        let root = absolute_normalized(root).expect("root");
+        ProjectPaths {
+            input_dir: resolve_path(&root, &config.input_storage.base_dir),
+            output_dir: resolve_path(&root, &config.output_storage.base_dir),
+            cache_dir: resolve_path(&root, &config.cache.storage.base_dir),
+            reporting_dir: resolve_path(&root, &config.reporting.base_dir),
+            vector_db_uri: resolve_path(&root, &config.vector_store.db_uri),
+            root,
+        }
+    }
+
+    fn config_with_paths(
+        input: &str,
+        output: &str,
+        cache: &str,
+        reporting: &str,
+        vector: &str,
+    ) -> GraphRagConfig {
+        serde_yaml::from_str(&format!(
+            r"
+input_storage:
+  type: file
+  base_dir: {input:?}
+output_storage:
+  type: file
+  base_dir: {output:?}
+cache:
+  type: json
+  storage:
+    type: file
+    base_dir: {cache:?}
+reporting:
+  type: file
+  base_dir: {reporting:?}
+vector_store:
+  type: lancedb
+  db_uri: {vector:?}
+"
+        ))
+        .expect("config")
     }
 }

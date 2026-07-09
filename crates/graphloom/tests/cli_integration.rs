@@ -10,7 +10,7 @@ use assert_cmd::Command;
 use graphloom::{ALL_EMBEDDINGS, GraphRagConfig};
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
-use polars_core::prelude::{AnyValue, DataFrame, DataType, PlSmallStr};
+use polars_core::prelude::{AnyValue, DataFrame, DataType, NamedFrom, PlSmallStr, Series};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use serde_yaml::Mapping;
@@ -1165,6 +1165,128 @@ fn assert_reference_integrity(frames: &OutputFrames) {
         &i64_set(&frames.community_reports, "community"),
         &community_keys,
     );
+    validate_document_text_unit_mapping(&frames.documents, &frames.text_units)
+        .expect("documents.text_unit_ids should exactly mirror text_units.document_id");
+}
+
+#[test]
+fn test_should_reject_incomplete_document_text_unit_reverse_mapping() {
+    let documents = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["doc-1"]).into(),
+            string_list_column("text_unit_ids", &[&["tu-1"]]),
+        ],
+    )
+    .expect("documents");
+    let text_units = DataFrame::new(
+        2,
+        vec![
+            Series::new("id".into(), ["tu-1", "tu-2"]).into(),
+            Series::new("document_id".into(), ["doc-1", "doc-1"]).into(),
+        ],
+    )
+    .expect("text_units");
+
+    let error = validate_document_text_unit_mapping(&documents, &text_units)
+        .expect_err("missing reverse mapping should fail");
+
+    assert!(error.contains("doc-1"));
+    assert!(error.contains("tu-2"));
+}
+
+fn validate_document_text_unit_mapping(
+    documents: &DataFrame,
+    text_units: &DataFrame,
+) -> Result<(), String> {
+    let document_ids = string_set(documents, "id");
+    let text_unit_ids = string_set(text_units, "id");
+    let mut expected = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    let text_unit_id_column = text_units
+        .column("id")
+        .map_err(|source| source.to_string())?
+        .str()
+        .map_err(|source| source.to_string())?;
+    let document_id_column = text_units
+        .column("document_id")
+        .map_err(|source| source.to_string())?
+        .str()
+        .map_err(|source| source.to_string())?;
+    let mut seen_text_unit_ids = BTreeSet::new();
+    for row_index in 0..text_units.height() {
+        let text_unit_id = text_unit_id_column
+            .get(row_index)
+            .ok_or_else(|| format!("text_units row {row_index} has null id"))?;
+        if !seen_text_unit_ids.insert(text_unit_id.to_owned()) {
+            return Err(format!("duplicate text unit id {text_unit_id}"));
+        }
+        let document_id = document_id_column
+            .get(row_index)
+            .ok_or_else(|| format!("text_units row {row_index} has null document_id"))?;
+        if !document_ids.contains(document_id) {
+            return Err(format!(
+                "text unit {text_unit_id} references missing document {document_id}"
+            ));
+        }
+        expected
+            .entry(document_id.to_owned())
+            .or_default()
+            .insert(text_unit_id.to_owned());
+    }
+
+    let mut actual = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    let document_id_column = documents
+        .column("id")
+        .map_err(|source| source.to_string())?
+        .str()
+        .map_err(|source| source.to_string())?;
+    let text_unit_ids_index = documents
+        .get_column_names()
+        .iter()
+        .position(|name| name.as_str() == "text_unit_ids")
+        .ok_or_else(|| "documents.text_unit_ids column is missing".to_owned())?;
+    let mut seen_document_ids = BTreeSet::new();
+    for row_index in 0..documents.height() {
+        let document_id = document_id_column
+            .get(row_index)
+            .ok_or_else(|| format!("documents row {row_index} has null id"))?;
+        if !seen_document_ids.insert(document_id.to_owned()) {
+            return Err(format!("duplicate document id {document_id}"));
+        }
+        let row = documents
+            .get_row(row_index)
+            .map_err(|source| source.to_string())?;
+        let values = row
+            .0
+            .get(text_unit_ids_index)
+            .ok_or_else(|| format!("documents row {row_index} has no text_unit_ids value"))?;
+        let values = any_value_to_strings(values)
+            .into_iter()
+            .map(|text_unit_id| {
+                if text_unit_ids.contains(&text_unit_id) {
+                    Ok(text_unit_id)
+                } else {
+                    Err(format!(
+                        "document {document_id} references missing text unit {text_unit_id}"
+                    ))
+                }
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        actual.insert(document_id.to_owned(), values);
+    }
+
+    for document_id in &document_ids {
+        let empty = BTreeSet::new();
+        let expected_ids = expected.get(document_id).unwrap_or(&empty);
+        let actual_ids = actual.get(document_id).unwrap_or(&empty);
+        if actual_ids != expected_ids {
+            return Err(format!(
+                "document {document_id} text_unit_ids mismatch: expected {expected_ids:?}, got \
+                 {actual_ids:?}",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn assert_columns(dataframe: &DataFrame, expected: &[&str]) {
@@ -1231,6 +1353,14 @@ fn list_string_set(dataframe: &DataFrame, column: &str) -> BTreeSet<String> {
         }
     }
     values
+}
+
+fn string_list_column(name: &str, rows: &[&[&str]]) -> polars_core::prelude::Column {
+    let series = rows
+        .iter()
+        .map(|values| Series::new("item".into(), *values))
+        .collect::<Vec<_>>();
+    Series::new(name.into(), series).into()
 }
 
 fn any_value_to_strings(value: &AnyValue<'_>) -> Vec<String> {

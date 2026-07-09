@@ -178,6 +178,17 @@ before any output is cleared. Vector database paths are resolved through their
 existing ancestors and must not use symlink or reparse-point components to
 escape the project layout.
 
+Output and vector database locations are destructive paths: output may be
+recursively cleared, and managed LanceDB tables may be reset. GraphLoom rejects
+symlink or reparse-point components in both paths. Input, cache, and logs may be
+symlinks, but GraphLoom follows those links and uses the real filesystem
+locations for overlap checks against output and vector database paths.
+
+Home-directory safety checks resolve the user home directory from `HOME`,
+`USERPROFILE`, or `HOMEDRIVE` plus `HOMEPATH`, in that priority order. Output
+and vector database paths may live under a normal project in the home directory,
+but they must not equal the home directory or be an ancestor of it.
+
 When the LanceDB database is inside the output directory, such as the default
 `output/lancedb`, GraphLoom closes the preflight LanceDB connection before
 clearing output, then reconnects and recreates the managed vector tables. This
@@ -199,6 +210,8 @@ Supported:
 - OpenAI-compatible completion and embedding models
 - LanceDB vector storage
 - Linux and Windows CI
+- tag releases published once by a dedicated Ubuntu release job after Linux and
+  Windows build jobs pass
 
 Not yet supported:
 

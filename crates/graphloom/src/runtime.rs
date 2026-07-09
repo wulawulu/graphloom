@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
     Result, WorkflowCallbacks, WorkflowRegistry,
-    project::{LoadedProject, ProjectPaths, resolve_existing_ancestor},
+    project::{LoadedProject, ProjectPaths, resolve_path_rejecting_links},
     register_step9_workflows,
 };
 
@@ -348,8 +348,8 @@ enum VectorLocation {
 }
 
 fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
-    let output = resolve_existing_ancestor(&paths.output_dir)?;
-    let vector = resolve_existing_ancestor(&paths.vector_db_uri)?;
+    let output = resolve_path_rejecting_links(&paths.output_dir)?;
+    let vector = resolve_path_rejecting_links(&paths.vector_db_uri)?;
     Ok(if vector.resolved.starts_with(&output.resolved) {
         VectorLocation::InsideOutput
     } else {

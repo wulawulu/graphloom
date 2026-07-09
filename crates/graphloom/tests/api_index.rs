@@ -165,6 +165,55 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_probe_symlink_cache_and_reporting_targets_without_residue() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let external_cache = TempDir::new().expect("external cache");
+    let external_logs = TempDir::new().expect("external logs");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input dir");
+    tokio::fs::write(
+        tempdir.path().join("input").join("document.txt"),
+        "Alice works for Acme.",
+    )
+    .await
+    .expect("input");
+    std::os::unix::fs::symlink(external_cache.path(), tempdir.path().join("cache"))
+        .expect("cache symlink");
+    std::os::unix::fs::symlink(external_logs.path(), tempdir.path().join("logs"))
+        .expect("logs symlink");
+
+    build_index(
+        test_config(&server.uri()),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("index with symlink cache and logs");
+
+    assert_no_write_probe_files(tempdir.path()).await;
+    assert_no_write_probe_files(external_cache.path()).await;
+    assert_no_write_probe_files(external_logs.path()).await;
+}
+
 #[tokio::test]
 async fn test_should_drop_inside_output_lancedb_before_clearing_output() {
     let server = MockServer::start().await;
