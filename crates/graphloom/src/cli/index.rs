@@ -1,40 +1,33 @@
 //! Standard index command.
 
-use std::time::{Duration, Instant};
+use std::{path::Path, sync::Arc, time::Duration};
 
-use graphloom::{PipelineRunStats, WorkflowFunctionOutput};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
-    IndexArgs,
-    config::{load_project_config, redacted_config_summary, validate_project},
-    error::{CliError, Result},
-    runtime::{build_runtime, prepare_full_index},
+    PipelineRunStats, WorkflowCallbacks,
+    api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_index},
+    cli::{
+        args::IndexArgs,
+        callbacks::ConsoleWorkflowCallbacks,
+        error::{CliError, Result},
+    },
+    config::load::{load_project_config, redacted_config_summary, validate_project},
 };
-
-/// Successful index run result.
-#[derive(Debug, Clone)]
-pub struct IndexRunResult {
-    /// Workflow outputs.
-    pub workflow_outputs: Vec<WorkflowFunctionOutput>,
-    /// Final stats.
-    pub stats: PipelineRunStats,
-    /// Elapsed wall time.
-    pub elapsed: Duration,
-}
 
 /// Execute `graphloom index`.
 ///
 /// # Errors
 ///
 /// Returns a config, runtime, or pipeline error.
-pub async fn run_index(args: &IndexArgs) -> Result<IndexRunResult> {
+pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
     if args.method != "standard" {
         return Err(CliError::UnsupportedMethod {
             method: args.method.clone(),
         });
     }
     let project = load_project_config(&args.root).await?;
-    validate_project(&project, args.skip_validation || args.dry_run).await?;
+    validate_project(&project, args.skip_validation).await?;
     if args.dry_run {
         let summary = redacted_config_summary(&project.config)?;
         println!("Dry run for {}", project.root.display());
@@ -56,23 +49,57 @@ pub async fn run_index(args: &IndexArgs) -> Result<IndexRunResult> {
         });
     }
 
-    let started = Instant::now();
-    prepare_full_index(&project).await?;
-    let mut runtime = build_runtime(&project, args.cache_enabled(), args.verbose).await?;
-    let outputs = runtime
-        .pipeline
-        .run(&runtime.config, &mut runtime.context)
+    let _log_guard = init_logging(&project.paths.reporting_dir, args.verbose).await?;
+    let callback =
+        Arc::new(ConsoleWorkflowCallbacks::new(args.verbose)) as Arc<dyn WorkflowCallbacks>;
+    let result = build_index(
+        project.config,
+        BuildIndexOptions {
+            project_root: project.root,
+            method: IndexingMethod::Standard,
+            cache_mode: if args.cache_enabled() {
+                CacheMode::Configured
+            } else {
+                CacheMode::Disabled
+            },
+            callbacks: vec![callback],
+        },
+    )
+    .await?;
+    print_success_summary(&result.stats, result.elapsed);
+    Ok(result)
+}
+
+async fn init_logging(
+    reporting_dir: &Path,
+    verbose: bool,
+) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    tokio::fs::create_dir_all(reporting_dir)
         .await
-        .map_err(|source| CliError::IndexFailed {
-            source: Box::new(source),
+        .map_err(|source| CliError::Io {
+            operation: "create log directory",
+            path: reporting_dir.to_path_buf(),
+            source,
         })?;
-    let elapsed = started.elapsed();
-    let stats = runtime.context.stats.clone();
-    print_success_summary(&stats, elapsed);
-    Ok(IndexRunResult {
-        workflow_outputs: outputs,
-        stats,
-        elapsed,
+    let filter = if verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+    let file_appender = tracing_appender::rolling::never(reporting_dir, "indexing-engine.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let console_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(file_writer);
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer);
+    Ok(match tracing::subscriber::set_global_default(subscriber) {
+        Ok(()) => Some(guard),
+        Err(_) => None,
     })
 }
 
@@ -93,12 +120,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{InitArgs, init_project};
+    use crate::cli::{InitArgs, init_project};
 
     #[tokio::test]
     async fn test_should_reject_unsupported_index_method() {
         let tempdir = TempDir::new().expect("tempdir");
-        let error = run_index(&IndexArgs {
+        let error = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),
             method: "fast".to_owned(),
             verbose: false,
@@ -141,7 +168,7 @@ mod tests {
         .await
         .expect("input");
 
-        let result = run_index(&IndexArgs {
+        let result = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),
             method: "standard".to_owned(),
             verbose: false,

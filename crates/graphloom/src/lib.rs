@@ -22,18 +22,22 @@
 )]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
+pub mod api;
 mod callbacks;
+pub mod cli;
 mod config;
 mod context;
 mod dataframe;
 mod error;
 mod operations;
 mod pipeline;
+mod project;
+mod runtime;
 mod stats;
 mod workflow;
 pub mod workflows;
 
-pub use callbacks::{NoopWorkflowCallbacks, WorkflowCallbacks};
+pub use callbacks::{CallbackChain, NoopWorkflowCallbacks, WorkflowCallbacks};
 pub use config::{
     ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig, CacheStorageConfig,
     ClusterGraphConfig, CommunityReportsConfig, DEFAULT_EMBEDDINGS, ENTITY_DESCRIPTION_EMBEDDING,

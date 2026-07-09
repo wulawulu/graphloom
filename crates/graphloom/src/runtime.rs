@@ -2,19 +2,14 @@
 
 use std::{path::Path, sync::Arc};
 
-use graphloom::{
-    ALL_EMBEDDINGS, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
-    WorkflowRegistry, register_step9_workflows,
-};
 use graphloom_cache::JsonCache;
 use graphloom_input::FileInputReader;
 use graphloom_storage::{FileStorage, ParquetTableProvider, Storage};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
 
 use crate::{
-    callbacks::ConsoleWorkflowCallbacks,
-    error::{CliError, Result},
-    project::LoadedProject,
+    ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
+    Result, WorkflowCallbacks, WorkflowRegistry, project::LoadedProject, register_step9_workflows,
 };
 
 /// Runtime ready to execute standard indexing.
@@ -36,11 +31,11 @@ pub struct IndexRuntime {
 pub async fn build_runtime(
     project: &LoadedProject,
     cache_enabled: bool,
-    verbose: bool,
+    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
 ) -> Result<IndexRuntime> {
     let output_provider = Arc::new(
         ParquetTableProvider::new(&project.paths.output_dir).map_err(|source| {
-            CliError::RuntimeBuild {
+            GraphLoomError::RuntimeBuild {
                 source: Box::new(source),
             }
         })?,
@@ -50,24 +45,26 @@ pub async fn build_runtime(
             &project.paths.input_dir,
             &project.config.input.file_pattern,
         )
-        .map_err(|source| CliError::RuntimeBuild {
+        .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })?,
     );
     let input_storage = Arc::new(
-        FileStorage::new(&project.paths.input_dir).map_err(|source| CliError::RuntimeBuild {
-            source: Box::new(source),
+        FileStorage::new(&project.paths.input_dir).map_err(|source| {
+            GraphLoomError::RuntimeBuild {
+                source: Box::new(source),
+            }
         })?,
     );
     let output_storage = Arc::new(FileStorage::new(&project.paths.output_dir).map_err(
-        |source| CliError::RuntimeBuild {
+        |source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         },
     )?);
     let cache =
         if cache_enabled && project.config.cache.cache_type.eq_ignore_ascii_case("json") {
             let storage = Arc::new(FileStorage::new(&project.paths.cache_dir).map_err(
-                |source| CliError::RuntimeBuild {
+                |source| GraphLoomError::RuntimeBuild {
                     source: Box::new(source),
                 },
             )?);
@@ -78,12 +75,11 @@ pub async fn build_runtime(
     let vector_store = Arc::new(
         LanceDbVectorStore::connect(&project.config.vector_store)
             .await
-            .map_err(|source| CliError::RuntimeBuild {
+            .map_err(|source| GraphLoomError::RuntimeBuild {
                 source: Box::new(source),
             })?,
     );
-    let callbacks =
-        Arc::new(ConsoleWorkflowCallbacks::new(&project.paths.reporting_dir, verbose).await?);
+    let callbacks = crate::callbacks::callback_chain(callbacks);
 
     let mut context = PipelineRunContext::new(output_provider)
         .with_input_reader(input_reader)
@@ -98,7 +94,7 @@ pub async fn build_runtime(
     register_step9_workflows(&mut registry);
     let pipeline = PipelineFactory::new(registry)
         .standard(&project.config)
-        .map_err(|source| CliError::RuntimeBuild {
+        .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })?;
 
@@ -119,7 +115,7 @@ pub async fn prepare_full_index(project: &LoadedProject) -> Result<()> {
     clear_output_dir(&project.paths.output_dir).await?;
     let store = LanceDbVectorStore::connect(&project.config.vector_store)
         .await
-        .map_err(|source| CliError::RuntimeBuild {
+        .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })?;
     reset_managed_indices(&store, &project.config).await
@@ -131,7 +127,7 @@ async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig)
         store
             .reset_index(&schema)
             .await
-            .map_err(|source| CliError::RuntimeBuild {
+            .map_err(|source| GraphLoomError::RuntimeBuild {
                 source: Box::new(source),
             })?;
     }
@@ -139,13 +135,13 @@ async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig)
 }
 
 async fn clear_output_dir(path: &Path) -> Result<()> {
-    let storage = FileStorage::new(path).map_err(|source| CliError::RuntimeBuild {
+    let storage = FileStorage::new(path).map_err(|source| GraphLoomError::RuntimeBuild {
         source: Box::new(source),
     })?;
     storage
         .clear()
         .await
-        .map_err(|source| CliError::RuntimeBuild {
+        .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })
 }

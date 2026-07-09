@@ -231,6 +231,19 @@ impl ModelConfig {
             });
         }
 
+        if !self
+            .effective_retry_strategy()
+            .eq_ignore_ascii_case("exponential_backoff")
+        {
+            return Err(crate::LlmError::InvalidConfig {
+                model_instance: model_instance.to_owned(),
+                message: format!(
+                    "unsupported retry strategy {}; only exponential_backoff is supported",
+                    self.effective_retry_strategy()
+                ),
+            });
+        }
+
         Ok(())
     }
 }

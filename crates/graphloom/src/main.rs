@@ -4,7 +4,7 @@
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
 use clap::Parser;
-use graphloom_cli::{Cli, run};
+use graphloom::cli::{Cli, run};
 
 #[tokio::main]
 async fn main() {

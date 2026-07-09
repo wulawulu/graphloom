@@ -8,6 +8,8 @@ use graphloom_vectors::VectorStoreConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod load;
+
 const DEFAULT_CONCURRENT_REQUESTS: usize = 25;
 const DEFAULT_COMPLETION_MODEL_ID: &str = "default_completion_model";
 const DEFAULT_EXTRACT_GRAPH_MODEL_INSTANCE_NAME: &str = "extract_graph";
@@ -244,7 +246,7 @@ pub struct ExtractGraphConfig {
     /// Model instance/cache namespace name.
     #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
-    /// Optional prompt path or inline prompt override.
+    /// Optional prompt file path override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Entity types to ask the extractor to identify.
@@ -278,7 +280,7 @@ pub struct SummarizeDescriptionsConfig {
     /// Model instance/cache namespace name.
     #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
-    /// Optional prompt path or inline prompt override.
+    /// Optional prompt file path override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Maximum summary length.
@@ -314,7 +316,7 @@ pub struct ExtractClaimsConfig {
     /// Model instance/cache namespace name.
     #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
-    /// Optional prompt path or inline prompt override.
+    /// Optional prompt file path override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Claim description inserted into the extraction prompt.
@@ -373,10 +375,10 @@ pub struct CommunityReportsConfig {
     /// Model instance/cache namespace name.
     #[serde(alias = "model_instance_name")]
     pub model_instance_name: String,
-    /// Optional graph-context prompt path or inline prompt override.
+    /// Optional graph-context prompt file path override.
     #[serde(alias = "graph_prompt", skip_serializing_if = "Option::is_none")]
     pub graph_prompt: Option<String>,
-    /// Optional text-context prompt retained for `GraphRAG` config compatibility.
+    /// Optional text-context prompt file path retained for `GraphRAG` config compatibility.
     #[serde(alias = "text_prompt", skip_serializing_if = "Option::is_none")]
     pub text_prompt: Option<String>,
     /// Maximum report length passed into the prompt.

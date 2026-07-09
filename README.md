@@ -6,14 +6,29 @@ The current compatibility target is Microsoft GraphRAG 3.1.0.
 ## Install
 
 ```bash
-cargo install --path crates/graphloom-cli
+cargo install --path crates/graphloom
 ```
 
 For development:
 
 ```bash
-cargo run -p graphloom-cli -- --help
+cargo run -p graphloom -- --help
 ```
+
+## Architecture
+
+The `graphloom` crate is both the Rust library and the command-line binary.
+
+- `graphloom::api` exposes programmatic entry points. The current public API is
+  `build_index`, which runs standard indexing and returns structured workflow
+  output and pipeline stats. Future query and prompt-tuning APIs will live under
+  the same API layer.
+- `graphloom::cli` adapts command-line arguments, console output, logging, and
+  exit codes to the API. `graphloom index` loads project configuration and calls
+  `graphloom::api::build_index`.
+- `graphloom init` is a CLI-only project scaffold command. It writes default
+  settings, `.env`, `input/`, and prompt files, but is not part of the public
+  indexing API.
 
 ## Initialize a Project
 

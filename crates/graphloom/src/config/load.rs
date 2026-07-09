@@ -1,17 +1,18 @@
 //! Project config loading and validation.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     path::{Path, PathBuf},
 };
 
-use graphloom::{GraphRagConfig, WorkflowRegistry, register_step9_workflows};
+use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    error::{CliError, Result},
+    GraphLoomError, GraphRagConfig, Result, WorkflowRegistry,
     project::{LoadedProject, ProjectPaths},
+    register_step9_workflows,
 };
 
 /// Load a project config from a root directory or concrete config file.
@@ -40,7 +41,7 @@ pub async fn load_project_config_with_env(
     let dotenv = read_dotenv(&root.join(".env")).await?;
     let raw = tokio::fs::read_to_string(&config_path)
         .await
-        .map_err(|source| CliError::Io {
+        .map_err(|source| GraphLoomError::Io {
             operation: "read settings",
             path: config_path.clone(),
             source,
@@ -59,10 +60,16 @@ pub async fn load_project_config_with_env(
 
 async fn find_config_path(root_or_config: &Path) -> Result<PathBuf> {
     if root_or_config.is_file() {
-        return Ok(root_or_config.to_path_buf());
+        return root_or_config
+            .canonicalize()
+            .map_err(|source| GraphLoomError::Io {
+                operation: "canonicalize settings",
+                path: root_or_config.to_path_buf(),
+                source,
+            });
     }
     if !root_or_config.is_dir() {
-        return Err(CliError::InvalidRoot {
+        return Err(GraphLoomError::InvalidRoot {
             path: root_or_config.to_path_buf(),
             message: "root must be a directory or settings file".to_owned(),
         });
@@ -71,31 +78,37 @@ async fn find_config_path(root_or_config: &Path) -> Result<PathBuf> {
         let path = root_or_config.join(name);
         if tokio::fs::try_exists(&path)
             .await
-            .map_err(|source| CliError::Io {
+            .map_err(|source| GraphLoomError::Io {
                 operation: "check settings",
                 path: path.clone(),
                 source,
             })?
         {
-            return Ok(path);
+            return path.canonicalize().map_err(|source| GraphLoomError::Io {
+                operation: "canonicalize settings",
+                path,
+                source,
+            });
         }
     }
-    Err(CliError::MissingSettings {
+    Err(GraphLoomError::MissingSettings {
         root: root_or_config.to_path_buf(),
     })
 }
 
 fn parse_config(path: &Path, raw: &str) -> Result<GraphRagConfig> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("yaml" | "yml") => serde_yaml::from_str(raw).map_err(|source| CliError::ConfigParse {
+        Some("yaml" | "yml") => {
+            serde_yaml::from_str(raw).map_err(|source| GraphLoomError::ConfigParse {
+                path: path.to_path_buf(),
+                source: Box::new(source),
+            })
+        }
+        Some("json") => serde_json::from_str(raw).map_err(|source| GraphLoomError::ConfigParse {
             path: path.to_path_buf(),
             source: Box::new(source),
         }),
-        Some("json") => serde_json::from_str(raw).map_err(|source| CliError::ConfigParse {
-            path: path.to_path_buf(),
-            source: Box::new(source),
-        }),
-        _ => Err(CliError::UnsupportedConfigFormat {
+        _ => Err(GraphLoomError::UnsupportedConfigFormat {
             path: path.to_path_buf(),
         }),
     }
@@ -106,7 +119,7 @@ async fn read_dotenv(path: &Path) -> Result<BTreeMap<String, String>> {
         Ok(raw) => raw,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(source) => {
-            return Err(CliError::Io {
+            return Err(GraphLoomError::Io {
                 operation: "read .env",
                 path: path.to_path_buf(),
                 source,
@@ -124,13 +137,13 @@ fn parse_dotenv(raw: &str) -> Result<BTreeMap<String, String>> {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            return Err(CliError::DotenvParse {
+            return Err(GraphLoomError::DotenvParse {
                 line: index.saturating_add(1),
             });
         };
         let key = key.trim();
         if key.is_empty() {
-            return Err(CliError::DotenvParse {
+            return Err(GraphLoomError::DotenvParse {
                 line: index.saturating_add(1),
             });
         }
@@ -234,7 +247,7 @@ fn lookup_env(
     dotenv
         .get(name)
         .cloned()
-        .ok_or_else(|| CliError::MissingEnvironmentVariable {
+        .ok_or_else(|| GraphLoomError::MissingEnvironmentVariable {
             name: name.to_owned(),
         })
 }
@@ -263,7 +276,7 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
     project
         .config
         .validate_embed_text()
-        .map_err(|message| CliError::InvalidModel {
+        .map_err(|message| GraphLoomError::InvalidModel {
             model_id: project.config.embed_text.embedding_model_id.clone(),
             message,
         })?;
@@ -272,106 +285,109 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
     register_step9_workflows(&mut registry);
     registry
         .validate_names(&project.config.workflow_order())
-        .map_err(|source| CliError::RuntimeBuild {
+        .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })?;
     Ok(())
 }
 
 async fn validate_optional(project: &LoadedProject) -> Result<()> {
-    for (model_id, model) in project
-        .config
-        .completion_models
-        .iter()
-        .chain(project.config.embedding_models.iter())
-    {
-        if !model.provider_type().eq_ignore_ascii_case("openai") {
-            return Err(CliError::UnsupportedProvider {
-                provider: model.provider_type().to_owned(),
-            });
-        }
-        if !model.auth_method.eq_ignore_ascii_case("api_key") {
-            return Err(CliError::UnsupportedAuthMethod {
-                auth_method: model.auth_method.clone(),
-            });
-        }
-        model
-            .validate_openai_compatible(model_id)
-            .map_err(|source| CliError::InvalidModel {
-                model_id: model_id.clone(),
-                message: source.to_string(),
-            })?;
+    let completion_models = referenced_completion_models(&project.config);
+    for model_id in completion_models {
+        let model = require_model(&project.config.completion_models, &model_id)?;
+        validate_model(&model_id, model)?;
     }
-    require_model(
-        &project.config.completion_models,
-        &project.config.extract_graph.completion_model_id,
-    )?;
-    require_model(
-        &project.config.completion_models,
-        &project.config.summarize_descriptions.completion_model_id,
-    )?;
-    require_model(
-        &project.config.completion_models,
-        &project.config.community_reports.completion_model_id,
-    )?;
-    require_model(
-        &project.config.embedding_models,
-        &project.config.embed_text.embedding_model_id,
-    )?;
+    let embedding_model_id = project.config.embed_text.embedding_model_id.clone();
+    let embedding_model = require_model(&project.config.embedding_models, &embedding_model_id)?;
+    validate_model(&embedding_model_id, embedding_model)?;
     for path in project.paths.prompt_paths(&project.config) {
         if !tokio::fs::try_exists(&path)
             .await
-            .map_err(|source| CliError::Io {
+            .map_err(|source| GraphLoomError::Io {
                 operation: "check prompt",
                 path: path.clone(),
                 source,
             })?
         {
-            return Err(CliError::MissingPrompt { path });
+            return Err(GraphLoomError::MissingPrompt { path });
         }
     }
     if !tokio::fs::try_exists(&project.paths.input_dir)
         .await
-        .map_err(|source| CliError::Io {
+        .map_err(|source| GraphLoomError::Io {
             operation: "check input directory",
             path: project.paths.input_dir.clone(),
             source,
         })?
     {
-        return Err(CliError::MissingInput {
+        return Err(GraphLoomError::MissingInput {
             message: format!(
                 "input directory {} does not exist",
                 project.paths.input_dir.display()
             ),
         });
     }
-    if input_file_count(&project.paths.input_dir).await? == 0 {
-        return Err(CliError::MissingInput {
+    let file_pattern = Regex::new(&project.config.input.file_pattern).map_err(|source| {
+        GraphLoomError::InvalidModel {
+            model_id: "input.file_pattern".to_owned(),
+            message: source.to_string(),
+        }
+    })?;
+    if input_file_count(&project.paths.input_dir, &file_pattern).await? == 0 {
+        return Err(GraphLoomError::MissingInput {
             message: "no matching input files found".to_owned(),
         });
     }
     Ok(())
 }
 
-fn require_model(
-    models: &BTreeMap<String, graphloom_llm::ModelConfig>,
+fn require_model<'a>(
+    models: &'a BTreeMap<String, graphloom_llm::ModelConfig>,
     model_id: &str,
-) -> Result<()> {
-    if models.contains_key(model_id) {
-        Ok(())
-    } else {
-        Err(CliError::InvalidModel {
+) -> Result<&'a graphloom_llm::ModelConfig> {
+    models
+        .get(model_id)
+        .ok_or_else(|| GraphLoomError::InvalidModel {
             model_id: model_id.to_owned(),
             message: "model is not configured".to_owned(),
         })
+}
+
+fn referenced_completion_models(config: &GraphRagConfig) -> BTreeSet<String> {
+    let mut models = BTreeSet::new();
+    models.insert(config.extract_graph.completion_model_id.clone());
+    models.insert(config.summarize_descriptions.completion_model_id.clone());
+    models.insert(config.community_reports.completion_model_id.clone());
+    if config.extract_claims.enabled {
+        models.insert(config.extract_claims.completion_model_id.clone());
     }
+    models
+}
+
+fn validate_model(model_id: &str, model: &graphloom_llm::ModelConfig) -> Result<()> {
+    if !model.provider_type().eq_ignore_ascii_case("openai") {
+        return Err(GraphLoomError::UnsupportedProvider {
+            provider: model.provider_type().to_owned(),
+        });
+    }
+    if !model.auth_method.eq_ignore_ascii_case("api_key") {
+        return Err(GraphLoomError::UnsupportedAuthMethod {
+            auth_method: model.auth_method.clone(),
+        });
+    }
+    model
+        .validate_openai_compatible(model_id)
+        .map_err(|source| GraphLoomError::InvalidModel {
+            model_id: model_id.to_owned(),
+            message: source.to_string(),
+        })
 }
 
 fn validate_storage(kind: &'static str, storage_type: &str) -> Result<()> {
     if storage_type.eq_ignore_ascii_case("file") {
         Ok(())
     } else {
-        Err(CliError::UnsupportedStorage {
+        Err(GraphLoomError::UnsupportedStorage {
             kind,
             storage_type: storage_type.to_owned(),
         })
@@ -386,7 +402,7 @@ fn validate_input(input_type: &str) -> Result<()> {
     if input_type.eq_ignore_ascii_case("text") || input_type.eq_ignore_ascii_case("file") {
         Ok(())
     } else {
-        Err(CliError::UnsupportedInput {
+        Err(GraphLoomError::UnsupportedInput {
             input_type: input_type.to_owned(),
         })
     }
@@ -396,42 +412,51 @@ fn validate_cache(cache_type: &str) -> Result<()> {
     if cache_type.eq_ignore_ascii_case("json") || cache_type.eq_ignore_ascii_case("none") {
         Ok(())
     } else {
-        Err(CliError::UnsupportedStorage {
+        Err(GraphLoomError::UnsupportedStorage {
             kind: "cache",
             storage_type: cache_type.to_owned(),
         })
     }
 }
 
-async fn input_file_count(root: &Path) -> Result<usize> {
+async fn input_file_count(root: &Path, file_pattern: &Regex) -> Result<usize> {
     let mut count = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&path)
+        let mut entries =
+            tokio::fs::read_dir(&path)
+                .await
+                .map_err(|source| GraphLoomError::Io {
+                    operation: "read input directory",
+                    path: path.clone(),
+                    source,
+                })?;
+        while let Some(entry) = entries
+            .next_entry()
             .await
-            .map_err(|source| CliError::Io {
-                operation: "read input directory",
+            .map_err(|source| GraphLoomError::Io {
+                operation: "read input directory entry",
                 path: path.clone(),
                 source,
-            })?;
-        while let Some(entry) = entries.next_entry().await.map_err(|source| CliError::Io {
-            operation: "read input directory entry",
-            path: path.clone(),
-            source,
-        })? {
-            let file_type = entry.file_type().await.map_err(|source| CliError::Io {
-                operation: "read input file type",
-                path: entry.path(),
-                source,
-            })?;
+            })?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|source| GraphLoomError::Io {
+                    operation: "read input file type",
+                    path: entry.path(),
+                    source,
+                })?;
             if file_type.is_dir() {
                 stack.push(entry.path());
             } else if file_type.is_file()
                 && entry
                     .path()
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("txt")
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .is_some_and(|path| file_pattern.is_match(path))
             {
                 count = count.saturating_add(1);
             }
@@ -446,7 +471,7 @@ async fn input_file_count(root: &Path) -> Result<usize> {
 ///
 /// Returns an error if serialization fails.
 pub fn redacted_config_summary(config: &GraphRagConfig) -> Result<Value> {
-    let mut value = serde_json::to_value(config).map_err(|source| CliError::ConfigParse {
+    let mut value = serde_json::to_value(config).map_err(|source| GraphLoomError::ConfigParse {
         path: PathBuf::from("<config>"),
         source: Box::new(source),
     })?;
@@ -461,7 +486,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{InitArgs, init_project};
+    use crate::cli::{InitArgs, init_project};
 
     #[tokio::test]
     async fn test_should_load_initialized_yaml_without_changing_cwd() {
@@ -621,5 +646,98 @@ embedding_models:
             .await
             .expect_err("bad dotenv");
         assert!(error.to_string().contains("line 1"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_dry_run_preflight_requirements() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+
+        let project = load_project_config(tempdir.path()).await.expect("load");
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("placeholder api key should fail");
+        assert!(error.to_string().contains("api_key is required"));
+        assert!(!error.to_string().contains("<API_KEY>"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_input_file_pattern_with_reader_regex() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.md"), "Alice")
+            .await
+            .expect("md input");
+
+        project.config.input.file_pattern = ".*\\.md$".to_owned();
+        validate_project(&project, false)
+            .await
+            .expect("md pattern should match");
+
+        project.config.input.file_pattern = ".*\\.txt$".to_owned();
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("txt pattern should not match");
+        assert!(error.to_string().contains("no matching input files"));
+    }
+
+    #[tokio::test]
+    async fn test_should_ignore_unused_unsupported_completion_models() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        let mut unused = project.config.completion_models["default_completion_model"].clone();
+        unused.provider_type = "azure".to_owned();
+        project
+            .config
+            .completion_models
+            .insert("unused_query_model".to_owned(), unused);
+
+        validate_project(&project, false)
+            .await
+            .expect("unused unsupported model should not block standard index");
+    }
+
+    #[tokio::test]
+    async fn test_should_require_claims_model_when_claims_enabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.extract_claims.enabled = true;
+        project.config.extract_claims.completion_model_id = "missing_claim_model".to_owned();
+
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("missing claims model should fail");
+        assert!(error.to_string().contains("missing_claim_model"));
+    }
+
+    async fn initialized_project(root: &std::path::Path) -> LoadedProject {
+        init_project(&InitArgs {
+            root: root.to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        tokio::fs::write(root.join(".env"), "GRAPHRAG_API_KEY=test-key\n")
+            .await
+            .expect("dotenv");
+        load_project_config(root).await.expect("load")
     }
 }

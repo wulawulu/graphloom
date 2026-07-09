@@ -56,7 +56,6 @@ wiremock = "0.6.5"
 # workspace crates
 graphloom-cache = { path = "crates/graphloom-cache" }
 graphloom-chunking = { path = "crates/graphloom-chunking" }
-graphloom-cli = { path = "crates/graphloom-cli" }
 graphloom-common = { path = "crates/graphloom-common" }
 graphloom = { path = "crates/graphloom" }
 graphloom-input = { path = "crates/graphloom-input" }

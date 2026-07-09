@@ -2,12 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use graphloom::GraphRagConfig;
-
-use crate::{
-    error::{CliError, Result},
-    init::PROMPT_ASSETS,
-};
+use crate::{GraphLoomError, GraphRagConfig, Result};
 
 /// Loaded `GraphLoom` project.
 #[derive(Debug, Clone)]
@@ -46,7 +41,7 @@ impl ProjectPaths {
     ///
     /// Returns an error when destructive output path validation fails.
     pub fn resolve(root: &Path, config: &GraphRagConfig) -> Result<Self> {
-        let root = normalize_path(root);
+        let root = absolute_normalized(root)?;
         let input_dir = resolve_path(&root, &config.input_storage.base_dir);
         let output_dir = resolve_path(&root, &config.output_storage.base_dir);
         let cache_dir = resolve_path(&root, &config.cache.storage.base_dir);
@@ -70,6 +65,7 @@ impl ProjectPaths {
     ///
     /// Returns an error if output could delete project, input, cache, or logs.
     pub fn validate_destructive_paths(&self) -> Result<()> {
+        reject_symlink_components(&self.output_dir)?;
         let output = canonical_or_normalized(&self.output_dir);
         let root = canonical_or_normalized(&self.root);
         let input = canonical_or_normalized(&self.input_dir);
@@ -91,10 +87,14 @@ impl ProjectPaths {
         if output == reporting {
             return unsafe_output(&self.output_dir, "output directory must not equal logs");
         }
-        if root.starts_with(&output) || input.starts_with(&output) || cache.starts_with(&output) {
+        if root.starts_with(&output)
+            || input.starts_with(&output)
+            || cache.starts_with(&output)
+            || reporting.starts_with(&output)
+        {
             return unsafe_output(
                 &self.output_dir,
-                "output directory must not be an ancestor of project, input, or cache",
+                "output directory must not be an ancestor of project, input, cache, or logs",
             );
         }
         if is_filesystem_root(&output) {
@@ -126,34 +126,57 @@ impl ProjectPaths {
         ]
         .into_iter()
         .flatten()
-        .filter(|path| is_prompt_file_path(path))
         .map(|path| resolve_path(&self.root, path))
         .collect()
     }
+}
 
-    /// Return all default prompt paths.
-    #[must_use]
-    pub fn managed_prompt_paths(&self) -> Vec<PathBuf> {
-        PROMPT_ASSETS
-            .iter()
-            .map(|(name, _)| self.root.join("prompts").join(name))
-            .collect()
+impl LoadedProject {
+    /// Build a loaded project from an already parsed config and project root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when path resolution or safety validation fails.
+    pub fn from_config(root: PathBuf, mut config: GraphRagConfig) -> Result<Self> {
+        let root = absolute_normalized(&root)?;
+        let paths = ProjectPaths::resolve(&root, &config)?;
+        config.vector_store.db_uri = paths.vector_db_uri.to_string_lossy().to_string();
+        Ok(Self {
+            root,
+            config_path: paths.root.join("settings.yaml"),
+            config,
+            paths,
+        })
     }
 }
 
-fn is_prompt_file_path(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
-        || path.contains('/')
-        || path.contains('\\')
-}
-
 fn unsafe_output<T>(path: &Path, message: &str) -> Result<T> {
-    Err(CliError::UnsafeOutputPath {
+    Err(GraphLoomError::UnsafeOutputPath {
         path: path.to_path_buf(),
         message: message.to_owned(),
     })
+}
+
+fn reject_symlink_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match current.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return unsafe_output(path, "output directory must not contain symlink components");
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(GraphLoomError::Io {
+                    operation: "inspect output path",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_path(root: &Path, value: &str) -> PathBuf {
@@ -185,4 +208,67 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn absolute_normalized(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| GraphLoomError::Io {
+                operation: "get current directory",
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path)
+    };
+    Ok(canonical_or_normalized(&absolute))
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn test_should_reject_output_ancestor_of_reporting_dir() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let config: GraphRagConfig = serde_yaml::from_str(
+            r"
+output_storage:
+  type: file
+  base_dir: logs
+reporting:
+  type: file
+  base_dir: logs/index
+",
+        )
+        .expect("config");
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("output ancestor of logs should fail");
+        assert!(error.to_string().contains("ancestor"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_destructive_output_symlink_escape() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("output-link"))
+            .expect("symlink");
+        let config: GraphRagConfig = serde_yaml::from_str(
+            r"
+output_storage:
+  type: file
+  base_dir: output-link/index
+",
+        )
+        .expect("config");
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("symlink output escape should fail");
+        assert!(error.to_string().contains("symlink"));
+    }
 }

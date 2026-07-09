@@ -2,67 +2,70 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
-    InitArgs,
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
+
+use crate::cli::{
+    args::InitArgs,
     error::{CliError, Result},
 };
 
-const SETTINGS: &str = include_str!("assets/settings.yaml");
-const DOTENV: &str = include_str!("assets/dotenv");
+const SETTINGS: &str = include_str!("../assets/settings.yaml");
+const DOTENV: &str = include_str!("../assets/dotenv");
 
 /// Managed prompt assets.
 pub const PROMPT_ASSETS: &[(&str, &str)] = &[
     (
         "extract_graph.txt",
-        include_str!("assets/prompts/extract_graph.txt"),
+        include_str!("../assets/prompts/extract_graph.txt"),
     ),
     (
         "summarize_descriptions.txt",
-        include_str!("assets/prompts/summarize_descriptions.txt"),
+        include_str!("../assets/prompts/summarize_descriptions.txt"),
     ),
     (
         "extract_claims.txt",
-        include_str!("assets/prompts/extract_claims.txt"),
+        include_str!("../assets/prompts/extract_claims.txt"),
     ),
     (
         "community_report_graph.txt",
-        include_str!("assets/prompts/community_report_graph.txt"),
+        include_str!("../assets/prompts/community_report_graph.txt"),
     ),
     (
         "community_report_text.txt",
-        include_str!("assets/prompts/community_report_text.txt"),
+        include_str!("../assets/prompts/community_report_text.txt"),
     ),
     (
         "drift_search_system_prompt.txt",
-        include_str!("assets/prompts/drift_search_system_prompt.txt"),
+        include_str!("../assets/prompts/drift_search_system_prompt.txt"),
     ),
     (
         "drift_reduce_prompt.txt",
-        include_str!("assets/prompts/drift_reduce_prompt.txt"),
+        include_str!("../assets/prompts/drift_reduce_prompt.txt"),
     ),
     (
         "global_search_map_system_prompt.txt",
-        include_str!("assets/prompts/global_search_map_system_prompt.txt"),
+        include_str!("../assets/prompts/global_search_map_system_prompt.txt"),
     ),
     (
         "global_search_reduce_system_prompt.txt",
-        include_str!("assets/prompts/global_search_reduce_system_prompt.txt"),
+        include_str!("../assets/prompts/global_search_reduce_system_prompt.txt"),
     ),
     (
         "global_search_knowledge_system_prompt.txt",
-        include_str!("assets/prompts/global_search_knowledge_system_prompt.txt"),
+        include_str!("../assets/prompts/global_search_knowledge_system_prompt.txt"),
     ),
     (
         "local_search_system_prompt.txt",
-        include_str!("assets/prompts/local_search_system_prompt.txt"),
+        include_str!("../assets/prompts/local_search_system_prompt.txt"),
     ),
     (
         "basic_search_system_prompt.txt",
-        include_str!("assets/prompts/basic_search_system_prompt.txt"),
+        include_str!("../assets/prompts/basic_search_system_prompt.txt"),
     ),
     (
         "question_gen_system_prompt.txt",
-        include_str!("assets/prompts/question_gen_system_prompt.txt"),
+        include_str!("../assets/prompts/question_gen_system_prompt.txt"),
     ),
 ];
 
@@ -115,36 +118,85 @@ async fn create_dir(path: &Path) -> Result<()> {
 }
 
 async fn write_managed_file(path: &Path, content: &str, overwrite: bool) -> Result<()> {
-    if tokio::fs::try_exists(path)
+    let exists = tokio::fs::try_exists(path)
         .await
         .map_err(|source| CliError::Io {
             operation: "check file",
             path: path.to_path_buf(),
             source,
-        })?
-        && !overwrite
-    {
+        })?;
+    if exists && !overwrite {
         return Ok(());
     }
-    reject_symlink(path).await?;
     if let Some(parent) = path.parent() {
+        reject_symlink_ancestors(parent).await?;
         create_dir(parent).await?;
     }
-    let tmp = path.with_extension("tmp-graphloom");
-    tokio::fs::write(&tmp, content.as_bytes())
+    reject_symlink(path).await?;
+    if exists {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| CliError::Io {
+                operation: "stat existing managed file",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(CliError::InvalidRoot {
+                path: path.to_path_buf(),
+                message: "refusing to overwrite non-file managed path".to_owned(),
+            });
+        }
+    }
+
+    let tmp = temporary_sibling(path)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
         .await
         .map_err(|source| CliError::Io {
-            operation: "write temporary file",
+            operation: "create temporary file",
             path: tmp.clone(),
             source,
         })?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|source| CliError::Io {
+    if let Err(source) = file.write_all(content.as_bytes()).await {
+        cleanup_tmp(&tmp).await;
+        return Err(CliError::Io {
+            operation: "write temporary file",
+            path: tmp,
+            source,
+        });
+    }
+    if let Err(source) = file.flush().await {
+        cleanup_tmp(&tmp).await;
+        return Err(CliError::Io {
+            operation: "flush temporary file",
+            path: tmp,
+            source,
+        });
+    }
+    drop(file);
+    if overwrite
+        && exists
+        && let Err(source) = tokio::fs::remove_file(path).await
+    {
+        cleanup_tmp(&tmp).await;
+        return Err(CliError::Io {
+            operation: "remove existing managed file",
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    if let Err(source) = tokio::fs::rename(&tmp, path).await {
+        cleanup_tmp(&tmp).await;
+        return Err(CliError::Io {
             operation: "rename temporary file",
             path: path.to_path_buf(),
             source,
-        })
+        });
+    }
+    Ok(())
 }
 
 async fn reject_symlink(path: &Path) -> Result<()> {
@@ -155,6 +207,51 @@ async fn reject_symlink(path: &Path) -> Result<()> {
         }),
         Ok(_) | Err(_) => Ok(()),
     }
+}
+
+async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CliError::InvalidRoot {
+                    path: current,
+                    message: "refusing to write through symlink parent".to_owned(),
+                });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(CliError::Io {
+                    operation: "check parent symlink",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn temporary_sibling(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| CliError::InvalidRoot {
+        path: path.to_path_buf(),
+        message: "managed path has no parent".to_owned(),
+    })?;
+    let name = path.file_name().ok_or_else(|| CliError::InvalidRoot {
+        path: path.to_path_buf(),
+        message: "managed path has no file name".to_owned(),
+    })?;
+    Ok(parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        Uuid::new_v4()
+    )))
+}
+
+async fn cleanup_tmp(path: &Path) {
+    let _ = tokio::fs::remove_file(path).await;
 }
 
 fn normalize_existing_parent(path: &Path) -> Result<PathBuf> {
@@ -327,5 +424,56 @@ mod tests {
                 .join("summarize_descriptions.txt")
                 .is_file()
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_ignore_stale_temporary_file_names() {
+        let tempdir = TempDir::new().expect("tempdir");
+        tokio::fs::write(tempdir.path().join(".settings.yaml.tmp-graphloom"), "stale")
+            .await
+            .expect("stale temp");
+
+        init_project(&args(tempdir.path(), false))
+            .await
+            .expect("init");
+
+        assert!(tempdir.path().join("settings.yaml").is_file());
+        assert_eq!(
+            tokio::fs::read_to_string(tempdir.path().join(".settings.yaml.tmp-graphloom"))
+                .await
+                .expect("stale temp"),
+            "stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_managed_file_target() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = tempdir.path().join("external-settings.yaml");
+        tokio::fs::write(&external, "external")
+            .await
+            .expect("external");
+        std::os::unix::fs::symlink(&external, tempdir.path().join("settings.yaml"))
+            .expect("symlink");
+
+        let error = init_project(&args(tempdir.path(), true))
+            .await
+            .expect_err("symlink target should fail");
+        assert!(error.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_prompt_parent() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("prompts"))
+            .expect("symlink");
+
+        let error = init_project(&args(tempdir.path(), false))
+            .await
+            .expect_err("symlink parent should fail");
+        assert!(error.to_string().contains("symlink"));
     }
 }

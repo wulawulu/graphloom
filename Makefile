@@ -5,10 +5,13 @@ test:
 	@cargo nextest run --all-features
 
 test-cli:
-	@cargo nextest run -p graphloom-cli --all-features
+	@cargo nextest run -p graphloom --test cli_integration
+
+test-api:
+	@cargo nextest run -p graphloom --test api_index
 
 test-integration:
-	@cargo nextest run -p graphloom-cli --test cli_integration
+	@cargo nextest run -p graphloom --test cli_integration --test api_index
 
 test-all:
 	@cargo nextest run --all-features
@@ -39,4 +42,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-integration test-all check-agent-sync release update-submodule
+.PHONY: build test test-cli test-api test-integration test-all check-agent-sync release update-submodule

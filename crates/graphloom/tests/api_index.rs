@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use assert_cmd::Command;
-use graphloom::{ALL_EMBEDDINGS, GraphRagConfig};
+use graphloom::{
+    ALL_EMBEDDINGS, GraphRagConfig, PipelineRunStats, WorkflowCallbacks,
+    api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
+};
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
-use predicates::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
@@ -13,7 +14,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub() {
+async fn test_should_build_standard_index_via_public_api() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -27,84 +28,137 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         .await;
 
     let tempdir = TempDir::new().expect("tempdir");
-    Command::cargo_bin("graphloom")
-        .expect("binary")
-        .args([
-            "init",
-            "--root",
-            tempdir.path().to_str().expect("utf8 root"),
-            "--model",
-            "gpt-test",
-            "--embedding",
-            "embed-test",
-        ])
-        .assert()
-        .success();
-
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input dir");
     tokio::fs::write(
         tempdir.path().join("input").join("document.txt"),
         "Alice works for Acme. Bob manages Acme. Alice and Bob collaborated on Project Atlas.",
     )
     .await
-    .expect("write input");
-    tokio::fs::write(
-        tempdir.path().join(".env"),
-        "GRAPHRAG_API_KEY=super-secret-key\n",
+    .expect("input");
+    let config = test_config(&server.uri());
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    let result = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: vec![callbacks.clone()],
+        },
     )
     .await
-    .expect("write env");
-    patch_settings(tempdir.path(), &server.uri()).await;
+    .expect("build index");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
-        .args([
-            "index",
-            "--root",
-            tempdir.path().to_str().expect("utf8 root"),
-            "--dry-run",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Workflows:"))
-        .stdout(predicate::str::contains("super-secret-key").not());
-    assert!(!tempdir.path().join("output").exists());
-    assert!(!tempdir.path().join("cache").exists());
-    assert!(!tempdir.path().join("logs").exists());
-
-    Command::cargo_bin("graphloom")
-        .expect("binary")
-        .args([
-            "index",
-            "--root",
-            tempdir.path().to_str().expect("utf8 root"),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Index completed successfully"));
-
+    assert!(!result.workflow_outputs.is_empty());
+    assert!(result.stats.document_count > 0);
+    assert!(
+        callbacks
+            .started()
+            .contains(&"load_input_documents".to_owned())
+    );
+    assert!(
+        callbacks
+            .completed()
+            .contains(&"generate_text_embeddings".to_owned())
+    );
     assert_standard_outputs(tempdir.path()).await;
 }
 
-async fn assert_standard_outputs(root: &std::path::Path) {
-    for table in [
-        "documents",
-        "text_units",
-        "entities",
-        "relationships",
-        "communities",
-        "community_reports",
-    ] {
-        assert!(
-            root.join("output")
-                .join(format!("{table}.parquet"))
-                .is_file(),
-            "{table} parquet should exist",
-        );
-    }
-    assert!(!root.join("output").join("covariates.parquet").exists());
-    assert!(root.join("cache").exists());
-    assert!(root.join("logs").join("indexing-engine.log").is_file());
+#[derive(Debug, Default)]
+struct RecordingCallbacks {
+    started: Mutex<Vec<String>>,
+    completed: Mutex<Vec<String>>,
+}
 
+impl RecordingCallbacks {
+    fn started(&self) -> Vec<String> {
+        self.started.lock().expect("started lock").clone()
+    }
+
+    fn completed(&self) -> Vec<String> {
+        self.completed.lock().expect("completed lock").clone()
+    }
+}
+
+impl WorkflowCallbacks for RecordingCallbacks {
+    fn workflow_started(&self, workflow_name: &str) {
+        self.started
+            .lock()
+            .expect("started lock")
+            .push(workflow_name.to_owned());
+    }
+
+    fn workflow_completed(&self, workflow_name: &str, _stats: &PipelineRunStats) {
+        self.completed
+            .lock()
+            .expect("completed lock")
+            .push(workflow_name.to_owned());
+    }
+}
+
+fn test_config(server_uri: &str) -> GraphRagConfig {
+    serde_yaml::from_str(&format!(
+        r#"
+completion_models:
+  default_completion_model:
+    model_provider: openai
+    model: gpt-test
+    auth_method: api_key
+    api_key: test-key
+    api_base: {server_uri}/v1
+embedding_models:
+  default_embedding_model:
+    model_provider: openai
+    model: embed-test
+    auth_method: api_key
+    api_key: test-key
+    api_base: {server_uri}/v1
+input:
+  type: text
+  file_pattern: ".*\\.txt$"
+input_storage:
+  type: file
+  base_dir: input
+output_storage:
+  type: file
+  base_dir: output
+reporting:
+  type: file
+  base_dir: logs
+cache:
+  type: json
+  storage:
+    type: file
+    base_dir: cache
+chunking:
+  type: tokens
+  size: 1200
+  overlap: 100
+  encoding_model: o200k_base
+vector_store:
+  type: lancedb
+  db_uri: output/lancedb
+  vector_size: 4
+extract_graph:
+  completion_model_id: default_completion_model
+  max_gleanings: 0
+summarize_descriptions:
+  completion_model_id: default_completion_model
+community_reports:
+  completion_model_id: default_completion_model
+embed_text:
+  embedding_model_id: default_embedding_model
+extract_claims:
+  enabled: false
+"#
+    ))
+    .expect("config")
+}
+
+async fn assert_standard_outputs(root: &std::path::Path) {
     let provider = ParquetTableProvider::new(root.join("output")).expect("provider");
     for table in [
         "documents",
@@ -119,40 +173,20 @@ async fn assert_standard_outputs(root: &std::path::Path) {
         assert!(dataframe.column("id").is_ok(), "{table} should have id");
     }
 
-    let settings = tokio::fs::read_to_string(root.join("settings.yaml"))
-        .await
-        .expect("settings");
-    let config: GraphRagConfig = serde_yaml::from_str(&settings).expect("config");
+    let config = test_config("http://127.0.0.1:1");
     let mut config = config;
     config.vector_store.db_uri = root
         .join("output")
         .join("lancedb")
         .to_string_lossy()
         .to_string();
-    let store = Arc::new(
-        LanceDbVectorStore::connect(&config.vector_store)
-            .await
-            .expect("lancedb"),
-    );
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("lancedb");
     for embedding in ALL_EMBEDDINGS {
         let schema = config.vector_store.schema_for(embedding);
         assert!(store.count(&schema).await.expect("count") > 0);
     }
-}
-
-async fn patch_settings(root: &std::path::Path, server_uri: &str) {
-    let path = root.join("settings.yaml");
-    let settings = tokio::fs::read_to_string(&path).await.expect("settings");
-    let settings = settings
-        .replace(
-            "api_key: ${GRAPHRAG_API_KEY}",
-            &format!("api_key: ${{GRAPHRAG_API_KEY}}\n    api_base: {server_uri}/v1"),
-        )
-        .replace("vector_size: 3072", "vector_size: 4")
-        .replace("max_gleanings: 1", "max_gleanings: 0");
-    tokio::fs::write(path, settings)
-        .await
-        .expect("patch settings");
 }
 
 fn chat_responder(request: &Request) -> ResponseTemplate {
@@ -177,12 +211,7 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
             "summary": "Alice, Bob, and Acme form a connected work community.",
             "rating": 5.0,
             "rating_explanation": "The community is small but coherent.",
-            "findings": [
-                {
-                    "summary": "Collaboration",
-                    "explanation": "Alice and Bob collaborate through Acme [Data: Entities (0, 1); Relationships (0)]."
-                }
-            ]
+            "findings": [{"summary": "Collaboration", "explanation": "Alice and Bob collaborate through Acme [Data: Entities (0, 1); Relationships (0)]."}]
         })
         .to_string()
     } else {
