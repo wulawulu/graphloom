@@ -10,6 +10,7 @@ use std::{
 use crate::{
     CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     GraphLoomError, GraphRagConfig, Result,
+    path_safety::{is_symlink_or_reparse, paths_overlap},
 };
 
 /// Loaded `GraphLoom` project.
@@ -101,7 +102,7 @@ impl ProjectPaths {
             (&cache.resolved, "cache"),
             (&reporting.resolved, "logs"),
         ] {
-            if paths_overlap(&output.resolved, path) {
+            if paths_overlap(&output.resolved, path)? {
                 return unsafe_output(
                     &self.output_dir,
                     &format!("output directory must not overlap {label} directory"),
@@ -157,7 +158,7 @@ impl ProjectPaths {
             (&cache.resolved, "cache"),
             (&reporting.resolved, "logs"),
         ] {
-            if paths_overlap(&vector.resolved, path) {
+            if paths_overlap(&vector.resolved, path)? {
                 return unsafe_output(
                     &self.vector_db_uri,
                     &format!("vector DB path must not overlap {label} directory"),
@@ -275,15 +276,31 @@ fn resolve_path_with_existing_ancestor(
     let lexical = absolute_lexical(path)?;
     let mut current = PathBuf::new();
     let mut existing = None;
-    for component in lexical.components() {
+    let mut components = lexical.components().peekable();
+    while let Some(component) = components.next() {
         current.push(component.as_os_str());
+        if !current.has_root() {
+            continue;
+        }
+        let has_remaining = components.peek().is_some();
         match current.symlink_metadata() {
             Ok(metadata)
                 if link_policy == LinkPolicy::Reject && is_symlink_or_reparse(&metadata) =>
             {
                 return unsafe_output(path, "path must not contain symlink components");
             }
-            Ok(_) => {
+            Ok(metadata) => {
+                if has_remaining && !path_component_is_directory(&current, &metadata, link_policy)?
+                {
+                    return Err(GraphLoomError::Io {
+                        operation: "inspect path ancestor",
+                        path: current,
+                        source: std::io::Error::new(
+                            ErrorKind::NotADirectory,
+                            "path ancestor is not a directory",
+                        ),
+                    });
+                }
                 existing = Some(current.clone());
             }
             Err(source) if source.kind() == ErrorKind::NotFound => break,
@@ -311,6 +328,27 @@ fn resolve_path_with_existing_ancestor(
         lexical,
         resolved: normalize_path(&resolved_ancestor.join(suffix)),
     })
+}
+
+fn path_component_is_directory(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    link_policy: LinkPolicy,
+) -> Result<bool> {
+    if metadata.is_dir() {
+        return Ok(true);
+    }
+    if link_policy == LinkPolicy::Follow && is_symlink_or_reparse(metadata) {
+        return path
+            .metadata()
+            .map(|target| target.is_dir())
+            .map_err(|source| GraphLoomError::Io {
+                operation: "inspect resolved path ancestor",
+                path: path.to_path_buf(),
+                source,
+            });
+    }
+    Ok(false)
 }
 
 pub(crate) fn user_home_dir() -> Option<PathBuf> {
@@ -347,20 +385,6 @@ fn absolute_lexical(path: &Path) -> Result<PathBuf> {
     Ok(normalize_path(&absolute))
 }
 
-#[cfg(windows)]
-fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
 fn resolve_path(root: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() {
@@ -372,35 +396,6 @@ fn resolve_path(root: &Path, value: &str) -> PathBuf {
 
 fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
-}
-
-#[cfg(not(windows))]
-pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> bool {
-    path.starts_with(parent)
-}
-
-#[cfg(windows)]
-pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> bool {
-    path_is_prefix_case_insensitive(path, parent)
-}
-
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    path_is_within_or_equal(left, right) || path_is_within_or_equal(right, left)
-}
-
-#[cfg(windows)]
-fn path_is_prefix_case_insensitive(path: &Path, prefix: &Path) -> bool {
-    let mut path_components = path.components();
-    prefix.components().all(|prefix_component| {
-        path_components.next().is_some_and(|path_component| {
-            component_eq_ignore_case(path_component, prefix_component)
-        })
-    })
-}
-
-#[cfg(windows)]
-fn component_eq_ignore_case(left: Component<'_>, right: Component<'_>) -> bool {
-    graphloom_windows_path::os_str_eq_ignore_case(left.as_os_str(), right.as_os_str())
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -441,28 +436,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    #[test]
-    fn test_should_detect_overlapping_paths() {
-        assert!(paths_overlap(Path::new("/a"), Path::new("/a")));
-        assert!(paths_overlap(Path::new("/a/b"), Path::new("/a")));
-        assert!(paths_overlap(Path::new("/a"), Path::new("/a/b")));
-        assert!(!paths_overlap(Path::new("/a/b"), Path::new("/a/c")));
-        assert!(!paths_overlap(Path::new("/a/b"), Path::new("/ab")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_should_compare_windows_paths_by_component_case_insensitively() {
-        assert!(paths_overlap(
-            Path::new(r"C:\Project\Input"),
-            Path::new(r"c:\project\input\Generated"),
-        ));
-        assert!(!paths_overlap(
-            Path::new(r"C:\Project\Input"),
-            Path::new(r"c:\project\input-Other"),
-        ));
-    }
 
     #[cfg(windows)]
     #[test]
@@ -537,6 +510,29 @@ mod tests {
 
         ProjectPaths::resolve(tempdir.path(), &config)
             .expect("separate sibling project directories should be allowed");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_non_directory_existing_path_ancestor() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let file = tempdir.path().join("file");
+        tokio::fs::write(&file, "not a directory")
+            .await
+            .expect("file");
+
+        let error = resolve_path_rejecting_links(&file.join("child"))
+            .expect_err("non-directory ancestor should fail");
+
+        assert!(error.to_string().contains("not a directory"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_resolve_verbatim_temp_path_without_querying_prefix_only_path() {
+        let tempdir = TempDir::new().expect("tempdir");
+
+        resolve_path_rejecting_links(&tempdir.path().join("missing").join("child"))
+            .expect("resolve verbatim temp path");
     }
 
     #[test]

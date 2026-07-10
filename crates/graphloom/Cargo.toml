@@ -43,7 +43,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-graphloom-windows-path.workspace = true
+windows-sys.workspace = true
 
 [[bin]]
 name = "graphloom"

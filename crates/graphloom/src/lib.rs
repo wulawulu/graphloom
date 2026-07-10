@@ -3,7 +3,7 @@
 //! The top-level crate owns configuration, provider assembly, and workflow
 //! orchestration for the indexing pipeline.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -30,6 +30,11 @@ mod context;
 mod dataframe;
 mod error;
 mod operations;
+#[allow(
+    unsafe_code,
+    reason = "the Windows ordinal comparison API requires a narrowly scoped FFI call"
+)]
+mod path_safety;
 mod pipeline;
 mod project;
 mod runtime;

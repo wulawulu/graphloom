@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::{
     ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
     Result, WorkflowCallbacks, WorkflowRegistry,
-    project::{LoadedProject, ProjectPaths, path_is_within_or_equal, resolve_path_rejecting_links},
+    path_safety::path_is_within_or_equal,
+    project::{LoadedProject, ProjectPaths, resolve_path_rejecting_links},
     register_step9_workflows,
 };
 
@@ -351,7 +352,7 @@ fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
     let output = resolve_path_rejecting_links(&paths.output_dir)?;
     let vector = resolve_path_rejecting_links(&paths.vector_db_uri)?;
     Ok(
-        if path_is_within_or_equal(&vector.resolved, &output.resolved) {
+        if path_is_within_or_equal(&vector.resolved, &output.resolved)? {
             VectorLocation::InsideOutput
         } else {
             VectorLocation::OutsideOutput

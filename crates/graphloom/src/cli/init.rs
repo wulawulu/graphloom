@@ -6,9 +6,12 @@ use serde_yaml::Value as YamlValue;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::cli::{
-    args::InitArgs,
-    error::{CliError, Result},
+use crate::{
+    cli::{
+        args::InitArgs,
+        error::{CliError, Result},
+    },
+    path_safety::is_symlink_or_reparse,
 };
 
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
@@ -354,8 +357,11 @@ async fn write_managed_file(path: &Path, content: &str, overwrite: bool) -> Resu
 }
 
 async fn reject_symlink(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        reject_symlink_ancestors(parent).await?;
+    }
     match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::InvalidRoot {
+        Ok(metadata) if is_symlink_or_reparse(&metadata) => Err(CliError::InvalidRoot {
             path: path.to_path_buf(),
             message: "refusing to overwrite symlink".to_owned(),
         }),
@@ -370,18 +376,28 @@ async fn reject_symlink(path: &Path) -> Result<()> {
 }
 
 async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let path = absolute_unresolved(path)?;
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        if !current.has_root() {
+            continue;
+        }
         match tokio::fs::symlink_metadata(&current).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
                 return Err(CliError::InvalidRoot {
                     path: current,
                     message: "refusing to write through symlink parent".to_owned(),
                 });
             }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(CliError::InvalidRoot {
+                    path: current,
+                    message: "path ancestor is not a directory".to_owned(),
+                });
+            }
             Ok(_) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(source) => {
                 return Err(CliError::Io {
                     operation: "check parent symlink",
@@ -780,7 +796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_return_non_not_found_symlink_metadata_errors() {
+    async fn test_should_reject_non_directory_parent_before_target_check() {
         let tempdir = TempDir::new().expect("tempdir");
         let file = tempdir.path().join("file");
         tokio::fs::write(&file, "not a directory")
@@ -792,11 +808,11 @@ mod tests {
             .await
             .expect_err("not a directory must not be swallowed");
 
-        assert!(error.to_string().contains("check symlink"));
+        assert!(error.to_string().contains("not a directory"));
     }
 
     #[tokio::test]
-    async fn test_should_return_non_not_found_ancestor_metadata_errors() {
+    async fn test_should_reject_non_directory_ancestor_cross_platform() {
         let tempdir = TempDir::new().expect("tempdir");
         let file = tempdir.path().join("file");
         tokio::fs::write(&file, "not a directory")
@@ -808,7 +824,17 @@ mod tests {
             .await
             .expect_err("not a directory must not be swallowed");
 
-        assert!(error.to_string().contains("check parent symlink"));
+        assert!(error.to_string().contains("not a directory"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_should_check_verbatim_path_ancestors_without_querying_prefix_only_path() {
+        let tempdir = TempDir::new().expect("tempdir");
+
+        reject_symlink_ancestors(&tempdir.path().join("missing").join("child"))
+            .await
+            .expect("verbatim path ancestor check");
     }
 
     #[cfg(unix)]

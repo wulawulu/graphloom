@@ -63,4 +63,3 @@ graphloom-input = { path = "crates/graphloom-input" }
 graphloom-llm = { path = "crates/graphloom-llm" }
 graphloom-storage = { path = "crates/graphloom-storage" }
 graphloom-vectors = { path = "crates/graphloom-vectors" }
-graphloom-windows-path = { path = "crates/graphloom-windows-path" }
