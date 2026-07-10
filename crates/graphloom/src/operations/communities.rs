@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].0, "ALICE & CO");
         assert_eq!(edges[0].1, "BOB");
-        assert_eq!(edges[0].2, 1.0);
+        assert!((edges[0].2 - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

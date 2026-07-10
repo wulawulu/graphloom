@@ -14,7 +14,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -22,7 +21,6 @@ csv.workspace = true
 futures-util.workspace = true
 graphloom-cache.workspace = true
 graphloom-chunking.workspace = true
-graphloom-common.workspace = true
 graphloom-input.workspace = true
 graphloom-llm.workspace = true
 graphloom-storage.workspace = true

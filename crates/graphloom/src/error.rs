@@ -130,20 +130,6 @@ pub enum GraphLoomError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// Unsupported provider.
-    #[error("unsupported provider {provider}; only openai is implemented")]
-    UnsupportedProvider {
-        /// Provider name.
-        provider: String,
-    },
-
-    /// Unsupported authentication method.
-    #[error("unsupported auth method {auth_method}; only api_key is implemented")]
-    UnsupportedAuthMethod {
-        /// Auth method.
-        auth_method: String,
-    },
-
     /// Unsupported storage.
     #[error("unsupported {kind} storage {storage_type}; only file is implemented")]
     UnsupportedStorage {
@@ -208,11 +194,16 @@ pub enum GraphLoomError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// Unsupported indexing method.
-    #[error("unsupported indexing method {method}; only standard is implemented")]
-    UnsupportedMethod {
-        /// Method.
-        method: String,
+    /// A transaction failed and its recovery also failed.
+    #[error("{operation} failed: {source}; rollback also failed: {rollback}")]
+    RollbackFailed {
+        /// Transaction being recovered.
+        operation: &'static str,
+        /// Primary transaction failure.
+        #[source]
+        source: Box<GraphLoomError>,
+        /// Recovery failure.
+        rollback: Box<GraphLoomError>,
     },
 
     /// I/O failed.

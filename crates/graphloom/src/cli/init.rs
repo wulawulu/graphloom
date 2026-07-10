@@ -1,17 +1,23 @@
 //! Project initialization.
 
-use std::path::{Component, Path, PathBuf};
+mod transaction;
 
+use std::path::{Path, PathBuf};
+
+use graphloom_llm::DefaultPrompt;
 use serde_yaml::Value as YamlValue;
-use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
+use transaction::execute_plan;
+#[cfg(test)]
+use transaction::execute_plan_with_hook;
 
 use crate::{
     cli::{
         args::InitArgs,
         error::{CliError, Result},
     },
-    path_safety::{component_reaches_queryable_path, is_symlink_or_reparse},
+    path_safety::{
+        absolute_unresolved, is_symlink_or_reparse, normalize_path, reject_symlink_ancestors,
+    },
 };
 
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
@@ -19,21 +25,18 @@ const DOTENV: &str = include_str!("../assets/dotenv");
 
 /// Managed prompt assets.
 pub const PROMPT_ASSETS: &[(&str, &str)] = &[
-    (
-        "extract_graph.txt",
-        include_str!("../assets/prompts/extract_graph.txt"),
-    ),
+    ("extract_graph.txt", DefaultPrompt::ExtractGraph.template()),
     (
         "summarize_descriptions.txt",
-        include_str!("../assets/prompts/summarize_descriptions.txt"),
+        DefaultPrompt::SummarizeDescriptions.template(),
     ),
     (
         "extract_claims.txt",
-        include_str!("../assets/prompts/extract_claims.txt"),
+        DefaultPrompt::ExtractClaims.template(),
     ),
     (
         "community_report_graph.txt",
-        include_str!("../assets/prompts/community_report_graph.txt"),
+        DefaultPrompt::CommunityReport.template(),
     ),
     (
         "community_report_text.txt",
@@ -107,7 +110,7 @@ impl InitPlan {
         let raw_root = absolute_unresolved(&args.root)?;
         reject_symlink_ancestors(&raw_root).await?;
         reject_symlink(&raw_root).await?;
-        let root = normalize_lexical(&raw_root);
+        let root = normalize_path(&raw_root);
         let settings = root.join("settings.yaml");
         if tokio::fs::try_exists(&settings)
             .await
@@ -157,16 +160,6 @@ impl InitPlan {
         }
         Ok(())
     }
-}
-
-async fn execute_plan(plan: &InitPlan) -> Result<()> {
-    for directory in &plan.directories {
-        create_dir(directory).await?;
-    }
-    for file in &plan.files {
-        write_managed_file(&file.path, &file.content, file.overwrite).await?;
-    }
-    Ok(())
 }
 
 fn validate_model_argument(name: &str, value: &str) -> Result<()> {
@@ -264,98 +257,6 @@ async fn preflight_managed_file(file: &ManagedFilePlan) -> Result<()> {
     }
 }
 
-async fn create_dir(path: &Path) -> Result<()> {
-    tokio::fs::create_dir_all(path)
-        .await
-        .map_err(|source| CliError::Io {
-            operation: "create directory",
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-async fn write_managed_file(path: &Path, content: &str, overwrite: bool) -> Result<()> {
-    let exists = tokio::fs::try_exists(path)
-        .await
-        .map_err(|source| CliError::Io {
-            operation: "check file",
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if exists && !overwrite {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        reject_symlink_ancestors(parent).await?;
-        create_dir(parent).await?;
-    }
-    reject_symlink(path).await?;
-    if exists {
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|source| CliError::Io {
-                operation: "stat existing managed file",
-                path: path.to_path_buf(),
-                source,
-            })?;
-        if !metadata.is_file() {
-            return Err(CliError::InvalidRoot {
-                path: path.to_path_buf(),
-                message: "refusing to overwrite non-file managed path".to_owned(),
-            });
-        }
-    }
-
-    let tmp = temporary_sibling(path)?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp)
-        .await
-        .map_err(|source| CliError::Io {
-            operation: "create temporary file",
-            path: tmp.clone(),
-            source,
-        })?;
-    if let Err(source) = file.write_all(content.as_bytes()).await {
-        cleanup_tmp(&tmp).await;
-        return Err(CliError::Io {
-            operation: "write temporary file",
-            path: tmp,
-            source,
-        });
-    }
-    if let Err(source) = file.flush().await {
-        cleanup_tmp(&tmp).await;
-        return Err(CliError::Io {
-            operation: "flush temporary file",
-            path: tmp,
-            source,
-        });
-    }
-    drop(file);
-    if overwrite
-        && exists
-        && let Err(source) = tokio::fs::remove_file(path).await
-    {
-        cleanup_tmp(&tmp).await;
-        return Err(CliError::Io {
-            operation: "remove existing managed file",
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    if let Err(source) = tokio::fs::rename(&tmp, path).await {
-        cleanup_tmp(&tmp).await;
-        return Err(CliError::Io {
-            operation: "rename temporary file",
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
 async fn reject_symlink(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         reject_symlink_ancestors(parent).await?;
@@ -373,90 +274,6 @@ async fn reject_symlink(path: &Path) -> Result<()> {
             source,
         }),
     }
-}
-
-async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
-    let path = absolute_unresolved(path)?;
-    let mut current = PathBuf::new();
-    let mut reached_root = false;
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if !component_reaches_queryable_path(component, &mut reached_root) {
-            continue;
-        }
-        match tokio::fs::symlink_metadata(&current).await {
-            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
-                return Err(CliError::InvalidRoot {
-                    path: current,
-                    message: "refusing to write through symlink parent".to_owned(),
-                });
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(CliError::InvalidRoot {
-                    path: current,
-                    message: "path ancestor is not a directory".to_owned(),
-                });
-            }
-            Ok(_) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(CliError::Io {
-                    operation: "check parent symlink",
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn temporary_sibling(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().ok_or_else(|| CliError::InvalidRoot {
-        path: path.to_path_buf(),
-        message: "managed path has no parent".to_owned(),
-    })?;
-    let name = path.file_name().ok_or_else(|| CliError::InvalidRoot {
-        path: path.to_path_buf(),
-        message: "managed path has no file name".to_owned(),
-    })?;
-    Ok(parent.join(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        Uuid::new_v4()
-    )))
-}
-
-async fn cleanup_tmp(path: &Path) {
-    let _ = tokio::fs::remove_file(path).await;
-}
-
-fn absolute_unresolved(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()
-            .map_err(|source| CliError::Io {
-                operation: "get current directory",
-                path: PathBuf::from("."),
-                source,
-            })?
-            .join(path))
-    }
-}
-
-fn normalize_lexical(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]
@@ -485,8 +302,13 @@ mod tests {
         assert!(tempdir.path().join(".env").is_file());
         assert!(tempdir.path().join("input").is_dir());
         assert!(tempdir.path().join("prompts").is_dir());
-        for (name, _) in PROMPT_ASSETS {
-            assert!(tempdir.path().join("prompts").join(name).is_file());
+        for (name, content) in PROMPT_ASSETS {
+            let path = tempdir.path().join("prompts").join(name);
+            assert!(path.is_file());
+            assert_eq!(
+                tokio::fs::read_to_string(path).await.expect("prompt asset"),
+                *content,
+            );
         }
     }
 
@@ -623,6 +445,111 @@ mod tests {
                 .expect("unknown"),
             "keep"
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_roll_back_every_managed_file_when_force_publish_fails() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&args(tempdir.path(), false))
+            .await
+            .expect("initial init");
+        tokio::fs::write(tempdir.path().join(".env"), "ORIGINAL=1")
+            .await
+            .expect("custom dotenv");
+        let settings_before = tokio::fs::read(tempdir.path().join("settings.yaml"))
+            .await
+            .expect("settings before");
+        let prompt_before =
+            tokio::fs::read(tempdir.path().join("prompts").join("extract_graph.txt"))
+                .await
+                .expect("prompt before");
+        let plan = InitPlan::build(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "replacement-model".to_owned(),
+            embedding: "replacement-embedding".to_owned(),
+            force: true,
+        })
+        .await
+        .expect("plan");
+
+        let error = execute_plan_with_hook(&plan, |index| {
+            if index == 1 {
+                return Err(CliError::Io {
+                    operation: "inject publish failure",
+                    path: tempdir.path().join(".env"),
+                    source: std::io::Error::other("injected failure"),
+                });
+            }
+            Ok(())
+        })
+        .await
+        .expect_err("publish should fail");
+
+        assert!(error.to_string().contains("injected failure"));
+        assert_eq!(
+            tokio::fs::read(tempdir.path().join("settings.yaml"))
+                .await
+                .expect("settings after"),
+            settings_before,
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(tempdir.path().join(".env"))
+                .await
+                .expect("dotenv after"),
+            "ORIGINAL=1",
+        );
+        assert_eq!(
+            tokio::fs::read(tempdir.path().join("prompts").join("extract_graph.txt"),)
+                .await
+                .expect("prompt after"),
+            prompt_before,
+        );
+        assert_no_transaction_files(tempdir.path()).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_remove_new_scaffold_when_initial_publish_fails() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("project");
+        let plan = InitPlan::build(&args(&root, false)).await.expect("plan");
+
+        execute_plan_with_hook(&plan, |index| {
+            if index == 1 {
+                return Err(CliError::Io {
+                    operation: "inject initial publish failure",
+                    path: root.join(".env"),
+                    source: std::io::Error::other("injected failure"),
+                });
+            }
+            Ok(())
+        })
+        .await
+        .expect_err("publication should fail");
+
+        assert!(!root.exists(), "incomplete scaffold must be removed");
+    }
+
+    async fn assert_no_transaction_files(root: &Path) {
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let mut entries = tokio::fs::read_dir(&directory)
+                .await
+                .expect("read directory");
+            while let Some(entry) = entries.next_entry().await.expect("directory entry") {
+                let path = entry.path();
+                if entry.file_type().await.expect("file type").is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("UTF-8 test file name");
+                let extension = path.extension().and_then(|extension| extension.to_str());
+                assert_ne!(extension, Some("tmp"), "staged file leaked: {name}");
+                assert_ne!(extension, Some("backup"), "backup leaked: {name}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -576,7 +576,7 @@ impl GraphRagConfig {
     #[must_use]
     pub fn workflow_order(&self) -> Vec<String> {
         if self.workflows.is_empty() {
-            crate::workflows::STEP9_WORKFLOWS
+            crate::workflows::STANDARD_WORKFLOWS
                 .iter()
                 .map(|workflow| (*workflow).to_owned())
                 .collect()

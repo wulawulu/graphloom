@@ -17,7 +17,7 @@ use crate::{
     GraphLoomError, GraphRagConfig, LOAD_INPUT_DOCUMENTS_WORKFLOW, Result, WorkflowRegistry,
     config::{effective_completion_encoding, effective_embedding_encoding},
     project::{LoadedProject, ProjectPaths},
-    register_step9_workflows,
+    register_standard_workflows,
 };
 
 /// Load a project config from a root directory or concrete config file.
@@ -297,7 +297,7 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
     validate_cache(&project.config.cache.cache_type)?;
     project.paths.validate_destructive_paths()?;
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     registry
         .validate_names(&project.config.workflow_order())
         .map_err(|source| GraphLoomError::RuntimeBuild {
@@ -466,16 +466,6 @@ fn validate_chunking_if_needed(project: &LoadedProject, active: &BTreeSet<String
 }
 
 fn validate_model(model_id: &str, model: &graphloom_llm::ModelConfig) -> Result<()> {
-    if !model.provider_type().eq_ignore_ascii_case("openai") {
-        return Err(GraphLoomError::UnsupportedProvider {
-            provider: model.provider_type().to_owned(),
-        });
-    }
-    if !model.auth_method.eq_ignore_ascii_case("api_key") {
-        return Err(GraphLoomError::UnsupportedAuthMethod {
-            auth_method: model.auth_method.clone(),
-        });
-    }
     model
         .validate_openai_compatible(model_id)
         .map_err(|source| GraphLoomError::InvalidModel {

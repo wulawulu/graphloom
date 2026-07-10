@@ -107,7 +107,7 @@ pub(crate) fn raw_entity_dataframe(rows: &[EntityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.description.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         3,
@@ -117,7 +117,7 @@ pub(crate) fn raw_entity_dataframe(rows: &[EntityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
@@ -136,7 +136,7 @@ pub(crate) fn raw_relationship_dataframe(rows: &[RelationshipRow]) -> Result<Dat
                 .iter()
                 .map(|row| row.description.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         3,
@@ -146,7 +146,7 @@ pub(crate) fn raw_relationship_dataframe(rows: &[RelationshipRow]) -> Result<Dat
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
@@ -166,7 +166,7 @@ pub(crate) fn entity_intermediate_dataframe(rows: &[SummarizedEntityRow]) -> Res
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
@@ -188,7 +188,7 @@ pub(crate) fn relationship_intermediate_dataframe(
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
@@ -211,7 +211,7 @@ pub(crate) fn final_entities_dataframe(rows: &[FinalEntityRow]) -> Result<DataFr
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
@@ -232,7 +232,7 @@ pub(crate) fn final_relationships_dataframe(rows: &[FinalRelationshipRow]) -> Re
             .iter()
             .map(|row| row.text_unit_ids.clone())
             .collect::<Vec<_>>(),
-    )?)?;
+    ))?;
     Ok(dataframe)
 }
 
@@ -316,13 +316,10 @@ mod tests {
         )
         .expect("dataframe should build");
         dataframe
-            .with_column(
-                list_column(
-                    "text_unit_ids",
-                    &[vec!["tu-1".to_owned(), "tu-2".to_owned()]],
-                )
-                .expect("list column should build"),
-            )
+            .with_column(list_column(
+                "text_unit_ids",
+                &[vec!["tu-1".to_owned(), "tu-2".to_owned()]],
+            ))
             .expect("column should append");
 
         let rows = read_entity_rows(&dataframe).expect("entity rows should decode");
@@ -344,10 +341,7 @@ mod tests {
         )
         .expect("dataframe should build");
         dataframe
-            .with_column(
-                list_column("text_unit_ids", &[vec!["tu-1".to_owned()]])
-                    .expect("list column should build"),
-            )
+            .with_column(list_column("text_unit_ids", &[vec!["tu-1".to_owned()]]))
             .expect("column should append");
 
         let error = read_entity_rows(&dataframe).expect_err("frequency type should fail");
@@ -436,7 +430,7 @@ mod tests {
         dataframe
             .get_column_names()
             .into_iter()
-            .map(|name| name.as_str())
+            .map(polars_core::datatypes::PlSmallStr::as_str)
             .collect()
     }
 }

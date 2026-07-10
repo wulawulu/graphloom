@@ -18,16 +18,19 @@ pub(crate) fn graphml_snapshot(rows: &[FinalRelationshipRow]) -> String {
         nodes.insert(row.target.as_str());
     }
     for node in nodes {
-        graphml.push_str(&format!(r#"<node id="{}"/>"#, xml_escape(node)));
+        graphml.push_str(r#"<node id=""#);
+        graphml.push_str(&xml_escape(node));
+        graphml.push_str(r#""/>"#);
         graphml.push('\n');
     }
     for row in rows {
-        graphml.push_str(&format!(
-            r#"<edge source="{}" target="{}"><data key="weight">{}</data></edge>"#,
-            xml_escape(&row.source),
-            xml_escape(&row.target),
-            row.weight,
-        ));
+        graphml.push_str(r#"<edge source=""#);
+        graphml.push_str(&xml_escape(&row.source));
+        graphml.push_str(r#"" target=""#);
+        graphml.push_str(&xml_escape(&row.target));
+        graphml.push_str(r#""><data key="weight">"#);
+        graphml.push_str(&row.weight.to_string());
+        graphml.push_str("</data></edge>");
         graphml.push('\n');
     }
     graphml.push_str("</graph>\n</graphml>\n");

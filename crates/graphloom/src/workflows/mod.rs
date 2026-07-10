@@ -27,36 +27,17 @@ pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkf
 
 use crate::WorkflowRegistry;
 
-/// Workflow name for `load_input_documents`.
-pub const STEP5_WORKFLOWS: &[&str] = &[
+/// Workflow prefix used by focused pipeline tests.
+#[cfg(test)]
+pub(crate) const STEP5_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
     CREATE_BASE_TEXT_UNITS_WORKFLOW,
     CREATE_FINAL_DOCUMENTS_WORKFLOW,
 ];
 
-/// Workflow names for the implemented Step-6 standard prefix.
-pub const STEP6_WORKFLOWS: &[&str] = &[
-    LOAD_INPUT_DOCUMENTS_WORKFLOW,
-    CREATE_BASE_TEXT_UNITS_WORKFLOW,
-    CREATE_FINAL_DOCUMENTS_WORKFLOW,
-    EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW,
-];
-
-/// Workflow names for the implemented Step-7 standard prefix.
-pub const STEP7_WORKFLOWS: &[&str] = &[
-    LOAD_INPUT_DOCUMENTS_WORKFLOW,
-    CREATE_BASE_TEXT_UNITS_WORKFLOW,
-    CREATE_FINAL_DOCUMENTS_WORKFLOW,
-    EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW,
-    EXTRACT_COVARIATES_WORKFLOW,
-    CREATE_COMMUNITIES_WORKFLOW,
-    CREATE_FINAL_TEXT_UNITS_WORKFLOW,
-];
-
-/// Workflow names for the implemented Step-8 standard prefix.
-pub const STEP8_WORKFLOWS: &[&str] = &[
+/// Workflow prefix used by focused validation tests.
+#[cfg(test)]
+pub(crate) const STEP8_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
     CREATE_BASE_TEXT_UNITS_WORKFLOW,
     CREATE_FINAL_DOCUMENTS_WORKFLOW,
@@ -68,8 +49,8 @@ pub const STEP8_WORKFLOWS: &[&str] = &[
     CREATE_COMMUNITY_REPORTS_WORKFLOW,
 ];
 
-/// Workflow names for the implemented Step-9 standard prefix.
-pub const STEP9_WORKFLOWS: &[&str] = &[
+/// Workflow names for the standard indexing pipeline.
+pub const STANDARD_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
     CREATE_BASE_TEXT_UNITS_WORKFLOW,
     CREATE_FINAL_DOCUMENTS_WORKFLOW,
@@ -82,36 +63,45 @@ pub const STEP9_WORKFLOWS: &[&str] = &[
     GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
 ];
 
-/// Register built-in Step-5 workflows.
-pub fn register_step5_workflows(registry: &mut WorkflowRegistry) {
+/// Register the smallest workflow prefix used by focused tests.
+#[cfg(test)]
+pub(crate) fn register_step5_workflows(registry: &mut WorkflowRegistry) {
     registry.register(LoadInputDocumentsWorkflow);
     registry.register(CreateBaseTextUnitsWorkflow);
     registry.register(CreateFinalDocumentsWorkflow);
 }
 
-/// Register built-in Step-6 workflows.
-pub fn register_step6_workflows(registry: &mut WorkflowRegistry) {
+#[cfg(test)]
+pub(crate) fn register_step6_workflows(registry: &mut WorkflowRegistry) {
     register_step5_workflows(registry);
     registry.register(ExtractGraphWorkflow);
     registry.register(FinalizeGraphWorkflow);
 }
 
-/// Register built-in Step-7 workflows.
-pub fn register_step7_workflows(registry: &mut WorkflowRegistry) {
+#[cfg(test)]
+pub(crate) fn register_step7_workflows(registry: &mut WorkflowRegistry) {
     register_step6_workflows(registry);
     registry.register(ExtractCovariatesWorkflow);
     registry.register(CreateCommunitiesWorkflow);
     registry.register(CreateFinalTextUnitsWorkflow);
 }
 
-/// Register built-in Step-8 workflows.
-pub fn register_step8_workflows(registry: &mut WorkflowRegistry) {
+#[cfg(test)]
+pub(crate) fn register_step8_workflows(registry: &mut WorkflowRegistry) {
     register_step7_workflows(registry);
     registry.register(CreateCommunityReportsWorkflow);
 }
 
-/// Register built-in Step-9 workflows.
-pub fn register_step9_workflows(registry: &mut WorkflowRegistry) {
-    register_step8_workflows(registry);
+/// Register every workflow in the standard indexing pipeline.
+pub fn register_standard_workflows(registry: &mut WorkflowRegistry) {
+    registry.register(LoadInputDocumentsWorkflow);
+    registry.register(CreateBaseTextUnitsWorkflow);
+    registry.register(CreateFinalDocumentsWorkflow);
+    registry.register(ExtractGraphWorkflow);
+    registry.register(FinalizeGraphWorkflow);
+    registry.register(ExtractCovariatesWorkflow);
+    registry.register(CreateCommunitiesWorkflow);
+    registry.register(CreateFinalTextUnitsWorkflow);
+    registry.register(CreateCommunityReportsWorkflow);
     registry.register(GenerateTextEmbeddingsWorkflow);
 }

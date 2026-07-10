@@ -42,8 +42,8 @@ impl Workflow for FinalizeGraphWorkflow {
                 .await?,
         )?;
         let degree_map = degree_map(&relationships);
-        let final_entities = finalize_entities(&entities, &degree_map);
-        let final_relationships = finalize_relationships(&relationships, &degree_map);
+        let final_entities = finalize_entities(&entities, &degree_map)?;
+        let final_relationships = finalize_relationships(&relationships, &degree_map)?;
 
         context
             .output_table_provider

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::too_many_lines,
+    reason = "end-to-end workflow tests keep each scenario and its table assertions together"
+)]
+
 use std::{
     pin::Pin,
     sync::{
@@ -23,8 +28,8 @@ use crate::{
     CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
     CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphRagConfig, PipelineFactory,
-    PipelineRunContext, WorkflowRegistry, register_step5_workflows, register_step6_workflows,
-    register_step7_workflows, register_step8_workflows, register_step9_workflows,
+    PipelineRunContext, WorkflowRegistry, register_standard_workflows, register_step5_workflows,
+    register_step6_workflows, register_step7_workflows, register_step8_workflows,
 };
 
 #[test]
@@ -860,7 +865,7 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
     let mut context = PipelineRunContext::new(provider.clone())
         .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -982,7 +987,7 @@ async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configur
         .expect("text_units should write");
     let mut context = PipelineRunContext::new(provider);
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let mut config = GraphRagConfig {
         workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
         ..Default::default()
@@ -1025,7 +1030,7 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
     let mut context = PipelineRunContext::new(provider.clone())
         .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -1112,7 +1117,7 @@ async fn test_should_allow_same_source_id_in_different_embedding_fields() {
     let mut context = PipelineRunContext::new(provider)
         .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -1178,7 +1183,7 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;

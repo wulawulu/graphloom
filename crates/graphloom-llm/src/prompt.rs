@@ -45,9 +45,11 @@ impl DefaultPrompt {
         }
     }
 
-    fn content(self) -> &'static str {
+    /// Return the canonical built-in template.
+    #[must_use]
+    pub const fn template(self) -> &'static str {
         match self {
-            Self::ExtractGraph => include_str!("../../../prompts/extract_graph.txt"),
+            Self::ExtractGraph => include_str!("prompts/extract_graph.txt"),
             Self::ExtractGraphContinue => {
                 "MANY entities and relationships were missed in the last extraction. Remember to \
                  ONLY emit entities that match any of the previously extracted types. Add them \
@@ -59,9 +61,9 @@ impl DefaultPrompt {
                  are none. Please answer with a single letter Y or N.\n"
             }
             Self::SummarizeDescriptions => {
-                include_str!("../../../prompts/summarize_descriptions.txt")
+                include_str!("prompts/summarize_descriptions.txt")
             }
-            Self::ExtractClaims => include_str!("../../../prompts/extract_claims.txt"),
+            Self::ExtractClaims => include_str!("prompts/extract_claims.txt"),
             Self::ExtractClaimsContinue => {
                 "MANY entities were missed in the last extraction.  Add them below using the same \
                  format:\n"
@@ -71,7 +73,7 @@ impl DefaultPrompt {
                  entities that need to be added, or N if there are none. Please answer with a \
                  single letter Y or N.\n"
             }
-            Self::CommunityReport => include_str!("../../../prompts/community_report.txt"),
+            Self::CommunityReport => include_str!("prompts/community_report.txt"),
         }
     }
 }
@@ -157,7 +159,7 @@ impl PromptLoader {
             return read_prompt(&override_path).await;
         }
 
-        Ok(prompt.content().to_owned())
+        Ok(prompt.template().to_owned())
     }
 }
 

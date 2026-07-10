@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::list_column,
+    dataframe::{list_column, usize_to_i64},
 };
 
 /// Workflow name.
@@ -50,7 +50,11 @@ impl Workflow for LoadInputDocumentsWorkflow {
                 .transpose()?;
             let row = DocumentRow {
                 id: document.id,
-                human_readable_id: rows.len() as i64,
+                human_readable_id: usize_to_i64(
+                    rows.len(),
+                    LOAD_INPUT_DOCUMENTS_WORKFLOW,
+                    "human_readable_id",
+                )?,
                 title: Some(document.title),
                 text: document.text,
                 text_unit_ids: Vec::new(),
@@ -107,7 +111,7 @@ impl DocumentRow {
         );
         object.insert(
             "title".to_owned(),
-            self.title.clone().map(Value::String).unwrap_or(Value::Null),
+            self.title.clone().map_or(Value::Null, Value::String),
         );
         object.insert("text".to_owned(), Value::String(self.text.clone()));
         object.insert("text_unit_ids".to_owned(), json!(self.text_unit_ids));
@@ -115,15 +119,11 @@ impl DocumentRow {
             "creation_date".to_owned(),
             self.creation_date
                 .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, Value::String),
         );
         object.insert(
             "raw_data".to_owned(),
-            self.raw_data
-                .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
+            self.raw_data.clone().map_or(Value::Null, Value::String),
         );
         Value::Object(object)
     }
@@ -165,7 +165,7 @@ pub(crate) fn documents_dataframe(rows: &[DocumentRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }

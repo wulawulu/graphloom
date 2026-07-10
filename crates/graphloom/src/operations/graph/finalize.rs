@@ -5,6 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use super::{FinalEntityRow, FinalRelationshipRow, SummarizedEntityRow, SummarizedRelationshipRow};
+use crate::{Result, dataframe::usize_to_i64};
+
+const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
 
 pub(crate) fn degree_map(rows: &[SummarizedRelationshipRow]) -> BTreeMap<String, i64> {
     let mut seen = BTreeSet::new();
@@ -22,7 +25,7 @@ pub(crate) fn degree_map(rows: &[SummarizedRelationshipRow]) -> BTreeMap<String,
 pub(crate) fn finalize_entities(
     rows: &[SummarizedEntityRow],
     degree_map: &BTreeMap<String, i64>,
-) -> Vec<FinalEntityRow> {
+) -> Result<Vec<FinalEntityRow>> {
     let mut seen = BTreeSet::new();
     let mut final_rows = Vec::new();
     for row in rows {
@@ -31,7 +34,11 @@ pub(crate) fn finalize_entities(
         }
         final_rows.push(FinalEntityRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: final_rows.len() as i64,
+            human_readable_id: usize_to_i64(
+                final_rows.len(),
+                FINALIZE_GRAPH_WORKFLOW,
+                "human_readable_id",
+            )?,
             title: row.title.clone(),
             entity_type: row.entity_type.clone(),
             description: row.description.clone(),
@@ -43,13 +50,13 @@ pub(crate) fn finalize_entities(
                 .map_or(0, |degree| degree),
         });
     }
-    final_rows
+    Ok(final_rows)
 }
 
 pub(crate) fn finalize_relationships(
     rows: &[SummarizedRelationshipRow],
     degree_map: &BTreeMap<String, i64>,
-) -> Vec<FinalRelationshipRow> {
+) -> Result<Vec<FinalRelationshipRow>> {
     let mut seen = BTreeSet::new();
     let mut final_rows = Vec::new();
     for row in rows {
@@ -59,7 +66,11 @@ pub(crate) fn finalize_relationships(
         }
         final_rows.push(FinalRelationshipRow {
             id: Uuid::new_v4().to_string(),
-            human_readable_id: final_rows.len() as i64,
+            human_readable_id: usize_to_i64(
+                final_rows.len(),
+                FINALIZE_GRAPH_WORKFLOW,
+                "human_readable_id",
+            )?,
             source: row.source.clone(),
             target: row.target.clone(),
             description: row.description.clone(),
@@ -77,7 +88,7 @@ pub(crate) fn finalize_relationships(
             text_unit_ids: row.text_unit_ids.clone(),
         });
     }
-    final_rows
+    Ok(final_rows)
 }
 
 fn sorted_pair(left: &str, right: &str) -> (String, String) {

@@ -58,7 +58,7 @@ pub(crate) async fn embed_text_rows(
         ..EmbeddingBatchOutput::default()
     };
 
-    let snippets = prepare_snippets(rows, config, tokenizer, &mut output)?;
+    let snippets = prepare_snippets(rows, config, &tokenizer, &mut output)?;
     if snippets.is_empty() {
         output.skipped_rows = rows.len();
         return Ok(output);
@@ -143,7 +143,7 @@ fn validate_source_ids(rows: &[EmbeddingSourceRow], embedding_name: &str) -> Res
 fn prepare_snippets(
     rows: &[EmbeddingSourceRow],
     config: &EmbeddingOperationConfig,
-    tokenizer: Arc<dyn Tokenizer>,
+    tokenizer: &Arc<dyn Tokenizer>,
     output: &mut EmbeddingBatchOutput,
 ) -> Result<Vec<Snippet>> {
     let mut snippets = Vec::new();
@@ -151,8 +151,8 @@ fn prepare_snippets(
         if row.text.trim().is_empty() {
             continue;
         }
-        let encode_tokenizer = Arc::clone(&tokenizer);
-        let decode_tokenizer = Arc::clone(&tokenizer);
+        let encode_tokenizer = Arc::clone(tokenizer);
+        let decode_tokenizer = Arc::clone(tokenizer);
         let chunks = split_text_on_tokens(
             &row.text,
             config.batch_max_tokens,
@@ -353,6 +353,11 @@ fn collect_row_vectors(row_count: usize, results: &[ApiBatchResult]) -> Result<V
     Ok(vectors)
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "normalized finite values are bounded to [-1, 1] before conversion to the f32 store \
+              format"
+)]
 fn reconstitute_vectors(
     vectors: Vec<Vec<f32>>,
     config: &EmbeddingOperationConfig,
@@ -376,7 +381,12 @@ fn reconstitute_vectors(
                     *sum += f64::from(value);
                 }
             }
-            let divisor = count as f64;
+            let divisor = f64::from(u32::try_from(count).map_err(|_| {
+                invalid_data(format!(
+                    "{} row {row_index} has too many vector fragments",
+                    config.embedding_name,
+                ))
+            })?);
             for sum in &mut sums {
                 *sum /= divisor;
             }

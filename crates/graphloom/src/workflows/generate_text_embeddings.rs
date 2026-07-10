@@ -57,6 +57,30 @@ struct FieldSummary {
     index_name: String,
 }
 
+#[derive(Debug, Clone)]
+struct FieldDependencies {
+    vector_store: Arc<dyn VectorStore>,
+    model: Arc<dyn graphloom_llm::EmbeddingModel>,
+    tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
+    embedding_cache: Option<Arc<dyn Cache>>,
+    snapshot_provider: Option<Arc<dyn TableProvider>>,
+}
+
+struct FieldInput<'a> {
+    source: &'a mut dyn Table,
+    indices: &'a SourceIndices,
+    snapshot: &'a mut Option<Box<dyn Table>>,
+    input_rows: usize,
+}
+
+struct FlushState<'a> {
+    buffer: &'a mut Vec<EmbeddingSourceRow>,
+    snapshot: &'a mut Option<Box<dyn Table>>,
+    summary: &'a mut FieldSummary,
+    completed: &'a mut usize,
+    total: usize,
+}
+
 impl FieldSummary {
     fn value(&self) -> Value {
         json!({
@@ -117,6 +141,13 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
         } else {
             None
         };
+        let dependencies = FieldDependencies {
+            vector_store,
+            model,
+            tokenizer,
+            embedding_cache,
+            snapshot_provider,
+        };
         let mut summaries = Vec::new();
         let mut input_rows = 0usize;
         let mut output_rows = 0usize;
@@ -144,19 +175,8 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
             }
 
             let schema = config.vector_store.schema_for(field.name);
-            vector_store.ensure_index(&schema).await?;
-            let summary = process_field(
-                config,
-                context,
-                field,
-                &schema,
-                Arc::clone(&vector_store),
-                Arc::clone(&model),
-                Arc::clone(&tokenizer),
-                embedding_cache.as_ref().map(Arc::clone),
-                snapshot_provider.as_ref().map(Arc::clone),
-            )
-            .await?;
+            dependencies.vector_store.ensure_index(&schema).await?;
+            let summary = process_field(config, context, field, &schema, &dependencies).await?;
             input_rows = input_rows.saturating_add(summary.input_rows);
             output_rows = output_rows.saturating_add(summary.embedded_rows);
             summaries.push(summary);
@@ -172,21 +192,12 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "workflow field execution passes explicit dependencies without hiding GraphRagConfig \
-              or PipelineRunContext in operations"
-)]
 async fn process_field(
     config: &GraphRagConfig,
     context: &mut PipelineRunContext,
     field: &EmbeddingField,
     schema: &VectorIndexSchema,
-    vector_store: Arc<dyn VectorStore>,
-    model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
-    embedding_cache: Option<Arc<dyn Cache>>,
-    snapshot_provider: Option<Arc<dyn TableProvider>>,
+    dependencies: &FieldDependencies,
 ) -> Result<FieldSummary> {
     let mut source = context
         .output_table_provider
@@ -195,7 +206,7 @@ async fn process_field(
     let input_rows = source.len();
     let columns = source.column_names();
     let indices = SourceIndices::new(field, &columns)?;
-    let mut snapshot = match snapshot_provider {
+    let mut snapshot = match &dependencies.snapshot_provider {
         Some(provider) => Some(provider.open(field.name, true).await?),
         None => None,
     };
@@ -205,14 +216,13 @@ async fn process_field(
         context,
         field,
         schema,
-        vector_store,
-        model,
-        tokenizer,
-        embedding_cache,
-        &mut *source,
-        &indices,
-        &mut snapshot,
-        input_rows,
+        dependencies,
+        FieldInput {
+            source: &mut *source,
+            indices: &indices,
+            snapshot: &mut snapshot,
+            input_rows,
+        },
     )
     .await;
 
@@ -243,24 +253,13 @@ async fn process_field(
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "streaming field loop keeps source, snapshot, model, tokenizer, and store \
-              dependencies explicit"
-)]
 async fn process_field_inner(
     config: &GraphRagConfig,
     context: &mut PipelineRunContext,
     field: &EmbeddingField,
     schema: &VectorIndexSchema,
-    vector_store: Arc<dyn VectorStore>,
-    model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
-    embedding_cache: Option<Arc<dyn Cache>>,
-    source: &mut dyn Table,
-    indices: &SourceIndices,
-    snapshot: &mut Option<Box<dyn Table>>,
-    input_rows: usize,
+    dependencies: &FieldDependencies,
+    input: FieldInput<'_>,
 ) -> Result<FieldSummary> {
     let flush_size = config
         .embed_text
@@ -277,12 +276,12 @@ async fn process_field_inner(
         embedding_name: field.name.to_owned(),
     };
 
-    let mut rows = source.rows();
+    let mut rows = input.source.rows();
     let mut buffer = Vec::with_capacity(flush_size);
     let mut summary = FieldSummary {
         name: field.name.to_owned(),
         source_table: field.source_table.to_owned(),
-        input_rows,
+        input_rows: input.input_rows,
         embedded_rows: 0,
         skipped_rows: 0,
         snippet_count: 0,
@@ -293,7 +292,7 @@ async fn process_field_inner(
     let mut seen_source_ids = BTreeSet::new();
 
     while let Some(row) = rows.next().await {
-        let source_row = source_row(field, indices, &row?)?;
+        let source_row = source_row(field, input.indices, &row?)?;
         if !seen_source_ids.insert(source_row.id.clone()) {
             return Err(invalid_data(
                 GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
@@ -304,17 +303,16 @@ async fn process_field_inner(
         if buffer.len() >= flush_size {
             flush_buffer(
                 context,
-                &mut buffer,
                 &operation_config,
-                &vector_store,
+                dependencies,
                 schema,
-                Arc::clone(&model),
-                Arc::clone(&tokenizer),
-                embedding_cache.as_ref().map(Arc::clone),
-                snapshot,
-                &mut summary,
-                &mut completed,
-                input_rows,
+                FlushState {
+                    buffer: &mut buffer,
+                    snapshot: input.snapshot,
+                    summary: &mut summary,
+                    completed: &mut completed,
+                    total: input.input_rows,
+                },
             )
             .await?;
         }
@@ -322,64 +320,70 @@ async fn process_field_inner(
     if !buffer.is_empty() {
         flush_buffer(
             context,
-            &mut buffer,
             &operation_config,
-            &vector_store,
+            dependencies,
             schema,
-            model,
-            tokenizer,
-            embedding_cache,
-            snapshot,
-            &mut summary,
-            &mut completed,
-            input_rows,
+            FlushState {
+                buffer: &mut buffer,
+                snapshot: input.snapshot,
+                summary: &mut summary,
+                completed: &mut completed,
+                total: input.input_rows,
+            },
         )
         .await?;
     }
     context.callbacks.progress(
         GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
         completed,
-        Some(input_rows),
+        Some(input.input_rows),
     );
     Ok(summary)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flush boundary updates operation output, vector store, snapshots, progress, and \
-              shared stats atomically"
-)]
 async fn flush_buffer(
     context: &mut PipelineRunContext,
-    buffer: &mut Vec<EmbeddingSourceRow>,
     operation_config: &EmbeddingOperationConfig,
-    vector_store: &Arc<dyn VectorStore>,
+    dependencies: &FieldDependencies,
     schema: &VectorIndexSchema,
-    model: Arc<dyn graphloom_llm::EmbeddingModel>,
-    tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
-    embedding_cache: Option<Arc<dyn Cache>>,
-    snapshot: &mut Option<Box<dyn Table>>,
-    summary: &mut FieldSummary,
-    completed: &mut usize,
-    total: usize,
+    state: FlushState<'_>,
 ) -> Result<()> {
-    let rows = std::mem::take(buffer);
-    let output =
-        embed_text_rows(&rows, operation_config, model, tokenizer, embedding_cache).await?;
-    vector_store
+    let rows = std::mem::take(state.buffer);
+    let output = embed_text_rows(
+        &rows,
+        operation_config,
+        Arc::clone(&dependencies.model),
+        Arc::clone(&dependencies.tokenizer),
+        dependencies.embedding_cache.as_ref().map(Arc::clone),
+    )
+    .await?;
+    dependencies
+        .vector_store
         .upsert_documents(schema, &output.documents)
         .await?;
-    if let Some(snapshot) = snapshot.as_mut()
+    if let Some(snapshot) = state.snapshot.as_mut()
         && !output.documents.is_empty()
     {
         snapshot
             .write(embeddings_dataframe(&output.documents)?)
             .await?;
     }
-    summary.embedded_rows = summary.embedded_rows.saturating_add(output.documents.len());
-    summary.skipped_rows = summary.skipped_rows.saturating_add(output.skipped_rows);
-    summary.snippet_count = summary.snippet_count.saturating_add(output.snippet_count);
-    summary.request_count = summary.request_count.saturating_add(output.request_count);
+    state.summary.embedded_rows = state
+        .summary
+        .embedded_rows
+        .saturating_add(output.documents.len());
+    state.summary.skipped_rows = state
+        .summary
+        .skipped_rows
+        .saturating_add(output.skipped_rows);
+    state.summary.snippet_count = state
+        .summary
+        .snippet_count
+        .saturating_add(output.snippet_count);
+    state.summary.request_count = state
+        .summary
+        .request_count
+        .saturating_add(output.request_count);
     context.stats.llm_request_count = context
         .stats
         .llm_request_count
@@ -396,10 +400,12 @@ async fn flush_buffer(
         .stats
         .input_token_count
         .saturating_add(output.input_tokens);
-    *completed = completed.saturating_add(output.attempted_rows);
-    context
-        .callbacks
-        .progress(GENERATE_TEXT_EMBEDDINGS_WORKFLOW, *completed, Some(total));
+    *state.completed = state.completed.saturating_add(output.attempted_rows);
+    context.callbacks.progress(
+        GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+        *state.completed,
+        Some(state.total),
+    );
     Ok(())
 }
 

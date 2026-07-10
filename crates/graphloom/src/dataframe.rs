@@ -21,6 +21,19 @@ pub(crate) fn invalid_data(workflow: &'static str, message: &str) -> GraphLoomEr
     }
 }
 
+pub(crate) fn usize_to_i64(
+    value: usize,
+    workflow: &'static str,
+    field: &'static str,
+) -> Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        invalid_data(
+            workflow,
+            &format!("{field} exceeds the supported signed 64-bit range"),
+        )
+    })
+}
+
 pub(crate) fn row_to_static(row: Row<'_>) -> Row<'static> {
     Row::new(row.0.into_iter().map(AnyValue::into_static).collect())
 }
@@ -136,7 +149,7 @@ pub(crate) fn f64_column_value(
     }
 }
 
-pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {
+pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Column {
     let series_rows = rows
         .iter()
         .map(|values| {
@@ -144,20 +157,18 @@ pub(crate) fn list_column(name: &str, rows: &[Vec<String>]) -> Result<Column> {
             Series::new("item".into(), refs)
         })
         .collect::<Vec<_>>();
-    Ok(Series::new(name.into(), series_rows).into())
+    Series::new(name.into(), series_rows).into()
 }
 
-pub(crate) fn i64_list_column(name: &str, rows: &[Vec<i64>]) -> Result<Column> {
+pub(crate) fn i64_list_column(name: &str, rows: &[Vec<i64>]) -> Column {
     if rows.is_empty() {
-        return Ok(
-            Series::new_empty(name.into(), &DataType::List(Box::new(DataType::Int64))).into(),
-        );
+        return Series::new_empty(name.into(), &DataType::List(Box::new(DataType::Int64))).into();
     }
     let series_rows = rows
         .iter()
         .map(|values| Series::new("item".into(), values.as_slice()))
         .collect::<Vec<_>>();
-    Ok(Series::new(name.into(), series_rows).into())
+    Series::new(name.into(), series_rows).into()
 }
 
 fn column_index(
@@ -205,5 +216,22 @@ fn any_value_to_i64_list(value: &AnyValue<'_>, workflow: &'static str) -> Result
         }
         AnyValue::Null => Ok(Vec::new()),
         _ => Err(invalid_data(workflow, "expected i64 list column")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_convert_supported_collection_length_to_i64() {
+        assert_eq!(usize_to_i64(42, "test", "rows").expect("conversion"), 42);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_should_reject_collection_length_larger_than_i64() {
+        let error = usize_to_i64(usize::MAX, "test", "rows").expect_err("overflow");
+        assert!(error.to_string().contains("signed 64-bit range"));
     }
 }

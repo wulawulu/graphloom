@@ -7,7 +7,9 @@ use polars_core::prelude::*;
 
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{i64_column_value, invalid_data, list_at, row_to_static, string_value},
+    dataframe::{
+        i64_column_value, invalid_data, list_at, row_to_static, string_value, usize_to_i64,
+    },
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
@@ -66,7 +68,11 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
         for (index, text_unit) in text_units.into_iter().enumerate() {
             rows.push(TextUnitRow {
                 id: text_unit.id.clone(),
-                human_readable_id: index as i64,
+                human_readable_id: usize_to_i64(
+                    index,
+                    CREATE_FINAL_TEXT_UNITS_WORKFLOW,
+                    "human_readable_id",
+                )?,
                 text: text_unit.text,
                 n_tokens: text_unit.n_tokens,
                 document_id: text_unit.document_id,
@@ -220,24 +226,18 @@ mod tests {
         let mut entities =
             df!("id" => ["entity-1", "entity-2"]).expect("entities dataframe should build");
         entities
-            .with_column(
-                list_column(
-                    "text_unit_ids",
-                    &[
-                        vec!["tu-1".to_owned(), "tu-2".to_owned()],
-                        vec!["tu-1".to_owned()],
-                    ],
-                )
-                .expect("entity text unit ids should build"),
-            )
+            .with_column(list_column(
+                "text_unit_ids",
+                &[
+                    vec!["tu-1".to_owned(), "tu-2".to_owned()],
+                    vec!["tu-1".to_owned()],
+                ],
+            ))
             .expect("entity text unit ids should append");
         let mut relationships =
             df!("id" => ["rel-1"]).expect("relationships dataframe should build");
         relationships
-            .with_column(
-                list_column("text_unit_ids", &[vec!["tu-1".to_owned()]])
-                    .expect("relationship text unit ids should build"),
-            )
+            .with_column(list_column("text_unit_ids", &[vec!["tu-1".to_owned()]]))
             .expect("relationship text unit ids should append");
         let covariates = df!(
             "id" => ["claim-1", "claim-2"],

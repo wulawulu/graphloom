@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{optional_string_at, string_at},
+    dataframe::{optional_string_at, string_at, usize_to_i64},
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
@@ -107,9 +107,13 @@ fn append_document_chunks(
         let n_tokens = tokenizer.count(&chunk.text)?;
         let row = TextUnitRow {
             id: gen_sha512_hash([chunk.text.as_str()]),
-            human_readable_id: rows.len() as i64,
+            human_readable_id: usize_to_i64(
+                rows.len(),
+                CREATE_BASE_TEXT_UNITS_WORKFLOW,
+                "human_readable_id",
+            )?,
             text: chunk.text,
-            n_tokens: n_tokens as i64,
+            n_tokens: usize_to_i64(n_tokens, CREATE_BASE_TEXT_UNITS_WORKFLOW, "n_tokens")?,
             document_id: document.id.clone(),
             entity_ids: Vec::new(),
             relationship_ids: Vec::new(),

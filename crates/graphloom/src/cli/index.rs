@@ -6,9 +6,9 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     PipelineRunStats, WorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
+    api::{BuildIndexOptions, CacheMode, IndexRunResult, build_validated_index},
     cli::{
-        args::{IndexArgs, IndexMethodArg},
+        args::IndexArgs,
         callbacks::ConsoleWorkflowCallbacks,
         error::{CliError, Result},
     },
@@ -17,14 +17,6 @@ use crate::{
     },
 };
 
-impl From<IndexMethodArg> for IndexingMethod {
-    fn from(value: IndexMethodArg) -> Self {
-        match value {
-            IndexMethodArg::Standard => Self::Standard,
-        }
-    }
-}
-
 /// Execute `graphloom index`.
 ///
 /// # Errors
@@ -32,7 +24,6 @@ impl From<IndexMethodArg> for IndexingMethod {
 /// Returns a config, runtime, or pipeline error.
 pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
     let project = load_project_config(&args.root).await?;
-    let method = IndexingMethod::from(args.method);
     validate_index_project(
         &project,
         if args.skip_validation {
@@ -71,7 +62,6 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
         project,
         BuildIndexOptions {
             project_root,
-            method,
             cache_mode: if args.cache_enabled() {
                 CacheMode::Configured
             } else {
@@ -140,10 +130,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::{InitArgs, init_project};
+    use crate::cli::{IndexMethodArg, InitArgs, init_project};
 
     #[tokio::test]
-    async fn test_should_reject_unsupported_index_method() {
+    async fn test_should_reject_missing_project_settings() {
         let tempdir = TempDir::new().expect("tempdir");
         let error = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),

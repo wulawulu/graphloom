@@ -5,7 +5,7 @@ use std::{
 
 use graphloom::{
     ALL_EMBEDDINGS, GraphRagConfig, PipelineRunStats, WorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
+    api::{BuildIndexOptions, CacheMode, build_index},
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
@@ -54,7 +54,6 @@ async fn test_should_build_standard_index_via_public_api() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: vec![callbacks.clone()],
         },
@@ -102,7 +101,6 @@ async fn test_should_validate_before_destructive_reset() {
             config.clone(),
             BuildIndexOptions {
                 project_root: tempdir.path().to_path_buf(),
-                method: IndexingMethod::Standard,
                 cache_mode: CacheMode::Configured,
                 callbacks: Vec::new(),
             },
@@ -120,6 +118,80 @@ async fn test_should_validate_before_destructive_reset() {
         );
         assert_old_vector_still_exists(tempdir.path(), &config).await;
     }
+}
+
+#[tokio::test]
+async fn test_should_preserve_active_index_when_pipeline_fails_after_preflight() {
+    let server = MockServer::start().await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    prepare_old_output_and_vector(tempdir.path(), &mut config).await;
+
+    let error = build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("unconfigured mock server should fail during the pipeline");
+
+    assert!(error.to_string().contains("index failed"));
+    assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
+    assert_old_vector_still_exists(tempdir.path(), &config).await;
+    assert_no_generation_residue(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_publish_output_and_external_vector_generation_together() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    let external_vector = tempdir.path().join("vector-db");
+    prepare_old_output_and_vector_at(tempdir.path(), &mut config, &external_vector).await;
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("external-vector index should publish");
+
+    assert!(!tempdir.path().join("output").join("sentinel.txt").exists());
+    let provider = ParquetTableProvider::new(tempdir.path().join("output")).expect("provider");
+    assert!(provider.has("documents").await.expect("documents"));
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("external vector store");
+    for embedding in ALL_EMBEDDINGS {
+        let schema = config.vector_store.schema_for(embedding);
+        assert!(store.count(&schema).await.expect("vector count") > 0);
+    }
+    let entity_schema = config.vector_store.schema_for("entity_description");
+    assert!(
+        store
+            .get_by_id(&entity_schema, "old-id")
+            .await
+            .expect("old vector lookup")
+            .is_none(),
+    );
+    assert_no_generation_residue(tempdir.path()).await;
 }
 
 #[tokio::test]
@@ -143,7 +215,6 @@ async fn test_should_reject_output_overlapping_input_before_reset() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -195,7 +266,6 @@ async fn test_should_index_from_symlinked_input_directory() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -234,7 +304,6 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
             config,
             BuildIndexOptions {
                 project_root: tempdir.path().to_path_buf(),
-                method: IndexingMethod::Standard,
                 cache_mode: CacheMode::Configured,
                 callbacks: Vec::new(),
             },
@@ -291,7 +360,6 @@ async fn test_should_probe_symlink_cache_and_reporting_targets_without_residue()
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -326,7 +394,6 @@ async fn test_should_drop_inside_output_lancedb_before_clearing_output() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -364,7 +431,6 @@ async fn test_should_reject_vector_child_symlink_before_destructive_reset() {
         config,
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -394,7 +460,6 @@ async fn test_should_reject_vector_ancestor_symlink_before_destructive_reset() {
         config,
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -436,7 +501,6 @@ async fn test_should_run_api_without_callbacks() {
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Disabled,
             callbacks: Vec::new(),
         },
@@ -479,7 +543,6 @@ async fn test_should_fan_out_callbacks_in_api() {
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: vec![first.clone(), second.clone()],
         },
@@ -521,7 +584,6 @@ async fn test_should_fail_embedding_dimension_mismatch_with_workflow_source_chai
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Disabled,
             callbacks: Vec::new(),
         },
@@ -763,6 +825,17 @@ async fn assert_no_write_probe_files(root: &std::path::Path) {
                 pending.push(entry.path());
             }
         }
+    }
+}
+
+async fn assert_no_generation_residue(root: &Path) {
+    let mut entries = tokio::fs::read_dir(root).await.expect("project entries");
+    while let Some(entry) = entries.next_entry().await.expect("project entry") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".staging") && !name.ends_with(".backup"),
+            "index transaction residue should be removed: {name}",
+        );
     }
 }
 

@@ -8,7 +8,8 @@ use std::{
 };
 use std::{
     fs::Metadata,
-    path::{Component, Path},
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
 };
 
 #[cfg(windows)]
@@ -16,7 +17,21 @@ use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 
 #[cfg(windows)]
 use crate::GraphLoomError;
-use crate::Result;
+use crate::{GraphLoomError, Result};
+
+/// A path represented both lexically and through its nearest existing ancestor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPath {
+    pub(crate) lexical: PathBuf,
+    pub(crate) resolved: PathBuf,
+}
+
+/// Policy applied while resolving existing path components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkPolicy {
+    Reject,
+    Follow,
+}
 
 /// Advances absolute-path traversal state and reports whether metadata may be queried.
 pub(crate) fn component_reaches_queryable_path(
@@ -50,6 +65,10 @@ pub(crate) fn is_symlink_or_reparse(metadata: &Metadata) -> bool {
 
 /// Returns whether `path` equals or is contained by `parent`.
 #[cfg(not(windows))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Windows implementation performs a fallible ordinal comparison"
+)]
 pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> Result<bool> {
     Ok(path.starts_with(parent))
 }
@@ -67,6 +86,175 @@ pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> Result<bool
 /// Returns whether either resolved path contains the other.
 pub(crate) fn paths_overlap(left: &Path, right: &Path) -> Result<bool> {
     Ok(path_is_within_or_equal(left, right)? || path_is_within_or_equal(right, left)?)
+}
+
+/// Return an absolute, lexically normalized path without following links.
+pub(crate) fn absolute_lexical(path: &Path) -> Result<PathBuf> {
+    Ok(normalize_path(&absolute_unresolved(path)?))
+}
+
+/// Return an absolute path while preserving `.` and `..` components.
+pub(crate) fn absolute_unresolved(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|source| GraphLoomError::Io {
+                operation: "get current directory",
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path))
+    }
+}
+
+/// Normalize `.` and `..` components without consulting the filesystem.
+#[must_use]
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolve a destructive path while rejecting symlink or reparse-point components.
+pub(crate) fn resolve_path_rejecting_links(path: &Path) -> Result<ResolvedPath> {
+    resolve_path_with_existing_ancestor(path, LinkPolicy::Reject)
+}
+
+/// Resolve a comparison path by following existing symlink components.
+pub(crate) fn resolve_path_following_links(path: &Path) -> Result<ResolvedPath> {
+    resolve_path_with_existing_ancestor(path, LinkPolicy::Follow)
+}
+
+/// Reject an existing symlink/reparse point or non-directory ancestor.
+pub(crate) async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let path = absolute_unresolved(path)?;
+    let mut current = PathBuf::new();
+    let mut reached_root = false;
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if !component_reaches_queryable_path(component, &mut reached_root) {
+            continue;
+        }
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
+                return Err(GraphLoomError::InvalidRoot {
+                    path: current,
+                    message: "refusing to write through symlink parent".to_owned(),
+                });
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(GraphLoomError::InvalidRoot {
+                    path: current,
+                    message: "path ancestor is not a directory".to_owned(),
+                });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(GraphLoomError::Io {
+                    operation: "check parent symlink",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_path_with_existing_ancestor(
+    path: &Path,
+    link_policy: LinkPolicy,
+) -> Result<ResolvedPath> {
+    let lexical = absolute_lexical(path)?;
+    let mut current = PathBuf::new();
+    let mut existing = None;
+    let mut reached_root = false;
+    let mut components = lexical.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        if !component_reaches_queryable_path(component, &mut reached_root) {
+            continue;
+        }
+        let has_remaining = components.peek().is_some();
+        match current.symlink_metadata() {
+            Ok(metadata)
+                if link_policy == LinkPolicy::Reject && is_symlink_or_reparse(&metadata) =>
+            {
+                return Err(GraphLoomError::UnsafeOutputPath {
+                    path: path.to_path_buf(),
+                    message: "path must not contain symlink components".to_owned(),
+                });
+            }
+            Ok(metadata) => {
+                if has_remaining && !path_component_is_directory(&current, &metadata, link_policy)?
+                {
+                    return Err(GraphLoomError::Io {
+                        operation: "inspect path ancestor",
+                        path: current,
+                        source: std::io::Error::new(
+                            ErrorKind::NotADirectory,
+                            "path ancestor is not a directory",
+                        ),
+                    });
+                }
+                existing = Some(current.clone());
+            }
+            Err(source) if source.kind() == ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(GraphLoomError::Io {
+                    operation: "inspect path",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    let existing = existing.unwrap_or_else(|| lexical.clone());
+    let suffix = lexical
+        .strip_prefix(&existing)
+        .map_or_else(|_| PathBuf::new(), Path::to_path_buf);
+    let resolved_ancestor = existing
+        .canonicalize()
+        .map_err(|source| GraphLoomError::Io {
+            operation: "canonicalize path ancestor",
+            path: existing.clone(),
+            source,
+        })?;
+    Ok(ResolvedPath {
+        lexical,
+        resolved: normalize_path(&resolved_ancestor.join(suffix)),
+    })
+}
+
+fn path_component_is_directory(
+    path: &Path,
+    metadata: &Metadata,
+    link_policy: LinkPolicy,
+) -> Result<bool> {
+    if metadata.is_dir() {
+        return Ok(true);
+    }
+    if link_policy == LinkPolicy::Follow && is_symlink_or_reparse(metadata) {
+        return path
+            .metadata()
+            .map(|target| target.is_dir())
+            .map_err(|source| GraphLoomError::Io {
+                operation: "inspect resolved path ancestor",
+                path: path.to_path_buf(),
+                source,
+            });
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]

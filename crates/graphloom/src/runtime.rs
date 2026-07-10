@@ -1,11 +1,14 @@
 //! Runtime assembly for standard indexing.
 
+mod generation;
+
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+pub(crate) use generation::StagedIndexGeneration;
 use graphloom_cache::JsonCache;
 use graphloom_input::{FileInputReader, InputReader};
 use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
@@ -16,9 +19,9 @@ use uuid::Uuid;
 use crate::{
     ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
     Result, WorkflowCallbacks, WorkflowRegistry,
-    path_safety::path_is_within_or_equal,
-    project::{LoadedProject, ProjectPaths, resolve_path_rejecting_links},
-    register_step9_workflows,
+    path_safety::{path_is_within_or_equal, resolve_path_rejecting_links},
+    project::{LoadedProject, ProjectPaths},
+    register_standard_workflows,
 };
 
 /// Runtime ready to execute standard indexing.
@@ -107,7 +110,7 @@ pub(crate) async fn preflight_index_runtime(
     let callbacks = crate::callbacks::callback_chain(callbacks);
 
     let mut registry = WorkflowRegistry::new();
-    register_step9_workflows(&mut registry);
+    register_standard_workflows(&mut registry);
     let pipeline = PipelineFactory::new(registry)
         .standard(&project.config)
         .map_err(|source| GraphLoomError::RuntimeBuild {

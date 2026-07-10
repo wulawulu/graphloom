@@ -3,14 +3,15 @@
 use std::{
     collections::BTreeSet,
     ffi::OsString,
-    io::ErrorKind,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use crate::{
     CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     GraphLoomError, GraphRagConfig, Result,
-    path_safety::{component_reaches_queryable_path, is_symlink_or_reparse, paths_overlap},
+    path_safety::{
+        normalize_path, paths_overlap, resolve_path_following_links, resolve_path_rejecting_links,
+    },
 };
 
 /// Loaded `GraphLoom` project.
@@ -41,12 +42,6 @@ pub struct ProjectPaths {
     pub reporting_dir: PathBuf,
     /// `LanceDB` URI path.
     pub vector_db_uri: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedPath {
-    pub(crate) lexical: PathBuf,
-    pub(crate) resolved: PathBuf,
 }
 
 impl ProjectPaths {
@@ -226,8 +221,8 @@ impl LoadedProject {
     /// # Errors
     ///
     /// Returns an error when path resolution or safety validation fails.
-    pub fn from_config(root: PathBuf, mut config: GraphRagConfig) -> Result<Self> {
-        let root = absolute_normalized(&root)?;
+    pub fn from_config(root: impl AsRef<Path>, mut config: GraphRagConfig) -> Result<Self> {
+        let root = absolute_normalized(root.as_ref())?;
         let paths = ProjectPaths::resolve(&root, &config)?;
         config.vector_store.db_uri = paths.vector_db_uri.to_string_lossy().to_string();
         Ok(Self {
@@ -244,112 +239,6 @@ fn unsafe_output<T>(path: &Path, message: &str) -> Result<T> {
         path: path.to_path_buf(),
         message: message.to_owned(),
     })
-}
-
-/// Resolve a destructive path while rejecting symlink or reparse-point components.
-///
-/// Use this for paths that may be recursively deleted or reset, such as output
-/// and vector database locations.
-pub(crate) fn resolve_path_rejecting_links(path: &Path) -> Result<ResolvedPath> {
-    resolve_path_with_existing_ancestor(path, LinkPolicy::Reject)
-}
-
-/// Resolve a non-destructive comparison path by following existing links.
-///
-/// Use this for input, cache, reporting, root, and home-directory paths that
-/// should participate in safety comparisons by their real filesystem location
-/// without being rejected solely because they contain links.
-pub(crate) fn resolve_path_following_links(path: &Path) -> Result<ResolvedPath> {
-    resolve_path_with_existing_ancestor(path, LinkPolicy::Follow)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinkPolicy {
-    Reject,
-    Follow,
-}
-
-fn resolve_path_with_existing_ancestor(
-    path: &Path,
-    link_policy: LinkPolicy,
-) -> Result<ResolvedPath> {
-    let lexical = absolute_lexical(path)?;
-    let mut current = PathBuf::new();
-    let mut existing = None;
-    let mut reached_root = false;
-    let mut components = lexical.components().peekable();
-    while let Some(component) = components.next() {
-        current.push(component.as_os_str());
-        if !component_reaches_queryable_path(component, &mut reached_root) {
-            continue;
-        }
-        let has_remaining = components.peek().is_some();
-        match current.symlink_metadata() {
-            Ok(metadata)
-                if link_policy == LinkPolicy::Reject && is_symlink_or_reparse(&metadata) =>
-            {
-                return unsafe_output(path, "path must not contain symlink components");
-            }
-            Ok(metadata) => {
-                if has_remaining && !path_component_is_directory(&current, &metadata, link_policy)?
-                {
-                    return Err(GraphLoomError::Io {
-                        operation: "inspect path ancestor",
-                        path: current,
-                        source: std::io::Error::new(
-                            ErrorKind::NotADirectory,
-                            "path ancestor is not a directory",
-                        ),
-                    });
-                }
-                existing = Some(current.clone());
-            }
-            Err(source) if source.kind() == ErrorKind::NotFound => break,
-            Err(source) => {
-                return Err(GraphLoomError::Io {
-                    operation: "inspect path",
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    let existing = existing.unwrap_or_else(|| lexical.clone());
-    let suffix = lexical
-        .strip_prefix(&existing)
-        .map_or_else(|_| PathBuf::new(), Path::to_path_buf);
-    let resolved_ancestor = existing
-        .canonicalize()
-        .map_err(|source| GraphLoomError::Io {
-            operation: "canonicalize path ancestor",
-            path: existing.clone(),
-            source,
-        })?;
-    Ok(ResolvedPath {
-        lexical,
-        resolved: normalize_path(&resolved_ancestor.join(suffix)),
-    })
-}
-
-fn path_component_is_directory(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-    link_policy: LinkPolicy,
-) -> Result<bool> {
-    if metadata.is_dir() {
-        return Ok(true);
-    }
-    if link_policy == LinkPolicy::Follow && is_symlink_or_reparse(metadata) {
-        return path
-            .metadata()
-            .map(|target| target.is_dir())
-            .map_err(|source| GraphLoomError::Io {
-                operation: "inspect resolved path ancestor",
-                path: path.to_path_buf(),
-                source,
-            });
-    }
-    Ok(false)
 }
 
 pub(crate) fn user_home_dir() -> Option<PathBuf> {
@@ -371,21 +260,6 @@ pub(crate) fn user_home_dir_from_env(get: impl Fn(&str) -> Option<OsString>) -> 
     Some(normalize_path(&home))
 }
 
-fn absolute_lexical(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|source| GraphLoomError::Io {
-                operation: "get current directory",
-                path: PathBuf::from("."),
-                source,
-            })?
-            .join(path)
-    };
-    Ok(normalize_path(&absolute))
-}
-
 fn resolve_path(root: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() {
@@ -397,20 +271,6 @@ fn resolve_path(root: &Path, value: &str) -> PathBuf {
 
 fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 fn absolute_normalized(path: &Path) -> Result<PathBuf> {

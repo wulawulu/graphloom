@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{invalid_data, list_at, list_column, row_to_static, string_value},
+    dataframe::{invalid_data, list_at, list_column, row_to_static, string_value, usize_to_i64},
     operations::communities::{
         ClusterRelationship, CommunityCluster, cluster_graph as cluster_relationship_graph,
     },
@@ -144,7 +144,7 @@ fn create_communities(
         if relationship_ids.is_empty() {
             continue;
         }
-        let size = entity_ids.len() as i64;
+        let size = usize_to_i64(entity_ids.len(), CREATE_COMMUNITIES_WORKFLOW, "size")?;
         rows.push(CommunityRow {
             id: Uuid::new_v4().to_string(),
             human_readable_id: cluster.community,
@@ -257,7 +257,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.children.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         7,
@@ -267,7 +267,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.entity_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         8,
@@ -277,7 +277,7 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.relationship_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         9,
@@ -287,17 +287,17 @@ fn communities_dataframe(rows: &[CommunityRow]) -> Result<DataFrame> {
                 .iter()
                 .map(|row| row.text_unit_ids.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     Ok(dataframe)
 }
 
-fn i64_list_column(name: &str, values: &[Vec<i64>]) -> Result<Column> {
+fn i64_list_column(name: &str, values: &[Vec<i64>]) -> Column {
     let series = values
         .iter()
         .map(|values| Series::new(name.into(), values.as_slice()))
         .collect::<Vec<_>>();
-    Ok(Series::new(name.into(), series).into())
+    Series::new(name.into(), series).into()
 }
 
 fn community_value(row: &CommunityRow) -> Value {
@@ -432,7 +432,7 @@ mod tests {
         dataframe
             .get_column_names()
             .into_iter()
-            .map(|name| name.as_str())
+            .map(polars_core::datatypes::PlSmallStr::as_str)
             .collect()
     }
 }

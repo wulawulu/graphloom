@@ -63,21 +63,21 @@ pub(crate) fn text_units_dataframe(rows: &[TextUnitRow]) -> Result<DataFrame> {
             .iter()
             .map(|row| row.entity_ids.clone())
             .collect::<Vec<_>>(),
-    )?)?;
+    ))?;
     dataframe.with_column(list_column(
         "relationship_ids",
         &rows
             .iter()
             .map(|row| row.relationship_ids.clone())
             .collect::<Vec<_>>(),
-    )?)?;
+    ))?;
     dataframe.with_column(list_column(
         "covariate_ids",
         &rows
             .iter()
             .map(|row| row.covariate_ids.clone())
             .collect::<Vec<_>>(),
-    )?)?;
+    ))?;
     Ok(dataframe)
 }
 

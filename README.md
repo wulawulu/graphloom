@@ -21,9 +21,10 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 
 - `graphloom::api` exposes programmatic entry points. The current public API is
   `build_index`, which runs standard indexing and returns structured workflow
-  output and pipeline stats. `build_index` always performs full validation
-  before it clears output or resets managed vector tables, so API callers do not
-  need to run CLI validation first. Future query and prompt-tuning APIs will
+  output and pipeline stats. `build_index` always performs full validation,
+  builds into an isolated generation, and publishes that generation only after
+  every workflow succeeds, so API callers do not need to run CLI validation
+  first. Future query and prompt-tuning APIs will
   live under the same API layer.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` loads project
@@ -150,7 +151,9 @@ graphloom init --root ./demo --force
 
 Force init overwrites `settings.yaml`, `.env`, and GraphLoom-managed default
 prompt files with matching names. It does not delete `input/`, user input
-files, unknown files under the project root, or extra prompt files.
+files, unknown files under the project root, or extra prompt files. Managed
+files are fully staged before publication; a publication failure restores every
+previous managed file and removes the incomplete scaffold.
 
 ## Outputs
 
@@ -168,13 +171,16 @@ demo/cache/
 demo/logs/indexing-engine.log
 ```
 
-`graphloom index` is a full rebuild. After validation succeeds, it clears
-validated output storage and resets GraphLoom-managed LanceDB vector indices
-before running the standard pipeline. Cache is preserved.
+`graphloom index` is a full rebuild. After validation succeeds, it creates an
+isolated output generation, resets GraphLoom-managed LanceDB indices inside that
+generation, and runs the standard pipeline there. The active output and vector
+database are replaced only after the complete pipeline succeeds. A pipeline or
+publication failure restores the previous active generation. Cache is
+preserved.
 
 Runtime preflight validates provider construction, managed vector schemas, and
 write access for output, logs, cache when enabled, and the vector database path
-before any output is cleared. Vector database paths are resolved through their
+before any generation is created. Vector database paths are resolved through their
 existing ancestors and must not use symlink or reparse-point components to
 escape the project layout.
 

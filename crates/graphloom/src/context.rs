@@ -7,7 +7,6 @@ use graphloom_input::InputReader;
 use graphloom_llm::{CompletionModel, EmbeddingModel};
 use graphloom_storage::{Storage, TableProvider};
 use graphloom_vectors::VectorStore;
-use serde_json::Value;
 
 use crate::{NoopWorkflowCallbacks, PipelineRunStats, WorkflowCallbacks};
 
@@ -23,8 +22,6 @@ pub struct PipelineRunContext {
     pub output_storage: Option<Arc<dyn Storage>>,
     /// Current output table provider.
     pub output_table_provider: Arc<dyn TableProvider>,
-    /// Previous output table provider for update workflows.
-    pub previous_table_provider: Option<Arc<dyn TableProvider>>,
     /// Cache provider for LLM and operation results.
     pub cache: Option<Arc<dyn Cache>>,
     /// Completion model instances keyed by model id.
@@ -35,8 +32,6 @@ pub struct PipelineRunContext {
     pub vector_store: Option<Arc<dyn VectorStore>>,
     /// Workflow callbacks.
     pub callbacks: Arc<dyn WorkflowCallbacks>,
-    /// Arbitrary run-local state.
-    pub state: BTreeMap<String, Value>,
     /// Input reader used by `load_input_documents`.
     pub input_reader: Option<Arc<dyn InputReader>>,
     /// Project root used to resolve prompt paths.
@@ -52,13 +47,11 @@ impl PipelineRunContext {
             input_storage: None,
             output_storage: None,
             output_table_provider,
-            previous_table_provider: None,
             cache: None,
             completion_models: BTreeMap::new(),
             embedding_models: BTreeMap::new(),
             vector_store: None,
             callbacks: Arc::new(NoopWorkflowCallbacks),
-            state: BTreeMap::new(),
             input_reader: None,
             project_root: None,
         }

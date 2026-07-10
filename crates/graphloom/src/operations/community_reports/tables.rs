@@ -136,7 +136,7 @@ pub(crate) fn community_reports_dataframe(rows: &[CommunityReportRow]) -> Result
                 .iter()
                 .map(|row| row.children.clone())
                 .collect::<Vec<_>>(),
-        )?,
+        ),
     )?;
     dataframe.insert_column(
         11,

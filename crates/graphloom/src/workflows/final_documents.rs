@@ -8,7 +8,7 @@ use polars_core::prelude::DataFrame;
 use super::input_documents::{DocumentRow, documents_dataframe};
 use crate::{
     GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
-    dataframe::{optional_string_at, row_to_static, string_value},
+    dataframe::{optional_string_at, row_to_static, string_value, usize_to_i64},
 };
 
 /// Workflow name.
@@ -52,7 +52,11 @@ impl Workflow for CreateFinalDocumentsWorkflow {
             )?;
             let document = DocumentRow {
                 id: document_id.clone(),
-                human_readable_id: row_index as i64,
+                human_readable_id: usize_to_i64(
+                    row_index,
+                    CREATE_FINAL_DOCUMENTS_WORKFLOW,
+                    "human_readable_id",
+                )?,
                 title: optional_string_at(&row, 2),
                 text: string_value(
                     document_texts.get(row_index),
