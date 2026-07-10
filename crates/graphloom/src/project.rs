@@ -90,30 +90,23 @@ impl ProjectPaths {
         let cache = resolve_path_following_links(&self.cache_dir)?;
         let reporting = resolve_path_following_links(&self.reporting_dir)?;
 
-        if output.resolved == root.resolved {
+        if output.resolved == root.resolved || root.resolved.starts_with(&output.resolved) {
             return unsafe_output(
                 &self.output_dir,
-                "output directory must not be project root",
+                "output directory must not be project root or an ancestor of project root",
             );
         }
-        if output.resolved == input.resolved {
-            return unsafe_output(&self.output_dir, "output directory must not equal input");
-        }
-        if output.resolved == cache.resolved {
-            return unsafe_output(&self.output_dir, "output directory must not equal cache");
-        }
-        if output.resolved == reporting.resolved {
-            return unsafe_output(&self.output_dir, "output directory must not equal logs");
-        }
-        if root.resolved.starts_with(&output.resolved)
-            || input.resolved.starts_with(&output.resolved)
-            || cache.resolved.starts_with(&output.resolved)
-            || reporting.resolved.starts_with(&output.resolved)
-        {
-            return unsafe_output(
-                &self.output_dir,
-                "output directory must not be an ancestor of project, input, cache, or logs",
-            );
+        for (path, label) in [
+            (&input.resolved, "input"),
+            (&cache.resolved, "cache"),
+            (&reporting.resolved, "logs"),
+        ] {
+            if paths_overlap(&output.resolved, path) {
+                return unsafe_output(
+                    &self.output_dir,
+                    &format!("output directory must not overlap {label} directory"),
+                );
+            }
         }
         if is_filesystem_root(&output.resolved) {
             return unsafe_output(
@@ -164,7 +157,7 @@ impl ProjectPaths {
             (&cache.resolved, "cache"),
             (&reporting.resolved, "logs"),
         ] {
-            if vector.resolved.starts_with(path) || path.starts_with(&vector.resolved) {
+            if paths_overlap(&vector.resolved, path) {
                 return unsafe_output(
                     &self.vector_db_uri,
                     &format!("vector DB path must not overlap {label} directory"),
@@ -381,6 +374,10 @@ fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -421,13 +418,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_detect_overlapping_paths() {
+        assert!(paths_overlap(Path::new("/a"), Path::new("/a")));
+        assert!(paths_overlap(Path::new("/a/b"), Path::new("/a")));
+        assert!(paths_overlap(Path::new("/a"), Path::new("/a/b")));
+        assert!(!paths_overlap(Path::new("/a/b"), Path::new("/a/c")));
+        assert!(!paths_overlap(Path::new("/a/b"), Path::new("/ab")));
+    }
+
+    #[test]
+    fn test_should_reject_output_inside_input_directory() {
+        assert_output_overlap("input", "input/generated", "cache", "logs", "overlap input");
+    }
+
+    #[test]
+    fn test_should_reject_output_ancestor_of_input_directory() {
+        assert_output_overlap("data/input", "data", "cache", "logs", "overlap input");
+    }
+
+    #[test]
+    fn test_should_reject_output_inside_cache_directory() {
+        assert_output_overlap("input", "cache/generated", "cache", "logs", "overlap cache");
+    }
+
+    #[test]
+    fn test_should_reject_output_inside_reporting_directory() {
+        assert_output_overlap("input", "logs/generated", "cache", "logs", "overlap logs");
+    }
+
+    #[test]
+    fn test_should_allow_separate_sibling_project_directories() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+
+        ProjectPaths::resolve(tempdir.path(), &config)
+            .expect("separate sibling project directories should be allowed");
+    }
+
+    #[test]
     fn test_should_reject_output_ancestor_of_reporting_dir() {
         let tempdir = TempDir::new().expect("tempdir");
         let config = config_with_paths("input", "logs", "cache", "logs/index", "output/lancedb");
 
         let error = ProjectPaths::resolve(tempdir.path(), &config)
             .expect_err("output ancestor of logs should fail");
-        assert!(error.to_string().contains("ancestor"));
+        assert!(error.to_string().contains("overlap logs"));
     }
 
     #[cfg(unix)]
@@ -465,6 +500,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_should_reject_output_inside_resolved_input_symlink() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
+            .expect("input symlink");
+        let output = external.path().join("generated");
+        let vector = output.join("lancedb");
+        let config = config_with_paths(
+            "input",
+            &output.to_string_lossy(),
+            "cache",
+            "logs",
+            &vector.to_string_lossy(),
+        );
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("output inside resolved input should fail");
+        assert!(error.to_string().contains("overlap input"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_should_allow_cache_symlink_when_vector_path_is_separate() {
         let tempdir = TempDir::new().expect("tempdir");
         let external = TempDir::new().expect("external");
@@ -474,6 +531,28 @@ mod tests {
         let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
 
         ProjectPaths::resolve(tempdir.path(), &config).expect("cache symlink should be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_output_inside_resolved_cache_symlink() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
+            .expect("cache symlink");
+        let output = external.path().join("generated");
+        let vector = output.join("lancedb");
+        let config = config_with_paths(
+            "input",
+            &output.to_string_lossy(),
+            "cache",
+            "logs",
+            &vector.to_string_lossy(),
+        );
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("output inside resolved cache should fail");
+        assert!(error.to_string().contains("overlap cache"));
     }
 
     #[cfg(unix)]
@@ -707,6 +786,22 @@ mod tests {
             vector_db_uri: resolve_path(&root, &config.vector_store.db_uri),
             root,
         }
+    }
+
+    fn assert_output_overlap(
+        input: &str,
+        output: &str,
+        cache: &str,
+        reporting: &str,
+        expected: &str,
+    ) {
+        let tempdir = TempDir::new().expect("tempdir");
+        let vector = format!("{output}/lancedb");
+        let config = config_with_paths(input, output, cache, reporting, &vector);
+
+        let error = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect_err("overlapping output should fail");
+        assert!(error.to_string().contains(expected));
     }
 
     fn config_with_paths(

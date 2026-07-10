@@ -123,6 +123,96 @@ async fn test_should_validate_before_destructive_reset() {
 }
 
 #[tokio::test]
+async fn test_should_reject_output_overlapping_input_before_reset() {
+    let server = MockServer::start().await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    let old_vector = tempdir.path().join("old-vector");
+    prepare_old_output_and_vector_at(tempdir.path(), &mut config, &old_vector).await;
+    let generated = tempdir.path().join("input").join("generated");
+    tokio::fs::create_dir_all(&generated)
+        .await
+        .expect("generated input dir");
+    tokio::fs::write(generated.join("sentinel.txt"), "keep")
+        .await
+        .expect("sentinel");
+    "input/generated".clone_into(&mut config.output_storage.base_dir);
+    "input/generated/lancedb".clone_into(&mut config.vector_store.db_uri);
+
+    let error = build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("output overlapping input should fail");
+
+    assert!(error.to_string().contains("overlap input"));
+    assert!(generated.join("sentinel.txt").is_file());
+    assert!(tempdir.path().join("input/document.txt").is_file());
+    let mut old_config = config;
+    old_config.vector_store.db_uri = old_vector.to_string_lossy().to_string();
+    assert_old_vector_exists(&old_config).await;
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+    assert_no_write_probe_files(tempdir.path()).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_index_from_symlinked_input_directory() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let external_input = TempDir::new().expect("external input");
+    let document = external_input.path().join("document.txt");
+    tokio::fs::write(&document, "Alice works for Acme.")
+        .await
+        .expect("input");
+    std::os::unix::fs::symlink(external_input.path(), tempdir.path().join("input"))
+        .expect("input symlink");
+    let config = test_config(&server.uri());
+
+    let result = build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("index symlinked input");
+
+    assert!(result.stats.document_count > 0);
+    assert_standard_outputs(tempdir.path(), &config).await;
+    assert!(document.is_file());
+    assert!(!external_input.path().join("output").exists());
+    assert!(!external_input.path().join("lancedb").exists());
+    assert_no_write_probe_files(tempdir.path()).await;
+    assert_no_write_probe_files(external_input.path()).await;
+}
+
+#[tokio::test]
 async fn test_should_preflight_runtime_failures_before_destructive_reset() {
     for case in [
         RuntimePreflightCase::InvalidVectorSize,

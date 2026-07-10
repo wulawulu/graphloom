@@ -183,6 +183,8 @@ recursively cleared, and managed LanceDB tables may be reset. GraphLoom rejects
 symlink or reparse-point components in both paths. Input, cache, and logs may be
 symlinks, but GraphLoom follows those links and uses the real filesystem
 locations for overlap checks against output and vector database paths.
+Output must be disjoint from input, cache, and reporting directories. It may
+not equal, contain, or be contained by any of those resolved filesystem paths.
 
 Home-directory safety checks resolve the user home directory from `HOME`,
 `USERPROFILE`, or `HOMEDRIVE` plus `HOMEPATH`, in that priority order. Output

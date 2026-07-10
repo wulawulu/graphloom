@@ -590,7 +590,7 @@ async fn test_should_report_common_preflight_errors_without_resetting_output() {
         ),
         (
             CliPreflightCase::OutputAncestorOfLogs,
-            "output directory must not be an ancestor",
+            "output directory must not overlap logs directory",
         ),
         (CliPreflightCase::UnknownWorkflow, "not_a_workflow"),
         (CliPreflightCase::MissingClaimsModel, "missing_claim_model"),
