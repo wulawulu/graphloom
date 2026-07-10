@@ -10,7 +10,7 @@ use std::{
 use crate::{
     CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     GraphLoomError, GraphRagConfig, Result,
-    path_safety::{is_symlink_or_reparse, paths_overlap},
+    path_safety::{component_reaches_queryable_path, is_symlink_or_reparse, paths_overlap},
 };
 
 /// Loaded `GraphLoom` project.
@@ -276,10 +276,11 @@ fn resolve_path_with_existing_ancestor(
     let lexical = absolute_lexical(path)?;
     let mut current = PathBuf::new();
     let mut existing = None;
+    let mut reached_root = false;
     let mut components = lexical.components().peekable();
     while let Some(component) = components.next() {
         current.push(component.as_os_str());
-        if !current.has_root() {
+        if !component_reaches_queryable_path(component, &mut reached_root) {
             continue;
         }
         let has_remaining = components.peek().is_some();
@@ -528,10 +529,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_should_resolve_verbatim_temp_path_without_querying_prefix_only_path() {
+    fn test_should_resolve_canonical_verbatim_path_without_querying_prefix_only_path() {
         let tempdir = TempDir::new().expect("tempdir");
+        let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
+        crate::path_safety::tests::windows::assert_windows_verbatim_path(&canonical);
 
-        resolve_path_rejecting_links(&tempdir.path().join("missing").join("child"))
+        resolve_path_rejecting_links(&canonical.join("missing").join("child"))
             .expect("resolve verbatim temp path");
     }
 

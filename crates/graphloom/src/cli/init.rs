@@ -11,7 +11,7 @@ use crate::{
         args::InitArgs,
         error::{CliError, Result},
     },
-    path_safety::is_symlink_or_reparse,
+    path_safety::{component_reaches_queryable_path, is_symlink_or_reparse},
 };
 
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
@@ -378,9 +378,10 @@ async fn reject_symlink(path: &Path) -> Result<()> {
 async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
     let path = absolute_unresolved(path)?;
     let mut current = PathBuf::new();
+    let mut reached_root = false;
     for component in path.components() {
         current.push(component.as_os_str());
-        if !current.has_root() {
+        if !component_reaches_queryable_path(component, &mut reached_root) {
             continue;
         }
         match tokio::fs::symlink_metadata(&current).await {
@@ -831,8 +832,10 @@ mod tests {
     #[tokio::test]
     async fn test_should_check_verbatim_path_ancestors_without_querying_prefix_only_path() {
         let tempdir = TempDir::new().expect("tempdir");
+        let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
+        crate::path_safety::tests::windows::assert_windows_verbatim_path(&canonical);
 
-        reject_symlink_ancestors(&tempdir.path().join("missing").join("child"))
+        reject_symlink_ancestors(&canonical.join("missing").join("child"))
             .await
             .expect("verbatim path ancestor check");
     }

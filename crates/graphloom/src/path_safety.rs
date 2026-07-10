@@ -5,9 +5,11 @@ use std::{
     ffi::OsStr,
     io,
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
-    path::Component,
 };
-use std::{fs::Metadata, path::Path};
+use std::{
+    fs::Metadata,
+    path::{Component, Path},
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
@@ -15,6 +17,21 @@ use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 #[cfg(windows)]
 use crate::GraphLoomError;
 use crate::Result;
+
+/// Advances absolute-path traversal state and reports whether metadata may be queried.
+pub(crate) fn component_reaches_queryable_path(
+    component: Component<'_>,
+    reached_root: &mut bool,
+) -> bool {
+    match component {
+        Component::Prefix(_) => false,
+        Component::RootDir => {
+            *reached_root = true;
+            true
+        }
+        _ => *reached_root,
+    }
+}
 
 /// Returns whether metadata identifies a symlink or Windows reparse point.
 #[cfg(not(windows))]
@@ -112,10 +129,10 @@ fn classify_compare_string_ordinal_result(result: i32) -> Option<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
-    use super::paths_overlap;
+    use super::{component_reaches_queryable_path, paths_overlap};
 
     #[test]
     fn test_should_detect_overlapping_paths() {
@@ -126,15 +143,73 @@ mod tests {
         assert!(!paths_overlap(Path::new("/a/b"), Path::new("/ab")).expect("comparison"));
     }
 
+    #[test]
+    fn test_should_query_metadata_from_root_component_on_absolute_path() {
+        assert_queryable_states(Path::new("/var/tmp"), &[true, true, true]);
+    }
+
+    #[test]
+    fn test_should_not_query_metadata_for_relative_path_components() {
+        assert_queryable_states(Path::new("foo/bar"), &[false, false]);
+    }
+
+    fn assert_queryable_states(path: &Path, expected: &[bool]) {
+        let mut reached_root = false;
+        let states = path
+            .components()
+            .map(|component| component_reaches_queryable_path(component, &mut reached_root))
+            .collect::<Vec<_>>();
+
+        assert_eq!(states, expected);
+    }
+
     #[cfg(windows)]
-    mod windows {
-        use std::{ffi::OsStr, path::Path};
+    pub(crate) mod windows {
+        use std::{
+            ffi::OsStr,
+            path::{Component, Path, Prefix},
+        };
 
         use windows_sys::Win32::Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN};
 
         use super::super::{
-            classify_compare_string_ordinal_result, os_str_eq_ignore_case, paths_overlap,
+            classify_compare_string_ordinal_result, component_reaches_queryable_path,
+            os_str_eq_ignore_case, paths_overlap,
         };
+
+        pub(crate) fn assert_windows_verbatim_path(path: &Path) {
+            let Some(Component::Prefix(prefix)) = path.components().next() else {
+                panic!("expected Windows path prefix: {}", path.display());
+            };
+            assert!(
+                matches!(
+                    prefix.kind(),
+                    Prefix::Verbatim(_) | Prefix::VerbatimUNC(_, _) | Prefix::VerbatimDisk(_)
+                ),
+                "test must use a verbatim path: {}",
+                path.display(),
+            );
+        }
+
+        #[test]
+        fn test_should_skip_verbatim_disk_prefix_until_root_component() {
+            assert_queryable_states(Path::new(r"\\?\C:\Users"));
+        }
+
+        #[test]
+        fn test_should_skip_normal_disk_prefix_until_root_component() {
+            assert_queryable_states(Path::new(r"C:\Users"));
+        }
+
+        fn assert_queryable_states(path: &Path) {
+            let mut reached_root = false;
+            let states = path
+                .components()
+                .map(|component| component_reaches_queryable_path(component, &mut reached_root))
+                .collect::<Vec<_>>();
+
+            assert_eq!(states, vec![false, true, true]);
+        }
 
         #[test]
         fn test_should_compare_windows_paths_by_component_case_insensitively() {

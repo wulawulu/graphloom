@@ -163,6 +163,11 @@ mod tests {
     #[tokio::test]
     async fn test_should_dry_run_without_creating_runtime_outputs() {
         let tempdir = TempDir::new().expect("tempdir");
+        #[cfg(windows)]
+        {
+            let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
+            crate::path_safety::tests::windows::assert_windows_verbatim_path(&canonical);
+        }
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
@@ -198,6 +203,7 @@ mod tests {
 
         assert_eq!(result.workflow_outputs.len(), 0);
         assert!(!tempdir.path().join("output").exists());
+        assert!(!tempdir.path().join("output").join("lancedb").exists());
         assert!(!tempdir.path().join("cache").exists());
         assert!(!tempdir.path().join("logs").exists());
     }
