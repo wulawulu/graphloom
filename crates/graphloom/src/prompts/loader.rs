@@ -1,13 +1,16 @@
 //! Prompt override loading and explicit syntax selection.
 
-use std::path::{Path, PathBuf};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use tera::{Context, Tera};
 
 use super::{
     PromptKind,
-    renderer::{prompt_values, render_graphrag_prompt, validate_required_variables_resolved},
+    renderer::{prompt_values, render_graphrag_prompt},
 };
 use crate::{GraphLoomError, Result};
 
@@ -161,12 +164,23 @@ fn contains_tera_variable(template: &str, expected: &str) -> bool {
         let Some(end) = expression.find("}}") else {
             return false;
         };
-        if expression[..end].trim() == expected {
+        if tera_expression_references_variable(&expression[..end], expected) {
             return true;
         }
         remaining = &expression[end.saturating_add(2)..];
     }
     false
+}
+
+fn tera_expression_references_variable(expression: &str, expected: &str) -> bool {
+    let expression = expression.trim();
+    let Some(suffix) = expression.strip_prefix(expected) else {
+        return false;
+    };
+    let Some(next) = suffix.chars().next() else {
+        return true;
+    };
+    next.is_whitespace() || matches!(next, '|' | '.' | '[')
 }
 
 fn render_tera_prompt<T>(kind: PromptKind, template: &str, values: &T) -> Result<String>
@@ -177,17 +191,24 @@ where
     let context = Context::from_value(serde_json::Value::Object(values)).map_err(|source| {
         GraphLoomError::PromptRender {
             name: kind.filename(),
-            message: source.to_string(),
+            message: tera_error_message(&source),
         }
     })?;
-    let rendered = Tera::one_off(template, &context, false).map_err(|source| {
-        GraphLoomError::PromptRender {
-            name: kind.filename(),
-            message: source.to_string(),
-        }
-    })?;
-    validate_required_variables_resolved(kind, &rendered, true)?;
-    Ok(rendered)
+    Tera::one_off(template, &context, false).map_err(|source| GraphLoomError::PromptRender {
+        name: kind.filename(),
+        message: tera_error_message(&source),
+    })
+}
+
+fn tera_error_message(error: &tera::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 #[cfg(test)]
@@ -260,6 +281,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_preserve_graphrag_placeholder_text_from_input_value() {
+        let input_text = "Documentation mentions {input_text} and {entity_types}.";
+        let rendered = PromptLoader::new(".")
+            .render(
+                PromptKind::ExtractGraph,
+                None,
+                &GraphValues {
+                    input_text,
+                    entity_types: &["person"],
+                },
+            )
+            .await
+            .expect("placeholder text from the input value should be preserved");
+
+        assert!(rendered.contains(input_text));
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_claim_placeholder_text_from_input_value() {
+        let input_text = "The text contains {claim_description} literally.";
+        let rendered = PromptLoader::new(".")
+            .render(
+                PromptKind::ExtractClaims,
+                None,
+                &ClaimsValues {
+                    input_text,
+                    entity_specs: &["person"],
+                    claim_description: "claims",
+                },
+            )
+            .await
+            .expect("claim placeholder text from the input value should be preserved");
+
+        assert!(rendered.contains(input_text));
+    }
+
+    #[tokio::test]
     async fn test_should_render_tera_override() {
         let tempdir = prompt_project("Text: {{ input_text }}\nTypes: {{ entity_types }}").await;
         let rendered = render_graph_override(&tempdir)
@@ -270,6 +328,46 @@ mod tests {
         assert!(rendered.contains("Types:"));
         assert!(rendered.contains("person"));
         assert!(!rendered.contains("{{ entity_types }}"));
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_tera_placeholder_text_from_input_value() {
+        let tempdir = prompt_project("Text: {{ input_text }}").await;
+        let input_text = "Example containing {{ input_text }} and {input_text}";
+        let rendered = PromptLoader::new(tempdir.path())
+            .render(
+                PromptKind::ExtractGraph,
+                None,
+                &GraphValues {
+                    input_text,
+                    entity_types: &["person"],
+                },
+            )
+            .await
+            .expect("Tera placeholder text from the input value should be preserved");
+
+        assert_eq!(rendered, format!("Text: {input_text}"));
+    }
+
+    #[tokio::test]
+    async fn test_should_render_tera_override_with_filters() {
+        let tempdir = prompt_project(
+            "Text: {{ input_text | trim }}\nTypes: {{ entity_types | join(sep=\",\") }}",
+        )
+        .await;
+        let rendered = PromptLoader::new(tempdir.path())
+            .render(
+                PromptKind::ExtractGraph,
+                None,
+                &GraphValues {
+                    input_text: "  Alice met Bob.  ",
+                    entity_types: &["person", "organization"],
+                },
+            )
+            .await
+            .expect("Tera filters should render");
+
+        assert_eq!(rendered, "Text: Alice met Bob.\nTypes: person,organization");
     }
 
     #[tokio::test]
@@ -299,6 +397,17 @@ mod tests {
         let error = render_graph_override(&tempdir)
             .await
             .expect_err("missing variable must fail");
+
+        assert!(error.to_string().contains("missing_variable"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_missing_tera_prompt_variable() {
+        let tempdir =
+            prompt_project("Text: {{ input_text }}\nUnknown: {{ missing_variable }}").await;
+        let error = render_graph_override(&tempdir)
+            .await
+            .expect_err("missing Tera variable must fail");
 
         assert!(error.to_string().contains("missing_variable"));
     }
@@ -335,6 +444,66 @@ mod tests {
             .expect("JSON literal should render");
 
         assert!(rendered.contains(r#"{"title":"example"}"#));
+    }
+
+    #[test]
+    fn test_should_detect_tera_required_variable_expressions() {
+        for expression in [
+            "{{ input_text }}",
+            "{{input_text}}",
+            "{{ input_text | trim }}",
+            "{{ input_text|escape }}",
+            "{{ input_text.value }}",
+            "{{ input_text[\"value\"] }}",
+            "{{ input_text[0] }}",
+        ] {
+            assert!(
+                contains_tera_variable(expression, "input_text"),
+                "expected Tera expression to be detected: {expression}",
+            );
+        }
+
+        for expression in [
+            "{{ input_text_extra }}",
+            "{{ other_input_text }}",
+            "{{ input_text2 }}",
+        ] {
+            assert!(
+                !contains_tera_variable(expression, "input_text"),
+                "expected prefix lookalike not to be detected: {expression}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_classify_tera_attribute_and_index_access() {
+        for template in [
+            "Text: {{ input_text.value }}",
+            "Types: {{ entity_types[0] }}",
+        ] {
+            assert_eq!(
+                detect_prompt_syntax(PromptKind::ExtractGraph, template)
+                    .expect("syntax should be detected"),
+                PromptSyntax::Tera,
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_not_classify_json_literal_as_tera() {
+        assert_eq!(
+            detect_prompt_syntax(
+                PromptKind::ExtractGraph,
+                r#"Example: {{"input_text":"literal"}}"#,
+            )
+            .expect("JSON literal should be classified"),
+            PromptSyntax::GraphRag,
+        );
+        assert_eq!(
+            detect_prompt_syntax(PromptKind::ExtractGraph, "Text: {{ input_text | trim }}",)
+                .expect("filter expression should be classified"),
+            PromptSyntax::Tera,
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! `GraphRAG` single-brace prompt rendering and post-render validation.
+//! `GraphRAG` single-brace prompt rendering and template validation.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -63,7 +63,6 @@ where
         }
     }
     output.push_str(&template[literal_start..]);
-    validate_required_variables_resolved(kind, &output, false)?;
     Ok(output)
 }
 
@@ -87,27 +86,6 @@ where
         }
     }
     Ok(values)
-}
-
-pub(super) fn validate_required_variables_resolved(
-    kind: PromptKind,
-    rendered: &str,
-    include_tera: bool,
-) -> Result<()> {
-    for variable in kind.required_variables() {
-        let graphrag = format!("{{{variable}}}");
-        let tera = format!("{{{{ {variable} }}}}");
-        let compact_tera = format!("{{{{{variable}}}}}");
-        if rendered.contains(&graphrag)
-            || (include_tera && (rendered.contains(&tera) || rendered.contains(&compact_tera)))
-        {
-            return prompt_error(
-                kind,
-                &format!("required prompt variable `{variable}` was not resolved"),
-            );
-        }
-    }
-    Ok(())
 }
 
 fn value_as_prompt_text(value: &Value) -> String {
