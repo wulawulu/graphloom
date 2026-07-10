@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
     Result, WorkflowCallbacks, WorkflowRegistry,
-    project::{LoadedProject, ProjectPaths, resolve_path_rejecting_links},
+    project::{LoadedProject, ProjectPaths, path_is_within_or_equal, resolve_path_rejecting_links},
     register_step9_workflows,
 };
 
@@ -350,9 +350,58 @@ enum VectorLocation {
 fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
     let output = resolve_path_rejecting_links(&paths.output_dir)?;
     let vector = resolve_path_rejecting_links(&paths.vector_db_uri)?;
-    Ok(if vector.resolved.starts_with(&output.resolved) {
-        VectorLocation::InsideOutput
-    } else {
-        VectorLocation::OutsideOutput
-    })
+    Ok(
+        if path_is_within_or_equal(&vector.resolved, &output.resolved) {
+            VectorLocation::InsideOutput
+        } else {
+            VectorLocation::OutsideOutput
+        },
+    )
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::{VectorLocation, vector_location};
+    use crate::project::ProjectPaths;
+
+    #[test]
+    fn test_should_detect_vector_inside_output_case_insensitively() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let paths = project_paths(
+            tempdir.path().join("Output"),
+            tempdir.path().join("output").join("lancedb"),
+        );
+
+        assert_eq!(
+            vector_location(&paths).expect("vector location"),
+            VectorLocation::InsideOutput,
+        );
+    }
+
+    #[test]
+    fn test_should_detect_vector_outside_output_case_insensitively() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let paths = project_paths(tempdir.path().join("Output"), tempdir.path().join("Vector"));
+
+        assert_eq!(
+            vector_location(&paths).expect("vector location"),
+            VectorLocation::OutsideOutput,
+        );
+    }
+
+    fn project_paths(output_dir: PathBuf, vector_db_uri: PathBuf) -> ProjectPaths {
+        let root = output_dir.parent().expect("project root").to_path_buf();
+        ProjectPaths {
+            input_dir: root.join("Input"),
+            cache_dir: root.join("Cache"),
+            reporting_dir: root.join("Logs"),
+            root,
+            output_dir,
+            vector_db_uri,
+        }
+    }
 }

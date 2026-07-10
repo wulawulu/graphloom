@@ -2698,6 +2698,7 @@ dependencies = [
  "graphloom-llm",
  "graphloom-storage",
  "graphloom-vectors",
+ "graphloom-windows-path",
  "html-escape",
  "network_partitions",
  "polars-core",
@@ -2832,6 +2833,13 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "graphloom-windows-path"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

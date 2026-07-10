@@ -1,0 +1,13 @@
+[package]
+name = "graphloom-windows-path"
+description = "Safe Windows ordinal path-component comparison for GraphLoom"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

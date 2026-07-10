@@ -185,6 +185,10 @@ symlinks, but GraphLoom follows those links and uses the real filesystem
 locations for overlap checks against output and vector database paths.
 Output must be disjoint from input, cache, and reporting directories. It may
 not equal, contain, or be contained by any of those resolved filesystem paths.
+On Windows, path overlap and containment checks use case-insensitive Windows
+path semantics, including unresolved suffixes whose capitalization differs.
+Unix checks remain case-sensitive, and vector inside-output detection uses the
+same platform-specific semantics.
 
 Home-directory safety checks resolve the user home directory from `HOME`,
 `USERPROFILE`, or `HOMEDRIVE` plus `HOMEPATH`, in that priority order. Output

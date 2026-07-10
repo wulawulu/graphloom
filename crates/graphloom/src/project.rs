@@ -374,8 +374,33 @@ fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
 }
 
+#[cfg(not(windows))]
+pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> bool {
+    path.starts_with(parent)
+}
+
+#[cfg(windows)]
+pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> bool {
+    path_is_prefix_case_insensitive(path, parent)
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
+    path_is_within_or_equal(left, right) || path_is_within_or_equal(right, left)
+}
+
+#[cfg(windows)]
+fn path_is_prefix_case_insensitive(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+    prefix.components().all(|prefix_component| {
+        path_components.next().is_some_and(|path_component| {
+            component_eq_ignore_case(path_component, prefix_component)
+        })
+    })
+}
+
+#[cfg(windows)]
+fn component_eq_ignore_case(left: Component<'_>, right: Component<'_>) -> bool {
+    graphloom_windows_path::os_str_eq_ignore_case(left.as_os_str(), right.as_os_str())
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -424,6 +449,65 @@ mod tests {
         assert!(paths_overlap(Path::new("/a"), Path::new("/a/b")));
         assert!(!paths_overlap(Path::new("/a/b"), Path::new("/a/c")));
         assert!(!paths_overlap(Path::new("/a/b"), Path::new("/ab")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_compare_windows_paths_by_component_case_insensitively() {
+        assert!(paths_overlap(
+            Path::new(r"C:\Project\Input"),
+            Path::new(r"c:\project\input\Generated"),
+        ));
+        assert!(!paths_overlap(
+            Path::new(r"C:\Project\Input"),
+            Path::new(r"c:\project\input-Other"),
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_reject_output_inside_input_with_different_case() {
+        assert_output_overlap(
+            "Input",
+            "input/generated",
+            "CacheDir",
+            "LogsDir",
+            "overlap input",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_reject_output_inside_cache_with_different_case() {
+        assert_output_overlap(
+            "InputDir",
+            "cache/generated",
+            "Cache",
+            "LogsDir",
+            "overlap cache",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_reject_output_inside_logs_with_different_case() {
+        assert_output_overlap(
+            "InputDir",
+            "logs/generated",
+            "CacheDir",
+            "Logs",
+            "overlap logs",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_allow_case_insensitive_non_overlapping_siblings() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let config = config_with_paths("Input-A", "input-b", "Cache", "Logs", "input-b/lancedb");
+
+        ProjectPaths::resolve(tempdir.path(), &config)
+            .expect("case-insensitive sibling directories should be allowed");
     }
 
     #[test]
