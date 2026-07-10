@@ -1,16 +1,13 @@
 //! Entity and relationship description summarization operations.
 
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
 use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, Tokenizer};
 use serde::Serialize;
 
 use super::{EntityRow, RelationshipRow, SummarizedEntityRow, SummarizedRelationshipRow};
-use crate::{
-    Result,
-    prompts::{PromptKind, PromptLoader},
-};
+use crate::{Result, prompts::PromptTemplate};
 
 #[derive(Debug, Serialize)]
 struct SummarizePromptValues {
@@ -29,8 +26,7 @@ pub(crate) struct DescriptionSummarizeConfig {
 #[derive(Debug, Clone, Copy)]
 struct SummarizeContext<'a> {
     model: &'a dyn CompletionModel,
-    prompt_loader: &'a PromptLoader,
-    prompt_path: Option<&'a str>,
+    prompt_template: &'a PromptTemplate,
     tokenizer: &'a dyn Tokenizer,
     max_length: usize,
     max_input_tokens: usize,
@@ -38,8 +34,7 @@ struct SummarizeContext<'a> {
 
 pub(crate) async fn summarize_entities(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+    prompt_template: &PromptTemplate,
     tokenizer: &dyn Tokenizer,
     rows: &[EntityRow],
     config: DescriptionSummarizeConfig,
@@ -47,8 +42,7 @@ pub(crate) async fn summarize_entities(
 ) -> Result<Vec<SummarizedEntityRow>> {
     let context = SummarizeContext {
         model,
-        prompt_loader,
-        prompt_path,
+        prompt_template,
         tokenizer,
         max_length: config.max_length,
         max_input_tokens: config.max_input_tokens,
@@ -88,8 +82,7 @@ pub(crate) async fn summarize_entities(
 
 pub(crate) async fn summarize_relationships(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+    prompt_template: &PromptTemplate,
     tokenizer: &dyn Tokenizer,
     rows: &[RelationshipRow],
     config: DescriptionSummarizeConfig,
@@ -97,8 +90,7 @@ pub(crate) async fn summarize_relationships(
 ) -> Result<Vec<SummarizedRelationshipRow>> {
     let context = SummarizeContext {
         model,
-        prompt_loader,
-        prompt_path,
+        prompt_template,
         tokenizer,
         max_length: config.max_length,
         max_input_tokens: config.max_input_tokens,
@@ -136,24 +128,19 @@ pub(crate) async fn summarize_relationships(
     Ok(summarized.into_iter().map(|(_, row)| row).collect())
 }
 
-async fn render_summarization_prompt(
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+fn render_summarization_prompt(
+    template: &PromptTemplate,
     entity_name_json: &str,
     descriptions: &[String],
     max_length: usize,
 ) -> Result<String> {
-    prompt_loader
-        .render(
-            PromptKind::SummarizeDescriptions,
-            prompt_path.map(Path::new),
-            &SummarizePromptValues {
-                entity_name: entity_name_json.to_owned(),
-                description_list: serde_json::to_string(descriptions)?,
-                max_length,
-            },
-        )
-        .await
+    template
+        .bind(&SummarizePromptValues {
+            entity_name: entity_name_json.to_owned(),
+            description_list: serde_json::to_string(descriptions)?,
+            max_length,
+        })?
+        .render()
 }
 
 async fn summarize_description_list(
@@ -178,13 +165,11 @@ async fn summarize_description_list(
     }
 
     let prompt_budget = render_summarization_prompt(
-        context.prompt_loader,
-        context.prompt_path,
+        context.prompt_template,
         entity_name_json,
         &[],
         context.max_length,
-    )
-    .await?;
+    )?;
     let mut usable_tokens = context
         .max_input_tokens
         .saturating_sub(context.tokenizer.count(&prompt_budget)?);
@@ -197,13 +182,11 @@ async fn summarize_description_list(
             || index == descriptions.len().saturating_sub(1)
         {
             let prompt = render_summarization_prompt(
-                context.prompt_loader,
-                context.prompt_path,
+                context.prompt_template,
                 entity_name_json,
                 &collected,
                 context.max_length,
-            )
-            .await?;
+            )?;
             result = context
                 .model
                 .complete(CompletionRequest {
@@ -276,6 +259,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_preserve_entity_order_with_concurrent_summarization() {
+        let template = crate::prompts::PromptRepository::new(".")
+            .load(crate::prompts::PromptKind::SummarizeDescriptions, None)
+            .await
+            .expect("summary template");
         let rows = vec![
             EntityRow {
                 title: "B".to_owned(),
@@ -297,8 +284,7 @@ mod tests {
 
         let summarized = summarize_entities(
             &UnusedModel,
-            &PromptLoader::new("."),
-            None,
+            &template,
             &WhitespaceTokenizer,
             &rows,
             DescriptionSummarizeConfig {

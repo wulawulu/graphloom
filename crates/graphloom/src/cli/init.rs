@@ -316,6 +316,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_initialize_tera_prompt_templates() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&args(tempdir.path(), false))
+            .await
+            .expect("init");
+
+        let extract_graph =
+            tokio::fs::read_to_string(tempdir.path().join("prompts").join("extract_graph.txt"))
+                .await
+                .expect("extract graph prompt");
+
+        assert!(extract_graph.contains("{{ input_text }}"));
+        assert!(extract_graph.contains("{{ entity_types }}"));
+        assert!(!extract_graph.contains("{input_text}"));
+        assert!(!extract_graph.contains("{entity_types}"));
+    }
+
+    #[tokio::test]
     async fn test_should_write_model_names_with_yaml_safe_serialization() {
         let tempdir = TempDir::new().expect("tempdir");
         let completion = "vendor:model#v1 \"quoted\"";

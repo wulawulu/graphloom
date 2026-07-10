@@ -18,7 +18,7 @@ use super::{
 use crate::{
     Result,
     dataframe::invalid_data,
-    prompts::{PromptKind, PromptLoader},
+    prompts::{PromptKind, PromptRepository, PromptTemplate},
 };
 
 const COMMUNITY_REPORTS_CONTEXT: &str = "create_community_reports";
@@ -59,12 +59,18 @@ struct ReportTask {
 
 pub(crate) async fn create_community_reports(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    prompt_repository: &PromptRepository,
     tokenizer: &dyn Tokenizer,
     input: CommunityReportOperationInput<'_>,
     config: CommunityReportExtractionConfig<'_>,
     callbacks: CommunityReportCallbacks<'_>,
 ) -> Result<Vec<CommunityReportRow>> {
+    let report_template = prompt_repository
+        .load(
+            PromptKind::CommunityReport,
+            config.prompt_path.map(Path::new),
+        )
+        .await?;
     let local_contexts = build_local_contexts(
         input.communities,
         input.entities,
@@ -106,19 +112,22 @@ pub(crate) async fn create_community_reports(
         }
 
         let mut level_results = stream::iter(tasks)
-            .map(|task| async move {
-                let index = task.index;
-                let community_id = task.community.community;
-                let result = extract_report_for_community(
-                    model,
-                    prompt_loader,
-                    tokenizer,
-                    task,
-                    config,
-                    callbacks.warning,
-                )
-                .await?;
-                Ok::<_, crate::GraphLoomError>((index, community_id, result))
+            .map(|task| {
+                let report_template = report_template.clone();
+                async move {
+                    let index = task.index;
+                    let community_id = task.community.community;
+                    let result = extract_report_for_community(
+                        model,
+                        &report_template,
+                        tokenizer,
+                        task,
+                        config,
+                        callbacks.warning,
+                    )
+                    .await?;
+                    Ok::<_, crate::GraphLoomError>((index, community_id, result))
+                }
             })
             .buffer_unordered(config.concurrency.max(1));
 
@@ -244,7 +253,7 @@ fn stable_children(community: &CommunityInputRow) -> Vec<i64> {
 
 async fn extract_report_for_community(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    report_template: &PromptTemplate,
     tokenizer: &dyn Tokenizer,
     task: ReportTask,
     config: CommunityReportExtractionConfig<'_>,
@@ -267,16 +276,12 @@ async fn extract_report_for_community(
             ),
         ));
     }
-    let rendered_prompt = prompt_loader
-        .render(
-            PromptKind::CommunityReport,
-            config.prompt_path.map(Path::new),
-            &ReportPromptValues {
-                input_text: &task.context,
-                max_report_length: config.max_report_length,
-            },
-        )
-        .await?;
+    let rendered_prompt = report_template
+        .bind(&ReportPromptValues {
+            input_text: &task.context,
+            max_report_length: config.max_report_length,
+        })?
+        .render()?;
     let response = match model
         .complete(CompletionRequest {
             messages: vec![ChatMessage::user(rendered_prompt)],
@@ -471,7 +476,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &test_entities(),
@@ -523,7 +528,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &test_entities(),
@@ -583,7 +588,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &entities,
@@ -650,7 +655,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &entities,
@@ -707,7 +712,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &entities,
@@ -765,7 +770,7 @@ mod tests {
 
         let rows = create_community_reports(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &entities,

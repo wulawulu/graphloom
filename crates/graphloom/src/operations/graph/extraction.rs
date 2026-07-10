@@ -1,27 +1,25 @@
 //! Entity and relationship extraction operations.
 
-use std::path::Path;
-
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, parse_graph_tuples};
 use serde::Serialize;
 
 use super::{RawEntityRow, RawRelationshipRow, TextUnitInput};
-use crate::{
-    Result,
-    prompts::{PromptKind, PromptLoader},
-};
+use crate::{Result, prompts::PromptTemplate};
 
 pub(crate) async fn extract_text_unit_graph(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+    extraction_template: &PromptTemplate,
+    continue_template: &PromptTemplate,
+    loop_template: &PromptTemplate,
     entity_types: &[String],
     text_unit: &TextUnitInput,
     max_gleanings: usize,
 ) -> Result<(Vec<RawEntityRow>, Vec<RawRelationshipRow>)> {
-    let mut messages = vec![ChatMessage::user(
-        render_extraction_prompt(prompt_loader, prompt_path, &text_unit.text, entity_types).await?,
-    )];
+    let mut messages = vec![ChatMessage::user(render_extraction_prompt(
+        extraction_template,
+        &text_unit.text,
+        entity_types,
+    )?)];
 
     let mut output = model
         .complete(CompletionRequest {
@@ -36,9 +34,8 @@ pub(crate) async fn extract_text_unit_graph(
         .content;
     messages.push(ChatMessage::assistant(output.clone()));
 
-    let continue_prompt =
-        render_builtin_prompt(prompt_loader, PromptKind::ExtractGraphContinue).await?;
-    let loop_prompt = render_builtin_prompt(prompt_loader, PromptKind::ExtractGraphLoop).await?;
+    let continue_prompt = render_empty_prompt(continue_template)?;
+    let loop_prompt = render_empty_prompt(loop_template)?;
     for glean_index in 0..max_gleanings {
         messages.push(ChatMessage::user(continue_prompt.clone()));
         let response = model
@@ -110,28 +107,21 @@ struct ExtractPromptValues<'a> {
 #[derive(Debug, Serialize)]
 struct EmptyPromptValues {}
 
-async fn render_extraction_prompt(
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+fn render_extraction_prompt(
+    template: &PromptTemplate,
     input_text: &str,
     entity_types: &[String],
 ) -> Result<String> {
-    prompt_loader
-        .render(
-            PromptKind::ExtractGraph,
-            prompt_path.map(Path::new),
-            &ExtractPromptValues {
-                entity_types: entity_types.join(","),
-                input_text,
-            },
-        )
-        .await
+    template
+        .bind(&ExtractPromptValues {
+            entity_types: entity_types.join(","),
+            input_text,
+        })?
+        .render()
 }
 
-async fn render_builtin_prompt(prompt_loader: &PromptLoader, prompt: PromptKind) -> Result<String> {
-    prompt_loader
-        .render(prompt, None, &EmptyPromptValues {})
-        .await
+fn render_empty_prompt(template: &PromptTemplate) -> Result<String> {
+    template.bind(&EmptyPromptValues {})?.render()
 }
 
 #[cfg(test)]
@@ -142,6 +132,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_append_gleaned_graph_records() {
+        let repository = crate::prompts::PromptRepository::new(".");
+        let extraction_template = repository
+            .load(crate::prompts::PromptKind::ExtractGraph, None)
+            .await
+            .expect("extraction template");
+        let continue_template = repository
+            .load(crate::prompts::PromptKind::ExtractGraphContinue, None)
+            .await
+            .expect("continue template");
+        let loop_template = repository
+            .load(crate::prompts::PromptKind::ExtractGraphLoop, None)
+            .await
+            .expect("loop template");
         let model = MockCompletionModel::new(
             "mock",
             vec![
@@ -158,8 +161,9 @@ mod tests {
 
         let (entities, relationships) = extract_text_unit_graph(
             &model,
-            &PromptLoader::new("."),
-            None,
+            &extraction_template,
+            &continue_template,
+            &loop_template,
             &[String::from("person")],
             &text_unit,
             1,

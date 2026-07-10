@@ -12,7 +12,7 @@ use crate::{
         read_claim_context_rows, read_community_input_rows, read_entity_context_rows,
         read_relationship_context_rows,
     },
-    prompts::PromptLoader,
+    prompts::PromptRepository,
 };
 
 /// Workflow name.
@@ -76,10 +76,10 @@ impl Workflow for CreateCommunityReportsWorkflow {
             &config.community_reports.completion_model_id,
         );
         let tokenizer = TiktokenTokenizer::new(encoding_model)?;
-        let prompt_loader = PromptLoader::new(context.prompt_root());
+        let prompt_repository = PromptRepository::new(context.prompt_root());
         let rows = create_community_reports(
             model.as_ref(),
-            &prompt_loader,
+            &prompt_repository,
             &tokenizer,
             CommunityReportOperationInput {
                 entities: &entities,

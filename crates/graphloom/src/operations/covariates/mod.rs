@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     dataframe::{string_value, usize_to_i64},
-    prompts::{PromptKind, PromptLoader},
+    prompts::{PromptKind, PromptRepository, PromptTemplate},
 };
 
 const EXTRACT_COVARIATES_CONTEXT: &str = "extract_covariates";
@@ -78,17 +78,38 @@ pub(crate) fn read_text_unit_inputs(dataframe: &DataFrame) -> Result<Vec<TextUni
 
 pub(crate) async fn extract_covariates(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    prompt_repository: &PromptRepository,
     text_units: &[TextUnitInput],
     config: ClaimExtractionConfig<'_>,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Vec<CovariateRow>> {
+    let extraction_template = prompt_repository
+        .load(PromptKind::ExtractClaims, config.prompt_path.map(Path::new))
+        .await?;
+    let continue_template = prompt_repository
+        .load(PromptKind::ExtractClaimsContinue, None)
+        .await?;
+    let loop_template = prompt_repository
+        .load(PromptKind::ExtractClaimsLoop, None)
+        .await?;
     let concurrency = config.concurrency.max(1);
     let mut results = stream::iter(text_units.iter().cloned().enumerate())
-        .map(|(index, text_unit)| async move {
-            extract_claims_for_text_unit(model, prompt_loader, &text_unit, &config)
+        .map(|(index, text_unit)| {
+            let extraction_template = extraction_template.clone();
+            let continue_template = continue_template.clone();
+            let loop_template = loop_template.clone();
+            async move {
+                extract_claims_for_text_unit(
+                    model,
+                    &extraction_template,
+                    &continue_template,
+                    &loop_template,
+                    &text_unit,
+                    &config,
+                )
                 .await
                 .map(|claims| (index, text_unit, claims))
+            }
         })
         .buffer_unordered(concurrency);
 
@@ -130,18 +151,20 @@ pub(crate) async fn extract_covariates(
 
 async fn extract_claims_for_text_unit(
     model: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    extraction_template: &PromptTemplate,
+    continue_template: &PromptTemplate,
+    loop_template: &PromptTemplate,
     text_unit: &TextUnitInput,
     config: &ClaimExtractionConfig<'_>,
 ) -> Result<Vec<graphloom_llm::ClaimRecord>> {
     let initial_prompt = render_claim_prompt(
-        prompt_loader,
-        config.prompt_path,
+        extraction_template,
         &text_unit.text,
         config.entity_types,
         config.claim_description,
-    )
-    .await?;
+    )?;
+    let continue_prompt = render_empty_prompt(continue_template)?;
+    let loop_prompt = render_empty_prompt(loop_template)?;
     let mut messages = vec![ChatMessage::user(initial_prompt)];
     let initial = model
         .complete(CompletionRequest {
@@ -157,9 +180,7 @@ async fn extract_claims_for_text_unit(
     messages.push(ChatMessage::assistant(initial.clone()));
 
     for glean_index in 0..config.max_gleanings {
-        messages.push(ChatMessage::user(
-            render_builtin_prompt(prompt_loader, PromptKind::ExtractClaimsContinue).await?,
-        ));
+        messages.push(ChatMessage::user(continue_prompt.clone()));
         let extension = model
             .complete(CompletionRequest {
                 messages: messages.clone(),
@@ -177,9 +198,7 @@ async fn extract_claims_for_text_unit(
             break;
         }
 
-        messages.push(ChatMessage::user(
-            render_builtin_prompt(prompt_loader, PromptKind::ExtractClaimsLoop).await?,
-        ));
+        messages.push(ChatMessage::user(loop_prompt.clone()));
         let response = model
             .complete(CompletionRequest {
                 messages: messages.clone(),
@@ -201,29 +220,27 @@ async fn extract_claims_for_text_unit(
     Ok(parse_claim_tuples(&initial))
 }
 
-async fn render_claim_prompt(
-    prompt_loader: &PromptLoader,
-    prompt_path: Option<&str>,
+fn render_claim_prompt(
+    template: &PromptTemplate,
     input_text: &str,
     entity_specs: &[String],
     claim_description: &str,
 ) -> Result<String> {
-    prompt_loader
-        .render(
-            PromptKind::ExtractClaims,
-            prompt_path.map(Path::new),
-            &ClaimPromptValues {
-                input_text,
-                entity_specs,
-                claim_description,
-            },
-        )
-        .await
+    template
+        .bind(&ClaimPromptValues {
+            input_text,
+            entity_specs,
+            claim_description,
+        })?
+        .render()
 }
 
-async fn render_builtin_prompt(prompt_loader: &PromptLoader, prompt: PromptKind) -> Result<String> {
-    prompt_loader.render(prompt, None, &json!({})).await
+fn render_empty_prompt(template: &PromptTemplate) -> Result<String> {
+    template.bind(&EmptyPromptValues {})?.render()
 }
+
+#[derive(Debug, Serialize)]
+struct EmptyPromptValues {}
 
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
     Ok(df!(
@@ -293,7 +310,7 @@ mod tests {
 
         let rows = extract_covariates(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &text_units,
             ClaimExtractionConfig {
                 prompt_path: None,
@@ -337,7 +354,7 @@ mod tests {
 
         let rows = extract_covariates(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &text_units,
             ClaimExtractionConfig {
                 prompt_path: None,
@@ -371,7 +388,7 @@ mod tests {
 
         let error = extract_covariates(
             &model,
-            &PromptLoader::new("."),
+            &PromptRepository::new("."),
             &text_units,
             ClaimExtractionConfig {
                 prompt_path: None,

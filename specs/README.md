@@ -872,19 +872,19 @@ prompts/
 
 模板内容应从固定基准提交复制，不得随意缩短、改写或“优化”。运行时不得访问 GraphLoom 仓库源码目录、从网络下载 prompt，或假设用户保留 workspace。
 
-例如 Python 格式变量：
+旧的 Python 格式变量：
 
 ```text
 {entity_types}
 ```
 
-可以转换为 Tera，或由 PromptLoader 在保持业务文本不变的前提下兼容 GraphRAG Python `.format` 风格变量：
+必须转换为 Tera：
 
 ```text
 {{ entity_types }}
 ```
 
-但业务文本和输出协议不得改变。
+运行时不兼容 GraphRAG Python `.format` 风格变量；项目模板使用旧单花括号变量时必须返回迁移错误。业务文本和输出协议不得改变。
 
 ## 11.2 Prompt 加载优先级
 

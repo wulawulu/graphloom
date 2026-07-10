@@ -46,7 +46,7 @@ Output:
 
 -Real Data-
 Use the following input for your answer.
-Entity specification: {entity_specs}
-Claim description: {claim_description}
-Text: {input_text}
+Entity specification: {{ entity_specs }}
+Claim description: {{ claim_description }}
+Text: {{ input_text }}
 Output:

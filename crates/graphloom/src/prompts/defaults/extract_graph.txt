@@ -5,7 +5,7 @@ Given a text document that is potentially relevant to this activity and a list o
 -Steps-
 1. Identify all entities. For each identified entity, extract the following information:
 - entity_name: Name of the entity, capitalized
-- entity_type: One of the following types: [{entity_types}]
+- entity_type: One of the following types: [{{ entity_types }}]
 - entity_description: Comprehensive description of the entity's attributes and activities
 Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description>)
 
@@ -115,7 +115,7 @@ Output:
 ######################
 -Real Data-
 ######################
-Entity_types: {entity_types}
-Text: {input_text}
+Entity_types: {{ entity_types }}
+Text: {{ input_text }}
 ######################
 Output:

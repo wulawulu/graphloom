@@ -173,10 +173,14 @@ pub enum GraphLoomError {
     },
 
     /// Prompt template rendering or syntax validation failed.
-    #[error("failed to render prompt template {name}: {message}")]
+    #[error("failed to render {kind} prompt template {name} from {prompt_source}: {message}")]
     PromptRender {
+        /// Prompt kind.
+        kind: &'static str,
         /// Canonical prompt filename.
         name: &'static str,
+        /// Built-in or filesystem template source.
+        prompt_source: String,
         /// Rendering or validation failure.
         message: String,
     },

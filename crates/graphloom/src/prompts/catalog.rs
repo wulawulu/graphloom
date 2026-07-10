@@ -68,7 +68,7 @@ impl PromptKind {
     }
 
     /// Return variables supplied by the workflow for this prompt.
-    pub(crate) const fn required_variables(self) -> &'static [&'static str] {
+    pub(crate) const fn variables(self) -> &'static [&'static str] {
         match self {
             Self::ExtractGraph => &["entity_types", "input_text"],
             Self::SummarizeDescriptions => &["entity_name", "description_list", "max_length"],
@@ -81,11 +81,17 @@ impl PromptKind {
         }
     }
 
-    /// Return a legacy project filename accepted when the canonical override is absent.
-    pub(super) const fn legacy_filename(self) -> Option<&'static str> {
+    /// Return the stable prompt kind name used in diagnostics.
+    pub(super) const fn name(self) -> &'static str {
         match self {
-            Self::CommunityReport => Some("community_report_graph.txt"),
-            _ => None,
+            Self::ExtractGraph => "ExtractGraph",
+            Self::ExtractGraphContinue => "ExtractGraphContinue",
+            Self::ExtractGraphLoop => "ExtractGraphLoop",
+            Self::SummarizeDescriptions => "SummarizeDescriptions",
+            Self::ExtractClaims => "ExtractClaims",
+            Self::ExtractClaimsContinue => "ExtractClaimsContinue",
+            Self::ExtractClaimsLoop => "ExtractClaimsLoop",
+            Self::CommunityReport => "CommunityReport",
         }
     }
 }
@@ -101,17 +107,13 @@ mod tests {
             "community_report.txt"
         );
         assert_eq!(
-            PromptKind::ExtractGraph.required_variables(),
+            PromptKind::ExtractGraph.variables(),
             &["entity_types", "input_text"]
         );
         assert_eq!(
-            PromptKind::ExtractClaims.required_variables(),
+            PromptKind::ExtractClaims.variables(),
             &["entity_specs", "claim_description", "input_text"]
         );
-        assert!(
-            PromptKind::ExtractClaimsLoop
-                .required_variables()
-                .is_empty()
-        );
+        assert!(PromptKind::ExtractClaimsLoop.variables().is_empty());
     }
 }

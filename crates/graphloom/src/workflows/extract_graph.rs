@@ -1,5 +1,7 @@
 //! Graph extraction workflow orchestration.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use graphloom_llm::{CompletionModel, TiktokenTokenizer};
@@ -14,7 +16,7 @@ use crate::{
         merge_relationships, raw_entity_dataframe, raw_relationship_dataframe, read_text_units,
         relationship_intermediate_dataframe, summarize_entities, summarize_relationships,
     },
-    prompts::PromptLoader,
+    prompts::{PromptKind, PromptRepository},
 };
 
 /// Workflow name.
@@ -68,14 +70,14 @@ impl Workflow for ExtractGraphWorkflow {
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
-        let prompt_loader = PromptLoader::new(context.prompt_root());
+        let prompt_repository = PromptRepository::new(context.prompt_root());
         let concurrency = config.concurrent_requests.max(1);
         let graph = extract_rows(
             config,
             context,
             &text_units,
             extractor.as_ref(),
-            &prompt_loader,
+            &prompt_repository,
             concurrency,
         )
         .await?;
@@ -83,7 +85,7 @@ impl Workflow for ExtractGraphWorkflow {
             config,
             context,
             summarizer.as_ref(),
-            &prompt_loader,
+            &prompt_repository,
             &tokenizer,
             &graph,
             concurrency,
@@ -113,22 +115,35 @@ async fn extract_rows(
     context: &PipelineRunContext,
     text_units: &[TextUnitInput],
     extractor: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    prompt_repository: &PromptRepository,
     concurrency: usize,
 ) -> Result<MergedGraph> {
-    let extraction_prompt = config.extract_graph.prompt.clone();
+    let extraction_template = prompt_repository
+        .load(
+            PromptKind::ExtractGraph,
+            config.extract_graph.prompt.as_deref().map(Path::new),
+        )
+        .await?;
+    let continue_template = prompt_repository
+        .load(PromptKind::ExtractGraphContinue, None)
+        .await?;
+    let loop_template = prompt_repository
+        .load(PromptKind::ExtractGraphLoop, None)
+        .await?;
     let entity_types = config.extract_graph.entity_types.clone();
     let max_gleanings = config.extract_graph.max_gleanings;
     let mut extraction_results = stream::iter(text_units.iter().cloned().enumerate())
         .map(|(index, text_unit)| {
-            let prompt_loader = prompt_loader.clone();
-            let extraction_prompt = extraction_prompt.clone();
+            let extraction_template = extraction_template.clone();
+            let continue_template = continue_template.clone();
+            let loop_template = loop_template.clone();
             let entity_types = entity_types.clone();
             async move {
                 extract_text_unit_graph(
                     extractor,
-                    &prompt_loader,
-                    extraction_prompt.as_deref(),
+                    &extraction_template,
+                    &continue_template,
+                    &loop_template,
                     &entity_types,
                     &text_unit,
                     max_gleanings,
@@ -187,19 +202,28 @@ async fn summarize_rows(
     config: &GraphRagConfig,
     context: &PipelineRunContext,
     summarizer: &dyn CompletionModel,
-    prompt_loader: &PromptLoader,
+    prompt_repository: &PromptRepository,
     tokenizer: &TiktokenTokenizer,
     graph: &MergedGraph,
     concurrency: usize,
 ) -> Result<SummarizedGraph> {
+    let summary_template = prompt_repository
+        .load(
+            PromptKind::SummarizeDescriptions,
+            config
+                .summarize_descriptions
+                .prompt
+                .as_deref()
+                .map(Path::new),
+        )
+        .await?;
     let summary_total = graph
         .entities
         .len()
         .saturating_add(graph.relationships.len());
     let summarized_entities = summarize_entities(
         summarizer,
-        prompt_loader,
-        config.summarize_descriptions.prompt.as_deref(),
+        &summary_template,
         tokenizer,
         &graph.entities,
         DescriptionSummarizeConfig {
@@ -217,8 +241,7 @@ async fn summarize_rows(
     let summarized_entity_count = summarized_entities.len();
     let summarized_relationships = summarize_relationships(
         summarizer,
-        prompt_loader,
-        config.summarize_descriptions.prompt.as_deref(),
+        &summary_template,
         tokenizer,
         &graph.relationships,
         DescriptionSummarizeConfig {

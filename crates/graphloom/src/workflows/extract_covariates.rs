@@ -9,7 +9,7 @@ use crate::{
         ClaimExtractionConfig, covariate_value, covariates_dataframe, default_claim_entity_types,
         extract_covariates, read_text_unit_inputs,
     },
-    prompts::PromptLoader,
+    prompts::PromptRepository,
 };
 
 /// Workflow name.
@@ -52,11 +52,11 @@ impl Workflow for ExtractCovariatesWorkflow {
             &config.extract_claims.model_instance_name,
             EXTRACT_COVARIATES_WORKFLOW,
         )?;
-        let prompt_loader = PromptLoader::new(context.prompt_root());
+        let prompt_repository = PromptRepository::new(context.prompt_root());
         let entity_types = default_claim_entity_types();
         let rows = extract_covariates(
             model.as_ref(),
-            &prompt_loader,
+            &prompt_repository,
             &text_units,
             ClaimExtractionConfig {
                 prompt_path: config.extract_claims.prompt.as_deref(),
