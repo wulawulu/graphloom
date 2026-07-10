@@ -6,9 +6,9 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     PipelineRunStats, WorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, IndexRunResult, build_validated_index},
+    api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
     cli::{
-        args::IndexArgs,
+        args::{IndexArgs, IndexMethodArg},
         callbacks::ConsoleWorkflowCallbacks,
         error::{CliError, Result},
     },
@@ -17,6 +17,14 @@ use crate::{
     },
 };
 
+impl From<IndexMethodArg> for IndexingMethod {
+    fn from(value: IndexMethodArg) -> Self {
+        match value {
+            IndexMethodArg::Standard => Self::Standard,
+        }
+    }
+}
+
 /// Execute `graphloom index`.
 ///
 /// # Errors
@@ -24,6 +32,7 @@ use crate::{
 /// Returns a config, runtime, or pipeline error.
 pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
     let project = load_project_config(&args.root).await?;
+    let method = IndexingMethod::from(args.method);
     validate_index_project(
         &project,
         if args.skip_validation {
@@ -62,6 +71,7 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
         project,
         BuildIndexOptions {
             project_root,
+            method,
             cache_mode: if args.cache_enabled() {
                 CacheMode::Configured
             } else {

@@ -16,12 +16,8 @@ html-escape.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tera.workspace = true
 thiserror.workspace = true
 tiktoken-rs.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

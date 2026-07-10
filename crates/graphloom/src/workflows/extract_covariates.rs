@@ -1,7 +1,6 @@
 //! Claim covariate extraction workflow.
 
 use async_trait::async_trait;
-use graphloom_llm::PromptLoader;
 
 use super::common::resolve_completion_model;
 use crate::{
@@ -10,6 +9,7 @@ use crate::{
         ClaimExtractionConfig, covariate_value, covariates_dataframe, default_claim_entity_types,
         extract_covariates, read_text_unit_inputs,
     },
+    prompts::PromptLoader,
 };
 
 /// Workflow name.

@@ -1,4 +1,4 @@
-//! LLM, tokenizer, prompt, and parser contracts for `GraphLoom`.
+//! LLM, tokenizer, and parser contracts for `GraphLoom`.
 //!
 //! The public API mirrors Microsoft `GraphRAG`'s LLM bridge shape while keeping
 //! provider-specific `async-openai` types private to this crate.
@@ -12,7 +12,6 @@ mod mock;
 mod model;
 mod openai;
 mod parser;
-mod prompt;
 mod tokenizer;
 
 #[cfg(test)]
@@ -33,5 +32,4 @@ pub use parser::{
     extract_json_object, parse_claim_tuples, parse_community_report, parse_graph_tuples,
     try_parse_json_object,
 };
-pub use prompt::{DefaultPrompt, PromptLoader};
 pub use tokenizer::{TiktokenTokenizer, Tokenizer};

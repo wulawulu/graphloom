@@ -1,10 +1,8 @@
-use serde::Serialize;
-
 use crate::{
-    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, EmbeddingModel,
-    EmbeddingRequest, MockCompletionModel, MockEmbeddingModel, ModelConfig, PromptLoader,
-    Tokenizer, completion_cache_key, embedding_cache_key, embedding_request_cache_key,
-    graphrag_cache_key, parse_claim_tuples, parse_community_report, parse_graph_tuples,
+    ChatMessage, CompletionModel, CompletionRequest, EmbeddingModel, EmbeddingRequest,
+    MockCompletionModel, MockEmbeddingModel, ModelConfig, Tokenizer, completion_cache_key,
+    embedding_cache_key, embedding_request_cache_key, graphrag_cache_key, parse_claim_tuples,
+    parse_community_report, parse_graph_tuples,
 };
 
 #[test]
@@ -269,69 +267,6 @@ fn test_should_reject_unsupported_provider_auth_and_placeholder_key() {
     .expect("config");
     assert!(placeholder.validate_openai_compatible("chat").is_err());
     assert!(!format!("{placeholder:?}").contains("<API_KEY>"));
-}
-
-#[tokio::test]
-async fn test_should_render_default_prompt_with_tera_values() {
-    #[derive(Debug, Serialize)]
-    struct Values<'a> {
-        entity_types: &'a str,
-        input_text: &'a str,
-    }
-
-    let loader = PromptLoader::new(".");
-    let rendered = loader
-        .render(
-            DefaultPrompt::ExtractGraph,
-            None,
-            &Values {
-                entity_types: "PERSON",
-                input_text: "Alice met Bob.",
-            },
-        )
-        .await
-        .expect("prompt should render");
-
-    assert!(rendered.contains("Entity_types: PERSON"));
-    assert!(rendered.contains("Text: Alice met Bob."));
-}
-
-#[tokio::test]
-async fn test_should_render_graphrag_format_prompt_file_relative_to_project_root() {
-    #[derive(Debug, Serialize)]
-    struct Values<'a> {
-        input_text: &'a str,
-        max_report_length: usize,
-    }
-
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let prompt_dir = tempdir.path().join("prompts");
-    tokio::fs::create_dir(&prompt_dir)
-        .await
-        .expect("prompt dir");
-    tokio::fs::write(
-        prompt_dir.join("community_report_graph.txt"),
-        "JSON example: {{\"title\":\"x\"}}\nText: {input_text}\nLimit: {max_report_length}",
-    )
-    .await
-    .expect("prompt write");
-
-    let loader = PromptLoader::new(tempdir.path());
-    let rendered = loader
-        .render(
-            crate::DefaultPrompt::CommunityReport,
-            Some(std::path::Path::new("prompts/community_report_graph.txt")),
-            &Values {
-                input_text: "Alice",
-                max_report_length: 12,
-            },
-        )
-        .await
-        .expect("prompt should render");
-
-    assert!(rendered.contains(r#"{"title":"x"}"#));
-    assert!(rendered.contains("Text: Alice"));
-    assert!(rendered.contains("Limit: 12"));
 }
 
 #[tokio::test]

@@ -4,7 +4,6 @@ mod transaction;
 
 use std::path::{Path, PathBuf};
 
-use graphloom_llm::DefaultPrompt;
 use serde_yaml::Value as YamlValue;
 use transaction::execute_plan;
 #[cfg(test)]
@@ -18,6 +17,7 @@ use crate::{
     path_safety::{
         absolute_unresolved, is_symlink_or_reparse, normalize_path, reject_symlink_ancestors,
     },
+    prompts::PromptKind,
 };
 
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
@@ -25,18 +25,21 @@ const DOTENV: &str = include_str!("../assets/dotenv");
 
 /// Managed prompt assets.
 pub const PROMPT_ASSETS: &[(&str, &str)] = &[
-    ("extract_graph.txt", DefaultPrompt::ExtractGraph.template()),
     (
-        "summarize_descriptions.txt",
-        DefaultPrompt::SummarizeDescriptions.template(),
+        PromptKind::ExtractGraph.filename(),
+        PromptKind::ExtractGraph.default_template(),
     ),
     (
-        "extract_claims.txt",
-        DefaultPrompt::ExtractClaims.template(),
+        PromptKind::SummarizeDescriptions.filename(),
+        PromptKind::SummarizeDescriptions.default_template(),
     ),
     (
-        "community_report_graph.txt",
-        DefaultPrompt::CommunityReport.template(),
+        PromptKind::ExtractClaims.filename(),
+        PromptKind::ExtractClaims.default_template(),
+    ),
+    (
+        PromptKind::CommunityReport.filename(),
+        PromptKind::CommunityReport.default_template(),
     ),
     (
         "community_report_text.txt",
@@ -343,6 +346,10 @@ mod tests {
         assert_eq!(
             config.extract_graph.prompt.as_deref(),
             Some("prompts/extract_graph.txt")
+        );
+        assert_eq!(
+            config.community_reports.graph_prompt.as_deref(),
+            Some("prompts/community_report.txt")
         );
         assert!(config.sections.contains_key("local_search"));
         assert!(config.sections.contains_key("global_search"));

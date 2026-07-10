@@ -200,7 +200,7 @@ impl ModelConfig {
             return Err(crate::LlmError::InvalidConfig {
                 model_instance: model_instance.to_owned(),
                 message: format!(
-                    "unsupported model_provider {}; only openai is supported",
+                    "unsupported provider {}; only openai is supported",
                     self.provider_type
                 ),
             });
@@ -210,7 +210,7 @@ impl ModelConfig {
             return Err(crate::LlmError::InvalidConfig {
                 model_instance: model_instance.to_owned(),
                 message: format!(
-                    "unsupported auth_method {}; only api_key is supported",
+                    "unsupported auth method {}; only api_key is supported",
                     self.auth_method
                 ),
             });

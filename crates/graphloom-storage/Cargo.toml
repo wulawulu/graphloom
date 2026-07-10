@@ -15,7 +15,6 @@ chrono.workspace = true
 dashmap.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-graphloom-common.workspace = true
 polars-core.workspace = true
 polars-io.workspace = true
 regex.workspace = true

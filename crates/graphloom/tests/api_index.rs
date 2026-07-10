@@ -5,7 +5,7 @@ use std::{
 
 use graphloom::{
     ALL_EMBEDDINGS, GraphRagConfig, PipelineRunStats, WorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, build_index},
+    api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
@@ -54,6 +54,7 @@ async fn test_should_build_standard_index_via_public_api() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: vec![callbacks.clone()],
         },
@@ -101,6 +102,7 @@ async fn test_should_validate_before_destructive_reset() {
             config.clone(),
             BuildIndexOptions {
                 project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
                 cache_mode: CacheMode::Configured,
                 callbacks: Vec::new(),
             },
@@ -131,6 +133,7 @@ async fn test_should_preserve_active_index_when_pipeline_fails_after_preflight()
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -166,6 +169,7 @@ async fn test_should_publish_output_and_external_vector_generation_together() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -215,6 +219,7 @@ async fn test_should_reject_output_overlapping_input_before_reset() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -266,6 +271,7 @@ async fn test_should_index_from_symlinked_input_directory() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -304,6 +310,7 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
             config,
             BuildIndexOptions {
                 project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
                 cache_mode: CacheMode::Configured,
                 callbacks: Vec::new(),
             },
@@ -360,6 +367,7 @@ async fn test_should_probe_symlink_cache_and_reporting_targets_without_residue()
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -394,6 +402,7 @@ async fn test_should_drop_inside_output_lancedb_before_clearing_output() {
         config.clone(),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -431,6 +440,7 @@ async fn test_should_reject_vector_child_symlink_before_destructive_reset() {
         config,
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -460,6 +470,7 @@ async fn test_should_reject_vector_ancestor_symlink_before_destructive_reset() {
         config,
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: Vec::new(),
         },
@@ -501,6 +512,7 @@ async fn test_should_run_api_without_callbacks() {
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Disabled,
             callbacks: Vec::new(),
         },
@@ -543,6 +555,7 @@ async fn test_should_fan_out_callbacks_in_api() {
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Configured,
             callbacks: vec![first.clone(), second.clone()],
         },
@@ -584,6 +597,7 @@ async fn test_should_fail_embedding_dimension_mismatch_with_workflow_source_chai
         test_config(&server.uri()),
         BuildIndexOptions {
             project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
             cache_mode: CacheMode::Disabled,
             callbacks: Vec::new(),
         },

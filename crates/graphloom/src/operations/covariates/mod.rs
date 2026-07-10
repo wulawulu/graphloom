@@ -3,18 +3,16 @@
 use std::path::Path;
 
 use futures_util::{StreamExt, stream};
-use graphloom_llm::{
-    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader,
-    parse_claim_tuples,
-};
+use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, parse_claim_tuples};
 use polars_core::prelude::*;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    GraphLoomError, Result,
+    Result,
     dataframe::{string_value, usize_to_i64},
+    prompts::{PromptKind, PromptLoader},
 };
 
 const EXTRACT_COVARIATES_CONTEXT: &str = "extract_covariates";
@@ -160,7 +158,7 @@ async fn extract_claims_for_text_unit(
 
     for glean_index in 0..config.max_gleanings {
         messages.push(ChatMessage::user(
-            render_builtin_prompt(prompt_loader, DefaultPrompt::ExtractClaimsContinue).await?,
+            render_builtin_prompt(prompt_loader, PromptKind::ExtractClaimsContinue).await?,
         ));
         let extension = model
             .complete(CompletionRequest {
@@ -180,7 +178,7 @@ async fn extract_claims_for_text_unit(
         }
 
         messages.push(ChatMessage::user(
-            render_builtin_prompt(prompt_loader, DefaultPrompt::ExtractClaimsLoop).await?,
+            render_builtin_prompt(prompt_loader, PromptKind::ExtractClaimsLoop).await?,
         ));
         let response = model
             .complete(CompletionRequest {
@@ -212,7 +210,7 @@ async fn render_claim_prompt(
 ) -> Result<String> {
     prompt_loader
         .render(
-            DefaultPrompt::ExtractClaims,
+            PromptKind::ExtractClaims,
             prompt_path.map(Path::new),
             &ClaimPromptValues {
                 input_text,
@@ -221,17 +219,10 @@ async fn render_claim_prompt(
             },
         )
         .await
-        .map_err(GraphLoomError::from)
 }
 
-async fn render_builtin_prompt(
-    prompt_loader: &PromptLoader,
-    prompt: DefaultPrompt,
-) -> Result<String> {
-    prompt_loader
-        .render(prompt, None, &json!({}))
-        .await
-        .map_err(GraphLoomError::from)
+async fn render_builtin_prompt(prompt_loader: &PromptLoader, prompt: PromptKind) -> Result<String> {
+    prompt_loader.render(prompt, None, &json!({})).await
 }
 
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
@@ -279,15 +270,13 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use graphloom_llm::{CompletionResponse, LlmError, MockCompletionModel, PromptLoader};
+    use graphloom_llm::{CompletionResponse, LlmError, MockCompletionModel};
     use polars_core::prelude::*;
     use tokio::time::sleep;
 
     use super::*;
 
-    //TODO
     #[tokio::test]
-    #[ignore]
     async fn test_should_keep_stable_order_with_concurrent_claim_extraction() {
         let model = DelayedContentModel::default();
         let text_units = vec![
@@ -366,9 +355,7 @@ mod tests {
         assert_eq!(rows[0].subject_id.as_deref(), Some("ALICE"));
     }
 
-    //TODO
     #[tokio::test]
-    #[ignore]
     async fn test_should_fail_fast_when_any_text_unit_claim_extraction_fails() {
         let model = FailingContentModel;
         let text_units = vec![

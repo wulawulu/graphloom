@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
-use graphloom_llm::{CompletionModel, PromptLoader, TiktokenTokenizer};
+use graphloom_llm::{CompletionModel, TiktokenTokenizer};
 
 use super::common::resolve_completion_model;
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
         merge_relationships, raw_entity_dataframe, raw_relationship_dataframe, read_text_units,
         relationship_intermediate_dataframe, summarize_entities, summarize_relationships,
     },
+    prompts::PromptLoader,
 };
 
 /// Workflow name.

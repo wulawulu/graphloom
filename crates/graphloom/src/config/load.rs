@@ -136,37 +136,23 @@ async fn read_dotenv(path: &Path) -> Result<BTreeMap<String, String>> {
 
 fn parse_dotenv(raw: &str) -> Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
-    for (index, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(GraphLoomError::DotenvParse {
-                line: index.saturating_add(1),
-            });
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(GraphLoomError::DotenvParse {
-                line: index.saturating_add(1),
-            });
-        }
-        values.insert(key.to_owned(), unquote(value.trim()));
+    for item in dotenvy::Iter::new(raw.as_bytes()) {
+        let (key, value) = item.map_err(|source| GraphLoomError::DotenvParse {
+            line: dotenv_error_line(raw, &source),
+        })?;
+        values.insert(key, value);
     }
     Ok(values)
 }
 
-fn unquote(value: &str) -> String {
-    let bytes = value.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
-            || (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'))
-    {
-        value[1..value.len() - 1].to_owned()
-    } else {
-        value.to_owned()
+fn dotenv_error_line(raw: &str, error: &dotenvy::Error) -> usize {
+    if let dotenvy::Error::LineParse(line, _) = error {
+        return raw
+            .lines()
+            .position(|candidate| candidate == line)
+            .map_or(1, |index| index.saturating_add(1));
     }
+    1
 }
 
 fn substitute_env(
@@ -541,6 +527,29 @@ mod tests {
 
     use super::*;
     use crate::cli::{InitArgs, init_project};
+
+    #[test]
+    fn test_should_parse_supported_dotenv_syntax() {
+        let values = parse_dotenv(
+            "\n# comment\nPLAIN=value\nDOUBLE=\"quoted value\"\nSINGLE='single \
+             value'\nWITH_EQUALS=left=right\n",
+        )
+        .expect("dotenv syntax should parse");
+
+        assert_eq!(values.get("PLAIN").map(String::as_str), Some("value"));
+        assert_eq!(
+            values.get("DOUBLE").map(String::as_str),
+            Some("quoted value")
+        );
+        assert_eq!(
+            values.get("SINGLE").map(String::as_str),
+            Some("single value")
+        );
+        assert_eq!(
+            values.get("WITH_EQUALS").map(String::as_str),
+            Some("left=right")
+        );
+    }
 
     #[tokio::test]
     async fn test_should_load_initialized_yaml_without_changing_cwd() {

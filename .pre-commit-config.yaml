@@ -58,7 +58,6 @@ repos:
       - id: cargo-test
         name: cargo test
         description: unit test for the project
-        # entry: bash -c 'cargo nextest run --all-features --no-tests=warn -- --include-ignored '
         entry: bash -c 'cargo nextest run --all-features --no-tests=warn'
         language: system
         files: \.rs$

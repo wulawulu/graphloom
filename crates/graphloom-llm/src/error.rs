@@ -1,6 +1,4 @@
-//! Error types for LLM, prompt, tokenizer, and parser operations.
-
-use std::path::PathBuf;
+//! Error types for LLM, tokenizer, and parser operations.
 
 use thiserror::Error;
 
@@ -62,26 +60,6 @@ pub enum LlmError {
         operation: &'static str,
         /// Validation failure message.
         message: String,
-    },
-
-    /// Prompt template loading failed.
-    #[error("failed to load prompt template {path}: {source}")]
-    PromptIo {
-        /// Template path.
-        path: PathBuf,
-        /// Original IO error.
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// Prompt template rendering failed.
-    #[error("failed to render prompt template {name}: {source}")]
-    PromptRender {
-        /// Template name.
-        name: String,
-        /// Tera error.
-        #[source]
-        source: tera::Error,
     },
 
     /// Tokenization failed.

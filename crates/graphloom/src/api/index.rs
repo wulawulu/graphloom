@@ -14,6 +14,13 @@ use crate::{
     runtime::{StagedIndexGeneration, preflight_index_runtime, prepare_full_index},
 };
 
+/// Supported indexing method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexingMethod {
+    /// Standard full indexing pipeline.
+    Standard,
+}
+
 /// Cache mode for indexing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
@@ -28,6 +35,8 @@ pub enum CacheMode {
 pub struct BuildIndexOptions {
     /// Project root used to resolve prompt paths and project-relative storage.
     pub project_root: PathBuf,
+    /// Indexing method.
+    pub method: IndexingMethod,
     /// Cache mode.
     pub cache_mode: CacheMode,
     /// Workflow callbacks.
@@ -67,6 +76,9 @@ pub(crate) async fn build_validated_index(
     project: LoadedProject,
     options: BuildIndexOptions,
 ) -> Result<IndexRunResult> {
+    match options.method {
+        IndexingMethod::Standard => {}
+    }
     let started = Instant::now();
     let cache_enabled = matches!(options.cache_mode, CacheMode::Configured);
     let active_root = project.root.clone();
@@ -78,6 +90,7 @@ pub(crate) async fn build_validated_index(
             preflight_index_runtime(&staged_project, cache_enabled, options.callbacks).await?;
         prepare_full_index(&staged_project, &mut prepared).await?;
         let mut runtime = prepared.into_runtime(staged_project.config.clone(), &active_root)?;
+        tracing::info!(project_root = %active_root.display(), "index run started");
         tracing::info!(project_root = %active_root.display(), "running isolated indexing pipeline");
         let outputs = runtime
             .pipeline

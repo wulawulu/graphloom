@@ -52,6 +52,9 @@ demo/
 
 The default prompts are embedded in the binary and are based on Microsoft
 GraphRAG 3.1.0 prompt content under the MIT License.
+The canonical community-report prompt is `prompts/community_report.txt`;
+existing projects that still use `prompts/community_report_graph.txt` remain
+supported as a legacy override.
 
 `init` performs path and symlink preflight before creating directories or
 writing managed files. If a project path, `input/`, `prompts/`, or managed file

@@ -21,6 +21,7 @@ mod operations;
 mod path_safety;
 mod pipeline;
 mod project;
+pub(crate) mod prompts;
 mod runtime;
 mod stats;
 mod workflow;

@@ -22,6 +22,7 @@ chrono = "0.4.45"
 clap = { version = "4.6.1", default-features = true, features = ["derive"] }
 csv = "1.4.0"
 dashmap = "6.1.0"
+dotenvy = "0.15.7"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 html-escape = "0.2.14"
@@ -54,7 +55,6 @@ wiremock = "0.6.5"
 # workspace crates
 graphloom-cache = { path = "crates/graphloom-cache" }
 graphloom-chunking = { path = "crates/graphloom-chunking" }
-graphloom-common = { path = "crates/graphloom-common" }
 graphloom = { path = "crates/graphloom" }
 graphloom-input = { path = "crates/graphloom-input" }
 graphloom-llm = { path = "crates/graphloom-llm" }

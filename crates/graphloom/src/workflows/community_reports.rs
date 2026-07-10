@@ -1,7 +1,7 @@
 //! Community report generation workflow.
 
 use async_trait::async_trait;
-use graphloom_llm::{PromptLoader, TiktokenTokenizer};
+use graphloom_llm::TiktokenTokenizer;
 
 use super::common::{resolve_completion_encoding_model, resolve_completion_model};
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
         read_claim_context_rows, read_community_input_rows, read_entity_context_rows,
         read_relationship_context_rows,
     },
+    prompts::PromptLoader,
 };
 
 /// Workflow name.

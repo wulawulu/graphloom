@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, path::Path};
 use futures_util::{StreamExt, stream};
 use graphloom_input::gen_sha512_hash;
 use graphloom_llm::{
-    ChatMessage, CommunityReport, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader,
-    Tokenizer, parse_community_report,
+    ChatMessage, CommunityReport, CompletionModel, CompletionRequest, Tokenizer,
+    parse_community_report,
 };
 use serde::Serialize;
 
@@ -15,7 +15,11 @@ use super::{
     CommunityReportRow, ContextRecords, EntityContextRow, RelationshipContextRow, ReportContextRow,
     build_local_contexts,
 };
-use crate::{Result, dataframe::invalid_data};
+use crate::{
+    Result,
+    dataframe::invalid_data,
+    prompts::{PromptKind, PromptLoader},
+};
 
 const COMMUNITY_REPORTS_CONTEXT: &str = "create_community_reports";
 
@@ -265,7 +269,7 @@ async fn extract_report_for_community(
     }
     let rendered_prompt = prompt_loader
         .render(
-            DefaultPrompt::CommunityReport,
+            PromptKind::CommunityReport,
             config.prompt_path.map(Path::new),
             &ReportPromptValues {
                 input_text: &task.context,

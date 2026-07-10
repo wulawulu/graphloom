@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use graphloom_llm::{
-    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader,
-    parse_graph_tuples,
-};
+use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, parse_graph_tuples};
 use serde::Serialize;
 
 use super::{RawEntityRow, RawRelationshipRow, TextUnitInput};
-use crate::{GraphLoomError, Result};
+use crate::{
+    Result,
+    prompts::{PromptKind, PromptLoader},
+};
 
 pub(crate) async fn extract_text_unit_graph(
     model: &dyn CompletionModel,
@@ -37,8 +37,8 @@ pub(crate) async fn extract_text_unit_graph(
     messages.push(ChatMessage::assistant(output.clone()));
 
     let continue_prompt =
-        render_builtin_prompt(prompt_loader, DefaultPrompt::ExtractGraphContinue).await?;
-    let loop_prompt = render_builtin_prompt(prompt_loader, DefaultPrompt::ExtractGraphLoop).await?;
+        render_builtin_prompt(prompt_loader, PromptKind::ExtractGraphContinue).await?;
+    let loop_prompt = render_builtin_prompt(prompt_loader, PromptKind::ExtractGraphLoop).await?;
     for glean_index in 0..max_gleanings {
         messages.push(ChatMessage::user(continue_prompt.clone()));
         let response = model
@@ -118,7 +118,7 @@ async fn render_extraction_prompt(
 ) -> Result<String> {
     prompt_loader
         .render(
-            DefaultPrompt::ExtractGraph,
+            PromptKind::ExtractGraph,
             prompt_path.map(Path::new),
             &ExtractPromptValues {
                 entity_types: entity_types.join(","),
@@ -126,17 +126,12 @@ async fn render_extraction_prompt(
             },
         )
         .await
-        .map_err(GraphLoomError::from)
 }
 
-async fn render_builtin_prompt(
-    prompt_loader: &PromptLoader,
-    prompt: DefaultPrompt,
-) -> Result<String> {
+async fn render_builtin_prompt(prompt_loader: &PromptLoader, prompt: PromptKind) -> Result<String> {
     prompt_loader
         .render(prompt, None, &EmptyPromptValues {})
         .await
-        .map_err(GraphLoomError::from)
 }
 
 #[cfg(test)]

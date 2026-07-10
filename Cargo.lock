@@ -2216,6 +2216,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2665,6 +2671,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "dotenvy",
  "futures-util",
  "graphloom-cache",
  "graphloom-chunking",
@@ -2682,6 +2689,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tera",
  "thiserror",
  "tokio",
  "tracing",
@@ -2720,10 +2728,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "graphloom-common"
-version = "0.1.0"
-
-[[package]]
 name = "graphloom-input"
 version = "0.1.0"
 dependencies = [
@@ -2750,8 +2754,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tempfile",
- "tera",
  "thiserror",
  "tiktoken-rs",
  "tokio",
@@ -2768,7 +2770,6 @@ dependencies = [
  "dashmap",
  "futures-core",
  "futures-util",
- "graphloom-common",
  "polars-core",
  "polars-io",
  "regex",

@@ -3,13 +3,14 @@
 use std::{collections::BTreeSet, path::Path};
 
 use futures_util::{StreamExt, stream};
-use graphloom_llm::{
-    ChatMessage, CompletionModel, CompletionRequest, DefaultPrompt, PromptLoader, Tokenizer,
-};
+use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, Tokenizer};
 use serde::Serialize;
 
 use super::{EntityRow, RelationshipRow, SummarizedEntityRow, SummarizedRelationshipRow};
-use crate::{GraphLoomError, Result};
+use crate::{
+    Result,
+    prompts::{PromptKind, PromptLoader},
+};
 
 #[derive(Debug, Serialize)]
 struct SummarizePromptValues {
@@ -144,7 +145,7 @@ async fn render_summarization_prompt(
 ) -> Result<String> {
     prompt_loader
         .render(
-            DefaultPrompt::SummarizeDescriptions,
+            PromptKind::SummarizeDescriptions,
             prompt_path.map(Path::new),
             &SummarizePromptValues {
                 entity_name: entity_name_json.to_owned(),
@@ -153,7 +154,6 @@ async fn render_summarization_prompt(
             },
         )
         .await
-        .map_err(GraphLoomError::from)
 }
 
 async fn summarize_description_list(

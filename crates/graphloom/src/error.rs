@@ -162,6 +162,25 @@ pub enum GraphLoomError {
         path: PathBuf,
     },
 
+    /// Prompt template loading failed.
+    #[error("failed to load prompt template {path}: {source}")]
+    PromptLoad {
+        /// Template path.
+        path: PathBuf,
+        /// Original I/O error.
+        #[source]
+        source: io::Error,
+    },
+
+    /// Prompt template rendering or syntax validation failed.
+    #[error("failed to render prompt template {name}: {message}")]
+    PromptRender {
+        /// Canonical prompt filename.
+        name: &'static str,
+        /// Rendering or validation failure.
+        message: String,
+    },
+
     /// Missing input.
     #[error("missing input: {message}")]
     MissingInput {

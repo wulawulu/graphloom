@@ -1,8 +1,22 @@
-use std::path::{Component, Path, PathBuf};
-
-use graphloom_common::is_safe_path_component;
+use std::{
+    ffi::OsStr,
+    path::{Component, Path, PathBuf},
+};
 
 use crate::{Result, StorageError};
+
+fn is_safe_path_component(component: &OsStr) -> bool {
+    let Some(component) = component.to_str() else {
+        return false;
+    };
+
+    !component.is_empty()
+        && component != "."
+        && component != ".."
+        && !component.contains('\0')
+        && !component.contains('/')
+        && !component.contains('\\')
+}
 
 pub(crate) fn validate_table_name(table_name: &str) -> Result<String> {
     if table_name.is_empty()
@@ -67,5 +81,24 @@ pub(crate) fn strip_namespace(key: &str, namespace: &str) -> String {
             .and_then(|value| value.strip_prefix('/'))
             .unwrap_or(key)
             .to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::is_safe_path_component;
+
+    #[test]
+    fn test_should_accept_simple_storage_component() {
+        assert!(is_safe_path_component(OsStr::new("documents_2026")));
+    }
+
+    #[test]
+    fn test_should_reject_traversal_and_separators() {
+        for component in ["", ".", "..", "a/b", "a\\b", "nul\0suffix"] {
+            assert!(!is_safe_path_component(OsStr::new(component)));
+        }
     }
 }
