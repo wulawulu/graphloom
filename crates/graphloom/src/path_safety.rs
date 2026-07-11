@@ -71,6 +71,41 @@ pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> Result<bool
     Ok(path.starts_with(parent))
 }
 
+/// Return the original-casing suffix when `path` is a strict lexical descendant of `parent`.
+///
+/// Path components use the platform's containment semantics. In particular, Windows compares
+/// components with ordinal case-insensitive comparison while retaining the casing from `path` in
+/// the returned relative path. This function does not access the filesystem or follow links.
+pub(crate) fn relative_descendant(path: &Path, parent: &Path) -> Result<Option<PathBuf>> {
+    if !path_is_within_or_equal(path, parent)? {
+        return Ok(None);
+    }
+
+    let parent_component_count = parent.components().count();
+    let relative = path
+        .components()
+        .skip(parent_component_count)
+        .map(|component| component.as_os_str())
+        .collect::<PathBuf>();
+    if relative.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        Ok(Some(relative))
+    } else {
+        Err(GraphLoomError::UnsafeOutputPath {
+            path: path.to_path_buf(),
+            message: format!(
+                "relative descendant of {} contains a non-normal path component",
+                parent.display()
+            ),
+        })
+    }
+}
+
 /// Returns whether `path` equals or is contained by `parent`.
 #[cfg(windows)]
 pub(crate) fn path_is_within_or_equal(path: &Path, parent: &Path) -> Result<bool> {
@@ -318,7 +353,38 @@ fn classify_compare_string_ordinal_result(result: i32) -> Option<bool> {
 pub(crate) mod tests {
     use std::path::Path;
 
-    use super::{component_reaches_queryable_path, paths_overlap};
+    use super::{component_reaches_queryable_path, paths_overlap, relative_descendant};
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_should_return_relative_descendant() {
+        assert_eq!(
+            relative_descendant(
+                Path::new("/project/output/lancedb/data"),
+                Path::new("/project/output"),
+            )
+            .expect("comparison"),
+            Some(Path::new("lancedb/data").to_path_buf())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_should_not_treat_equal_or_similar_path_as_descendant() {
+        assert_eq!(
+            relative_descendant(Path::new("/project/output"), Path::new("/project/output"))
+                .expect("comparison"),
+            None
+        );
+        assert_eq!(
+            relative_descendant(
+                Path::new("/project/output-old/lancedb"),
+                Path::new("/project/output"),
+            )
+            .expect("comparison"),
+            None
+        );
+    }
 
     #[test]
     fn test_should_detect_overlapping_paths() {
@@ -360,7 +426,7 @@ pub(crate) mod tests {
 
         use super::super::{
             classify_compare_string_ordinal_result, component_reaches_queryable_path,
-            os_str_eq_ignore_case, paths_overlap,
+            os_str_eq_ignore_case, paths_overlap, relative_descendant,
         };
 
         pub(crate) fn assert_windows_verbatim_path(path: &Path) {
@@ -412,6 +478,30 @@ pub(crate) mod tests {
                     Path::new(r"c:\project\input-Other"),
                 )
                 .expect("comparison")
+            );
+        }
+
+        #[test]
+        fn test_should_return_relative_descendant_case_insensitively() {
+            assert_eq!(
+                relative_descendant(
+                    Path::new(r"c:\project\output\LanceDB\data"),
+                    Path::new(r"C:\Project\Output"),
+                )
+                .expect("comparison"),
+                Some(Path::new(r"LanceDB\data").to_path_buf())
+            );
+        }
+
+        #[test]
+        fn test_should_not_match_similar_windows_prefix() {
+            assert_eq!(
+                relative_descendant(
+                    Path::new(r"C:\Project\OutputOld\lancedb"),
+                    Path::new(r"C:\Project\Output"),
+                )
+                .expect("comparison"),
+                None
             );
         }
 

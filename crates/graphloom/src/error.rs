@@ -117,6 +117,20 @@ pub enum GraphLoomError {
         path: PathBuf,
     },
 
+    /// Moving a preserved descendant between live and backup storage failed.
+    #[error("{operation} from {source_path} to {destination_path}: {source}")]
+    PreservedDescendantMove {
+        /// Publication or rollback operation.
+        operation: &'static str,
+        /// Existing descendant path.
+        source_path: PathBuf,
+        /// Intended descendant path.
+        destination_path: PathBuf,
+        /// Filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {

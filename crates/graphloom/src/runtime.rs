@@ -27,7 +27,7 @@ pub(crate) use vector_store_factory::{DefaultIndexVectorStoreFactory, IndexVecto
 use crate::{
     ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, IndexPipeline, IndexPipelineContext,
     IndexPipelineFactory, IndexWorkflowCallbacks, IndexWorkflowRegistry, Result,
-    path_safety::{path_is_within_or_equal, resolve_path_rejecting_links},
+    path_safety::{relative_descendant, resolve_path_rejecting_links},
     project::{LoadedProject, ProjectPaths},
     register_standard_index_workflows,
 };
@@ -142,7 +142,7 @@ pub(crate) async fn prepare_full_index(
     }
     project.paths.validate_vector_path_safety()?;
     match vector_location(&project.paths)? {
-        VectorLocation::InsideOutput => {
+        VectorLocation::InsideOutput(_) => {
             let services = runtime.take_services()?;
             let vector_store = runtime.take_vector_store()?;
             drop(vector_store);
@@ -357,9 +357,9 @@ fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> Gra
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum VectorLocation {
-    InsideOutput,
+    InsideOutput(PathBuf),
     OutsideOutput,
 }
 
@@ -367,10 +367,9 @@ fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
     let output = resolve_path_rejecting_links(&paths.output_dir)?;
     let vector = resolve_path_rejecting_links(&paths.vector_db_uri)?;
     Ok(
-        if path_is_within_or_equal(&vector.resolved, &output.resolved)? {
-            VectorLocation::InsideOutput
-        } else {
-            VectorLocation::OutsideOutput
+        match relative_descendant(&vector.resolved, &output.resolved)? {
+            Some(relative) => VectorLocation::InsideOutput(relative),
+            None => VectorLocation::OutsideOutput,
         },
     )
 }
@@ -823,7 +822,7 @@ mod tests {
 
         assert_eq!(
             vector_location(&paths).expect("vector location"),
-            VectorLocation::InsideOutput,
+            VectorLocation::InsideOutput(PathBuf::from("lancedb")),
         );
     }
 
