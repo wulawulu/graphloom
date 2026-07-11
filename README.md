@@ -55,6 +55,9 @@ GraphRAG 3.1.0 prompt content under the MIT License.
 GraphLoom prompt templates use Tera/Jinja double-brace syntax, such as
 `{{ input_text }}`. The canonical community-report prompt is
 `prompts/community_report.txt`.
+`graphloom init` currently generates only the prompt templates used by indexing
+workflows. Search and query prompts will be added when their workflows are
+implemented.
 
 `init` performs path and symlink preflight before creating directories or
 writing managed files. If a project path, `input/`, `prompts/`, or managed file

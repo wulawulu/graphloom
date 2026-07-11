@@ -49,19 +49,17 @@ impl PromptTemplate {
     ) -> Result<Self> {
         let content = content.into();
         let template_name: Arc<str> = kind.filename().into();
-        let mut template = Self {
+        let mut tera = Tera::default();
+        tera.add_raw_template(template_name.as_ref(), content.as_ref())
+            .map_err(|error| prompt_render_error(kind, &source, tera_error_message(&error)))?;
+
+        Ok(Self {
             kind,
             content,
             source,
             template_name,
-            tera: Arc::new(Tera::default()),
-        };
-        let mut tera = Tera::default();
-        if let Err(error) = tera.add_raw_template(&template.template_name, template.content()) {
-            return Err(template.render_error(tera_error_message(&error)));
-        }
-        template.tera = Arc::new(tera);
-        Ok(template)
+            tera: Arc::new(tera),
+        })
     }
 
     /// Return the prompt kind.
@@ -70,6 +68,14 @@ impl PromptTemplate {
     }
 
     /// Return the Tera template source text.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "template source access is retained for future graphloom prompt tuning and \
+                      evaluation"
+        )
+    )]
     pub(crate) fn content(&self) -> &str {
         &self.content
     }

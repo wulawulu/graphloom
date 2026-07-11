@@ -23,50 +23,10 @@ use crate::{
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
 const DOTENV: &str = include_str!("../assets/dotenv");
 
-const ADDITIONAL_PROMPT_ASSETS: &[(&str, &str)] = &[
-    (
-        "community_report_text.txt",
-        include_str!("../assets/prompts/community_report_text.txt"),
-    ),
-    (
-        "drift_search_system_prompt.txt",
-        include_str!("../assets/prompts/drift_search_system_prompt.txt"),
-    ),
-    (
-        "drift_reduce_prompt.txt",
-        include_str!("../assets/prompts/drift_reduce_prompt.txt"),
-    ),
-    (
-        "global_search_map_system_prompt.txt",
-        include_str!("../assets/prompts/global_search_map_system_prompt.txt"),
-    ),
-    (
-        "global_search_reduce_system_prompt.txt",
-        include_str!("../assets/prompts/global_search_reduce_system_prompt.txt"),
-    ),
-    (
-        "global_search_knowledge_system_prompt.txt",
-        include_str!("../assets/prompts/global_search_knowledge_system_prompt.txt"),
-    ),
-    (
-        "local_search_system_prompt.txt",
-        include_str!("../assets/prompts/local_search_system_prompt.txt"),
-    ),
-    (
-        "basic_search_system_prompt.txt",
-        include_str!("../assets/prompts/basic_search_system_prompt.txt"),
-    ),
-    (
-        "question_gen_system_prompt.txt",
-        include_str!("../assets/prompts/question_gen_system_prompt.txt"),
-    ),
-];
-
 fn prompt_assets() -> impl Iterator<Item = (&'static str, &'static str)> {
     PromptKind::all()
         .iter()
         .map(|kind| (kind.filename(), kind.default_template()))
-        .chain(ADDITIONAL_PROMPT_ASSETS.iter().copied())
 }
 
 /// Initialize a `GraphLoom` project.
@@ -271,6 +231,8 @@ async fn reject_symlink(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -341,6 +303,52 @@ mod tests {
             continue_template.source(),
             crate::prompts::PromptSource::ProjectOverride(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_should_initialize_only_managed_prompt_kinds() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&args(tempdir.path(), false))
+            .await
+            .expect("init");
+        let expected = PromptKind::all()
+            .iter()
+            .map(|kind| kind.filename().to_owned())
+            .collect::<BTreeSet<_>>();
+        let mut actual = BTreeSet::new();
+        let mut entries = tokio::fs::read_dir(tempdir.path().join("prompts"))
+            .await
+            .expect("prompt directory");
+        while let Some(entry) = entries.next_entry().await.expect("prompt entry") {
+            actual.insert(
+                entry
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 prompt filename"),
+            );
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_should_compile_every_initialized_prompt() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&args(tempdir.path(), false))
+            .await
+            .expect("init");
+        let repository = crate::prompts::PromptRepository::new(tempdir.path());
+
+        for kind in PromptKind::all() {
+            let template = repository
+                .load(*kind, None)
+                .await
+                .expect("initialized prompt should compile");
+            assert!(matches!(
+                template.source(),
+                crate::prompts::PromptSource::ProjectOverride(_)
+            ));
+        }
     }
 
     #[test]

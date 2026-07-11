@@ -112,7 +112,7 @@ cache:
     type: file
     base_dir: cache_data
 local_search:
-  prompt: prompts/local_search_system_prompt.txt
+  prompt: prompts/custom_query.txt
 ",
     )
     .expect("config should deserialize");
@@ -125,7 +125,7 @@ local_search:
     assert_eq!(config.cache.storage.base_dir, "cache_data");
     assert_eq!(
         config.sections["local_search"]["prompt"],
-        "prompts/local_search_system_prompt.txt"
+        "prompts/custom_query.txt"
     );
 }
 
@@ -136,7 +136,7 @@ fn test_should_deserialize_community_reports_camel_and_snake_case() {
             "completionModelId": "chat",
             "modelInstanceName": "community_reporting",
             "graphPrompt": "prompts/community_report.txt",
-            "textPrompt": "prompts/community_report_text.txt",
+            "textPrompt": "text.txt",
             "maxLength": 123,
             "maxInputLength": 456
         }

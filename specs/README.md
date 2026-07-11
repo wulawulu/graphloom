@@ -870,6 +870,8 @@ Prompt 使用 Tera。
 prompts/
 ```
 
+当前初始化仅生成 Phase 1 indexing workflows 实际使用的 Prompt。Local Search、Global Search、DRIFT、Basic Search 和 question generation Prompt 在对应 query workflow 实现时再加入。
+
 模板内容应从固定基准提交复制，不得随意缩短、改写或“优化”。运行时不得访问 GraphLoom 仓库源码目录、从网络下载 prompt，或假设用户保留 workspace。
 
 旧的 Python 格式变量：

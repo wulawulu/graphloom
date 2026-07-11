@@ -84,7 +84,6 @@ extract_claims:
 community_reports:
   completion_model_id: default_completion_model
   graph_prompt: prompts/community_report.txt
-  text_prompt: prompts/community_report_text.txt
   max_length: 2000
   max_input_length: 8000
 
@@ -95,21 +94,14 @@ snapshots:
 local_search:
   completion_model_id: default_completion_model
   embedding_model_id: default_embedding_model
-  prompt: prompts/local_search_system_prompt.txt
 
 global_search:
   completion_model_id: default_completion_model
-  map_prompt: prompts/global_search_map_system_prompt.txt
-  reduce_prompt: prompts/global_search_reduce_system_prompt.txt
-  knowledge_prompt: prompts/global_search_knowledge_system_prompt.txt
 
 drift_search:
   completion_model_id: default_completion_model
   embedding_model_id: default_embedding_model
-  prompt: prompts/drift_search_system_prompt.txt
-  reduce_prompt: prompts/drift_reduce_prompt.txt
 
 basic_search:
   completion_model_id: default_completion_model
   embedding_model_id: default_embedding_model
-  prompt: prompts/basic_search_system_prompt.txt

@@ -15,8 +15,6 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 
-#[cfg(windows)]
-use crate::GraphLoomError;
 use crate::{GraphLoomError, Result};
 
 /// A path represented both lexically and through its nearest existing ancestor.
