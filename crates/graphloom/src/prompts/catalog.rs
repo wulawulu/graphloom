@@ -1,4 +1,4 @@
-//! Built-in `GraphRAG` prompt metadata.
+//! Project prompt kinds and their built-in Tera templates.
 
 /// `GraphRAG` prompt kinds used by indexing workflows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,6 +22,20 @@ pub(crate) enum PromptKind {
 }
 
 impl PromptKind {
+    /// Return every prompt kind managed as a project resource.
+    pub(crate) const fn all() -> &'static [Self] {
+        &[
+            Self::ExtractGraph,
+            Self::ExtractGraphContinue,
+            Self::ExtractGraphLoop,
+            Self::SummarizeDescriptions,
+            Self::ExtractClaims,
+            Self::ExtractClaimsContinue,
+            Self::ExtractClaimsLoop,
+            Self::CommunityReport,
+        ]
+    }
+
     /// Return the canonical project filename.
     pub(crate) const fn filename(self) -> &'static str {
         match self {
@@ -40,29 +54,14 @@ impl PromptKind {
     pub(crate) const fn default_template(self) -> &'static str {
         match self {
             Self::ExtractGraph => include_str!("defaults/extract_graph.txt"),
-            Self::ExtractGraphContinue => {
-                "MANY entities and relationships were missed in the last extraction. Remember to \
-                 ONLY emit entities that match any of the previously extracted types. Add them \
-                 below using the same format:\n"
-            }
-            Self::ExtractGraphLoop => {
-                "It appears some entities and relationships may have still been missed. Answer Y \
-                 if there are still entities or relationships that need to be added, or N if there \
-                 are none. Please answer with a single letter Y or N.\n"
-            }
+            Self::ExtractGraphContinue => include_str!("defaults/extract_graph_continue.txt"),
+            Self::ExtractGraphLoop => include_str!("defaults/extract_graph_loop.txt"),
             Self::SummarizeDescriptions => {
                 include_str!("defaults/summarize_descriptions.txt")
             }
             Self::ExtractClaims => include_str!("defaults/extract_claims.txt"),
-            Self::ExtractClaimsContinue => {
-                "MANY entities were missed in the last extraction.  Add them below using the same \
-                 format:\n"
-            }
-            Self::ExtractClaimsLoop => {
-                "It appears some entities may have still been missed. Answer Y if there are still \
-                 entities that need to be added, or N if there are none. Please answer with a \
-                 single letter Y or N.\n"
-            }
+            Self::ExtractClaimsContinue => include_str!("defaults/extract_claims_continue.txt"),
+            Self::ExtractClaimsLoop => include_str!("defaults/extract_claims_loop.txt"),
             Self::CommunityReport => include_str!("defaults/community_report.txt"),
         }
     }
@@ -98,6 +97,8 @@ impl PromptKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -115,5 +116,26 @@ mod tests {
             &["entity_specs", "claim_description", "input_text"]
         );
         assert!(PromptKind::ExtractClaimsLoop.variables().is_empty());
+    }
+
+    #[test]
+    fn test_all_prompt_kinds_have_unique_filenames() {
+        let filenames = PromptKind::all()
+            .iter()
+            .map(|kind| kind.filename())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(filenames.len(), PromptKind::all().len());
+    }
+
+    #[test]
+    fn test_all_prompt_kinds_have_non_empty_default_templates() {
+        for kind in PromptKind::all() {
+            assert!(
+                !kind.default_template().trim().is_empty(),
+                "{} must have a default template",
+                kind.filename(),
+            );
+        }
     }
 }

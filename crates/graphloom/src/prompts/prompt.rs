@@ -37,19 +37,31 @@ pub(crate) struct PromptTemplate {
     kind: PromptKind,
     content: Arc<str>,
     source: PromptSource,
+    template_name: Arc<str>,
+    tera: Arc<Tera>,
 }
 
 impl PromptTemplate {
-    pub(super) fn new(
+    pub(super) fn try_new(
         kind: PromptKind,
         content: impl Into<Arc<str>>,
         source: PromptSource,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let content = content.into();
+        let template_name: Arc<str> = kind.filename().into();
+        let mut template = Self {
             kind,
-            content: content.into(),
+            content,
             source,
+            template_name,
+            tera: Arc::new(Tera::default()),
+        };
+        let mut tera = Tera::default();
+        if let Err(error) = tera.add_raw_template(&template.template_name, template.content()) {
+            return Err(template.render_error(tera_error_message(&error)));
         }
+        template.tera = Arc::new(tera);
+        Ok(template)
     }
 
     /// Return the prompt kind.
@@ -74,7 +86,8 @@ impl PromptTemplate {
     {
         let prompt = Prompt {
             kind: self.kind(),
-            template: Arc::clone(&self.content),
+            template_name: Arc::clone(&self.template_name),
+            tera: Arc::clone(&self.tera),
             context: Context::new(),
             source: self.source().clone(),
         }
@@ -98,7 +111,8 @@ impl PromptTemplate {
 #[derive(Clone, Debug)]
 pub(crate) struct Prompt {
     kind: PromptKind,
-    template: Arc<str>,
+    template_name: Arc<str>,
+    tera: Arc<Tera>,
     context: Context,
     source: PromptSource,
 }
@@ -112,20 +126,18 @@ impl Prompt {
         let context = Context::from_serialize(values).map_err(|error| {
             prompt_render_error(self.kind, &self.source, tera_error_message(&error))
         })?;
-        let serde_json::Value::Object(values) = context.into_json() else {
-            return Err(prompt_render_error(
-                self.kind,
-                &self.source,
-                "prompt context must serialize to an object".to_owned(),
-            ));
-        };
-        for (key, value) in values {
-            self = self.with_context_value(&key, &value)?;
-        }
+        self.context.extend(context);
         Ok(self)
     }
 
     /// Insert one serialized value into the prompt context.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "first-class Prompt context extension API is reserved for graphloom consumers"
+        )
+    )]
     pub(crate) fn with_context_value<T>(mut self, key: &str, value: &T) -> Result<Self>
     where
         T: Serialize,
@@ -136,11 +148,13 @@ impl Prompt {
         Ok(self)
     }
 
-    /// Render this prompt exactly once with Tera.
+    /// Render the precompiled Tera template with this prompt's context.
     pub(crate) fn render(&self) -> Result<String> {
-        Tera::one_off(&self.template, &self.context, false).map_err(|error| {
-            prompt_render_error(self.kind, &self.source, tera_error_message(&error))
-        })
+        self.tera
+            .render(&self.template_name, &self.context)
+            .map_err(|error| {
+                prompt_render_error(self.kind, &self.source, tera_error_message(&error))
+            })
     }
 }
 
@@ -187,20 +201,23 @@ mod tests {
     }
 
     fn template(content: &str) -> PromptTemplate {
-        PromptTemplate::new(
+        PromptTemplate::try_new(
             PromptKind::ExtractGraphContinue,
             content.to_owned(),
             PromptSource::BuiltIn,
         )
+        .expect("template should compile")
+    }
+
+    fn prepare_prompt(template: &PromptTemplate) -> Result<Prompt> {
+        template.bind(&NameContext { name: "GraphLoom" })
     }
 
     #[test]
     fn test_should_bind_typed_context_and_render_prompt() {
-        let rendered = template("Hello {{ name }}")
-            .bind(&NameContext { name: "GraphLoom" })
-            .expect("context should bind")
-            .render()
-            .expect("prompt should render");
+        let template = template("Hello {{ name }}");
+        let prompt = prepare_prompt(&template).expect("prompt should be prepared");
+        let rendered = prompt.render().expect("prompt should render");
 
         assert_eq!(rendered, "Hello GraphLoom");
     }
@@ -218,6 +235,45 @@ mod tests {
             .expect("prompt should render");
 
         assert_eq!(rendered, "Hello GraphLoom!");
+    }
+
+    #[test]
+    fn test_should_overwrite_context_values_when_extending_prompt() {
+        let rendered = template("Hello {{ name }}")
+            .bind(&NameContext { name: "before" })
+            .expect("context should bind")
+            .with_context(&NameContext { name: "after" })
+            .expect("context should be extended")
+            .render()
+            .expect("prompt should render");
+
+        assert_eq!(rendered, "Hello after");
+    }
+
+    #[test]
+    fn test_should_render_one_compiled_template_with_multiple_contexts() {
+        let template = template("Hello {{ name }}");
+
+        let first = template
+            .bind(&NameContext { name: "A" })
+            .expect("first context should bind")
+            .render()
+            .expect("first prompt should render");
+        let second = template
+            .bind(&NameContext { name: "B" })
+            .expect("second context should bind")
+            .render()
+            .expect("second prompt should render");
+
+        assert_eq!(first, "Hello A");
+        assert_eq!(second, "Hello B");
+    }
+
+    #[test]
+    fn test_prompt_template_should_be_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<PromptTemplate>();
     }
 
     #[test]
@@ -262,14 +318,56 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reject_invalid_tera_template() {
-        let error = template("{% if enabled %}")
-            .bind(&serde_json::json!({"enabled": true}))
-            .expect("context should bind")
-            .render()
-            .expect_err("invalid template should fail");
+    fn test_should_report_builtin_source_for_template_compile_error() {
+        let error = PromptTemplate::try_new(
+            PromptKind::ExtractGraphContinue,
+            "{% if enabled %}",
+            PromptSource::BuiltIn,
+        )
+        .expect_err("invalid built-in template should fail to compile");
+        let message = error.to_string();
 
-        assert!(error.to_string().contains("extract_graph_continue.txt"));
+        assert!(message.contains("extract_graph_continue.txt"));
+        assert!(message.contains("built-in defaults"));
+    }
+
+    #[test]
+    fn test_should_render_all_builtin_prompt_contracts() {
+        for kind in PromptKind::all() {
+            let template =
+                PromptTemplate::try_new(*kind, kind.default_template(), PromptSource::BuiltIn)
+                    .expect("built-in template should compile");
+            let values = match kind {
+                PromptKind::ExtractGraph => serde_json::json!({
+                    "entity_types": "person",
+                    "input_text": "Alice met Bob.",
+                }),
+                PromptKind::SummarizeDescriptions => serde_json::json!({
+                    "entity_name": "Alice",
+                    "description_list": "[\"Person\"]",
+                    "max_length": 100,
+                }),
+                PromptKind::ExtractClaims => serde_json::json!({
+                    "entity_specs": ["person"],
+                    "claim_description": "claims",
+                    "input_text": "Alice reported Bob.",
+                }),
+                PromptKind::CommunityReport => serde_json::json!({
+                    "input_text": "Entities and relationships",
+                    "max_report_length": 2_000,
+                }),
+                PromptKind::ExtractGraphContinue
+                | PromptKind::ExtractGraphLoop
+                | PromptKind::ExtractClaimsContinue
+                | PromptKind::ExtractClaimsLoop => serde_json::json!({}),
+            };
+
+            let rendered = template
+                .bind(&values)
+                .and_then(|prompt| prompt.render())
+                .unwrap_or_else(|error| panic!("{} failed to render: {error}", kind.filename()));
+            assert!(!rendered.trim().is_empty());
+        }
     }
 
     #[test]

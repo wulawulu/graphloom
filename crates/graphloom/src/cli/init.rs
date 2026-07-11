@@ -23,24 +23,7 @@ use crate::{
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
 const DOTENV: &str = include_str!("../assets/dotenv");
 
-/// Managed prompt assets.
-pub const PROMPT_ASSETS: &[(&str, &str)] = &[
-    (
-        PromptKind::ExtractGraph.filename(),
-        PromptKind::ExtractGraph.default_template(),
-    ),
-    (
-        PromptKind::SummarizeDescriptions.filename(),
-        PromptKind::SummarizeDescriptions.default_template(),
-    ),
-    (
-        PromptKind::ExtractClaims.filename(),
-        PromptKind::ExtractClaims.default_template(),
-    ),
-    (
-        PromptKind::CommunityReport.filename(),
-        PromptKind::CommunityReport.default_template(),
-    ),
+const ADDITIONAL_PROMPT_ASSETS: &[(&str, &str)] = &[
     (
         "community_report_text.txt",
         include_str!("../assets/prompts/community_report_text.txt"),
@@ -78,6 +61,13 @@ pub const PROMPT_ASSETS: &[(&str, &str)] = &[
         include_str!("../assets/prompts/question_gen_system_prompt.txt"),
     ),
 ];
+
+fn prompt_assets() -> impl Iterator<Item = (&'static str, &'static str)> {
+    PromptKind::all()
+        .iter()
+        .map(|kind| (kind.filename(), kind.default_template()))
+        .chain(ADDITIONAL_PROMPT_ASSETS.iter().copied())
+}
 
 /// Initialize a `GraphLoom` project.
 ///
@@ -145,7 +135,7 @@ impl InitPlan {
             ],
         };
         plan.files
-            .extend(PROMPT_ASSETS.iter().map(|(name, content)| ManagedFilePlan {
+            .extend(prompt_assets().map(|(name, content)| ManagedFilePlan {
                 path: root.join("prompts").join(name),
                 content: (*content).to_owned(),
                 overwrite: args.force,
@@ -305,12 +295,12 @@ mod tests {
         assert!(tempdir.path().join(".env").is_file());
         assert!(tempdir.path().join("input").is_dir());
         assert!(tempdir.path().join("prompts").is_dir());
-        for (name, content) in PROMPT_ASSETS {
+        for (name, content) in prompt_assets() {
             let path = tempdir.path().join("prompts").join(name);
             assert!(path.is_file());
             assert_eq!(
                 tokio::fs::read_to_string(path).await.expect("prompt asset"),
-                *content,
+                content,
             );
         }
     }
@@ -331,6 +321,38 @@ mod tests {
         assert!(extract_graph.contains("{{ entity_types }}"));
         assert!(!extract_graph.contains("{input_text}"));
         assert!(!extract_graph.contains("{entity_types}"));
+
+        for kind in PromptKind::all() {
+            let path = tempdir.path().join("prompts").join(kind.filename());
+            assert!(path.is_file(), "missing initialized prompt {path:?}");
+            assert_eq!(
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .expect("initialized prompt"),
+                kind.default_template(),
+            );
+        }
+
+        let continue_template = crate::prompts::PromptRepository::new(tempdir.path())
+            .load(PromptKind::ExtractGraphContinue, None)
+            .await
+            .expect("initialized continue prompt should load as an override");
+        assert!(matches!(
+            continue_template.source(),
+            crate::prompts::PromptSource::ProjectOverride(_)
+        ));
+    }
+
+    #[test]
+    fn test_prompt_assets_should_include_every_prompt_kind() {
+        for kind in PromptKind::all() {
+            assert!(
+                prompt_assets().any(|(filename, content)| filename == kind.filename()
+                    && content == kind.default_template()),
+                "{} is missing from init assets",
+                kind.filename(),
+            );
+        }
     }
 
     #[tokio::test]

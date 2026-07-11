@@ -4,7 +4,10 @@ use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, parse_graph
 use serde::Serialize;
 
 use super::{RawEntityRow, RawRelationshipRow, TextUnitInput};
-use crate::{Result, prompts::PromptTemplate};
+use crate::{
+    Result,
+    prompts::{Prompt, PromptTemplate},
+};
 
 pub(crate) async fn extract_text_unit_graph(
     model: &dyn CompletionModel,
@@ -15,11 +18,9 @@ pub(crate) async fn extract_text_unit_graph(
     text_unit: &TextUnitInput,
     max_gleanings: usize,
 ) -> Result<(Vec<RawEntityRow>, Vec<RawRelationshipRow>)> {
-    let mut messages = vec![ChatMessage::user(render_extraction_prompt(
-        extraction_template,
-        &text_unit.text,
-        entity_types,
-    )?)];
+    let mut messages = vec![ChatMessage::user(
+        bind_extraction_prompt(extraction_template, &text_unit.text, entity_types)?.render()?,
+    )];
 
     let mut output = model
         .complete(CompletionRequest {
@@ -34,8 +35,8 @@ pub(crate) async fn extract_text_unit_graph(
         .content;
     messages.push(ChatMessage::assistant(output.clone()));
 
-    let continue_prompt = render_empty_prompt(continue_template)?;
-    let loop_prompt = render_empty_prompt(loop_template)?;
+    let continue_prompt = bind_empty_prompt(continue_template)?.render()?;
+    let loop_prompt = bind_empty_prompt(loop_template)?.render()?;
     for glean_index in 0..max_gleanings {
         messages.push(ChatMessage::user(continue_prompt.clone()));
         let response = model
@@ -107,21 +108,19 @@ struct ExtractPromptValues<'a> {
 #[derive(Debug, Serialize)]
 struct EmptyPromptValues {}
 
-fn render_extraction_prompt(
+fn bind_extraction_prompt(
     template: &PromptTemplate,
     input_text: &str,
     entity_types: &[String],
-) -> Result<String> {
-    template
-        .bind(&ExtractPromptValues {
-            entity_types: entity_types.join(","),
-            input_text,
-        })?
-        .render()
+) -> Result<Prompt> {
+    template.bind(&ExtractPromptValues {
+        entity_types: entity_types.join(","),
+        input_text,
+    })
 }
 
-fn render_empty_prompt(template: &PromptTemplate) -> Result<String> {
-    template.bind(&EmptyPromptValues {})?.render()
+fn bind_empty_prompt(template: &PromptTemplate) -> Result<Prompt> {
+    template.bind(&EmptyPromptValues {})
 }
 
 #[cfg(test)]

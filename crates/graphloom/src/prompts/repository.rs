@@ -35,11 +35,7 @@ impl PromptRepository {
             return load_file(kind, canonical, PromptSource::ProjectOverride).await;
         }
 
-        Ok(PromptTemplate::new(
-            kind,
-            kind.default_template(),
-            PromptSource::BuiltIn,
-        ))
+        build_template(kind, kind.default_template(), PromptSource::BuiltIn)
     }
 
     fn resolve(&self, path: &Path) -> PathBuf {
@@ -63,9 +59,17 @@ async fn load_file(
                 path: path.clone(),
                 source: error,
             })?;
-    let template = PromptTemplate::new(kind, content, source(path.clone()));
-    reject_legacy_single_brace_syntax(kind, template.content(), &path)?;
-    Ok(template)
+    build_template(kind, content, source(path))
+}
+
+fn build_template(
+    kind: PromptKind,
+    content: impl Into<std::sync::Arc<str>>,
+    source: PromptSource,
+) -> Result<PromptTemplate> {
+    let content = content.into();
+    reject_legacy_single_brace_syntax(kind, &content, &source)?;
+    PromptTemplate::try_new(kind, content, source)
 }
 
 async fn path_exists(path: &Path) -> Result<bool> {
@@ -77,7 +81,11 @@ async fn path_exists(path: &Path) -> Result<bool> {
         })
 }
 
-fn reject_legacy_single_brace_syntax(kind: PromptKind, template: &str, path: &Path) -> Result<()> {
+fn reject_legacy_single_brace_syntax(
+    kind: PromptKind,
+    template: &str,
+    source: &PromptSource,
+) -> Result<()> {
     for variable in kind.variables() {
         let legacy = format!("{{{variable}}}");
         let mut remaining = template;
@@ -92,7 +100,7 @@ fn reject_legacy_single_brace_syntax(kind: PromptKind, template: &str, path: &Pa
                 return Err(GraphLoomError::PromptRender {
                     kind: kind.name(),
                     name: kind.filename(),
-                    prompt_source: path.display().to_string(),
+                    prompt_source: source.to_string(),
                     message: format!(
                         "prompt uses unsupported single-brace syntax `{legacy}`; GraphLoom \
                          prompts use Tera syntax `{{{{ {variable} }}}}`"
@@ -188,5 +196,79 @@ mod tests {
 
         assert!(message.contains("{input_text}"));
         assert!(message.contains("{{ input_text }}"));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_invalid_tera_template_when_loading() {
+        let project = TempDir::new().expect("project");
+        let prompts = project.path().join("prompts");
+        tokio::fs::create_dir(&prompts).await.expect("prompts");
+        let path = prompts.join("extract_graph.txt");
+        tokio::fs::write(&path, "{% if enabled %}")
+            .await
+            .expect("invalid project prompt");
+
+        let error = PromptRepository::new(project.path())
+            .load(PromptKind::ExtractGraph, None)
+            .await
+            .expect_err("invalid template should fail while loading");
+        let message = error.to_string();
+
+        assert!(message.contains("ExtractGraph"));
+        assert!(message.contains("extract_graph.txt"));
+        assert!(message.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[tokio::test]
+    async fn test_should_report_explicit_path_for_template_compile_error() {
+        let project = TempDir::new().expect("project");
+        let path = project.path().join("invalid.txt");
+        tokio::fs::write(&path, "{% if enabled %}")
+            .await
+            .expect("invalid explicit prompt");
+
+        let error = PromptRepository::new(project.path())
+            .load(PromptKind::ExtractGraph, Some(Path::new("invalid.txt")))
+            .await
+            .expect_err("invalid explicit template should fail while loading");
+
+        assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[tokio::test]
+    async fn test_should_load_continue_and_loop_prompt_project_overrides() {
+        let project = TempDir::new().expect("project");
+        let prompts = project.path().join("prompts");
+        tokio::fs::create_dir(&prompts).await.expect("prompts");
+        let repository = PromptRepository::new(project.path());
+
+        for kind in [
+            PromptKind::ExtractGraphContinue,
+            PromptKind::ExtractGraphLoop,
+            PromptKind::ExtractClaimsContinue,
+            PromptKind::ExtractClaimsLoop,
+        ] {
+            let content = format!("Custom {} prompt", kind.filename());
+            let path = prompts.join(kind.filename());
+            tokio::fs::write(&path, &content)
+                .await
+                .expect("continue or loop override");
+
+            let template = repository
+                .load(kind, None)
+                .await
+                .expect("continue or loop override should load");
+
+            assert_eq!(template.content(), content);
+            assert_eq!(template.source(), &PromptSource::ProjectOverride(path));
+        }
+    }
+
+    #[test]
+    fn test_should_compile_all_builtin_prompt_templates() {
+        for kind in PromptKind::all() {
+            PromptTemplate::try_new(*kind, kind.default_template(), PromptSource::BuiltIn)
+                .unwrap_or_else(|error| panic!("{} failed to compile: {error}", kind.filename()));
+        }
     }
 }
