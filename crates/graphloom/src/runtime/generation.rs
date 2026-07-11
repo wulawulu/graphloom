@@ -1456,11 +1456,17 @@ mod tests {
         };
         assert!(matches!(
             source.as_ref(),
-            GraphLoomError::UnsafePublicationRoot { .. }
+            GraphLoomError::UnsafePublicationRoot {
+                operation: "move preserved descendant source",
+                ..
+            }
         ));
         assert!(matches!(
             rollback.as_ref(),
-            GraphLoomError::UnsafePublicationRoot { .. }
+            GraphLoomError::UnsafePublicationRoot {
+                operation: "validate rollback backup root",
+                ..
+            }
         ));
     }
 

@@ -218,7 +218,7 @@ pub(crate) async fn reject_descendant_link_components(
     relative: &Path,
     operation: &'static str,
 ) -> Result<()> {
-    validate_publication_directory_root(root, "inspect preserved descendant root").await?;
+    validate_publication_directory_root(root, operation).await?;
 
     let mut current = root.to_path_buf();
     let mut components = relative.components().peekable();
@@ -442,6 +442,7 @@ pub(crate) mod tests {
         component_reaches_queryable_path, paths_overlap, reject_descendant_link_components,
         relative_descendant,
     };
+    use crate::GraphLoomError;
 
     #[tokio::test]
     async fn test_should_accept_normal_descendant_components() {
@@ -468,46 +469,50 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_missing_preserved_descendant_root() {
+    async fn test_should_preserve_operation_when_descendant_root_is_missing() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let root = tempdir.path().join("missing-root");
+        let operation = "test missing preserved source";
 
-        let error =
-            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
-                .await
-                .expect_err("missing root must fail");
+        let error = reject_descendant_link_components(&root, Path::new("lancedb"), operation)
+            .await
+            .expect_err("missing root must fail");
 
-        assert!(
-            error
-                .to_string()
-                .contains("inspect preserved descendant root")
-        );
+        assert!(matches!(
+            error,
+            GraphLoomError::Io {
+                operation: "test missing preserved source",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
-    async fn test_should_reject_non_directory_preserved_descendant_root() {
+    async fn test_should_preserve_operation_when_descendant_root_is_not_directory() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let root = tempdir.path().join("root-file");
+        let operation = "test invalid preserved destination";
         tokio::fs::write(&root, "not a directory")
             .await
             .expect("root file");
 
-        let error =
-            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
-                .await
-                .expect_err("file root must fail");
+        let error = reject_descendant_link_components(&root, Path::new("lancedb"), operation)
+            .await
+            .expect_err("file root must fail");
 
         assert!(error.to_string().contains("not a directory"));
-        assert!(
-            error
-                .to_string()
-                .contains("inspect preserved descendant root")
-        );
+        assert!(matches!(
+            error,
+            GraphLoomError::Io {
+                operation: "test invalid preserved destination",
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_should_reject_symlink_preserved_descendant_root() {
+    async fn test_should_preserve_operation_when_descendant_root_is_symlink() {
         use std::os::unix::fs::symlink;
 
         let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -521,13 +526,26 @@ pub(crate) mod tests {
             .expect("marker");
         symlink(&external, &root).expect("root symlink");
 
-        let error =
-            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
+        for operation in [
+            "move preserved descendant source",
+            "create preserved descendant destination",
+            "restore preserved descendant source",
+            "restore preserved descendant destination",
+        ] {
+            let error = reject_descendant_link_components(&root, Path::new("lancedb"), operation)
                 .await
                 .expect_err("symlink root must fail");
 
-        assert!(error.to_string().contains("symlink or reparse point"));
-        assert!(error.to_string().contains(&root.display().to_string()));
+            let GraphLoomError::UnsafePublicationRoot {
+                operation: actual,
+                path,
+            } = error
+            else {
+                panic!("expected unsafe publication root");
+            };
+            assert_eq!(actual, operation);
+            assert_eq!(path, root);
+        }
         assert_eq!(
             tokio::fs::read_to_string(external.join("lancedb").join("marker"))
                 .await
