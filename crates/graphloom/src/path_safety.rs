@@ -55,10 +55,14 @@ pub(crate) fn is_symlink_or_reparse(metadata: &Metadata) -> bool {
 /// Returns whether metadata identifies a symlink or Windows reparse point.
 #[cfg(windows)]
 pub(crate) fn is_symlink_or_reparse(metadata: &Metadata) -> bool {
+    metadata.file_type().is_symlink() || file_attributes_are_reparse(metadata.file_attributes())
+}
+
+#[cfg(windows)]
+fn file_attributes_are_reparse(attributes: u32) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 /// Returns whether `path` equals or is contained by `parent`.
@@ -195,6 +199,53 @@ pub(crate) async fn reject_symlink_ancestors(path: &Path) -> Result<()> {
             Err(source) => {
                 return Err(GraphLoomError::Io {
                     operation: "check parent symlink",
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject existing symlink or reparse-point components below a controlled root.
+///
+/// Missing components are accepted so callers can validate destinations before creating their
+/// parent directories. Callers must separately enforce that `relative` is a non-empty path made
+/// only of normal components.
+pub(crate) async fn reject_descendant_link_components(
+    root: &Path,
+    relative: &Path,
+    operation: &'static str,
+) -> Result<()> {
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if is_symlink_or_reparse(&metadata) => {
+                return Err(GraphLoomError::UnsafePreservedDescendantPath {
+                    operation,
+                    root: root.to_path_buf(),
+                    descendant: relative.to_path_buf(),
+                    path: current,
+                });
+            }
+            Ok(metadata) if components.peek().is_some() && !metadata.is_dir() => {
+                return Err(GraphLoomError::Io {
+                    operation: "inspect preserved descendant component",
+                    path: current,
+                    source: std::io::Error::new(
+                        ErrorKind::NotADirectory,
+                        "preserved descendant ancestor is not a directory",
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(GraphLoomError::Io {
+                    operation: "inspect preserved descendant component",
                     path: current,
                     source,
                 });
@@ -353,7 +404,53 @@ fn classify_compare_string_ordinal_result(result: i32) -> Option<bool> {
 pub(crate) mod tests {
     use std::path::Path;
 
-    use super::{component_reaches_queryable_path, paths_overlap, relative_descendant};
+    use super::{
+        component_reaches_queryable_path, paths_overlap, reject_descendant_link_components,
+        relative_descendant,
+    };
+
+    #[tokio::test]
+    async fn test_should_accept_normal_descendant_components() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("root");
+        tokio::fs::create_dir_all(root.join("vectors").join("lancedb"))
+            .await
+            .expect("directories");
+
+        reject_descendant_link_components(
+            &root,
+            Path::new("vectors/lancedb"),
+            "test preserved path",
+        )
+        .await
+        .expect("normal components");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_descendant_component() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let external = tempdir.path().join("external");
+        tokio::fs::create_dir_all(&root).await.expect("root");
+        tokio::fs::create_dir_all(external.join("lancedb"))
+            .await
+            .expect("external");
+        symlink(&external, root.join("vectors")).expect("symlink");
+
+        let error = reject_descendant_link_components(
+            &root,
+            Path::new("vectors/lancedb"),
+            "test preserved path",
+        )
+        .await
+        .expect_err("symlink must fail");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert!(error.to_string().contains("vectors/lancedb"));
+    }
 
     #[cfg(not(windows))]
     #[test]
@@ -426,7 +523,7 @@ pub(crate) mod tests {
 
         use super::super::{
             classify_compare_string_ordinal_result, component_reaches_queryable_path,
-            os_str_eq_ignore_case, paths_overlap, relative_descendant,
+            file_attributes_are_reparse, os_str_eq_ignore_case, paths_overlap, relative_descendant,
         };
 
         pub(crate) fn assert_windows_verbatim_path(path: &Path) {
@@ -519,6 +616,13 @@ pub(crate) mod tests {
                 !os_str_eq_ignore_case(OsStr::new("Input-A"), OsStr::new("input-b"))
                     .expect("comparison")
             );
+        }
+
+        #[test]
+        fn test_should_classify_windows_reparse_file_attributes() {
+            assert!(file_attributes_are_reparse(0x400));
+            assert!(file_attributes_are_reparse(0x400 | 0x10));
+            assert!(!file_attributes_are_reparse(0x10));
         }
 
         #[test]

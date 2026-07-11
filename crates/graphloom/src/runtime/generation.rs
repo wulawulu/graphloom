@@ -8,7 +8,11 @@ use std::{
 use uuid::Uuid;
 
 use super::{VectorLocation, io_error, vector_location};
-use crate::{GraphLoomError, Result, path_safety::relative_descendant, project::LoadedProject};
+use crate::{
+    GraphLoomError, Result,
+    path_safety::{reject_descendant_link_components, relative_descendant},
+    project::LoadedProject,
+};
 
 /// Isolated output generation and the publication transaction that owns it.
 #[derive(Debug)]
@@ -123,20 +127,27 @@ impl IndexPublication {
     where
         F: FnMut(usize) -> Result<()>,
     {
-        self.publish_with_hooks(&mut before_publish, |_, _, _| Ok(()), |_, _, _| Ok(()))
-            .await
+        self.publish_with_hooks(
+            &mut before_publish,
+            |_, _, _| Ok(()),
+            |_, _, _| Ok(()),
+            |_, _, _| Ok(()),
+        )
+        .await
     }
 
-    async fn publish_with_hooks<F, G, H>(
+    async fn publish_with_hooks<F, G, H, I>(
         &self,
         mut before_publish: F,
         mut before_preserved_move: G,
         mut before_preserved_restore: H,
+        mut before_backup_restore: I,
     ) -> Result<()>
     where
         F: FnMut(usize) -> Result<()>,
         G: FnMut(usize, &Path, &Path) -> Result<()>,
         H: FnMut(usize, &Path, &Path) -> Result<()>,
+        I: FnMut(usize, &Path, Option<&Path>) -> Result<()>,
     {
         let mut published = Vec::with_capacity(self.targets.len());
         for (index, target) in self.targets.iter().enumerate() {
@@ -150,27 +161,31 @@ impl IndexPublication {
                 }
             };
             if let Err(error) = before_publish(index) {
-                let current_rollback = restore_active_path(&target.live, backup.as_deref()).await;
-                let previous_rollback =
-                    rollback_publication(&published, &mut before_preserved_restore).await;
+                let rollback = rollback_backup_then_previous(
+                    index,
+                    &target.live,
+                    backup.as_deref(),
+                    &published,
+                    &mut before_backup_restore,
+                    &mut before_preserved_restore,
+                )
+                .await;
                 self.cleanup().await;
-                return Err(with_rollback(
-                    "publish index generation",
-                    error,
-                    current_rollback.and(previous_rollback),
-                ));
+                return Err(with_rollback("publish index generation", error, rollback));
             }
             if let Err(source) = tokio::fs::rename(&target.staged, &target.live).await {
                 let error = io_error("publish staged index generation", &target.live, source);
-                let current_rollback = restore_active_path(&target.live, backup.as_deref()).await;
-                let previous_rollback =
-                    rollback_publication(&published, &mut before_preserved_restore).await;
+                let rollback = rollback_backup_then_previous(
+                    index,
+                    &target.live,
+                    backup.as_deref(),
+                    &published,
+                    &mut before_backup_restore,
+                    &mut before_preserved_restore,
+                )
+                .await;
                 self.cleanup().await;
-                return Err(with_rollback(
-                    "publish index generation",
-                    error,
-                    current_rollback.and(previous_rollback),
-                ));
+                return Err(with_rollback("publish index generation", error, rollback));
             }
             let mut current = PublishedTarget {
                 live: target.live.clone(),
@@ -181,15 +196,18 @@ impl IndexPublication {
                 move_preserved_descendants(index, target, &mut current, &mut before_preserved_move)
                     .await
             {
-                let current_rollback =
-                    rollback_target(index, &current, &mut before_preserved_restore).await;
-                let previous_rollback =
-                    rollback_publication(&published, &mut before_preserved_restore).await;
+                let rollback = rollback_published_then_previous(
+                    index,
+                    &current,
+                    &published,
+                    &mut before_preserved_restore,
+                )
+                .await;
                 self.cleanup().await;
                 return Err(with_rollback(
                     "publish preserved index descendants",
                     error,
-                    current_rollback.and(previous_rollback),
+                    rollback,
                 ));
             }
             published.push(current);
@@ -208,6 +226,29 @@ impl IndexPublication {
     }
 }
 
+async fn rollback_backup_then_previous(
+    current_index: usize,
+    live: &Path,
+    backup: Option<&Path>,
+    previous: &[PublishedTarget],
+    before_backup_restore: &mut impl FnMut(usize, &Path, Option<&Path>) -> Result<()>,
+    before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
+) -> Result<()> {
+    before_backup_restore(current_index, live, backup)?;
+    restore_active_path(live, backup).await?;
+    rollback_publication(previous, before_restore).await
+}
+
+async fn rollback_published_then_previous(
+    current_index: usize,
+    current: &PublishedTarget,
+    previous: &[PublishedTarget],
+    before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
+) -> Result<()> {
+    rollback_target(current_index, current, before_restore).await?;
+    rollback_publication(previous, before_restore).await
+}
+
 async fn move_preserved_descendants(
     target_index: usize,
     target: &PublicationTarget,
@@ -219,31 +260,36 @@ async fn move_preserved_descendants(
     };
     for relative in &target.preserved_descendants {
         let source = backup.join(relative);
-        if !tokio::fs::try_exists(&source)
-            .await
-            .map_err(|source_error| io_error("check preserved descendant", &source, source_error))?
-        {
+        reject_descendant_link_components(backup, relative, "move preserved descendant source")
+            .await?;
+        if !path_exists_without_following_links(&source).await? {
             continue;
         }
         let destination = target.live.join(relative);
-        if tokio::fs::try_exists(&destination)
-            .await
-            .map_err(|source_error| {
-                io_error("check preserved destination", &destination, source_error)
-            })?
-        {
+        reject_descendant_link_components(
+            &target.live,
+            relative,
+            "create preserved descendant destination",
+        )
+        .await?;
+        if path_exists_without_following_links(&destination).await? {
             return Err(GraphLoomError::PreservedDescendantConflict { path: destination });
         }
     }
     for relative in &target.preserved_descendants {
         let source = backup.join(relative);
-        if !tokio::fs::try_exists(&source)
-            .await
-            .map_err(|source_error| io_error("check preserved descendant", &source, source_error))?
-        {
+        reject_descendant_link_components(backup, relative, "move preserved descendant source")
+            .await?;
+        if !path_exists_without_following_links(&source).await? {
             continue;
         }
         let destination = target.live.join(relative);
+        reject_descendant_link_components(
+            &target.live,
+            relative,
+            "create preserved descendant destination",
+        )
+        .await?;
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -252,6 +298,19 @@ async fn move_preserved_descendants(
                 })?;
         }
         before_move(target_index, &source, &destination)?;
+        // Rechecking both sides after parent creation and test hooks narrows, but cannot fully
+        // eliminate, filesystem TOCTOU races. Handle-based crash-safe publication is out of scope.
+        reject_descendant_link_components(backup, relative, "move preserved descendant source")
+            .await?;
+        reject_descendant_link_components(
+            &target.live,
+            relative,
+            "create preserved descendant destination",
+        )
+        .await?;
+        if path_exists_without_following_links(&destination).await? {
+            return Err(GraphLoomError::PreservedDescendantConflict { path: destination });
+        }
         tokio::fs::rename(&source, &destination)
             .await
             .map_err(|source_error| GraphLoomError::PreservedDescendantMove {
@@ -263,6 +322,14 @@ async fn move_preserved_descendants(
         published.moved_descendants.push(relative.clone());
     }
     Ok(())
+}
+
+async fn path_exists_without_following_links(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error("inspect preserved descendant path", path, source)),
+    }
 }
 
 fn validate_preserved_descendants(target: &Path, descendants: &[PathBuf]) -> Result<()> {
@@ -369,6 +436,18 @@ async fn restore_preserved_descendants(
         for relative in target.moved_descendants.iter().rev() {
             let source = target.live.join(relative);
             let destination = backup.join(relative);
+            reject_descendant_link_components(
+                &target.live,
+                relative,
+                "restore preserved descendant source",
+            )
+            .await?;
+            reject_descendant_link_components(
+                backup,
+                relative,
+                "restore preserved descendant destination",
+            )
+            .await?;
             if let Some(parent) = destination.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -377,6 +456,20 @@ async fn restore_preserved_descendants(
                     })?;
             }
             before_restore(target_index, &source, &destination)?;
+            // Recheck after creating the destination parent and immediately before rename. This
+            // reduces, but does not eliminate, filesystem TOCTOU races.
+            reject_descendant_link_components(
+                &target.live,
+                relative,
+                "restore preserved descendant source",
+            )
+            .await?;
+            reject_descendant_link_components(
+                backup,
+                relative,
+                "restore preserved descendant destination",
+            )
+            .await?;
             tokio::fs::rename(&source, &destination)
                 .await
                 .map_err(|source_error| GraphLoomError::PreservedDescendantMove {
@@ -605,6 +698,7 @@ mod tests {
                     })
                 },
                 |_, _, _| Ok(()),
+                |_, _, _| Ok(()),
             )
             .await
             .expect_err("preserved move should fail");
@@ -617,6 +711,237 @@ mod tests {
         assert_eq!(read_marker(&live).await, "old-output");
         assert_eq!(read_marker(&live.join("lancedb")).await, "old-vector");
         assert_only_active_directories(tempdir.path(), &["output"]).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_preserved_descendant_with_symlink_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        let external = tempdir.path().join("external");
+        write_marker(&live, "old-output").await;
+        write_marker(&external.join("lancedb"), "external-vector").await;
+        symlink("../external", live.join("vectors")).expect("symlink");
+        write_marker(&staged, "new-output").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace_preserving(
+                    live.clone(),
+                    staged,
+                    vec![PathBuf::from("vectors/lancedb")],
+                )
+                .expect("preserved target"),
+            ],
+        };
+
+        let error = publication
+            .publish()
+            .await
+            .expect_err("linked ancestor must fail");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert_eq!(read_marker(&live).await, "old-output");
+        assert!(
+            tokio::fs::symlink_metadata(live.join("vectors"))
+                .await
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            read_marker(&external.join("lancedb")).await,
+            "external-vector"
+        );
+        assert_only_active_directories(tempdir.path(), &["external", "output"]).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_preserved_descendant_that_is_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        let external = tempdir.path().join("external-lancedb");
+        write_marker(&live, "old-output").await;
+        write_marker(&external, "external-vector").await;
+        symlink("../external-lancedb", live.join("lancedb")).expect("symlink");
+        write_marker(&staged, "new-output").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace_preserving(
+                    live.clone(),
+                    staged,
+                    vec![PathBuf::from("lancedb")],
+                )
+                .expect("preserved target"),
+            ],
+        };
+
+        let error = publication
+            .publish()
+            .await
+            .expect_err("linked descendant must fail");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert_eq!(read_marker(&live).await, "old-output");
+        assert!(
+            tokio::fs::symlink_metadata(live.join("lancedb"))
+                .await
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_marker(&external).await, "external-vector");
+        assert_only_active_directories(tempdir.path(), &["external-lancedb", "output"]).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_stop_rollback_when_preserved_restore_path_becomes_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let backup = tempdir.path().join("output-backup");
+        let external = tempdir.path().join("external-destination");
+        write_marker(&live, "new-output").await;
+        write_marker(&live.join("lancedb"), "old-vector").await;
+        write_marker(&backup, "old-output").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        let target = PublishedTarget {
+            live: live.clone(),
+            backup: Some(backup.clone()),
+            moved_descendants: vec![PathBuf::from("lancedb")],
+        };
+
+        let error = rollback_target(0, &target, &mut |_, _, destination| {
+            symlink(&external, destination).map_err(|source| GraphLoomError::Io {
+                operation: "inject restore destination symlink",
+                path: destination.to_path_buf(),
+                source,
+            })?;
+            Ok(())
+        })
+        .await
+        .expect_err("reverse link validation must fail");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert_eq!(read_marker(&live.join("lancedb")).await, "old-vector");
+        assert_eq!(read_marker(&backup).await, "old-output");
+    }
+
+    #[tokio::test]
+    async fn test_should_stop_previous_target_rollback_when_current_rollback_fails() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let first_live = tempdir.path().join("first-live");
+        let first_backup = tempdir.path().join("first-backup");
+        let second_live = tempdir.path().join("second-live");
+        let second_backup = tempdir.path().join("second-backup");
+        write_marker(&first_live, "first-new").await;
+        write_marker(&first_backup, "first-old").await;
+        write_marker(&second_live, "second-new").await;
+        write_marker(&second_live.join("lancedb"), "second-vector").await;
+        write_marker(&second_backup, "second-old").await;
+        let targets = vec![
+            PublishedTarget {
+                live: first_live.clone(),
+                backup: Some(first_backup.clone()),
+                moved_descendants: Vec::new(),
+            },
+            PublishedTarget {
+                live: second_live.clone(),
+                backup: Some(second_backup.clone()),
+                moved_descendants: vec![PathBuf::from("lancedb")],
+            },
+        ];
+        let mut restore_indices = Vec::new();
+
+        let error = rollback_publication(&targets, &mut |index, _, destination| {
+            restore_indices.push(index);
+            Err(GraphLoomError::Io {
+                operation: "inject current rollback failure",
+                path: destination.to_path_buf(),
+                source: std::io::Error::other("injected current rollback failure"),
+            })
+        })
+        .await
+        .expect_err("current rollback must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected current rollback failure")
+        );
+        assert_eq!(restore_indices, vec![1]);
+        assert_eq!(read_marker(&second_live).await, "second-new");
+        assert_eq!(
+            read_marker(&second_live.join("lancedb")).await,
+            "second-vector"
+        );
+        assert_eq!(read_marker(&second_backup).await, "second-old");
+        assert_eq!(read_marker(&first_live).await, "first-new");
+        assert_eq!(read_marker(&first_backup).await, "first-old");
+    }
+
+    #[tokio::test]
+    async fn test_should_not_rollback_previous_target_when_current_backup_restore_fails() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let first_live = tempdir.path().join("first");
+        let first_staged = tempdir.path().join("first-staged");
+        let second_live = tempdir.path().join("second");
+        let second_staged = tempdir.path().join("second-staged");
+        write_marker(&first_live, "first-old").await;
+        write_marker(&first_staged, "first-new").await;
+        write_marker(&second_live, "second-old").await;
+        write_marker(&second_staged, "second-new").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(first_live.clone(), first_staged),
+                PublicationTarget::replace(second_live.clone(), second_staged),
+            ],
+        };
+
+        let error = publication
+            .publish_with_hooks(
+                |index| {
+                    if index == 1 {
+                        return Err(GraphLoomError::Io {
+                            operation: "inject before publish failure",
+                            path: second_live.clone(),
+                            source: std::io::Error::other("injected before publish failure"),
+                        });
+                    }
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+                |_, _, _| Ok(()),
+                |index, live, _| {
+                    if index == 1 {
+                        return Err(GraphLoomError::Io {
+                            operation: "inject current backup restore failure",
+                            path: live.to_path_buf(),
+                            source: std::io::Error::other(
+                                "injected current backup restore failure",
+                            ),
+                        });
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .expect_err("current restore must fail");
+
+        assert!(matches!(error, GraphLoomError::RollbackFailed { .. }));
+        assert_eq!(read_marker(&first_live).await, "first-new");
+        assert!(find_single_backup(tempdir.path(), "first").await.is_dir());
+        assert!(!second_live.exists());
+        assert!(find_single_backup(tempdir.path(), "second").await.is_dir());
     }
 
     #[tokio::test]
@@ -670,6 +995,7 @@ mod tests {
                     }
                     Ok(())
                 },
+                |_, _, _| Ok(()),
             )
             .await
             .expect_err("rollback must report the preserved restore failure");
@@ -714,7 +1040,9 @@ mod tests {
     }
 
     async fn write_marker(directory: &Path, value: &str) {
-        tokio::fs::create_dir(directory).await.expect("directory");
+        tokio::fs::create_dir_all(directory)
+            .await
+            .expect("directory");
         tokio::fs::write(directory.join("marker"), value)
             .await
             .expect("marker");

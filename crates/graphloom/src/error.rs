@@ -131,6 +131,22 @@ pub enum GraphLoomError {
         source: std::io::Error,
     },
 
+    /// A preserved descendant crosses a symlink or Windows reparse point.
+    #[error(
+        "refusing to {operation} preserved descendant {descendant} under {root} through symlink \
+         or reparse point {path}"
+    )]
+    UnsafePreservedDescendantPath {
+        /// Publication or rollback operation.
+        operation: &'static str,
+        /// Publication root containing the descendant.
+        root: PathBuf,
+        /// Validated relative descendant.
+        descendant: PathBuf,
+        /// Link or reparse-point component that made the path unsafe.
+        path: PathBuf,
+    },
+
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {
