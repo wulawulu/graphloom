@@ -12,7 +12,7 @@ use crate::{
     project::LoadedProject,
     runtime::{
         CacheService, DefaultIndexVectorStoreFactory, DefaultModelFactory, IndexRuntimeIo,
-        IndexRuntimeServices, IndexVectorStoreFactory, ModelFactory,
+        IndexVectorStoreFactory, ModelFactory, PreparedIndexServices,
         model_factory::create_model_registry,
     },
 };
@@ -26,7 +26,7 @@ pub(crate) trait IndexRuntimeFactory: Send + Sync + std::fmt::Debug {
         project_root: &std::path::Path,
         cache_enabled: bool,
         requirements: &IndexWorkflowRequirements,
-    ) -> Result<IndexRuntimeServices>;
+    ) -> Result<PreparedIndexServices>;
 
     fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory>;
 }
@@ -43,14 +43,13 @@ impl IndexRuntimeFactory for DefaultIndexRuntimeFactory {
         project_root: &std::path::Path,
         cache_enabled: bool,
         requirements: &IndexWorkflowRequirements,
-    ) -> Result<IndexRuntimeServices> {
+    ) -> Result<PreparedIndexServices> {
         create_default_services(
             project,
             project_root,
             cache_enabled,
             requirements,
             &DefaultModelFactory,
-            &DefaultIndexVectorStoreFactory,
         )
         .await
     }
@@ -66,8 +65,7 @@ async fn create_default_services(
     cache_enabled: bool,
     requirements: &IndexWorkflowRequirements,
     model_factory: &dyn ModelFactory,
-    vector_store_factory: &dyn IndexVectorStoreFactory,
-) -> Result<IndexRuntimeServices> {
+) -> Result<PreparedIndexServices> {
     let output_table_provider: Arc<dyn TableProvider> =
         Arc::new(ParquetTableProvider::new(&project.paths.output_dir).map_err(runtime_build)?);
     let input_reader: Arc<dyn InputReader> = Arc::new(
@@ -77,8 +75,6 @@ async fn create_default_services(
         )
         .map_err(runtime_build)?,
     );
-    let input_storage: Arc<dyn Storage> =
-        Arc::new(FileStorage::new(&project.paths.input_dir).map_err(runtime_build)?);
     let output_storage: Arc<dyn Storage> =
         Arc::new(FileStorage::new(&project.paths.output_dir).map_err(runtime_build)?);
     let cache = if cache_enabled && project.config.cache.cache_type.eq_ignore_ascii_case("json") {
@@ -88,23 +84,14 @@ async fn create_default_services(
     } else {
         CacheService::Disabled
     };
-    let vector_store = vector_store_factory
-        .create(&project.config.vector_store)
-        .await?;
     let models = create_model_registry(&project.config, requirements, model_factory)?;
 
-    Ok(IndexRuntimeServices::new(
-        IndexRuntimeIo::new(
-            input_reader,
-            input_storage,
-            output_storage,
-            output_table_provider,
-        ),
+    Ok(PreparedIndexServices {
+        io: IndexRuntimeIo::new(input_reader, output_storage, output_table_provider),
         cache,
-        vector_store,
         models,
-        project_root,
-    ))
+        project_root: project_root.to_path_buf(),
+    })
 }
 
 fn runtime_build(source: impl std::error::Error + Send + Sync + 'static) -> GraphLoomError {

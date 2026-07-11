@@ -9,7 +9,7 @@ use crate::{
     api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
     cli::{
         args::{IndexArgs, IndexMethodArg},
-        callbacks::ConsoleWorkflowCallbacks,
+        callbacks::ConsoleIndexWorkflowCallbacks,
         error::{CliError, Result},
     },
     config::load::{
@@ -64,8 +64,8 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
     }
 
     let _log_guard = init_logging(&project.paths.reporting_dir, args.verbose).await?;
-    let callback =
-        Arc::new(ConsoleWorkflowCallbacks::new(args.verbose)) as Arc<dyn IndexWorkflowCallbacks>;
+    let callback = Arc::new(ConsoleIndexWorkflowCallbacks::new(args.verbose))
+        as Arc<dyn IndexWorkflowCallbacks>;
     let project_root = project.root.clone();
     let result = build_validated_index(
         project,

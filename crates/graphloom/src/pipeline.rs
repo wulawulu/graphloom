@@ -16,14 +16,6 @@ pub struct IndexPipelineStep {
     workflow: Arc<dyn IndexWorkflow>,
 }
 
-impl IndexPipelineStep {
-    /// Return the stable workflow name.
-    #[must_use]
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
 /// Compiled GraphRAG indexing pipeline.
 #[derive(Debug, Clone)]
 pub struct IndexPipeline {
@@ -31,13 +23,8 @@ pub struct IndexPipeline {
 }
 
 impl IndexPipeline {
-    /// Return the resolved workflow steps.
-    #[must_use]
-    pub fn steps(&self) -> &[IndexPipelineStep] {
-        &self.workflows
-    }
-
     /// Iterate over workflow names in execution order.
+    #[cfg(test)]
     pub fn workflow_names(&self) -> impl Iterator<Item = &str> {
         self.workflows.iter().map(|step| step.name)
     }
@@ -93,7 +80,7 @@ impl IndexPipeline {
                 Err(source) => {
                     error!(workflow_name = name, event = "failed", error = %source);
                     context.callbacks.error(name, &source.to_string());
-                    return Err(GraphLoomError::WorkflowFailed {
+                    return Err(GraphLoomError::IndexWorkflowFailed {
                         name: name.to_owned(),
                         source: Box::new(source),
                     });
@@ -210,6 +197,6 @@ mod tests {
         let error = IndexPipelineFactory::new(IndexWorkflowRegistry::new())
             .standard(&config)
             .expect_err("unknown workflow must fail");
-        assert!(error.to_string().contains("workflow missing"));
+        assert!(error.to_string().contains("index workflow `missing`"));
     }
 }

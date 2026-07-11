@@ -106,6 +106,7 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
     fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_embedding_model(&config.embed_text.embedding_model_id);
+        requirements.require_vector_store();
         Ok(requirements)
     }
 
@@ -130,7 +131,7 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
             resolve_embedding_encoding_model(config, &config.embed_text.embedding_model_id);
         let tokenizer: Arc<dyn graphloom_llm::Tokenizer> =
             Arc::new(TiktokenTokenizer::new(encoding_model)?);
-        let vector_store = context.vector_store();
+        let vector_store = context.vector_store()?;
         let embedding_cache = context
             .cache()
             .map(|cache| cache.child(&config.embed_text.model_instance_name))

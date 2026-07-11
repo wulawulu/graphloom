@@ -93,6 +93,31 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
 }
 
 #[test]
+fn test_should_compile_yaml_workflow_subset_in_declared_order() {
+    let config = serde_yaml::from_str::<GraphRagConfig>(
+        "workflows:\n  - load_input_documents\n  - create_base_text_units\n",
+    )
+    .expect("workflow subset should deserialize");
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
+
+    let pipeline = IndexPipelineFactory::new(registry)
+        .standard(&config)
+        .expect("workflow subset should compile");
+
+    assert_eq!(
+        pipeline.workflow_names().collect::<Vec<_>>(),
+        vec!["load_input_documents", "create_base_text_units"]
+    );
+    assert!(
+        !pipeline
+            .requirements(&config)
+            .expect("requirements")
+            .requires_vector_store()
+    );
+}
+
+#[test]
 fn test_should_deserialize_graphrag_storage_cache_and_query_sections() {
     let config = serde_yaml::from_str::<GraphRagConfig>(
         r"
@@ -1014,6 +1039,36 @@ async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configur
         .expect_err("missing model should fail");
 
     assert!(error.to_string().contains("embedding model"));
+}
+
+#[tokio::test]
+async fn test_should_fail_embedding_workflow_when_vector_capability_is_disabled() {
+    let provider = Arc::new(MemoryTableProvider::new());
+    let model = Arc::new(CapturingEmbeddingModel::default());
+    let mut context = IndexPipelineContext::for_test(provider)
+        .with_embedding_model("default_embedding_model", model)
+        .expect("embedding model should register");
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
+    let config = GraphRagConfig {
+        workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
+        ..Default::default()
+    };
+    let pipeline = IndexPipelineFactory::new(registry)
+        .standard(&config)
+        .expect("embedding pipeline should build");
+
+    let error = pipeline
+        .run(&config, &mut context)
+        .await
+        .expect_err("disabled vector capability should fail");
+
+    assert!(error.to_string().contains("vector_store"));
+    assert!(matches!(
+        error,
+        crate::GraphLoomError::IndexWorkflowFailed { source, .. }
+            if matches!(*source, crate::GraphLoomError::MissingRuntimeCapability { capability: "vector_store" })
+    ));
 }
 
 #[tokio::test]

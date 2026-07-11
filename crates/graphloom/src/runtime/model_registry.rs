@@ -45,7 +45,8 @@ impl ModelRegistry {
     /// # Errors
     ///
     /// Returns an error when no completion model is registered for `id`.
-    pub fn completion(&self, id: &str) -> Result<Arc<dyn CompletionModel>> {
+    #[cfg(test)]
+    pub(crate) fn completion(&self, id: &str) -> Result<Arc<dyn CompletionModel>> {
         self.completion_for_workflow(id, "model_registry")
     }
 
@@ -54,7 +55,8 @@ impl ModelRegistry {
     /// # Errors
     ///
     /// Returns an error when no embedding model is registered for `id`.
-    pub fn embedding(&self, id: &str) -> Result<Arc<dyn EmbeddingModel>> {
+    #[cfg(test)]
+    pub(crate) fn embedding(&self, id: &str) -> Result<Arc<dyn EmbeddingModel>> {
         self.embedding_for_workflow(id, "model_registry")
     }
 

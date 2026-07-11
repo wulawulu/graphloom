@@ -15,6 +15,7 @@ use crate::{GraphLoomError, GraphRagConfig, IndexPipelineContext, Result};
 pub struct IndexWorkflowRequirements {
     completion_models: BTreeSet<String>,
     embedding_models: BTreeSet<String>,
+    vector_store: bool,
 }
 
 impl IndexWorkflowRequirements {
@@ -42,6 +43,18 @@ impl IndexWorkflowRequirements {
     pub fn merge(&mut self, other: Self) {
         self.completion_models.extend(other.completion_models);
         self.embedding_models.extend(other.embedding_models);
+        self.vector_store |= other.vector_store;
+    }
+
+    /// Require vector storage for this workflow.
+    pub fn require_vector_store(&mut self) {
+        self.vector_store = true;
+    }
+
+    /// Return whether the active indexing pipeline requires vector storage.
+    #[must_use]
+    pub fn requires_vector_store(&self) -> bool {
+        self.vector_store
     }
 }
 
@@ -122,7 +135,7 @@ impl IndexWorkflowRegistry {
         self.workflows
             .get(name)
             .cloned()
-            .ok_or_else(|| GraphLoomError::UnknownWorkflow {
+            .ok_or_else(|| GraphLoomError::UnknownIndexWorkflow {
                 name: name.to_owned(),
             })
     }

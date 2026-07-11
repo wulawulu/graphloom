@@ -138,14 +138,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["reports"]
         );
+        let embedding_requirements = GenerateTextEmbeddingsWorkflow
+            .requirements(&config)
+            .expect("embedding requirements");
         assert_eq!(
-            GenerateTextEmbeddingsWorkflow
-                .requirements(&config)
-                .expect("embedding requirements")
+            embedding_requirements
                 .embedding_models()
                 .collect::<Vec<_>>(),
             vec!["embeddings"]
         );
+        assert!(embedding_requirements.requires_vector_store());
 
         assert!(
             ExtractCovariatesWorkflow

@@ -16,25 +16,28 @@ pub(crate) struct StagedIndexGeneration {
 
 impl StagedIndexGeneration {
     /// Build paths for a new generation without touching the active index.
-    pub(crate) fn new(active: &LoadedProject) -> Result<Self> {
+    pub(crate) fn new(active: &LoadedProject, vector_store_enabled: bool) -> Result<Self> {
         active.paths.validate_destructive_paths()?;
-        active.paths.validate_vector_path_safety()?;
 
         let staged_output = transaction_sibling(&active.paths.output_dir, "staging")?;
-        let vector_location = vector_location(&active.paths)?;
-        let (staged_vector, external_vector) = match vector_location {
-            VectorLocation::InsideOutput => {
-                let relative =
-                    relative_descendant(&active.paths.vector_db_uri, &active.paths.output_dir)?;
-                (staged_output.join(relative), None)
+        let (staged_vector, external_vector) = if vector_store_enabled {
+            active.paths.validate_vector_path_safety()?;
+            match vector_location(&active.paths)? {
+                VectorLocation::InsideOutput => {
+                    let relative =
+                        relative_descendant(&active.paths.vector_db_uri, &active.paths.output_dir)?;
+                    (staged_output.join(relative), None)
+                }
+                VectorLocation::OutsideOutput => {
+                    let staged = transaction_sibling(&active.paths.vector_db_uri, "staging")?;
+                    (
+                        staged.clone(),
+                        Some((active.paths.vector_db_uri.clone(), staged)),
+                    )
+                }
             }
-            VectorLocation::OutsideOutput => {
-                let staged = transaction_sibling(&active.paths.vector_db_uri, "staging")?;
-                (
-                    staged.clone(),
-                    Some((active.paths.vector_db_uri.clone(), staged)),
-                )
-            }
+        } else {
+            (active.paths.vector_db_uri.clone(), None)
         };
 
         let mut config = active.config.clone();

@@ -26,7 +26,7 @@ pub(crate) mod prompts;
 mod runtime;
 mod stats;
 mod workflow;
-pub mod workflows;
+pub(crate) mod workflows;
 
 pub use config::{
     ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig, CacheStorageConfig,
@@ -35,23 +35,24 @@ pub use config::{
     ReportingConfig, SnapshotsConfig, StorageConfig, SummarizeDescriptionsConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
 };
+pub(crate) use context::IndexPipelineContext;
 pub use error::{GraphLoomError, Result};
 pub use graphloom_storage as storage;
 pub use indexing::{
-    IndexPipeline, IndexPipelineContext, IndexPipelineFactory, IndexPipelineStep, IndexRunStats,
-    IndexWorkflow, IndexWorkflowCallbackChain, IndexWorkflowCallbacks, IndexWorkflowOutput,
-    IndexWorkflowRegistry, IndexWorkflowRequirements, ModelRegistry, NoopIndexWorkflowCallbacks,
+    IndexRunStats, IndexWorkflowCallbackChain, IndexWorkflowCallbacks, IndexWorkflowOutput,
+    NoopIndexWorkflowCallbacks,
 };
-pub(crate) use runtime::IndexRuntimeServices;
-pub use workflows::{
-    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITIES_WORKFLOW,
-    CREATE_COMMUNITY_REPORTS_WORKFLOW, CREATE_FINAL_DOCUMENTS_WORKFLOW,
-    CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, LOAD_INPUT_DOCUMENTS_WORKFLOW,
-    register_standard_index_workflows,
+pub(crate) use pipeline::{IndexPipeline, IndexPipelineFactory};
+pub(crate) use runtime::{IndexRuntimeServices, ModelRegistry};
+pub(crate) use workflow::{IndexWorkflow, IndexWorkflowRegistry, IndexWorkflowRequirements};
+pub(crate) use workflows::{
+    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
+    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+    LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows,
 };
 #[cfg(test)]
 pub(crate) use workflows::{
+    CREATE_COMMUNITIES_WORKFLOW, CREATE_FINAL_TEXT_UNITS_WORKFLOW, FINALIZE_GRAPH_WORKFLOW,
     register_step5_workflows, register_step6_workflows, register_step7_workflows,
     register_step8_workflows,
 };

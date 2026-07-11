@@ -82,7 +82,9 @@ pub(crate) async fn build_validated_index(
     let started = Instant::now();
     let cache_enabled = matches!(options.cache_mode, CacheMode::Configured);
     let active_root = project.root.clone();
-    let generation = StagedIndexGeneration::new(&project)?;
+    let pipeline = crate::config::load::build_index_pipeline(&project.config)?;
+    let requirements = pipeline.requirements(&project.config)?;
+    let generation = StagedIndexGeneration::new(&project, requirements.requires_vector_store())?;
     let (staged_project, publication) = generation.into_parts();
     tracing::info!(project_root = %active_root.display(), "preflighting isolated index generation");
     let generation_result = async {

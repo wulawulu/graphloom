@@ -5,20 +5,20 @@ use std::fmt;
 use crate::{IndexRunStats, IndexWorkflowCallbacks};
 
 /// CLI workflow callbacks.
-pub struct ConsoleWorkflowCallbacks {
+pub struct ConsoleIndexWorkflowCallbacks {
     verbose: bool,
 }
 
-impl fmt::Debug for ConsoleWorkflowCallbacks {
+impl fmt::Debug for ConsoleIndexWorkflowCallbacks {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ConsoleWorkflowCallbacks")
+            .debug_struct("ConsoleIndexWorkflowCallbacks")
             .field("verbose", &self.verbose)
             .finish_non_exhaustive()
     }
 }
 
-impl ConsoleWorkflowCallbacks {
+impl ConsoleIndexWorkflowCallbacks {
     /// Create callbacks writing user-visible progress to the console.
     #[must_use]
     pub fn new(verbose: bool) -> Self {
@@ -26,7 +26,7 @@ impl ConsoleWorkflowCallbacks {
     }
 }
 
-impl IndexWorkflowCallbacks for ConsoleWorkflowCallbacks {
+impl IndexWorkflowCallbacks for ConsoleIndexWorkflowCallbacks {
     fn workflow_started(&self, workflow_name: &str) {
         println!("Starting {workflow_name}");
         tracing::info!(workflow = workflow_name, "workflow started");

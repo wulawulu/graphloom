@@ -43,9 +43,9 @@ pub enum GraphLoomError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    /// A workflow name is not registered.
-    #[error("workflow {name} is not registered")]
-    UnknownWorkflow {
+    /// An indexing workflow name is not registered.
+    #[error("index workflow `{name}` is not registered")]
+    UnknownIndexWorkflow {
         /// IndexWorkflow name.
         name: String,
     },
@@ -80,9 +80,9 @@ pub enum GraphLoomError {
         workflow: &'static str,
     },
 
-    /// A workflow failed.
-    #[error("workflow {name} failed: {source}")]
-    WorkflowFailed {
+    /// An indexing workflow failed.
+    #[error("index workflow `{name}` failed: {source}")]
+    IndexWorkflowFailed {
         /// IndexWorkflow name.
         name: String,
         /// Underlying failure.
@@ -90,11 +90,11 @@ pub enum GraphLoomError {
         source: Box<GraphLoomError>,
     },
 
-    /// A required provider is missing.
-    #[error("missing provider: {name}")]
-    MissingProvider {
-        /// Provider name.
-        name: &'static str,
+    /// A workflow requested a runtime capability absent from the active index plan.
+    #[error("runtime capability `{capability}` was not prepared for the active index pipeline")]
+    MissingRuntimeCapability {
+        /// Missing capability name.
+        capability: &'static str,
     },
 
     /// A workflow encountered invalid data.

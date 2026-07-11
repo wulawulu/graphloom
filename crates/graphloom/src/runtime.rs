@@ -15,11 +15,11 @@ use std::{
 
 pub(crate) use factory::{DefaultIndexRuntimeFactory, IndexRuntimeFactory};
 pub(crate) use generation::StagedIndexGeneration;
-use graphloom_storage::{FileStorage, Storage};
 use graphloom_vectors::VectorStore;
 pub use model_factory::{DefaultModelFactory, ModelFactory};
 pub use model_registry::ModelRegistry;
 pub use services::{CacheService, IndexRuntimeIo, IndexRuntimeServices};
+pub(crate) use services::{PreparedIndexServices, VectorStoreService};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 pub(crate) use vector_store_factory::{DefaultIndexVectorStoreFactory, IndexVectorStoreFactory};
@@ -46,10 +46,12 @@ pub struct IndexRuntime {
 /// Providers and pipeline that passed non-destructive runtime preflight.
 #[derive(Debug)]
 pub(crate) struct PreparedIndexRuntime {
-    services: Option<IndexRuntimeServices>,
+    services: Option<PreparedIndexServices>,
+    vector_store: Option<Arc<dyn VectorStore>>,
     callbacks: Arc<dyn IndexWorkflowCallbacks>,
     pipeline: IndexPipeline,
     vector_store_factory: Arc<dyn IndexVectorStoreFactory>,
+    requires_vector_store: bool,
 }
 
 /// Build standard-index providers and pipeline without clearing output or resetting vectors.
@@ -79,9 +81,6 @@ pub(crate) async fn preflight_index_runtime_with_factory(
     callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
     factory: &dyn IndexRuntimeFactory,
 ) -> Result<PreparedIndexRuntime> {
-    validate_managed_vector_schemas(&project.config)?;
-    project.paths.validate_vector_path_safety()?;
-    preflight_writable_paths(&project.paths, cache_enabled).await?;
     let mut registry = IndexWorkflowRegistry::new();
     register_standard_index_workflows(&mut registry)?;
     let pipeline = IndexPipelineFactory::new(registry)
@@ -91,16 +90,34 @@ pub(crate) async fn preflight_index_runtime_with_factory(
         })?;
     let requirements = pipeline.requirements(&project.config)?;
     crate::config::load::validate_required_models(&project.config, &requirements)?;
+    let requires_vector_store = requirements.requires_vector_store();
+    if requires_vector_store {
+        validate_managed_vector_schemas(&project.config)?;
+        project.paths.validate_vector_path_safety()?;
+    }
+    preflight_writable_paths(&project.paths, cache_enabled, requires_vector_store).await?;
+    let vector_store_factory = factory.vector_store_factory();
     let services = factory
         .create_services(project, project_root, cache_enabled, &requirements)
         .await?;
+    let vector_store = if requires_vector_store {
+        Some(
+            vector_store_factory
+                .create(&project.config.vector_store)
+                .await?,
+        )
+    } else {
+        None
+    };
     let callbacks = crate::callbacks::callback_chain(callbacks);
 
     Ok(PreparedIndexRuntime {
         services: Some(services),
+        vector_store,
         callbacks,
         pipeline,
-        vector_store_factory: factory.vector_store_factory(),
+        vector_store_factory,
+        requires_vector_store,
     })
 }
 
@@ -114,45 +131,41 @@ pub(crate) async fn prepare_full_index(
     runtime: &mut PreparedIndexRuntime,
 ) -> Result<()> {
     project.paths.validate_destructive_paths()?;
+    if !runtime.requires_vector_store {
+        return runtime
+            .services()?
+            .io
+            .output_storage
+            .clear()
+            .await
+            .map_err(Into::into);
+    }
     project.paths.validate_vector_path_safety()?;
     match vector_location(&project.paths)? {
         VectorLocation::InsideOutput => {
             let services = runtime.take_services()?;
-            let IndexRuntimeServices {
-                input_reader,
-                input_storage,
-                output_storage,
-                output_table_provider,
-                cache,
-                vector_store,
-                models,
-                project_root,
-            } = services;
+            let vector_store = runtime.take_vector_store()?;
             drop(vector_store);
-            clear_output_dir(&project.paths.output_dir).await?;
+            services.io.output_storage.clear().await?;
             let new_store = runtime
                 .vector_store_factory
                 .create(&project.config.vector_store)
                 .await?;
             reset_managed_indices(new_store.as_ref(), &project.config).await?;
-            runtime.services = Some(IndexRuntimeServices::new(
-                IndexRuntimeIo::new(
-                    input_reader,
-                    input_storage,
-                    output_storage,
-                    output_table_provider,
-                ),
-                cache,
-                new_store,
-                models,
-                project_root,
-            ));
+            runtime.services = Some(services);
+            runtime.vector_store = Some(new_store);
             Ok(())
         }
         VectorLocation::OutsideOutput => {
-            let store = &runtime.services()?.vector_store;
+            let store = runtime.vector_store()?;
             reset_managed_indices(store.as_ref(), &project.config).await?;
-            clear_output_dir(&project.paths.output_dir).await
+            runtime
+                .services()?
+                .io
+                .output_storage
+                .clear()
+                .await
+                .map_err(Into::into)
         }
     }
 }
@@ -165,7 +178,12 @@ impl PreparedIndexRuntime {
     ) -> Result<IndexRuntime> {
         let mut services = self.services.ok_or_else(missing_services)?;
         services.project_root = project_root.to_path_buf();
-        let context = IndexPipelineContext::new(services, self.callbacks);
+        let vector_store = match self.vector_store {
+            Some(store) => VectorStoreService::Enabled(store),
+            None => VectorStoreService::Disabled,
+        };
+        let context =
+            IndexPipelineContext::new(services.into_runtime_services(vector_store), self.callbacks);
 
         Ok(IndexRuntime {
             config,
@@ -174,12 +192,20 @@ impl PreparedIndexRuntime {
         })
     }
 
-    fn services(&self) -> Result<&IndexRuntimeServices> {
+    fn services(&self) -> Result<&PreparedIndexServices> {
         self.services.as_ref().ok_or_else(missing_services)
     }
 
-    fn take_services(&mut self) -> Result<IndexRuntimeServices> {
+    fn take_services(&mut self) -> Result<PreparedIndexServices> {
         self.services.take().ok_or_else(missing_services)
+    }
+
+    fn vector_store(&self) -> Result<&Arc<dyn VectorStore>> {
+        self.vector_store.as_ref().ok_or_else(missing_vector_store)
+    }
+
+    fn take_vector_store(&mut self) -> Result<Arc<dyn VectorStore>> {
+        self.vector_store.take().ok_or_else(missing_vector_store)
     }
 }
 
@@ -215,13 +241,20 @@ fn validate_managed_vector_schemas(config: &GraphRagConfig) -> Result<()> {
     Ok(())
 }
 
-async fn preflight_writable_paths(paths: &ProjectPaths, cache_enabled: bool) -> Result<()> {
+async fn preflight_writable_paths(
+    paths: &ProjectPaths,
+    cache_enabled: bool,
+    vector_store_enabled: bool,
+) -> Result<()> {
     probe_directory_writable(&paths.output_dir, "output").await?;
     probe_directory_writable(&paths.reporting_dir, "logs").await?;
     if cache_enabled {
         probe_directory_writable(&paths.cache_dir, "cache").await?;
     }
-    probe_directory_writable(&paths.vector_db_uri, "vector DB").await
+    if vector_store_enabled {
+        probe_directory_writable(&paths.vector_db_uri, "vector DB").await?;
+    }
+    Ok(())
 }
 
 async fn probe_directory_writable(directory: &Path, label: &'static str) -> Result<()> {
@@ -308,24 +341,20 @@ fn missing_services() -> GraphLoomError {
     }
 }
 
+fn missing_vector_store() -> GraphLoomError {
+    GraphLoomError::RuntimeBuild {
+        source: Box::new(std::io::Error::other(
+            "prepared index runtime requires a vector store but none is attached",
+        )),
+    }
+}
+
 fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> GraphLoomError {
     GraphLoomError::Io {
         operation,
         path: path.to_path_buf(),
         source,
     }
-}
-
-async fn clear_output_dir(path: &Path) -> Result<()> {
-    let storage = FileStorage::new(path).map_err(|source| GraphLoomError::RuntimeBuild {
-        source: Box::new(source),
-    })?;
-    storage
-        .clear()
-        .await
-        .map_err(|source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,15 +380,17 @@ mod runtime_factory_tests {
     use std::{
         pin::Pin,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
 
     use async_trait::async_trait;
     use futures_util::{Stream, stream};
-    use graphloom_input::{DocumentStream, InputReader};
-    use graphloom_storage::{MemoryStorage, MemoryTableProvider};
+    use graphloom_input::{DocumentStream, InputReader, TextDocument};
+    use graphloom_storage::{
+        MemoryStorage, MemoryTableProvider, Result as StorageResult, Storage, TableProvider,
+    };
     use graphloom_vectors::{
         Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore, VectorStoreConfig,
     };
@@ -369,9 +400,9 @@ mod runtime_factory_tests {
         IndexRuntimeFactory, IndexVectorStoreFactory, preflight_index_runtime_with_factory,
     };
     use crate::{
-        GraphRagConfig, IndexWorkflowRequirements, ModelRegistry, Result,
+        GraphLoomError, GraphRagConfig, IndexWorkflowRequirements, ModelRegistry, Result,
         project::LoadedProject,
-        runtime::{CacheService, IndexRuntimeIo, IndexRuntimeServices},
+        runtime::{CacheService, IndexRuntimeIo, PreparedIndexServices},
     };
 
     #[derive(Debug, Default)]
@@ -380,6 +411,17 @@ mod runtime_factory_tests {
     impl InputReader for EmptyInputReader {
         fn read_documents(&self) -> DocumentStream<'_> {
             Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + '_>>
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticInputReader {
+        documents: Vec<TextDocument>,
+    }
+
+    impl InputReader for StaticInputReader {
+        fn read_documents(&self) -> DocumentStream<'_> {
+            Box::pin(stream::iter(self.documents.clone().into_iter().map(Ok)))
         }
     }
 
@@ -431,10 +473,55 @@ mod runtime_factory_tests {
         calls: AtomicUsize,
         table_provider: Arc<MemoryTableProvider>,
         vector_factory: Arc<MemoryVectorStoreFactory>,
+        output_storage: Arc<CountingStorage>,
+        input_reader: Arc<dyn InputReader>,
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingStorage {
+        inner: MemoryStorage,
+        clear_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Storage for CountingStorage {
+        async fn get(&self, name: &str) -> StorageResult<Option<Vec<u8>>> {
+            self.inner.get(name).await
+        }
+        async fn set(&self, name: &str, bytes: &[u8]) -> StorageResult<()> {
+            self.inner.set(name, bytes).await
+        }
+        async fn delete(&self, name: &str) -> StorageResult<()> {
+            self.inner.delete(name).await
+        }
+        async fn clear(&self) -> StorageResult<()> {
+            self.clear_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.clear().await
+        }
+        async fn has(&self, name: &str) -> StorageResult<bool> {
+            self.inner.has(name).await
+        }
+        async fn list(&self, prefix: &str) -> StorageResult<Vec<String>> {
+            self.inner.list(prefix).await
+        }
+        async fn keys(&self) -> StorageResult<Vec<String>> {
+            self.inner.keys().await
+        }
+        async fn find(&self, pattern: &str) -> StorageResult<Vec<String>> {
+            self.inner.find(pattern).await
+        }
+        async fn get_creation_date(&self, name: &str) -> StorageResult<Option<String>> {
+            self.inner.get_creation_date(name).await
+        }
+        fn child(&self, namespace: Option<&str>) -> StorageResult<Arc<dyn Storage>> {
+            self.inner.child(namespace)
+        }
     }
 
     #[derive(Debug, Default)]
     struct MemoryVectorStoreFactory {
+        factory_id: usize,
+        call_factory_ids: Mutex<Vec<usize>>,
         calls: AtomicUsize,
         resets: Arc<AtomicUsize>,
         drops: Arc<AtomicUsize>,
@@ -444,6 +531,10 @@ mod runtime_factory_tests {
     impl IndexVectorStoreFactory for MemoryVectorStoreFactory {
         async fn create(&self, _config: &VectorStoreConfig) -> Result<Arc<dyn VectorStore>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.call_factory_ids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(self.factory_id);
             Ok(Arc::new(EmptyVectorStore {
                 resets: self.resets.clone(),
                 drops: self.drops.clone(),
@@ -459,23 +550,18 @@ mod runtime_factory_tests {
             project_root: &std::path::Path,
             _cache_enabled: bool,
             _requirements: &IndexWorkflowRequirements,
-        ) -> Result<IndexRuntimeServices> {
+        ) -> Result<PreparedIndexServices> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let storage = Arc::new(MemoryStorage::new());
-            Ok(IndexRuntimeServices::new(
-                IndexRuntimeIo::new(
-                    Arc::new(EmptyInputReader),
-                    storage.clone(),
-                    storage,
+            Ok(PreparedIndexServices {
+                io: IndexRuntimeIo::new(
+                    self.input_reader.clone(),
+                    self.output_storage.clone(),
                     self.table_provider.clone(),
                 ),
-                CacheService::Disabled,
-                self.vector_factory
-                    .create(&_project.config.vector_store)
-                    .await?,
-                ModelRegistry::default(),
-                project_root,
-            ))
+                cache: CacheService::Disabled,
+                models: ModelRegistry::default(),
+                project_root: project_root.to_path_buf(),
+            })
         }
 
         fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory> {
@@ -487,9 +573,18 @@ mod runtime_factory_tests {
     async fn test_should_prepare_runtime_entirely_from_injected_factory() {
         let tempdir = TempDir::new().expect("tempdir");
         let mut config = GraphRagConfig {
-            workflows: vec![crate::LOAD_INPUT_DOCUMENTS_WORKFLOW.to_owned()],
+            workflows: vec![crate::GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
             ..Default::default()
         };
+        config.embedding_models.insert(
+            config.embed_text.embedding_model_id.clone(),
+            serde_json::from_value(serde_json::json!({
+                "model_provider": "openai",
+                "model": "embedding-test",
+                "api_key": "test-key"
+            }))
+            .expect("embedding model config"),
+        );
         config.vector_store.db_uri = tempdir
             .path()
             .join("output")
@@ -502,10 +597,14 @@ mod runtime_factory_tests {
             calls: AtomicUsize::new(0),
             table_provider: Arc::new(MemoryTableProvider::new()),
             vector_factory: Arc::new(MemoryVectorStoreFactory {
+                factory_id: 41,
+                call_factory_ids: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
                 resets: Arc::new(AtomicUsize::new(0)),
                 drops: Arc::new(AtomicUsize::new(0)),
             }),
+            output_storage: Arc::new(CountingStorage::default()),
+            input_reader: Arc::new(EmptyInputReader),
         };
 
         let mut prepared = preflight_index_runtime_with_factory(
@@ -526,6 +625,15 @@ mod runtime_factory_tests {
 
         assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.vector_factory.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *factory
+                .vector_factory
+                .call_factory_ids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![41, 41]
+        );
+        assert_eq!(factory.output_storage.clear_calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.vector_factory.drops.load(Ordering::SeqCst), 1);
         assert_eq!(
             factory.vector_factory.resets.load(Ordering::SeqCst),
@@ -546,9 +654,18 @@ mod runtime_factory_tests {
     async fn test_should_reuse_factory_store_when_vector_path_is_outside_output() {
         let tempdir = TempDir::new().expect("tempdir");
         let mut config = GraphRagConfig {
-            workflows: vec![crate::LOAD_INPUT_DOCUMENTS_WORKFLOW.to_owned()],
+            workflows: vec![crate::GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
             ..Default::default()
         };
+        config.embedding_models.insert(
+            config.embed_text.embedding_model_id.clone(),
+            serde_json::from_value(serde_json::json!({
+                "model_provider": "openai",
+                "model": "embedding-test",
+                "api_key": "test-key"
+            }))
+            .expect("embedding model config"),
+        );
         config.vector_store.db_uri = tempdir
             .path()
             .join("vectors")
@@ -557,6 +674,8 @@ mod runtime_factory_tests {
         let project =
             LoadedProject::from_config(tempdir.path(), config).expect("project should load");
         let vector_factory = Arc::new(MemoryVectorStoreFactory {
+            factory_id: 42,
+            call_factory_ids: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             resets: Arc::new(AtomicUsize::new(0)),
             drops: Arc::new(AtomicUsize::new(0)),
@@ -565,6 +684,8 @@ mod runtime_factory_tests {
             calls: AtomicUsize::new(0),
             table_provider: Arc::new(MemoryTableProvider::new()),
             vector_factory: vector_factory.clone(),
+            output_storage: Arc::new(CountingStorage::default()),
+            input_reader: Arc::new(EmptyInputReader),
         };
         let mut prepared = preflight_index_runtime_with_factory(
             &project,
@@ -584,11 +705,102 @@ mod runtime_factory_tests {
             .expect("prepared runtime should convert");
 
         assert_eq!(vector_factory.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.output_storage.clear_calls.load(Ordering::SeqCst), 1);
         assert_eq!(vector_factory.drops.load(Ordering::SeqCst), 0);
         assert_eq!(
             vector_factory.resets.load(Ordering::SeqCst),
             crate::ALL_EMBEDDINGS.len()
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_run_chunk_only_without_vector_capability() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = serde_yaml::from_str::<GraphRagConfig>(
+            "workflows:\n  - load_input_documents\n  - create_base_text_units\n",
+        )
+        .expect("chunk-only YAML should deserialize");
+        config.vector_store.vector_size = 0;
+        config.vector_store.db_uri = "/".to_owned();
+        let project =
+            LoadedProject::from_config(tempdir.path(), config).expect("project should load");
+        let vector_factory = Arc::new(MemoryVectorStoreFactory {
+            factory_id: 43,
+            call_factory_ids: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+            resets: Arc::new(AtomicUsize::new(0)),
+            drops: Arc::new(AtomicUsize::new(0)),
+        });
+        let output_storage = Arc::new(CountingStorage::default());
+        output_storage
+            .set("sentinel", b"old")
+            .await
+            .expect("sentinel should write");
+        let table_provider = Arc::new(MemoryTableProvider::new());
+        let factory = MemoryRuntimeFactory {
+            calls: AtomicUsize::new(0),
+            table_provider: table_provider.clone(),
+            vector_factory: vector_factory.clone(),
+            output_storage: output_storage.clone(),
+            input_reader: Arc::new(StaticInputReader {
+                documents: vec![TextDocument::new(
+                    "doc-1".to_owned(),
+                    "alpha beta gamma".to_owned(),
+                    "doc.txt".to_owned(),
+                    None,
+                    None,
+                )],
+            }),
+        };
+        let mut prepared = preflight_index_runtime_with_factory(
+            &project,
+            tempdir.path(),
+            false,
+            Vec::new(),
+            &factory,
+        )
+        .await
+        .expect("chunk-only runtime should prepare");
+        super::prepare_full_index(&project, &mut prepared)
+            .await
+            .expect("chunk-only output should clear");
+        let mut runtime = prepared
+            .into_runtime(project.config.clone(), tempdir.path())
+            .expect("runtime should assemble");
+        runtime
+            .pipeline
+            .run(&runtime.config, &mut runtime.context)
+            .await
+            .expect("chunk-only pipeline should run");
+
+        assert_eq!(vector_factory.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(vector_factory.resets.load(Ordering::SeqCst), 0);
+        assert_eq!(vector_factory.drops.load(Ordering::SeqCst), 0);
+        assert_eq!(output_storage.clear_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !output_storage
+                .has("sentinel")
+                .await
+                .expect("sentinel lookup")
+        );
+        assert!(
+            table_provider
+                .has("documents")
+                .await
+                .expect("documents lookup")
+        );
+        assert!(
+            table_provider
+                .has("text_units")
+                .await
+                .expect("text units lookup")
+        );
+        assert!(matches!(
+            runtime.context.vector_store(),
+            Err(GraphLoomError::MissingRuntimeCapability {
+                capability: "vector_store"
+            })
+        ));
     }
 }
 

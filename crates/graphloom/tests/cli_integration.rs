@@ -489,7 +489,9 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("workflow extract_graph failed"))
+        .stderr(predicate::str::contains(
+            "index workflow `extract_graph` failed",
+        ))
         .stderr(predicate::str::contains("super-secret-key").not());
 
     let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
@@ -592,7 +594,7 @@ async fn test_should_report_common_preflight_errors_without_resetting_output() {
             CliPreflightCase::OutputAncestorOfLogs,
             "output directory must not overlap logs directory",
         ),
-        (CliPreflightCase::UnknownWorkflow, "not_a_workflow"),
+        (CliPreflightCase::UnknownIndexWorkflow, "not_a_workflow"),
         (CliPreflightCase::MissingClaimsModel, "missing_claim_model"),
         (
             CliPreflightCase::InvalidTokenizer,
@@ -805,7 +807,7 @@ enum CliPreflightCase {
     UnsupportedReportingStorage,
     UnsafeOutputRoot,
     OutputAncestorOfLogs,
-    UnknownWorkflow,
+    UnknownIndexWorkflow,
     MissingClaimsModel,
     InvalidTokenizer,
 }
@@ -1551,7 +1553,7 @@ fn cli_preflight_mutations(case: CliPreflightCase) -> Vec<(Vec<&'static str>, se
             (vec!["output_storage", "base_dir"], string("logs")),
             (vec!["reporting", "base_dir"], string("logs/index")),
         ],
-        CliPreflightCase::UnknownWorkflow => vec![(
+        CliPreflightCase::UnknownIndexWorkflow => vec![(
             vec!["workflows"],
             serde_yaml::Value::Sequence(vec![string("not_a_workflow")]),
         )],

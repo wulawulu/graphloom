@@ -43,12 +43,6 @@ impl IndexPipelineContext {
         Arc::clone(&self.services.input_reader)
     }
 
-    /// Return the prepared input storage.
-    #[must_use]
-    pub fn input_storage(&self) -> &dyn Storage {
-        self.services.input_storage.as_ref()
-    }
-
     /// Return the prepared output storage.
     #[must_use]
     pub fn output_storage(&self) -> &dyn Storage {
@@ -68,9 +62,11 @@ impl IndexPipelineContext {
     }
 
     /// Clone the prepared vector store handle.
-    #[must_use]
-    pub fn vector_store(&self) -> Arc<dyn VectorStore> {
-        Arc::clone(&self.services.vector_store)
+    /// # Errors
+    ///
+    /// Returns an error when the active indexing pipeline did not request vector storage.
+    pub fn vector_store(&self) -> crate::Result<Arc<dyn VectorStore>> {
+        self.services.vector_store.provider()
     }
 
     /// Return the prepared model registry.
@@ -96,19 +92,16 @@ impl IndexPipelineContext {
 mod test_support {
     use std::{pin::Pin, sync::Arc};
 
-    use async_trait::async_trait;
     use futures_util::{Stream, stream};
     use graphloom_input::{DocumentStream, InputReader};
     use graphloom_llm::{CompletionModel, EmbeddingModel};
     use graphloom_storage::{MemoryStorage, TableProvider};
-    use graphloom_vectors::{
-        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore,
-    };
+    use graphloom_vectors::VectorStore;
 
     use super::IndexPipelineContext;
     use crate::{
         ModelRegistry, NoopIndexWorkflowCallbacks,
-        runtime::{CacheService, IndexRuntimeIo, IndexRuntimeServices},
+        runtime::{CacheService, IndexRuntimeIo, IndexRuntimeServices, VectorStoreService},
     };
 
     #[derive(Debug, Default)]
@@ -120,56 +113,13 @@ mod test_support {
         }
     }
 
-    #[derive(Debug, Default)]
-    struct EmptyVectorStore;
-
-    #[async_trait]
-    impl VectorStore for EmptyVectorStore {
-        async fn ensure_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
-            Ok(())
-        }
-
-        async fn reset_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
-            Ok(())
-        }
-
-        async fn upsert_documents(
-            &self,
-            _schema: &VectorIndexSchema,
-            _documents: &[VectorDocument],
-        ) -> VectorResult<()> {
-            Ok(())
-        }
-
-        async fn count(&self, _schema: &VectorIndexSchema) -> VectorResult<usize> {
-            Ok(0)
-        }
-
-        async fn ids(&self, _schema: &VectorIndexSchema) -> VectorResult<Vec<String>> {
-            Ok(Vec::new())
-        }
-
-        async fn get_by_id(
-            &self,
-            _schema: &VectorIndexSchema,
-            _id: &str,
-        ) -> VectorResult<Option<VectorDocument>> {
-            Ok(None)
-        }
-    }
-
     impl IndexPipelineContext {
         pub(crate) fn for_test(output_table_provider: Arc<dyn TableProvider>) -> Self {
             let storage = Arc::new(MemoryStorage::new());
             let services = IndexRuntimeServices::new(
-                IndexRuntimeIo::new(
-                    Arc::new(EmptyInputReader),
-                    storage.clone(),
-                    storage,
-                    output_table_provider,
-                ),
+                IndexRuntimeIo::new(Arc::new(EmptyInputReader), storage, output_table_provider),
                 CacheService::Disabled,
-                Arc::new(EmptyVectorStore),
+                VectorStoreService::Disabled,
                 ModelRegistry::default(),
                 ".",
             );
@@ -208,7 +158,7 @@ mod test_support {
         }
 
         pub(crate) fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {
-            self.services.vector_store = vector_store;
+            self.services.vector_store = VectorStoreService::Enabled(vector_store);
             self
         }
 

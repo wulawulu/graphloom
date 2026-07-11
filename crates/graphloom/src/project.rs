@@ -66,7 +66,6 @@ impl ProjectPaths {
             vector_db_uri,
         };
         paths.validate_destructive_paths()?;
-        paths.validate_vector_path_safety()?;
         Ok(paths)
     }
 
@@ -527,7 +526,9 @@ mod tests {
             &vector.to_string_lossy(),
         );
 
-        let error = ProjectPaths::resolve(tempdir.path(), &config)
+        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
+        let error = paths
+            .validate_vector_path_safety()
             .expect_err("vector overlapping resolved input should fail");
 
         assert!(error.to_string().contains("overlap input"));
@@ -549,7 +550,9 @@ mod tests {
             &vector.to_string_lossy(),
         );
 
-        let error = ProjectPaths::resolve(tempdir.path(), &config)
+        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
+        let error = paths
+            .validate_vector_path_safety()
             .expect_err("vector overlapping resolved cache should fail");
 
         assert!(error.to_string().contains("overlap cache"));
@@ -571,7 +574,9 @@ mod tests {
             &vector.to_string_lossy(),
         );
 
-        let error = ProjectPaths::resolve(tempdir.path(), &config)
+        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
+        let error = paths
+            .validate_vector_path_safety()
             .expect_err("vector overlapping resolved logs should fail");
 
         assert!(error.to_string().contains("overlap logs"));
