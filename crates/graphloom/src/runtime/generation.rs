@@ -836,6 +836,104 @@ mod tests {
         assert_eq!(read_marker(&backup).await, "old-output");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_stop_restore_when_backup_root_becomes_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let backup = tempdir.path().join("output-backup");
+        let backup_original = tempdir.path().join("output-backup-original");
+        let external = tempdir.path().join("external");
+        write_marker(&live, "new-output").await;
+        write_marker(&live.join("lancedb"), "old-vector").await;
+        write_marker(&backup_original, "old-output").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        symlink(&external, &backup).expect("backup root symlink");
+        let target = PublishedTarget {
+            live: live.clone(),
+            backup: Some(backup.clone()),
+            moved_descendants: vec![PathBuf::from("lancedb")],
+        };
+
+        let error = rollback_target(0, &target, &mut |_, _, _| Ok(()))
+            .await
+            .expect_err("linked backup root must stop rollback");
+
+        assert!(matches!(
+            error,
+            GraphLoomError::UnsafePreservedDescendantPath { ref path, .. } if path == &backup
+        ));
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert_eq!(read_marker(&live.join("lancedb")).await, "old-vector");
+        assert_eq!(read_marker(&backup_original).await, "old-output");
+        assert!(
+            tokio::fs::symlink_metadata(&backup)
+                .await
+                .expect("backup symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !tokio::fs::try_exists(external.join("lancedb"))
+                .await
+                .expect("external descendant existence")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_not_rollback_previous_target_after_current_root_safety_failure() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let first_live = tempdir.path().join("first-live");
+        let first_backup = tempdir.path().join("first-backup");
+        let current_live = tempdir.path().join("current-live");
+        let current_backup = tempdir.path().join("current-backup");
+        let external = tempdir.path().join("external");
+        write_marker(&first_live, "first-new").await;
+        write_marker(&first_backup, "first-old").await;
+        write_marker(&current_live, "current-new").await;
+        write_marker(&current_live.join("lancedb"), "current-vector").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        symlink(&external, &current_backup).expect("current backup symlink");
+        let targets = vec![
+            PublishedTarget {
+                live: first_live.clone(),
+                backup: Some(first_backup.clone()),
+                moved_descendants: Vec::new(),
+            },
+            PublishedTarget {
+                live: current_live.clone(),
+                backup: Some(current_backup),
+                moved_descendants: vec![PathBuf::from("lancedb")],
+            },
+        ];
+        let mut restore_indices = Vec::new();
+
+        let error = rollback_publication(&targets, &mut |index, _, _| {
+            restore_indices.push(index);
+            Ok(())
+        })
+        .await
+        .expect_err("current linked root must stop rollback");
+
+        assert!(matches!(
+            error,
+            GraphLoomError::UnsafePreservedDescendantPath { .. }
+        ));
+        assert!(restore_indices.is_empty());
+        assert_eq!(read_marker(&current_live).await, "current-new");
+        assert_eq!(
+            read_marker(&current_live.join("lancedb")).await,
+            "current-vector"
+        );
+        assert_eq!(read_marker(&first_live).await, "first-new");
+        assert_eq!(read_marker(&first_backup).await, "first-old");
+    }
+
     #[tokio::test]
     async fn test_should_stop_previous_target_rollback_when_current_rollback_fails() {
         let tempdir = TempDir::new().expect("tempdir");

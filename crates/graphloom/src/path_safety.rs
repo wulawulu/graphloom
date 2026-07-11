@@ -218,6 +218,8 @@ pub(crate) async fn reject_descendant_link_components(
     relative: &Path,
     operation: &'static str,
 ) -> Result<()> {
+    validate_preserved_descendant_root(root, relative, operation).await?;
+
     let mut current = root.to_path_buf();
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
@@ -251,6 +253,40 @@ pub(crate) async fn reject_descendant_link_components(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+async fn validate_preserved_descendant_root(
+    root: &Path,
+    relative: &Path,
+    operation: &'static str,
+) -> Result<()> {
+    let metadata =
+        tokio::fs::symlink_metadata(root)
+            .await
+            .map_err(|source| GraphLoomError::Io {
+                operation: "inspect preserved descendant root",
+                path: root.to_path_buf(),
+                source,
+            })?;
+    if is_symlink_or_reparse(&metadata) {
+        return Err(GraphLoomError::UnsafePreservedDescendantPath {
+            operation,
+            root: root.to_path_buf(),
+            descendant: relative.to_path_buf(),
+            path: root.to_path_buf(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(GraphLoomError::Io {
+            operation: "inspect preserved descendant root",
+            path: root.to_path_buf(),
+            source: std::io::Error::new(
+                ErrorKind::NotADirectory,
+                "preserved descendant root is not a directory",
+            ),
+        });
     }
     Ok(())
 }
@@ -424,6 +460,83 @@ pub(crate) mod tests {
         )
         .await
         .expect("normal components");
+        reject_descendant_link_components(
+            &root,
+            Path::new("new-parent/lancedb"),
+            "test missing destination",
+        )
+        .await
+        .expect("missing relative components are allowed");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_missing_preserved_descendant_root() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("missing-root");
+
+        let error =
+            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
+                .await
+                .expect_err("missing root must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("inspect preserved descendant root")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_non_directory_preserved_descendant_root() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let root = tempdir.path().join("root-file");
+        tokio::fs::write(&root, "not a directory")
+            .await
+            .expect("root file");
+
+        let error =
+            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
+                .await
+                .expect_err("file root must fail");
+
+        assert!(error.to_string().contains("not a directory"));
+        assert!(
+            error
+                .to_string()
+                .contains("inspect preserved descendant root")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_preserved_descendant_root() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let external = tempdir.path().join("external");
+        let root = tempdir.path().join("root");
+        tokio::fs::create_dir_all(external.join("lancedb"))
+            .await
+            .expect("external");
+        tokio::fs::write(external.join("lancedb").join("marker"), "unchanged")
+            .await
+            .expect("marker");
+        symlink(&external, &root).expect("root symlink");
+
+        let error =
+            reject_descendant_link_components(&root, Path::new("lancedb"), "test preserved root")
+                .await
+                .expect_err("symlink root must fail");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert!(error.to_string().contains(&root.display().to_string()));
+        assert!(error.to_string().contains("lancedb"));
+        assert_eq!(
+            tokio::fs::read_to_string(external.join("lancedb").join("marker"))
+                .await
+                .expect("marker"),
+            "unchanged"
+        );
     }
 
     #[cfg(unix)]
