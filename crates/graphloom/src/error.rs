@@ -147,6 +147,17 @@ pub enum GraphLoomError {
         path: PathBuf,
     },
 
+    /// A publication transaction root is a symlink or Windows reparse point.
+    #[error(
+        "refusing to {operation} because publication root {path} is a symlink or reparse point"
+    )]
+    UnsafePublicationRoot {
+        /// Publication or rollback operation.
+        operation: &'static str,
+        /// Linked publication root.
+        path: PathBuf,
+    },
+
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {

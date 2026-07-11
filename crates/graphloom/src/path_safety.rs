@@ -218,7 +218,7 @@ pub(crate) async fn reject_descendant_link_components(
     relative: &Path,
     operation: &'static str,
 ) -> Result<()> {
-    validate_preserved_descendant_root(root, relative, operation).await?;
+    validate_publication_directory_root(root, "inspect preserved descendant root").await?;
 
     let mut current = root.to_path_buf();
     let mut components = relative.components().peekable();
@@ -257,34 +257,32 @@ pub(crate) async fn reject_descendant_link_components(
     Ok(())
 }
 
-async fn validate_preserved_descendant_root(
+/// Reject a publication root that is missing, linked, or not a directory.
+pub(crate) async fn validate_publication_directory_root(
     root: &Path,
-    relative: &Path,
     operation: &'static str,
 ) -> Result<()> {
     let metadata =
         tokio::fs::symlink_metadata(root)
             .await
             .map_err(|source| GraphLoomError::Io {
-                operation: "inspect preserved descendant root",
+                operation,
                 path: root.to_path_buf(),
                 source,
             })?;
     if is_symlink_or_reparse(&metadata) {
-        return Err(GraphLoomError::UnsafePreservedDescendantPath {
+        return Err(GraphLoomError::UnsafePublicationRoot {
             operation,
-            root: root.to_path_buf(),
-            descendant: relative.to_path_buf(),
             path: root.to_path_buf(),
         });
     }
     if !metadata.is_dir() {
         return Err(GraphLoomError::Io {
-            operation: "inspect preserved descendant root",
+            operation,
             path: root.to_path_buf(),
             source: std::io::Error::new(
                 ErrorKind::NotADirectory,
-                "preserved descendant root is not a directory",
+                "publication root is not a directory",
             ),
         });
     }
@@ -530,7 +528,6 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("symlink or reparse point"));
         assert!(error.to_string().contains(&root.display().to_string()));
-        assert!(error.to_string().contains("lancedb"));
         assert_eq!(
             tokio::fs::read_to_string(external.join("lancedb").join("marker"))
                 .await

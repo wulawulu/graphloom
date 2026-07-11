@@ -10,7 +10,9 @@ use uuid::Uuid;
 use super::{VectorLocation, io_error, vector_location};
 use crate::{
     GraphLoomError, Result,
-    path_safety::{reject_descendant_link_components, relative_descendant},
+    path_safety::{
+        reject_descendant_link_components, relative_descendant, validate_publication_directory_root,
+    },
     project::LoadedProject,
 };
 
@@ -235,6 +237,21 @@ async fn rollback_backup_then_previous(
     before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
 ) -> Result<()> {
     before_backup_restore(current_index, live, backup)?;
+    if let Some(backup) = backup {
+        validate_publication_directory_root(backup, "validate backup-only rollback root").await?;
+    }
+    if path_exists_without_following_links(live).await? {
+        validate_publication_directory_root(live, "validate backup-only rollback live root")
+            .await?;
+        return Err(GraphLoomError::Io {
+            operation: "restore backup-only rollback root",
+            path: live.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "publication live root unexpectedly exists before backup restore",
+            ),
+        });
+    }
     restore_active_path(live, backup).await?;
     rollback_publication(previous, before_restore).await
 }
@@ -422,9 +439,21 @@ async fn rollback_target(
     target: &PublishedTarget,
     before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
 ) -> Result<()> {
+    validate_rollback_roots(target).await?;
     restore_preserved_descendants(target_index, target, before_restore).await?;
+    // Descendant restoration and hooks can race with external root replacement. Revalidate
+    // immediately before destructive removal; this narrows but cannot eliminate TOCTOU races.
+    validate_rollback_roots(target).await?;
     remove_path_if_exists(&target.live).await?;
     restore_active_path(&target.live, target.backup.as_deref()).await
+}
+
+async fn validate_rollback_roots(target: &PublishedTarget) -> Result<()> {
+    validate_publication_directory_root(&target.live, "validate rollback live root").await?;
+    if let Some(backup) = target.backup.as_deref() {
+        validate_publication_directory_root(backup, "validate rollback backup root").await?;
+    }
+    Ok(())
 }
 
 async fn restore_preserved_descendants(
@@ -863,7 +892,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            GraphLoomError::UnsafePreservedDescendantPath { ref path, .. } if path == &backup
+            GraphLoomError::UnsafePublicationRoot { ref path, .. } if path == &backup
         ));
         assert_eq!(read_marker(&live).await, "new-output");
         assert_eq!(read_marker(&live.join("lancedb")).await, "old-vector");
@@ -922,7 +951,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            GraphLoomError::UnsafePreservedDescendantPath { .. }
+            GraphLoomError::UnsafePublicationRoot { .. }
         ));
         assert!(restore_indices.is_empty());
         assert_eq!(read_marker(&current_live).await, "current-new");
@@ -1115,6 +1144,248 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_validate_rollback_roots_without_moved_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let backup = tempdir.path().join("output-backup");
+        let external = tempdir.path().join("external");
+        write_marker(&live, "new-output").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        symlink(&external, &backup).expect("backup symlink");
+        let target = PublishedTarget {
+            live: live.clone(),
+            backup: Some(backup.clone()),
+            moved_descendants: Vec::new(),
+        };
+        let mut hook_called = false;
+
+        let error = rollback_target(0, &target, &mut |_, _, _| {
+            hook_called = true;
+            Ok(())
+        })
+        .await
+        .expect_err("empty descendant rollback must validate roots");
+
+        assert!(matches!(
+            error,
+            GraphLoomError::UnsafePublicationRoot { ref path, .. } if path == &backup
+        ));
+        assert!(!hook_called);
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert!(
+            tokio::fs::symlink_metadata(&backup)
+                .await
+                .expect("backup metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_keep_live_when_backup_root_changes_before_preserved_move() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        let external = tempdir.path().join("external");
+        write_marker(&live, "old-output").await;
+        write_marker(&live.join("lancedb"), "old-vector").await;
+        write_marker(&staged, "new-output").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        let publication = preserving_publication(live.clone(), staged);
+        let mut backup_original = None;
+
+        let error = publication
+            .publish_with_hooks(
+                |_| Ok(()),
+                |_, source, _| {
+                    let backup = source.parent().ok_or_else(|| GraphLoomError::Io {
+                        operation: "locate injected backup root",
+                        path: source.to_path_buf(),
+                        source: std::io::Error::other("preserved source has no parent"),
+                    })?;
+                    let original = backup.with_extension("backup-original");
+                    rename_in_hook(backup, &original, "replace backup root")?;
+                    symlink(&external, backup)
+                        .map_err(|source| io_error("link backup root", backup, source))?;
+                    backup_original = Some(original);
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+                |_, _, _| Ok(()),
+            )
+            .await
+            .expect_err("linked backup root must fail publication and rollback");
+
+        let original = backup_original.expect("hook backup original");
+        assert_unsafe_root_rollback(&error);
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert_eq!(read_marker(&original).await, "old-output");
+        assert_eq!(read_marker(&original.join("lancedb")).await, "old-vector");
+        let backup = original.with_extension("backup");
+        assert!(
+            tokio::fs::symlink_metadata(&backup)
+                .await
+                .expect("backup symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!external.join("lancedb").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_keep_live_when_backup_root_disappears_before_rollback() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        write_marker(&live, "old-output").await;
+        write_marker(&live.join("lancedb"), "old-vector").await;
+        write_marker(&staged, "new-output").await;
+        let publication = preserving_publication(live.clone(), staged);
+        let mut backup_original = None;
+
+        let error = publication
+            .publish_with_hooks(
+                |_| Ok(()),
+                |_, source, _| {
+                    let backup = source.parent().ok_or_else(|| GraphLoomError::Io {
+                        operation: "locate injected backup root",
+                        path: source.to_path_buf(),
+                        source: std::io::Error::other("preserved source has no parent"),
+                    })?;
+                    let original = backup.with_extension("backup-original");
+                    rename_in_hook(backup, &original, "remove backup root")?;
+                    backup_original = Some(original);
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+                |_, _, _| Ok(()),
+            )
+            .await
+            .expect_err("missing backup root must fail publication and rollback");
+
+        let original = backup_original.expect("hook backup original");
+        assert!(matches!(error, GraphLoomError::RollbackFailed { .. }));
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert_eq!(read_marker(&original).await, "old-output");
+        assert_eq!(read_marker(&original.join("lancedb")).await, "old-vector");
+        assert!(!original.with_extension("backup").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_keep_live_when_backup_root_becomes_file_before_rollback() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        write_marker(&live, "old-output").await;
+        write_marker(&live.join("lancedb"), "old-vector").await;
+        write_marker(&staged, "new-output").await;
+        let publication = preserving_publication(live.clone(), staged);
+        let mut backup_original = None;
+
+        let error = publication
+            .publish_with_hooks(
+                |_| Ok(()),
+                |_, source, _| {
+                    let backup = source.parent().ok_or_else(|| GraphLoomError::Io {
+                        operation: "locate injected backup root",
+                        path: source.to_path_buf(),
+                        source: std::io::Error::other("preserved source has no parent"),
+                    })?;
+                    let original = backup.with_extension("backup-original");
+                    rename_in_hook(backup, &original, "replace backup root")?;
+                    write_in_hook(backup, "unsafe replacement", "write backup replacement")?;
+                    backup_original = Some(original);
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+                |_, _, _| Ok(()),
+            )
+            .await
+            .expect_err("file backup root must fail publication and rollback");
+
+        let original = backup_original.expect("hook backup original");
+        assert!(matches!(error, GraphLoomError::RollbackFailed { .. }));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(read_marker(&live).await, "new-output");
+        assert_eq!(read_marker(&original).await, "old-output");
+        assert_eq!(read_marker(&original.join("lancedb")).await, "old-vector");
+        assert!(original.with_extension("backup").is_file());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_not_rollback_previous_target_after_forward_root_failure() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let first_live = tempdir.path().join("first");
+        let first_staged = tempdir.path().join("first-staged");
+        let current_live = tempdir.path().join("output");
+        let current_staged = tempdir.path().join("output-staged");
+        let external = tempdir.path().join("external");
+        write_marker(&first_live, "first-old").await;
+        write_marker(&first_staged, "first-new").await;
+        write_marker(&current_live, "current-old").await;
+        write_marker(&current_live.join("lancedb"), "current-vector").await;
+        write_marker(&current_staged, "current-new").await;
+        tokio::fs::create_dir(&external).await.expect("external");
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(first_live.clone(), first_staged),
+                PublicationTarget::replace_preserving(
+                    current_live.clone(),
+                    current_staged,
+                    vec![PathBuf::from("lancedb")],
+                )
+                .expect("preserved target"),
+            ],
+        };
+        let mut restore_indices = Vec::new();
+
+        let error = publication
+            .publish_with_hooks(
+                |_| Ok(()),
+                |index, source, _| {
+                    if index == 1 {
+                        let backup = source.parent().ok_or_else(|| GraphLoomError::Io {
+                            operation: "locate injected backup root",
+                            path: source.to_path_buf(),
+                            source: std::io::Error::other("preserved source has no parent"),
+                        })?;
+                        let original = backup.with_extension("backup-original");
+                        rename_in_hook(backup, &original, "replace backup root")?;
+                        symlink(&external, backup)
+                            .map_err(|source| io_error("link backup root", backup, source))?;
+                    }
+                    Ok(())
+                },
+                |index, _, _| {
+                    restore_indices.push(index);
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+            )
+            .await
+            .expect_err("current root replacement must stop previous rollback");
+
+        assert_unsafe_root_rollback(&error);
+        assert!(restore_indices.is_empty());
+        assert_eq!(read_marker(&first_live).await, "first-new");
+        assert_eq!(
+            read_marker(&find_single_backup(tempdir.path(), "first").await).await,
+            "first-old"
+        );
+        assert_eq!(read_marker(&current_live).await, "current-new");
+    }
+
     #[test]
     fn test_should_reject_overlapping_or_unsafe_preserved_descendants() {
         let target = PathBuf::from("output");
@@ -1144,6 +1415,53 @@ mod tests {
         tokio::fs::write(directory.join("marker"), value)
             .await
             .expect("marker");
+    }
+
+    fn preserving_publication(live: PathBuf, staged: PathBuf) -> IndexPublication {
+        IndexPublication {
+            targets: vec![
+                PublicationTarget::replace_preserving(live, staged, vec![PathBuf::from("lancedb")])
+                    .expect("preserved target"),
+            ],
+        }
+    }
+
+    fn rename_in_hook(source: &Path, destination: &Path, operation: &'static str) -> Result<()> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::fs::rename(source, destination)
+                    .await
+                    .map_err(|error| io_error(operation, source, error))
+            })
+        })
+    }
+
+    fn write_in_hook(path: &Path, contents: &str, operation: &'static str) -> Result<()> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::fs::write(path, contents)
+                    .await
+                    .map_err(|error| io_error(operation, path, error))
+            })
+        })
+    }
+
+    #[cfg(unix)]
+    fn assert_unsafe_root_rollback(error: &GraphLoomError) {
+        let GraphLoomError::RollbackFailed {
+            source, rollback, ..
+        } = error
+        else {
+            panic!("expected rollback failure, got {error}");
+        };
+        assert!(matches!(
+            source.as_ref(),
+            GraphLoomError::UnsafePublicationRoot { .. }
+        ));
+        assert!(matches!(
+            rollback.as_ref(),
+            GraphLoomError::UnsafePublicationRoot { .. }
+        ));
     }
 
     async fn read_marker(directory: &Path) -> String {
