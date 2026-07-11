@@ -107,6 +107,11 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_embedding_model(&config.embed_text.embedding_model_id);
         requirements.require_vector_store();
+        let model_id = &config.embed_text.embedding_model_id;
+        requirements.require_tokenizer(
+            format!("embedding_models.{model_id}.encoding_model"),
+            crate::config::effective_embedding_encoding(config, model_id),
+        );
         Ok(requirements)
     }
 

@@ -49,6 +49,7 @@ impl IndexWorkflow for ExtractGraphWorkflow {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_completion_model(&config.extract_graph.completion_model_id);
         requirements.require_completion_model(&config.summarize_descriptions.completion_model_id);
+        requirements.require_tokenizer("chunking.encoding_model", &config.chunking.encoding_model);
         Ok(requirements)
     }
 

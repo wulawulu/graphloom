@@ -32,6 +32,11 @@ impl IndexWorkflow for CreateCommunityReportsWorkflow {
     fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_completion_model(&config.community_reports.completion_model_id);
+        let model_id = &config.community_reports.completion_model_id;
+        requirements.require_tokenizer(
+            format!("completion_models.{model_id}.encoding_model"),
+            crate::config::effective_completion_encoding(config, model_id),
+        );
         Ok(requirements)
     }
 

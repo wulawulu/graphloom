@@ -12,10 +12,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphLoomError, GraphRagConfig, IndexWorkflowRegistry,
-    LOAD_INPUT_DOCUMENTS_WORKFLOW, Result,
-    config::{effective_completion_encoding, effective_embedding_encoding},
+    GraphLoomError, GraphRagConfig, IndexWorkflowRegistry, LOAD_INPUT_DOCUMENTS_WORKFLOW, Result,
     project::{LoadedProject, ProjectPaths},
     register_standard_index_workflows,
 };
@@ -300,7 +297,7 @@ async fn validate_optional(project: &LoadedProject) -> Result<()> {
                 message,
             })?;
     }
-    validate_chunking_if_needed(project, &active)?;
+    validate_chunking_requirements(&project.config, &requirements)?;
     for path in project.paths.active_prompt_paths(&project.config, &active) {
         if !tokio::fs::try_exists(&path)
             .await
@@ -383,62 +380,27 @@ fn active_workflows(config: &GraphRagConfig) -> BTreeSet<String> {
     config.workflow_order().into_iter().collect()
 }
 
-fn validate_chunking_if_needed(project: &LoadedProject, active: &BTreeSet<String>) -> Result<()> {
-    let needs_chunking = [
-        CREATE_BASE_TEXT_UNITS_WORKFLOW,
-        EXTRACT_GRAPH_WORKFLOW,
-        CREATE_COMMUNITY_REPORTS_WORKFLOW,
-        GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-    ]
-    .iter()
-    .any(|workflow| active.contains(*workflow));
-    if !needs_chunking {
-        return Ok(());
-    }
-    if project.config.chunking.overlap >= project.config.chunking.size.get() {
+fn validate_chunking_requirements(
+    config: &GraphRagConfig,
+    requirements: &crate::IndexWorkflowRequirements,
+) -> Result<()> {
+    if requirements.requires_chunking_config()
+        && config.chunking.overlap >= config.chunking.size.get()
+    {
         return Err(GraphLoomError::InvalidModel {
             model_id: "chunking".to_owned(),
             message: format!(
                 "overlap {} must be smaller than size {}",
-                project.config.chunking.overlap, project.config.chunking.size,
+                config.chunking.overlap, config.chunking.size,
             ),
         });
     }
-    let mut encodings = BTreeSet::new();
-    if active.contains(CREATE_BASE_TEXT_UNITS_WORKFLOW) || active.contains(EXTRACT_GRAPH_WORKFLOW) {
-        encodings.insert((
-            "chunking.encoding_model".to_owned(),
-            project.config.chunking.encoding_model.as_str(),
-        ));
-    }
-    if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
-        encodings.insert((
-            format!(
-                "completion_models.{}.encoding_model",
-                project.config.community_reports.completion_model_id
-            ),
-            effective_completion_encoding(
-                &project.config,
-                &project.config.community_reports.completion_model_id,
-            ),
-        ));
-    }
-    if active.contains(GENERATE_TEXT_EMBEDDINGS_WORKFLOW) {
-        encodings.insert((
-            format!(
-                "embedding_models.{}.encoding_model",
-                project.config.embed_text.embedding_model_id
-            ),
-            effective_embedding_encoding(
-                &project.config,
-                &project.config.embed_text.embedding_model_id,
-            ),
-        ));
-    }
-    for (model_id, encoding) in encodings {
-        TiktokenTokenizer::new(encoding).map_err(|source| GraphLoomError::InvalidModel {
-            model_id,
-            message: source.to_string(),
+    for requirement in requirements.tokenizer_requirements() {
+        TiktokenTokenizer::new(&requirement.encoding).map_err(|source| {
+            GraphLoomError::InvalidModel {
+                model_id: requirement.source.clone(),
+                message: source.to_string(),
+            }
         })?;
     }
     Ok(())
@@ -925,6 +887,47 @@ embedding_models:
             .expect_err("invalid embedding encoding should fail");
 
         assert!(error.to_string().contains("default_embedding_model"));
+        assert!(error.to_string().contains("definitely-not-an-encoding"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_chunking_only_for_workflows_that_require_it() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.chunking.overlap = project.config.chunking.size.get();
+        project.config.workflows = vec!["create_final_documents".to_owned()];
+        validate_project(&project, false)
+            .await
+            .expect("inactive chunking config should be ignored");
+
+        project.config.workflows = vec!["create_base_text_units".to_owned()];
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("active chunking config should fail");
+        assert!(error.to_string().contains("overlap"));
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_only_active_tokenizer_requirements() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
+            .await
+            .expect("input");
+        project.config.chunking.encoding_model = "definitely-not-an-encoding".to_owned();
+        project.config.workflows = vec!["create_final_documents".to_owned()];
+        validate_project(&project, false)
+            .await
+            .expect("inactive tokenizer should be ignored");
+
+        project.config.workflows = vec!["create_base_text_units".to_owned()];
+        let error = validate_project(&project, false)
+            .await
+            .expect_err("active tokenizer should fail");
+        assert!(error.to_string().contains("chunking.encoding_model"));
         assert!(error.to_string().contains("definitely-not-an-encoding"));
     }
 

@@ -17,6 +17,102 @@ use wiremock::{
 };
 
 #[tokio::test]
+async fn test_should_preserve_inactive_vector_store_inside_output() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    let output = tempdir.path().join("output");
+    tokio::fs::create_dir_all(&input).await.expect("input dir");
+    tokio::fs::create_dir_all(output.join("lancedb"))
+        .await
+        .expect("vector dir");
+    tokio::fs::write(input.join("doc.txt"), "alpha beta gamma")
+        .await
+        .expect("input document");
+    tokio::fs::write(output.join("old-sentinel"), "replace me")
+        .await
+        .expect("output sentinel");
+    tokio::fs::write(output.join("lancedb").join("vector-marker"), "preserve me")
+        .await
+        .expect("vector marker");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec![
+        "load_input_documents".to_owned(),
+        "create_base_text_units".to_owned(),
+    ];
+
+    build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("partial index should succeed");
+
+    let provider = ParquetTableProvider::new(&output).expect("output provider");
+    assert!(provider.has("documents").await.expect("documents table"));
+    assert!(provider.has("text_units").await.expect("text units table"));
+    assert!(
+        !tokio::fs::try_exists(output.join("old-sentinel"))
+            .await
+            .expect("sentinel lookup")
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(output.join("lancedb").join("vector-marker"))
+            .await
+            .expect("vector marker"),
+        "preserve me"
+    );
+    assert_no_generation_residue(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_leave_inactive_external_vector_store_untouched() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    let external_vector = tempdir.path().join("vector-db");
+    tokio::fs::create_dir_all(&input).await.expect("input dir");
+    tokio::fs::create_dir_all(&external_vector)
+        .await
+        .expect("vector dir");
+    tokio::fs::write(input.join("doc.txt"), "alpha beta")
+        .await
+        .expect("input document");
+    tokio::fs::write(external_vector.join("vector-marker"), "unchanged")
+        .await
+        .expect("vector marker");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec![
+        "load_input_documents".to_owned(),
+        "create_base_text_units".to_owned(),
+    ];
+    config.vector_store.db_uri = "vector-db".to_owned();
+
+    build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("partial index should succeed");
+
+    assert_eq!(
+        tokio::fs::read_to_string(external_vector.join("vector-marker"))
+            .await
+            .expect("vector marker"),
+        "unchanged"
+    );
+    assert_no_generation_residue(tempdir.path()).await;
+}
+
+#[tokio::test]
 async fn test_should_build_standard_index_via_public_api() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -40,6 +136,19 @@ async fn test_should_build_standard_index_via_public_api() {
     )
     .await
     .expect("input");
+    tokio::fs::create_dir_all(tempdir.path().join("output").join("lancedb"))
+        .await
+        .expect("old vector dir");
+    tokio::fs::write(
+        tempdir
+            .path()
+            .join("output")
+            .join("lancedb")
+            .join("old-vector-marker"),
+        "old",
+    )
+    .await
+    .expect("old vector marker");
     let mut config = test_config(&server.uri());
     let mut custom_schema = graphloom_vectors::VectorIndexSchema::default();
     custom_schema.index_name = "custom_entity_descriptions".to_owned();
@@ -68,6 +177,17 @@ async fn test_should_build_standard_index_via_public_api() {
     assert_eq!(callbacks.started(), expected_order);
     assert_eq!(callbacks.completed(), expected_order);
     assert_standard_outputs(tempdir.path(), &config).await;
+    assert!(
+        !tokio::fs::try_exists(
+            tempdir
+                .path()
+                .join("output")
+                .join("lancedb")
+                .join("old-vector-marker")
+        )
+        .await
+        .expect("old vector marker lookup")
+    );
     let mut vector_config = config.vector_store;
     vector_config.db_uri = tempdir
         .path()

@@ -16,6 +16,15 @@ pub struct IndexWorkflowRequirements {
     completion_models: BTreeSet<String>,
     embedding_models: BTreeSet<String>,
     vector_store: bool,
+    chunking_config: bool,
+    tokenizer_encodings: BTreeSet<TokenizerRequirement>,
+}
+
+/// One tokenizer encoding required by an active indexing workflow.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TokenizerRequirement {
+    pub(crate) source: String,
+    pub(crate) encoding: String,
 }
 
 impl IndexWorkflowRequirements {
@@ -44,6 +53,8 @@ impl IndexWorkflowRequirements {
         self.completion_models.extend(other.completion_models);
         self.embedding_models.extend(other.embedding_models);
         self.vector_store |= other.vector_store;
+        self.chunking_config |= other.chunking_config;
+        self.tokenizer_encodings.extend(other.tokenizer_encodings);
     }
 
     /// Require vector storage for this workflow.
@@ -55,6 +66,29 @@ impl IndexWorkflowRequirements {
     #[must_use]
     pub fn requires_vector_store(&self) -> bool {
         self.vector_store
+    }
+
+    pub(crate) fn require_chunking_config(&mut self) {
+        self.chunking_config = true;
+    }
+
+    pub(crate) fn requires_chunking_config(&self) -> bool {
+        self.chunking_config
+    }
+
+    pub(crate) fn require_tokenizer(
+        &mut self,
+        source: impl Into<String>,
+        encoding: impl Into<String>,
+    ) {
+        self.tokenizer_encodings.insert(TokenizerRequirement {
+            source: source.into(),
+            encoding: encoding.into(),
+        });
+    }
+
+    pub(crate) fn tokenizer_requirements(&self) -> impl Iterator<Item = &TokenizerRequirement> {
+        self.tokenizer_encodings.iter()
     }
 }
 
@@ -145,7 +179,9 @@ impl IndexWorkflowRegistry {
 mod tests {
     use async_trait::async_trait;
 
-    use super::{IndexWorkflow, IndexWorkflowOutput, IndexWorkflowRegistry};
+    use super::{
+        IndexWorkflow, IndexWorkflowOutput, IndexWorkflowRegistry, IndexWorkflowRequirements,
+    };
     use crate::{GraphRagConfig, IndexPipelineContext, Result};
 
     #[derive(Debug, Clone, Copy)]
@@ -179,5 +215,17 @@ mod tests {
 
         assert!(error.to_string().contains("index workflow `named`"));
         assert!(registry.resolve("named").is_ok());
+    }
+
+    #[test]
+    fn test_should_deduplicate_identical_tokenizer_requirements_when_merging() {
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_tokenizer("chunking.encoding_model", "cl100k_base");
+
+        let mut duplicate = IndexWorkflowRequirements::default();
+        duplicate.require_tokenizer("chunking.encoding_model", "cl100k_base");
+        requirements.merge(duplicate);
+
+        assert_eq!(requirements.tokenizer_requirements().count(), 1);
     }
 }

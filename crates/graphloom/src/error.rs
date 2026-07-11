@@ -97,6 +97,26 @@ pub enum GraphLoomError {
         capability: &'static str,
     },
 
+    /// An inactive managed descendant is unsafe to preserve during publication.
+    #[error("invalid preserved descendant {descendant} for publication target {target}: {message}")]
+    InvalidPreservedDescendant {
+        /// Live publication target.
+        target: PathBuf,
+        /// Relative descendant rejected by validation.
+        descendant: PathBuf,
+        /// Validation failure.
+        message: String,
+    },
+
+    /// Staged output already contains a path reserved for an inactive resource.
+    #[error(
+        "cannot preserve inactive managed descendant because destination {path} already exists"
+    )]
+    PreservedDescendantConflict {
+        /// Conflicting destination path.
+        path: PathBuf,
+    },
+
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {

@@ -109,8 +109,8 @@ pub fn register_standard_index_workflows(registry: &mut IndexWorkflowRegistry) -
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateCommunityReportsWorkflow, ExtractCovariatesWorkflow, ExtractGraphWorkflow,
-        GenerateTextEmbeddingsWorkflow,
+        CreateBaseTextUnitsWorkflow, CreateCommunityReportsWorkflow, ExtractCovariatesWorkflow,
+        ExtractGraphWorkflow, GenerateTextEmbeddingsWorkflow,
     };
     use crate::{GraphRagConfig, IndexWorkflow};
 
@@ -130,13 +130,32 @@ mod tests {
             graph.completion_models().collect::<Vec<_>>(),
             vec!["extract", "summarize"]
         );
+        assert!(!graph.requires_chunking_config());
         assert_eq!(
-            CreateCommunityReportsWorkflow
-                .requirements(&config)
-                .expect("report requirements")
-                .completion_models()
+            graph
+                .tokenizer_requirements()
+                .map(|requirement| requirement.source.as_str())
                 .collect::<Vec<_>>(),
+            vec!["chunking.encoding_model"]
+        );
+        let base = CreateBaseTextUnitsWorkflow
+            .requirements(&config)
+            .expect("base text unit requirements");
+        assert!(base.requires_chunking_config());
+        assert_eq!(base.tokenizer_requirements().count(), 1);
+        let report_requirements = CreateCommunityReportsWorkflow
+            .requirements(&config)
+            .expect("report requirements");
+        assert_eq!(
+            report_requirements.completion_models().collect::<Vec<_>>(),
             vec!["reports"]
+        );
+        assert_eq!(
+            report_requirements
+                .tokenizer_requirements()
+                .map(|requirement| requirement.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["completion_models.reports.encoding_model"]
         );
         let embedding_requirements = GenerateTextEmbeddingsWorkflow
             .requirements(&config)
@@ -148,6 +167,14 @@ mod tests {
             vec!["embeddings"]
         );
         assert!(embedding_requirements.requires_vector_store());
+        assert!(!embedding_requirements.requires_chunking_config());
+        assert_eq!(
+            embedding_requirements
+                .tokenizer_requirements()
+                .map(|requirement| requirement.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["embedding_models.embeddings.encoding_model"]
+        );
 
         assert!(
             ExtractCovariatesWorkflow

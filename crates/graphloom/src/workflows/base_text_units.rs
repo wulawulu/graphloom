@@ -9,7 +9,8 @@ use polars_core::frame::row::Row;
 use serde_json::Value;
 
 use crate::{
-    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput,
+    IndexWorkflowRequirements, Result,
     dataframe::{optional_string_at, string_at, usize_to_i64},
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
@@ -25,6 +26,13 @@ pub struct CreateBaseTextUnitsWorkflow;
 impl IndexWorkflow for CreateBaseTextUnitsWorkflow {
     fn name(&self) -> &'static str {
         CREATE_BASE_TEXT_UNITS_WORKFLOW
+    }
+
+    fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_chunking_config();
+        requirements.require_tokenizer("chunking.encoding_model", &config.chunking.encoding_model);
+        Ok(requirements)
     }
 
     async fn run(

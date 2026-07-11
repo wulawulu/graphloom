@@ -45,16 +45,15 @@ pub use indexing::{
 pub(crate) use pipeline::{IndexPipeline, IndexPipelineFactory};
 pub(crate) use runtime::{IndexRuntimeServices, ModelRegistry};
 pub(crate) use workflow::{IndexWorkflow, IndexWorkflowRegistry, IndexWorkflowRequirements};
-pub(crate) use workflows::{
-    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
-    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-    LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows,
-};
 #[cfg(test)]
 pub(crate) use workflows::{
     CREATE_COMMUNITIES_WORKFLOW, CREATE_FINAL_TEXT_UNITS_WORKFLOW, FINALIZE_GRAPH_WORKFLOW,
-    register_step5_workflows, register_step6_workflows, register_step7_workflows,
-    register_step8_workflows,
+    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, register_step5_workflows, register_step6_workflows,
+    register_step7_workflows, register_step8_workflows,
+};
+pub(crate) use workflows::{
+    CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
+    LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows,
 };
 
 #[cfg(test)]
