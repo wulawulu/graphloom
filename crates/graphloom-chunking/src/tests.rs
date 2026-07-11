@@ -5,7 +5,7 @@ use serde_json::json;
 use super::{
     Chunker, ChunkerType, ChunkingConfig, ChunkingError, SemanticTextChunker, TokenDecode,
     TokenEncode, TokenOverlapChunker, add_metadata, create_chunker, prepend_metadata,
-    unicode_scalar_decode, unicode_scalar_encode,
+    split_text_on_tokens, unicode_scalar_decode, unicode_scalar_encode,
 };
 
 #[test]
@@ -38,12 +38,51 @@ fn test_should_chunk_with_token_overlap_and_graphrag_chunk_fields() {
     assert_eq!(chunks[0].original, "abcd");
     assert_eq!(chunks[0].text, "abcd");
     assert_eq!(chunks[0].index, 0);
-    assert_eq!(chunks[0].start_char, 0);
-    assert_eq!(chunks[0].end_char, 3);
+    assert_eq!(chunks[0].start_char, None);
+    assert_eq!(chunks[0].end_char, None);
+    assert_eq!(chunks[0].start_token, Some(0));
+    assert_eq!(chunks[0].end_token, Some(3));
     assert_eq!(chunks[0].token_count, Some(4));
     assert_eq!(chunks[1].original, "defg");
-    assert_eq!(chunks[1].start_char, 4);
+    assert_eq!(chunks[1].start_char, None);
+    assert_eq!(chunks[1].end_char, None);
+    assert_eq!(chunks[1].start_token, Some(3));
+    assert_eq!(chunks[1].end_token, Some(6));
     assert_eq!(chunks[2].original, "ghi");
+    assert_eq!(chunks[2].start_token, Some(6));
+    assert_eq!(chunks[2].end_token, Some(8));
+}
+
+#[test]
+fn test_should_preserve_public_token_split_text_results() {
+    let chunks = split_text_on_tokens(
+        "abcdefghi",
+        4,
+        1,
+        &unicode_scalar_encode,
+        &unicode_scalar_decode,
+    )
+    .expect("chunking should work");
+
+    assert_eq!(chunks, vec!["abcd", "defg", "ghi"]);
+}
+
+#[test]
+fn test_should_return_no_token_chunks_for_empty_string() {
+    let chunker = TokenOverlapChunker::new(
+        ChunkingConfig::new(NonZeroUsize::new(4).expect("nonzero"), 1, Vec::new())
+            .expect("valid config"),
+        Arc::new(unicode_scalar_encode),
+        Arc::new(unicode_scalar_decode),
+    )
+    .expect("chunker should initialize");
+
+    assert!(
+        chunker
+            .chunk("", None)
+            .expect("chunking should work")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -243,11 +282,15 @@ fn test_should_report_unicode_character_offsets() {
 
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].original, "你好🙂世界\n\n");
-    assert_eq!(chunks[0].start_char, 0);
-    assert_eq!(chunks[0].end_char, 6);
+    assert_eq!(chunks[0].start_char, Some(0));
+    assert_eq!(chunks[0].end_char, Some(6));
+    assert_eq!(chunks[0].start_token, None);
+    assert_eq!(chunks[0].end_token, None);
     assert_eq!(chunks[1].original, "再见🙂世界");
-    assert_eq!(chunks[1].start_char, 7);
-    assert_eq!(chunks[1].end_char, 11);
+    assert_eq!(chunks[1].start_char, Some(7));
+    assert_eq!(chunks[1].end_char, Some(11));
+    assert_eq!(chunks[1].start_token, None);
+    assert_eq!(chunks[1].end_token, None);
 }
 
 #[test]

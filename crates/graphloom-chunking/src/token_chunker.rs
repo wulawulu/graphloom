@@ -46,14 +46,14 @@ impl fmt::Debug for TokenOverlapChunker {
 
 impl Chunker for TokenOverlapChunker {
     fn chunk(&self, text: &str, transform: Option<&TextTransform>) -> Result<Vec<TextChunk>> {
-        let chunks = split_text_on_tokens(
+        let chunks = split_text_on_tokens_with_spans(
             text,
             self.config.size.get(),
             self.config.overlap,
             self.encode.as_ref(),
             self.decode.as_ref(),
         )?;
-        create_chunk_results(&chunks, transform, Some(self.encode.as_ref()))
+        create_chunk_results(&chunks, transform, self.encode.as_ref())
     }
 }
 
@@ -70,6 +70,24 @@ pub fn split_text_on_tokens(
     encode: &TokenEncode,
     decode: &TokenDecode,
 ) -> Result<Vec<String>> {
+    split_text_on_tokens_with_spans(text, chunk_size, chunk_overlap, encode, decode)
+        .map(|chunks| chunks.into_iter().map(|chunk| chunk.text).collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenChunk {
+    text: String,
+    start_token: usize,
+    end_token: usize,
+}
+
+fn split_text_on_tokens_with_spans(
+    text: &str,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    encode: &TokenEncode,
+    decode: &TokenDecode,
+) -> Result<Vec<TokenChunk>> {
     if chunk_overlap >= chunk_size {
         return Err(ChunkingError::InvalidConfig(format!(
             "overlap {chunk_overlap} must be smaller than size {chunk_size}",
@@ -80,46 +98,45 @@ pub fn split_text_on_tokens(
     let mut result = Vec::new();
     let mut start_idx = 0usize;
     let mut cur_idx = start_idx.saturating_add(chunk_size).min(input_tokens.len());
-    let mut chunk_tokens = &input_tokens[start_idx..cur_idx];
 
     while start_idx < input_tokens.len() {
-        result.push(decode(chunk_tokens)?);
+        let chunk_tokens = &input_tokens[start_idx..cur_idx];
+        result.push(TokenChunk {
+            text: decode(chunk_tokens)?,
+            start_token: start_idx,
+            end_token: cur_idx.saturating_sub(1),
+        });
         if cur_idx == input_tokens.len() {
             break;
         }
         start_idx = start_idx.saturating_add(chunk_size.saturating_sub(chunk_overlap));
         cur_idx = start_idx.saturating_add(chunk_size).min(input_tokens.len());
-        chunk_tokens = &input_tokens[start_idx..cur_idx];
     }
 
     Ok(result)
 }
 
 fn create_chunk_results(
-    chunks: &[String],
+    chunks: &[TokenChunk],
     transform: Option<&TextTransform>,
-    encode: Option<&TokenEncode>,
+    encode: &TokenEncode,
 ) -> Result<Vec<TextChunk>> {
     let mut results = Vec::with_capacity(chunks.len());
-    let mut start_char = 0usize;
 
     for (index, chunk) in chunks.iter().enumerate() {
-        let char_len = chunk.chars().count();
-        let end_char = start_char.saturating_add(char_len).saturating_sub(1);
-        let text = transform.map_or_else(|| chunk.clone(), |transform| transform(chunk));
-        let token_count = encode
-            .map(|encode| encode(&text).map(|tokens| tokens.len()))
-            .transpose()?;
+        let text = transform.map_or_else(|| chunk.text.clone(), |transform| transform(&chunk.text));
+        let token_count = encode(&text)?.len();
 
         results.push(TextChunk {
-            original: chunk.clone(),
+            original: chunk.text.clone(),
             text,
             index,
-            start_char,
-            end_char,
-            token_count,
+            start_char: None,
+            end_char: None,
+            start_token: Some(chunk.start_token),
+            end_token: Some(chunk.end_token),
+            token_count: Some(token_count),
         });
-        start_char = end_char.saturating_add(1);
     }
 
     Ok(results)

@@ -12,10 +12,18 @@ pub struct TextChunk {
     pub text: String,
     /// Zero-based index of this chunk within the source document.
     pub index: usize,
-    /// Character index where the raw chunk text begins in the source document.
-    pub start_char: usize,
-    /// Character index where the raw chunk text ends in the source document.
-    pub end_char: usize,
+    /// Inclusive character index where the raw chunk begins, when known.
+    #[serde(default)]
+    pub start_char: Option<usize>,
+    /// Inclusive character index where the raw chunk ends, when known.
+    #[serde(default)]
+    pub end_char: Option<usize>,
+    /// Inclusive token index where the raw chunk begins, when known.
+    #[serde(default)]
+    pub start_token: Option<usize>,
+    /// Inclusive token index where the raw chunk ends, when known.
+    #[serde(default)]
+    pub end_token: Option<usize>,
     /// Number of tokens in the final chunk text, if computed.
     pub token_count: Option<usize>,
 }

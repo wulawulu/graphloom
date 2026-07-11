@@ -48,6 +48,7 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
             .await?;
         let mut rows = Vec::new();
         let mut sample = Vec::new();
+        let mut processed_documents = 0usize;
 
         let mut document_rows = documents.rows();
         while let Some(document) = document_rows.next().await {
@@ -74,9 +75,10 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
                     &mut sample,
                 )?;
             }
+            processed_documents = processed_documents.saturating_add(1);
             context.callbacks.progress(
                 CREATE_BASE_TEXT_UNITS_WORKFLOW,
-                rows.len(),
+                processed_documents,
                 Some(input_rows),
             );
         }
@@ -104,7 +106,7 @@ fn append_document_chunks(
     sample: &mut Vec<Value>,
 ) -> Result<()> {
     for chunk in chunker.chunk(&document.text, transform)? {
-        let n_tokens = tokenizer.count(&chunk.text)?;
+        let n_tokens = resolve_chunk_token_count(chunk.token_count, &chunk.text, tokenizer)?;
         let row = TextUnitRow {
             id: gen_sha512_hash([chunk.text.as_str()]),
             human_readable_id: usize_to_i64(
@@ -127,6 +129,14 @@ fn append_document_chunks(
     Ok(())
 }
 
+fn resolve_chunk_token_count(
+    token_count: Option<usize>,
+    text: &str,
+    tokenizer: &dyn Tokenizer,
+) -> Result<usize> {
+    token_count.map_or_else(|| tokenizer.count(text).map_err(Into::into), Ok)
+}
+
 fn metadata_transform(document: &TextDocument, prepend_metadata: &[String]) -> MetadataTransform {
     add_metadata(&document.collect(prepend_metadata), ": ", ".\n", false)
 }
@@ -141,4 +151,136 @@ fn document_from_row(row: &Row<'static>) -> Result<TextDocument> {
             .map(|raw| serde_json::from_str(&raw))
             .transpose()?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        num::NonZeroUsize,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use graphloom_chunking::ChunkingConfig;
+    use graphloom_llm::{LlmError, Result as LlmResult};
+    use graphloom_storage::{MemoryTableProvider, TableProvider};
+
+    use super::*;
+    use crate::{
+        WorkflowCallbacks,
+        workflows::input_documents::{DocumentRow, documents_dataframe},
+    };
+
+    #[derive(Debug, Default)]
+    struct CountingTokenizer {
+        calls: AtomicUsize,
+    }
+
+    impl Tokenizer for CountingTokenizer {
+        fn encode(&self, _text: &str) -> LlmResult<Vec<u32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![1, 2, 3])
+        }
+
+        fn decode(&self, _tokens: &[u32]) -> LlmResult<String> {
+            Err(LlmError::Tokenizer {
+                encoding_model: "test".to_owned(),
+                message: "decode is not used in this test".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn test_should_reuse_chunk_token_count_without_calling_tokenizer() {
+        let tokenizer = CountingTokenizer::default();
+
+        assert_eq!(
+            resolve_chunk_token_count(Some(7), "text", &tokenizer).expect("count"),
+            7
+        );
+        assert_eq!(tokenizer.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_should_fallback_to_tokenizer_when_chunk_count_is_missing() {
+        let tokenizer = CountingTokenizer::default();
+
+        assert_eq!(
+            resolve_chunk_token_count(None, "text", &tokenizer).expect("count"),
+            3
+        );
+        assert_eq!(tokenizer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Debug, Default)]
+    struct ProgressCallbacks {
+        calls: Mutex<Vec<(usize, Option<usize>)>>,
+    }
+
+    impl WorkflowCallbacks for ProgressCallbacks {
+        fn progress(&self, workflow_name: &str, completed: usize, total: Option<usize>) {
+            if workflow_name == CREATE_BASE_TEXT_UNITS_WORKFLOW {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((completed, total));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_report_progress_once_per_document() {
+        let provider = Arc::new(MemoryTableProvider::new());
+        let documents = vec![
+            DocumentRow {
+                id: "doc-1".to_owned(),
+                human_readable_id: 0,
+                title: None,
+                text: "alpha beta gamma delta".to_owned(),
+                text_unit_ids: Vec::new(),
+                creation_date: None,
+                raw_data: None,
+            },
+            DocumentRow {
+                id: "doc-2".to_owned(),
+                human_readable_id: 1,
+                title: None,
+                text: "xy".to_owned(),
+                text_unit_ids: Vec::new(),
+                creation_date: None,
+                raw_data: None,
+            },
+        ];
+        provider
+            .write_dataframe(
+                "documents",
+                documents_dataframe(&documents).expect("documents dataframe"),
+            )
+            .await
+            .expect("documents should write");
+        let callbacks = Arc::new(ProgressCallbacks::default());
+        let mut context = PipelineRunContext::new(provider).with_callbacks(callbacks.clone());
+        let config = GraphRagConfig {
+            chunking: ChunkingConfig::new(NonZeroUsize::new(1).expect("nonzero"), 0, Vec::new())
+                .expect("valid chunking config"),
+            ..Default::default()
+        };
+
+        let output = CreateBaseTextUnitsWorkflow
+            .run(&config, &mut context)
+            .await
+            .expect("workflow should run");
+
+        assert!(output.output_rows > documents.len());
+        assert_eq!(context.stats.text_unit_count, output.output_rows);
+        assert_eq!(
+            *callbacks
+                .calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![(1, Some(2)), (2, Some(2))]
+        );
+    }
 }

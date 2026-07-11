@@ -72,8 +72,10 @@ impl Chunker for SemanticTextChunker {
                     original,
                     text: text.clone(),
                     index,
-                    start_char: chunk.char_offset,
-                    end_char,
+                    start_char: Some(chunk.char_offset),
+                    end_char: Some(end_char),
+                    start_token: None,
+                    end_token: None,
                     token_count: Some(self.tokenizer.count(&text)),
                 })
             })
