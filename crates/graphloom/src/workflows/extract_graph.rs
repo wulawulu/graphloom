@@ -51,22 +51,18 @@ impl Workflow for ExtractGraphWorkflow {
     ) -> Result<WorkflowFunctionOutput> {
         let text_units = read_text_units(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("text_units")
                 .await?,
         )?;
         let extractor = resolve_completion_model(
-            config,
             context,
             &config.extract_graph.completion_model_id,
-            &config.extract_graph.model_instance_name,
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let summarizer = resolve_completion_model(
-            config,
             context,
             &config.summarize_descriptions.completion_model_id,
-            &config.summarize_descriptions.model_instance_name,
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
@@ -273,14 +269,14 @@ async fn write_graph_tables(
     summarized: &SummarizedGraph,
 ) -> Result<()> {
     context
-        .output_table_provider
+        .output_table_provider()
         .write_dataframe(
             "entities",
             entity_intermediate_dataframe(&summarized.entities)?,
         )
         .await?;
     context
-        .output_table_provider
+        .output_table_provider()
         .write_dataframe(
             "relationships",
             relationship_intermediate_dataframe(&summarized.relationships)?,
@@ -289,11 +285,11 @@ async fn write_graph_tables(
 
     if config.snapshots.raw_graph {
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("raw_entities", raw_entity_dataframe(&graph.entities)?)
             .await?;
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe(
                 "raw_relationships",
                 raw_relationship_dataframe(&graph.relationships)?,

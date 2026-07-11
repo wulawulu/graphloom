@@ -1,6 +1,10 @@
 //! Runtime assembly for standard indexing.
 
+mod factory;
 mod generation;
+mod model_factory;
+mod model_registry;
+mod services;
 
 use std::{
     io::ErrorKind,
@@ -8,11 +12,13 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) use factory::{DefaultIndexRuntimeFactory, IndexRuntimeFactory};
 pub(crate) use generation::StagedIndexGeneration;
-use graphloom_cache::JsonCache;
-use graphloom_input::{FileInputReader, InputReader};
-use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
+use graphloom_storage::{FileStorage, Storage};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
+pub use model_factory::{DefaultModelFactory, ModelFactory};
+pub use model_registry::ModelRegistry;
+pub use services::{CacheService, IndexRuntimeIo, IndexRuntimeServices};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -38,12 +44,7 @@ pub struct IndexRuntime {
 /// Providers and pipeline that passed non-destructive runtime preflight.
 #[derive(Debug)]
 pub(crate) struct PreparedIndexRuntime {
-    input_reader: Arc<dyn InputReader>,
-    input_storage: Arc<dyn Storage>,
-    output_provider: Arc<dyn TableProvider>,
-    output_storage: Arc<dyn Storage>,
-    cache: Option<Arc<dyn graphloom_cache::Cache>>,
-    vector_store: Option<Arc<dyn VectorStore>>,
+    services: Option<IndexRuntimeServices>,
     callbacks: Arc<dyn WorkflowCallbacks>,
     pipeline: Pipeline,
 }
@@ -58,55 +59,29 @@ pub(crate) async fn preflight_index_runtime(
     cache_enabled: bool,
     callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
 ) -> Result<PreparedIndexRuntime> {
+    preflight_index_runtime_with_factory(
+        project,
+        &project.root,
+        cache_enabled,
+        callbacks,
+        &DefaultIndexRuntimeFactory,
+    )
+    .await
+}
+
+pub(crate) async fn preflight_index_runtime_with_factory(
+    project: &LoadedProject,
+    project_root: &Path,
+    cache_enabled: bool,
+    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
+    factory: &dyn IndexRuntimeFactory,
+) -> Result<PreparedIndexRuntime> {
     validate_managed_vector_schemas(&project.config)?;
     project.paths.validate_vector_path_safety()?;
     preflight_writable_paths(&project.paths, cache_enabled).await?;
-    let output_provider = Arc::new(
-        ParquetTableProvider::new(&project.paths.output_dir).map_err(|source| {
-            GraphLoomError::RuntimeBuild {
-                source: Box::new(source),
-            }
-        })?,
-    );
-    let input_reader = Arc::new(
-        FileInputReader::with_file_pattern(
-            &project.paths.input_dir,
-            &project.config.input.file_pattern,
-        )
-        .map_err(|source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        })?,
-    );
-    let input_storage = Arc::new(
-        FileStorage::new(&project.paths.input_dir).map_err(|source| {
-            GraphLoomError::RuntimeBuild {
-                source: Box::new(source),
-            }
-        })?,
-    );
-    let output_storage = Arc::new(FileStorage::new(&project.paths.output_dir).map_err(
-        |source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        },
-    )?);
-    let cache =
-        if cache_enabled && project.config.cache.cache_type.eq_ignore_ascii_case("json") {
-            let storage = Arc::new(FileStorage::new(&project.paths.cache_dir).map_err(
-                |source| GraphLoomError::RuntimeBuild {
-                    source: Box::new(source),
-                },
-            )?);
-            Some(Arc::new(JsonCache::new(storage)) as Arc<dyn graphloom_cache::Cache>)
-        } else {
-            None
-        };
-    let vector_store = Arc::new(
-        LanceDbVectorStore::connect(&project.config.vector_store)
-            .await
-            .map_err(|source| GraphLoomError::RuntimeBuild {
-                source: Box::new(source),
-            })?,
-    );
+    let services = factory
+        .create_services(project, project_root, cache_enabled)
+        .await?;
     let callbacks = crate::callbacks::callback_chain(callbacks);
 
     let mut registry = WorkflowRegistry::new();
@@ -118,12 +93,7 @@ pub(crate) async fn preflight_index_runtime(
         })?;
 
     Ok(PreparedIndexRuntime {
-        input_reader,
-        input_storage,
-        output_provider,
-        output_storage,
-        cache,
-        vector_store: Some(vector_store),
+        services: Some(services),
         callbacks,
         pipeline,
     })
@@ -142,16 +112,37 @@ pub(crate) async fn prepare_full_index(
     project.paths.validate_vector_path_safety()?;
     match vector_location(&project.paths)? {
         VectorLocation::InsideOutput => {
-            let old_store = runtime.take_vector_store()?;
-            drop(old_store);
+            let services = runtime.take_services()?;
+            let IndexRuntimeServices {
+                input_reader,
+                input_storage,
+                output_storage,
+                output_table_provider,
+                cache,
+                vector_store,
+                models,
+                project_root,
+            } = services;
+            drop(vector_store);
             clear_output_dir(&project.paths.output_dir).await?;
             let new_store = connect_vector_store(&project.config).await?;
             reset_managed_indices(new_store.as_ref(), &project.config).await?;
-            runtime.vector_store = Some(new_store);
+            runtime.services = Some(IndexRuntimeServices::new(
+                IndexRuntimeIo::new(
+                    input_reader,
+                    input_storage,
+                    output_storage,
+                    output_table_provider,
+                ),
+                cache,
+                new_store,
+                models,
+                project_root,
+            ));
             Ok(())
         }
         VectorLocation::OutsideOutput => {
-            let store = runtime.vector_store()?;
+            let store = &runtime.services()?.vector_store;
             reset_managed_indices(store.as_ref(), &project.config).await?;
             clear_output_dir(&project.paths.output_dir).await
         }
@@ -164,15 +155,9 @@ impl PreparedIndexRuntime {
         config: GraphRagConfig,
         project_root: &Path,
     ) -> Result<IndexRuntime> {
-        let vector_store = self.vector_store.ok_or_else(missing_vector_store)?;
-        let mut context = PipelineRunContext::new(self.output_provider)
-            .with_input_reader(self.input_reader)
-            .with_vector_store(vector_store)
-            .with_callbacks(self.callbacks)
-            .with_project_root(project_root);
-        context.input_storage = Some(self.input_storage);
-        context.output_storage = Some(self.output_storage);
-        context.cache = self.cache;
+        let mut services = self.services.ok_or_else(missing_services)?;
+        services.project_root = project_root.to_path_buf();
+        let context = PipelineRunContext::new(services, self.callbacks);
 
         Ok(IndexRuntime {
             config,
@@ -181,12 +166,12 @@ impl PreparedIndexRuntime {
         })
     }
 
-    fn vector_store(&self) -> Result<&Arc<dyn VectorStore>> {
-        self.vector_store.as_ref().ok_or_else(missing_vector_store)
+    fn services(&self) -> Result<&IndexRuntimeServices> {
+        self.services.as_ref().ok_or_else(missing_services)
     }
 
-    fn take_vector_store(&mut self) -> Result<Arc<dyn VectorStore>> {
-        self.vector_store.take().ok_or_else(missing_vector_store)
+    fn take_services(&mut self) -> Result<IndexRuntimeServices> {
+        self.services.take().ok_or_else(missing_services)
     }
 }
 
@@ -317,10 +302,10 @@ async fn existing_ancestor(path: &Path, label: &'static str) -> Result<PathBuf> 
     })
 }
 
-fn missing_vector_store() -> GraphLoomError {
+fn missing_services() -> GraphLoomError {
     GraphLoomError::RuntimeBuild {
         source: Box::new(std::io::Error::other(
-            "preflight vector store is missing from prepared runtime",
+            "preflight services are missing from prepared runtime",
         )),
     }
 }
@@ -361,6 +346,140 @@ fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
             VectorLocation::OutsideOutput
         },
     )
+}
+
+#[cfg(test)]
+mod runtime_factory_tests {
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use futures_util::{Stream, stream};
+    use graphloom_input::{DocumentStream, InputReader};
+    use graphloom_storage::{MemoryStorage, MemoryTableProvider};
+    use graphloom_vectors::{
+        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore,
+    };
+    use tempfile::TempDir;
+
+    use super::{IndexRuntimeFactory, preflight_index_runtime_with_factory};
+    use crate::{
+        CacheService, GraphRagConfig, IndexRuntimeIo, IndexRuntimeServices, ModelRegistry, Result,
+        project::LoadedProject,
+    };
+
+    #[derive(Debug, Default)]
+    struct EmptyInputReader;
+
+    impl InputReader for EmptyInputReader {
+        fn read_documents(&self) -> DocumentStream<'_> {
+            Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + '_>>
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct EmptyVectorStore;
+
+    #[async_trait]
+    impl VectorStore for EmptyVectorStore {
+        async fn ensure_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
+            Ok(())
+        }
+        async fn reset_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
+            Ok(())
+        }
+        async fn upsert_documents(
+            &self,
+            _schema: &VectorIndexSchema,
+            _documents: &[VectorDocument],
+        ) -> VectorResult<()> {
+            Ok(())
+        }
+        async fn count(&self, _schema: &VectorIndexSchema) -> VectorResult<usize> {
+            Ok(0)
+        }
+        async fn ids(&self, _schema: &VectorIndexSchema) -> VectorResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn get_by_id(
+            &self,
+            _schema: &VectorIndexSchema,
+            _id: &str,
+        ) -> VectorResult<Option<VectorDocument>> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Debug)]
+    struct MemoryRuntimeFactory {
+        calls: AtomicUsize,
+        table_provider: Arc<MemoryTableProvider>,
+    }
+
+    #[async_trait]
+    impl IndexRuntimeFactory for MemoryRuntimeFactory {
+        async fn create_services(
+            &self,
+            _project: &LoadedProject,
+            project_root: &std::path::Path,
+            _cache_enabled: bool,
+        ) -> Result<IndexRuntimeServices> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let storage = Arc::new(MemoryStorage::new());
+            Ok(IndexRuntimeServices::new(
+                IndexRuntimeIo::new(
+                    Arc::new(EmptyInputReader),
+                    storage.clone(),
+                    storage,
+                    self.table_provider.clone(),
+                ),
+                CacheService::Disabled,
+                Arc::new(EmptyVectorStore),
+                ModelRegistry::default(),
+                project_root,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_prepare_runtime_entirely_from_injected_factory() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let project = LoadedProject::from_config(tempdir.path(), GraphRagConfig::default())
+            .expect("project should load");
+        let factory = MemoryRuntimeFactory {
+            calls: AtomicUsize::new(0),
+            table_provider: Arc::new(MemoryTableProvider::new()),
+        };
+
+        let prepared = preflight_index_runtime_with_factory(
+            &project,
+            tempdir.path(),
+            false,
+            Vec::new(),
+            &factory,
+        )
+        .await
+        .expect("runtime should prepare");
+        let runtime = prepared
+            .into_runtime(project.config.clone(), tempdir.path())
+            .expect("prepared runtime should convert");
+
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.context.project_root(), tempdir.path());
+        assert!(
+            !runtime
+                .context
+                .output_table_provider()
+                .has("documents")
+                .await
+                .expect("table lookup")
+        );
+    }
 }
 
 #[cfg(all(test, windows))]

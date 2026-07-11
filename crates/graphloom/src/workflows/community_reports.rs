@@ -35,28 +35,28 @@ impl Workflow for CreateCommunityReportsWorkflow {
     ) -> Result<WorkflowFunctionOutput> {
         let entities = read_entity_context_rows(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("entities")
                 .await?,
         )?;
         let relationships = read_relationship_context_rows(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("relationships")
                 .await?,
         )?;
         let communities = read_community_input_rows(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("communities")
                 .await?,
         )?;
         let claims = if config.extract_claims.enabled
-            && context.output_table_provider.has("covariates").await?
+            && context.output_table_provider().has("covariates").await?
         {
             read_claim_context_rows(
                 &context
-                    .output_table_provider
+                    .output_table_provider()
                     .read_dataframe("covariates")
                     .await?,
             )?
@@ -65,10 +65,8 @@ impl Workflow for CreateCommunityReportsWorkflow {
         };
 
         let model = resolve_completion_model(
-            config,
             context,
             &config.community_reports.completion_model_id,
-            &config.community_reports.model_instance_name,
             CREATE_COMMUNITY_REPORTS_WORKFLOW,
         )?;
         let encoding_model = resolve_completion_encoding_model(
@@ -111,7 +109,7 @@ impl Workflow for CreateCommunityReportsWorkflow {
         .await?;
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("community_reports", community_reports_dataframe(&rows)?)
             .await?;
         context.stats.report_count = rows.len();

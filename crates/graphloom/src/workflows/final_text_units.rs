@@ -33,30 +33,30 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
     ) -> Result<WorkflowFunctionOutput> {
         let text_units = read_text_units(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("text_units")
                 .await?,
         )?;
         let entity_map = build_multi_ref_map(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("entities")
                 .await?,
             "entity",
         )?;
         let relationship_map = build_multi_ref_map(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("relationships")
                 .await?,
             "relationship",
         )?;
         let covariate_map = if config.extract_claims.enabled
-            && context.output_table_provider.has("covariates").await?
+            && context.output_table_provider().has("covariates").await?
         {
             build_covariate_map(
                 &context
-                    .output_table_provider
+                    .output_table_provider()
                     .read_dataframe("covariates")
                     .await?,
             )?
@@ -83,7 +83,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
         }
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("text_units", text_units_dataframe(&rows)?)
             .await?;
 

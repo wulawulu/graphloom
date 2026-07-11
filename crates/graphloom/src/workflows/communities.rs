@@ -36,13 +36,13 @@ impl Workflow for CreateCommunitiesWorkflow {
     ) -> Result<WorkflowFunctionOutput> {
         let entities = read_entities(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("entities")
                 .await?,
         )?;
         let relationships = read_relationships(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("relationships")
                 .await?,
         )?;
@@ -55,7 +55,7 @@ impl Workflow for CreateCommunitiesWorkflow {
         )?;
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("communities", communities_dataframe(&communities)?)
             .await?;
         context.stats.community_count = communities.len();

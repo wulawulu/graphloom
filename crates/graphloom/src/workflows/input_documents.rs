@@ -28,15 +28,10 @@ impl Workflow for LoadInputDocumentsWorkflow {
         _config: &GraphRagConfig,
         context: &mut PipelineRunContext,
     ) -> Result<WorkflowFunctionOutput> {
-        let reader = context
-            .input_reader
-            .as_ref()
-            .ok_or(GraphLoomError::MissingProvider {
-                name: "input_reader",
-            })?;
+        let reader = context.input_reader();
         let mut stream = reader.read_documents();
         let mut table = context
-            .output_table_provider
+            .output_table_provider()
             .open("documents", true)
             .await?;
         let mut rows = Vec::new();

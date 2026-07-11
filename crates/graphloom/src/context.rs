@@ -1,117 +1,216 @@
 //! Runtime context shared by workflows.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use graphloom_cache::Cache;
 use graphloom_input::InputReader;
-use graphloom_llm::{CompletionModel, EmbeddingModel};
 use graphloom_storage::{Storage, TableProvider};
 use graphloom_vectors::VectorStore;
 
-use crate::{NoopWorkflowCallbacks, PipelineRunStats, WorkflowCallbacks};
+use crate::{IndexRuntimeServices, ModelRegistry, PipelineRunStats, WorkflowCallbacks};
 
-/// Pipeline runtime context.
+/// Pipeline runtime state backed by a complete set of indexing services.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PipelineRunContext {
+    services: IndexRuntimeServices,
     /// Current run statistics.
     pub stats: PipelineRunStats,
-    /// Input document storage.
-    pub input_storage: Option<Arc<dyn Storage>>,
-    /// Output storage for snapshots and long-lived files.
-    pub output_storage: Option<Arc<dyn Storage>>,
-    /// Current output table provider.
-    pub output_table_provider: Arc<dyn TableProvider>,
-    /// Cache provider for LLM and operation results.
-    pub cache: Option<Arc<dyn Cache>>,
-    /// Completion model instances keyed by model id.
-    pub completion_models: BTreeMap<String, Arc<dyn CompletionModel>>,
-    /// Embedding model instances keyed by model id.
-    pub embedding_models: BTreeMap<String, Arc<dyn EmbeddingModel>>,
-    /// Optional caller-provided vector store.
-    pub vector_store: Option<Arc<dyn VectorStore>>,
     /// Workflow callbacks.
     pub callbacks: Arc<dyn WorkflowCallbacks>,
-    /// Input reader used by `load_input_documents`.
-    pub input_reader: Option<Arc<dyn InputReader>>,
-    /// Project root used to resolve prompt paths.
-    pub project_root: Option<PathBuf>,
 }
 
 impl PipelineRunContext {
-    /// Create a context with the required table provider.
+    /// Create a context from fully initialized indexing services.
     #[must_use]
-    pub fn new(output_table_provider: Arc<dyn TableProvider>) -> Self {
+    pub fn new(services: IndexRuntimeServices, callbacks: Arc<dyn WorkflowCallbacks>) -> Self {
         Self {
+            services,
             stats: PipelineRunStats::default(),
-            input_storage: None,
-            output_storage: None,
-            output_table_provider,
-            cache: None,
-            completion_models: BTreeMap::new(),
-            embedding_models: BTreeMap::new(),
-            vector_store: None,
-            callbacks: Arc::new(NoopWorkflowCallbacks),
-            input_reader: None,
-            project_root: None,
+            callbacks,
         }
     }
 
-    /// Attach an input reader.
+    /// Return the prepared input reader.
     #[must_use]
-    pub fn with_input_reader(mut self, input_reader: Arc<dyn InputReader>) -> Self {
-        self.input_reader = Some(input_reader);
-        self
+    pub fn input_reader(&self) -> Arc<dyn InputReader> {
+        Arc::clone(&self.services.input_reader)
     }
 
-    /// Attach callbacks.
+    /// Return the prepared input storage.
     #[must_use]
-    pub fn with_callbacks(mut self, callbacks: Arc<dyn WorkflowCallbacks>) -> Self {
-        self.callbacks = callbacks;
-        self
+    pub fn input_storage(&self) -> &dyn Storage {
+        self.services.input_storage.as_ref()
     }
 
-    /// Attach a completion model by model id.
+    /// Return the prepared output storage.
     #[must_use]
-    pub fn with_completion_model(
-        mut self,
-        model_id: impl Into<String>,
-        model: Arc<dyn CompletionModel>,
-    ) -> Self {
-        self.completion_models.insert(model_id.into(), model);
-        self
+    pub fn output_storage(&self) -> &dyn Storage {
+        self.services.output_storage.as_ref()
     }
 
-    /// Attach an embedding model by model id.
+    /// Return the prepared output table provider.
     #[must_use]
-    pub fn with_embedding_model(
-        mut self,
-        model_id: impl Into<String>,
-        model: Arc<dyn EmbeddingModel>,
-    ) -> Self {
-        self.embedding_models.insert(model_id.into(), model);
-        self
+    pub fn output_table_provider(&self) -> &dyn TableProvider {
+        self.services.output_table_provider.as_ref()
     }
 
-    /// Attach a custom vector store.
+    /// Return the cache provider when caching is enabled.
     #[must_use]
-    pub fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {
-        self.vector_store = Some(vector_store);
-        self
+    pub fn cache(&self) -> Option<&dyn Cache> {
+        self.services.cache.provider().map(AsRef::as_ref)
     }
 
-    /// Attach a project root for prompt path resolution.
+    /// Clone the prepared vector store handle.
     #[must_use]
-    pub fn with_project_root(mut self, project_root: impl Into<PathBuf>) -> Self {
-        self.project_root = Some(project_root.into());
-        self
+    pub fn vector_store(&self) -> Arc<dyn VectorStore> {
+        Arc::clone(&self.services.vector_store)
     }
 
-    /// Return the prompt root, defaulting to current-directory semantics for library callers.
+    /// Return the prepared model registry.
     #[must_use]
-    pub fn prompt_root(&self) -> PathBuf {
-        self.project_root
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("."))
+    pub fn models(&self) -> &ModelRegistry {
+        &self.services.models
+    }
+
+    /// Return the project root used to resolve prompts.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        self.services.project_root()
+    }
+
+    /// Return an owned prompt root path.
+    #[must_use]
+    pub fn prompt_root(&self) -> std::path::PathBuf {
+        self.project_root().to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use std::{pin::Pin, sync::Arc};
+
+    use async_trait::async_trait;
+    use futures_util::{Stream, stream};
+    use graphloom_input::{DocumentStream, InputReader};
+    use graphloom_llm::{CompletionModel, EmbeddingModel};
+    use graphloom_storage::{MemoryStorage, TableProvider};
+    use graphloom_vectors::{
+        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore,
+    };
+
+    use super::PipelineRunContext;
+    use crate::{
+        CacheService, IndexRuntimeIo, IndexRuntimeServices, ModelRegistry, NoopWorkflowCallbacks,
+    };
+
+    #[derive(Debug, Default)]
+    struct EmptyInputReader;
+
+    impl InputReader for EmptyInputReader {
+        fn read_documents(&self) -> DocumentStream<'_> {
+            Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + '_>>
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct EmptyVectorStore;
+
+    #[async_trait]
+    impl VectorStore for EmptyVectorStore {
+        async fn ensure_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
+            Ok(())
+        }
+
+        async fn reset_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
+            Ok(())
+        }
+
+        async fn upsert_documents(
+            &self,
+            _schema: &VectorIndexSchema,
+            _documents: &[VectorDocument],
+        ) -> VectorResult<()> {
+            Ok(())
+        }
+
+        async fn count(&self, _schema: &VectorIndexSchema) -> VectorResult<usize> {
+            Ok(0)
+        }
+
+        async fn ids(&self, _schema: &VectorIndexSchema) -> VectorResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_by_id(
+            &self,
+            _schema: &VectorIndexSchema,
+            _id: &str,
+        ) -> VectorResult<Option<VectorDocument>> {
+            Ok(None)
+        }
+    }
+
+    impl PipelineRunContext {
+        pub(crate) fn for_test(output_table_provider: Arc<dyn TableProvider>) -> Self {
+            let storage = Arc::new(MemoryStorage::new());
+            let services = IndexRuntimeServices::new(
+                IndexRuntimeIo::new(
+                    Arc::new(EmptyInputReader),
+                    storage.clone(),
+                    storage,
+                    output_table_provider,
+                ),
+                CacheService::Disabled,
+                Arc::new(EmptyVectorStore),
+                ModelRegistry::default(),
+                ".",
+            );
+            Self::new(services, Arc::new(NoopWorkflowCallbacks))
+        }
+
+        pub(crate) fn with_input_reader(mut self, input_reader: Arc<dyn InputReader>) -> Self {
+            self.services.input_reader = input_reader;
+            self
+        }
+
+        pub(crate) fn with_callbacks(
+            mut self,
+            callbacks: Arc<dyn crate::WorkflowCallbacks>,
+        ) -> Self {
+            self.callbacks = callbacks;
+            self
+        }
+
+        pub(crate) fn with_completion_model(
+            mut self,
+            id: impl Into<String>,
+            model: Arc<dyn CompletionModel>,
+        ) -> Self {
+            let _result = self.services.models.insert_completion(id, model);
+            self
+        }
+
+        pub(crate) fn with_embedding_model(
+            mut self,
+            id: impl Into<String>,
+            model: Arc<dyn EmbeddingModel>,
+        ) -> Self {
+            let _result = self.services.models.insert_embedding(id, model);
+            self
+        }
+
+        pub(crate) fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {
+            self.services.vector_store = vector_store;
+            self
+        }
+
+        pub(crate) fn with_output_storage(
+            mut self,
+            output_storage: Arc<dyn graphloom_storage::Storage>,
+        ) -> Self {
+            self.services.output_storage = output_storage;
+            self
+        }
     }
 }

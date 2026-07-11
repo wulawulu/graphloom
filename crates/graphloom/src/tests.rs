@@ -216,7 +216,7 @@ async fn test_should_run_step5_pipeline_and_populate_documents() {
             Some(json!({"source": "unit-test"})),
         )],
     });
-    let mut context = PipelineRunContext::new(provider.clone()).with_input_reader(reader);
+    let mut context = PipelineRunContext::for_test(provider.clone()).with_input_reader(reader);
     let mut registry = WorkflowRegistry::new();
     register_step5_workflows(&mut registry);
     let config = GraphRagConfig {
@@ -273,7 +273,7 @@ async fn test_should_fail_when_no_documents_are_read() {
     let reader = Arc::new(MemoryInputReader {
         documents: Vec::new(),
     });
-    let mut context = PipelineRunContext::new(provider).with_input_reader(reader);
+    let mut context = PipelineRunContext::for_test(provider).with_input_reader(reader);
     let mut registry = WorkflowRegistry::new();
     register_step5_workflows(&mut registry);
     let config = GraphRagConfig {
@@ -324,9 +324,9 @@ async fn test_should_extract_and_finalize_graph_with_summaries_and_graphml() {
             "Alice works with and mentors Bob.".to_owned(),
         ],
     ));
-    let mut context = PipelineRunContext::new(provider.clone())
+    let mut context = PipelineRunContext::for_test(provider.clone())
         .with_completion_model("default_completion_model", model);
-    context.output_storage = Some(storage.clone());
+    context = context.with_output_storage(storage.clone());
     let mut registry = WorkflowRegistry::new();
     register_step6_workflows(&mut registry);
     let mut config = GraphRagConfig::default();
@@ -491,7 +491,7 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
                 .to_owned(),
         ],
     ));
-    let mut context = PipelineRunContext::new(provider.clone())
+    let mut context = PipelineRunContext::for_test(provider.clone())
         .with_completion_model("default_completion_model", model);
     let mut registry = WorkflowRegistry::new();
     register_step7_workflows(&mut registry);
@@ -636,7 +636,7 @@ async fn test_should_run_create_community_reports_workflow() {
         prompts: Arc::clone(&prompts),
         calls: AtomicUsize::new(0),
     });
-    let mut context = PipelineRunContext::new(provider.clone())
+    let mut context = PipelineRunContext::for_test(provider.clone())
         .with_completion_model("default_completion_model", model);
     let mut registry = WorkflowRegistry::new();
     register_step8_workflows(&mut registry);
@@ -862,8 +862,6 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::new(provider.clone())
-        .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
     register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
@@ -879,6 +877,14 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
         ..Default::default()
     };
     config.embedding_models.clear();
+    let vector_store = Arc::new(
+        LanceDbVectorStore::connect(&config.vector_store)
+            .await
+            .expect("vector store should connect"),
+    );
+    let mut context = PipelineRunContext::for_test(provider.clone())
+        .with_embedding_model("default_embedding_model", model.clone())
+        .with_vector_store(vector_store);
 
     let pipeline = PipelineFactory::new(registry)
         .standard(&config)
@@ -985,7 +991,7 @@ async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configur
         )
         .await
         .expect("text_units should write");
-    let mut context = PipelineRunContext::new(provider);
+    let mut context = PipelineRunContext::for_test(provider);
     let mut registry = WorkflowRegistry::new();
     register_standard_workflows(&mut registry);
     let mut config = GraphRagConfig {
@@ -1027,8 +1033,6 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::new(provider.clone())
-        .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
     register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
@@ -1047,6 +1051,14 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
     config.embed_text.batch_size = 1;
     config.embed_text.names = vec![crate::TEXT_UNIT_TEXT_EMBEDDING.to_owned()];
     config.embedding_models.clear();
+    let vector_store = Arc::new(
+        LanceDbVectorStore::connect(&config.vector_store)
+            .await
+            .expect("vector store should connect"),
+    );
+    let mut context = PipelineRunContext::for_test(provider.clone())
+        .with_embedding_model("default_embedding_model", model.clone())
+        .with_vector_store(vector_store);
 
     let pipeline = PipelineFactory::new(registry)
         .standard(&config)
@@ -1114,8 +1126,6 @@ async fn test_should_allow_same_source_id_in_different_embedding_fields() {
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::new(provider)
-        .with_embedding_model("default_embedding_model", model.clone());
     let mut registry = WorkflowRegistry::new();
     register_standard_workflows(&mut registry);
     let mut vector_store = VectorStoreConfig::default();
@@ -1131,6 +1141,14 @@ async fn test_should_allow_same_source_id_in_different_embedding_fields() {
         crate::ENTITY_DESCRIPTION_EMBEDDING.to_owned(),
     ];
     config.embedding_models.clear();
+    let vector_store = Arc::new(
+        LanceDbVectorStore::connect(&config.vector_store)
+            .await
+            .expect("vector store should connect"),
+    );
+    let mut context = PipelineRunContext::for_test(provider)
+        .with_embedding_model("default_embedding_model", model.clone())
+        .with_vector_store(vector_store);
 
     let pipeline = PipelineFactory::new(registry)
         .standard(&config)
@@ -1198,13 +1216,19 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
     };
     config.embed_text.names = vec![crate::TEXT_UNIT_TEXT_EMBEDDING.to_owned()];
     config.embedding_models.clear();
+    let vector_store: Arc<dyn VectorStore> = Arc::new(
+        LanceDbVectorStore::connect(&config.vector_store)
+            .await
+            .expect("vector store should connect"),
+    );
 
     let pipeline = PipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::new(provider.clone())
-        .with_embedding_model("default_embedding_model", model);
+    let mut context = PipelineRunContext::for_test(provider.clone())
+        .with_embedding_model("default_embedding_model", model)
+        .with_vector_store(vector_store.clone());
     pipeline
         .run(&config, &mut context)
         .await
@@ -1236,8 +1260,9 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
         .await
         .expect("second text_units should write");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::new(provider.clone())
-        .with_embedding_model("default_embedding_model", model);
+    let mut context = PipelineRunContext::for_test(provider.clone())
+        .with_embedding_model("default_embedding_model", model)
+        .with_vector_store(vector_store);
     pipeline
         .run(&config, &mut context)
         .await

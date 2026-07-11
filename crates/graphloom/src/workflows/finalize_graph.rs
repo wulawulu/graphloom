@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
     operations::graph::{
         degree_map, final_entities_dataframe, final_relationships_dataframe, finalize_entities,
         finalize_graph_sample, finalize_relationships, graphml_snapshot, read_entity_rows,
@@ -31,13 +31,13 @@ impl Workflow for FinalizeGraphWorkflow {
     ) -> Result<WorkflowFunctionOutput> {
         let entities = read_entity_rows(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("entities")
                 .await?,
         )?;
         let relationships = read_relationship_rows(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("relationships")
                 .await?,
         )?;
@@ -46,11 +46,11 @@ impl Workflow for FinalizeGraphWorkflow {
         let final_relationships = finalize_relationships(&relationships, &degree_map)?;
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("entities", final_entities_dataframe(&final_entities)?)
             .await?;
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe(
                 "relationships",
                 final_relationships_dataframe(&final_relationships)?,
@@ -58,13 +58,7 @@ impl Workflow for FinalizeGraphWorkflow {
             .await?;
 
         if config.snapshots.graphml {
-            let storage =
-                context
-                    .output_storage
-                    .as_ref()
-                    .ok_or(GraphLoomError::MissingProvider {
-                        name: "output_storage",
-                    })?;
+            let storage = context.output_storage();
             storage
                 .set_text("graph.graphml", &graphml_snapshot(&final_relationships))
                 .await?;

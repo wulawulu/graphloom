@@ -30,12 +30,12 @@ impl Workflow for CreateFinalDocumentsWorkflow {
         context: &mut PipelineRunContext,
     ) -> Result<WorkflowFunctionOutput> {
         let text_units = context
-            .output_table_provider
+            .output_table_provider()
             .read_dataframe("text_units")
             .await?;
         let mapping = text_unit_mapping(&text_units)?;
         let documents = context
-            .output_table_provider
+            .output_table_provider()
             .read_dataframe("documents")
             .await?;
         let document_ids = documents.column("id")?.str()?;
@@ -74,7 +74,7 @@ impl Workflow for CreateFinalDocumentsWorkflow {
         }
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("documents", documents_dataframe(&rows)?)
             .await?;
 

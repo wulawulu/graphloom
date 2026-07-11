@@ -41,15 +41,13 @@ impl Workflow for ExtractCovariatesWorkflow {
 
         let text_units = read_text_unit_inputs(
             &context
-                .output_table_provider
+                .output_table_provider()
                 .read_dataframe("text_units")
                 .await?,
         )?;
         let model = resolve_completion_model(
-            config,
             context,
             &config.extract_claims.completion_model_id,
-            &config.extract_claims.model_instance_name,
             EXTRACT_COVARIATES_WORKFLOW,
         )?;
         let prompt_repository = PromptRepository::new(context.prompt_root());
@@ -74,7 +72,7 @@ impl Workflow for ExtractCovariatesWorkflow {
         .await?;
 
         context
-            .output_table_provider
+            .output_table_provider()
             .write_dataframe("covariates", covariates_dataframe(&rows)?)
             .await?;
 

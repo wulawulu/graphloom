@@ -38,12 +38,12 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         let should_prepend_metadata = !prepend_metadata.is_empty();
 
         let mut documents = context
-            .output_table_provider
+            .output_table_provider()
             .open("documents", false)
             .await?;
         let input_rows = documents.length();
         let mut text_units = context
-            .output_table_provider
+            .output_table_provider()
             .open("text_units", true)
             .await?;
         let mut rows = Vec::new();
@@ -261,7 +261,7 @@ mod tests {
             .await
             .expect("documents should write");
         let callbacks = Arc::new(ProgressCallbacks::default());
-        let mut context = PipelineRunContext::new(provider).with_callbacks(callbacks.clone());
+        let mut context = PipelineRunContext::for_test(provider).with_callbacks(callbacks.clone());
         let config = GraphRagConfig {
             chunking: ChunkingConfig::new(NonZeroUsize::new(1).expect("nonzero"), 0, Vec::new())
                 .expect("valid chunking config"),

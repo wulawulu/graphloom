@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use graphloom_cache::Cache;
 use graphloom_llm::TiktokenTokenizer;
 use graphloom_storage::{Table, TableProvider};
-use graphloom_vectors::{VectorDocument, VectorIndexSchema, VectorStore, create_vector_store};
+use graphloom_vectors::{VectorDocument, VectorIndexSchema, VectorStore};
 use polars_core::{frame::row::Row, prelude::*};
 use serde_json::{Value, json};
 
@@ -115,29 +115,23 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
             })?;
 
         let model = resolve_embedding_model(
-            config,
             context,
             &config.embed_text.embedding_model_id,
-            &config.embed_text.model_instance_name,
             GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
         )?;
         let encoding_model =
             resolve_embedding_encoding_model(config, &config.embed_text.embedding_model_id);
         let tokenizer: Arc<dyn graphloom_llm::Tokenizer> =
             Arc::new(TiktokenTokenizer::new(encoding_model)?);
-        let vector_store = match &context.vector_store {
-            Some(store) => Arc::clone(store),
-            None => create_vector_store(&config.vector_store).await?,
-        };
+        let vector_store = context.vector_store();
         let embedding_cache = context
-            .cache
-            .as_ref()
+            .cache()
             .map(|cache| cache.child(&config.embed_text.model_instance_name))
             .transpose()?;
 
         let field_map = embedding_fields();
         let snapshot_provider = if config.snapshots.embeddings {
-            Some(context.output_table_provider.child(Some("embeddings"))?)
+            Some(context.output_table_provider().child(Some("embeddings"))?)
         } else {
             None
         };
@@ -160,7 +154,7 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
                 }
             })?;
             if !context
-                .output_table_provider
+                .output_table_provider()
                 .has(field.source_table)
                 .await?
             {
@@ -200,7 +194,7 @@ async fn process_field(
     dependencies: &FieldDependencies,
 ) -> Result<FieldSummary> {
     let mut source = context
-        .output_table_provider
+        .output_table_provider()
         .open(field.source_table, false)
         .await?;
     let input_rows = source.len();

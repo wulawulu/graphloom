@@ -39,6 +39,10 @@ pub use context::PipelineRunContext;
 pub use error::{GraphLoomError, Result};
 pub use graphloom_storage as storage;
 pub use pipeline::{Pipeline, PipelineFactory};
+pub use runtime::{
+    CacheService, DefaultModelFactory, IndexRuntimeIo, IndexRuntimeServices, ModelFactory,
+    ModelRegistry,
+};
 pub use stats::PipelineRunStats;
 pub use workflow::{Workflow, WorkflowFunctionOutput, WorkflowRegistry};
 pub use workflows::{
