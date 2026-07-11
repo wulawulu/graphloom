@@ -4,7 +4,8 @@ use async_trait::async_trait;
 
 use super::common::resolve_completion_model;
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput,
+    IndexWorkflowRequirements, Result,
     operations::covariates::{
         ClaimExtractionConfig, covariate_value, covariates_dataframe, default_claim_entity_types,
         extract_covariates, read_text_unit_inputs,
@@ -12,7 +13,7 @@ use crate::{
     prompts::PromptRepository,
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const EXTRACT_COVARIATES_WORKFLOW: &str = "extract_covariates";
 
 /// Extract claim covariates from text units.
@@ -20,18 +21,26 @@ pub const EXTRACT_COVARIATES_WORKFLOW: &str = "extract_covariates";
 pub struct ExtractCovariatesWorkflow;
 
 #[async_trait]
-impl Workflow for ExtractCovariatesWorkflow {
+impl IndexWorkflow for ExtractCovariatesWorkflow {
     fn name(&self) -> &'static str {
         EXTRACT_COVARIATES_WORKFLOW
+    }
+
+    fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
+        let mut requirements = IndexWorkflowRequirements::default();
+        if config.extract_claims.enabled {
+            requirements.require_completion_model(&config.extract_claims.completion_model_id);
+        }
+        Ok(requirements)
     }
 
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         if !config.extract_claims.enabled {
-            return Ok(WorkflowFunctionOutput {
+            return Ok(IndexWorkflowOutput {
                 result: Vec::new(),
                 stop: false,
                 input_rows: 0,
@@ -76,7 +85,7 @@ impl Workflow for ExtractCovariatesWorkflow {
             .write_dataframe("covariates", covariates_dataframe(&rows)?)
             .await?;
 
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: rows.iter().take(5).map(covariate_value).collect(),
             stop: false,
             input_rows: text_units.len(),

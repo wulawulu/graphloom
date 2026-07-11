@@ -5,7 +5,8 @@ use graphloom_llm::TiktokenTokenizer;
 
 use super::common::{resolve_completion_encoding_model, resolve_completion_model};
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput,
+    IndexWorkflowRequirements, Result,
     operations::community_reports::{
         CommunityReportCallbacks, CommunityReportExtractionConfig, CommunityReportOperationInput,
         community_report_value, community_reports_dataframe, create_community_reports,
@@ -15,7 +16,7 @@ use crate::{
     prompts::PromptRepository,
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const CREATE_COMMUNITY_REPORTS_WORKFLOW: &str = "create_community_reports";
 
 /// Create graph-context community reports.
@@ -23,16 +24,22 @@ pub const CREATE_COMMUNITY_REPORTS_WORKFLOW: &str = "create_community_reports";
 pub struct CreateCommunityReportsWorkflow;
 
 #[async_trait]
-impl Workflow for CreateCommunityReportsWorkflow {
+impl IndexWorkflow for CreateCommunityReportsWorkflow {
     fn name(&self) -> &'static str {
         CREATE_COMMUNITY_REPORTS_WORKFLOW
+    }
+
+    fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_completion_model(&config.community_reports.completion_model_id);
+        Ok(requirements)
     }
 
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let entities = read_entity_context_rows(
             &context
                 .output_table_provider()
@@ -114,7 +121,7 @@ impl Workflow for CreateCommunityReportsWorkflow {
             .await?;
         context.stats.report_count = rows.len();
 
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: rows.iter().take(5).map(community_report_value).collect(),
             stop: false,
             input_rows: communities.len(),

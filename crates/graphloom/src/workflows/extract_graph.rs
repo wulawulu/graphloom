@@ -8,7 +8,8 @@ use graphloom_llm::{CompletionModel, TiktokenTokenizer};
 
 use super::common::resolve_completion_model;
 use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphLoomError, GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput,
+    IndexWorkflowRequirements, Result,
     operations::graph::{
         DescriptionSummarizeConfig, EntityRow, RelationshipRow, SummarizedEntityRow,
         SummarizedRelationshipRow, TextUnitInput, entity_intermediate_dataframe,
@@ -19,7 +20,7 @@ use crate::{
     prompts::{PromptKind, PromptRepository},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const EXTRACT_GRAPH_WORKFLOW: &str = "extract_graph";
 
 /// Extract entity and relationship graph rows from text units.
@@ -39,16 +40,23 @@ struct SummarizedGraph {
 }
 
 #[async_trait]
-impl Workflow for ExtractGraphWorkflow {
+impl IndexWorkflow for ExtractGraphWorkflow {
     fn name(&self) -> &'static str {
         EXTRACT_GRAPH_WORKFLOW
+    }
+
+    fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_completion_model(&config.extract_graph.completion_model_id);
+        requirements.require_completion_model(&config.summarize_descriptions.completion_model_id);
+        Ok(requirements)
     }
 
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let text_units = read_text_units(
             &context
                 .output_table_provider()
@@ -91,7 +99,7 @@ impl Workflow for ExtractGraphWorkflow {
 
         context.stats.entity_count = summarized_graph.entities.len();
         context.stats.relationship_count = summarized_graph.relationships.len();
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: extract_graph_sample(
                 &summarized_graph.entities,
                 &summarized_graph.relationships,
@@ -108,7 +116,7 @@ impl Workflow for ExtractGraphWorkflow {
 
 async fn extract_rows(
     config: &GraphRagConfig,
-    context: &PipelineRunContext,
+    context: &IndexPipelineContext,
     text_units: &[TextUnitInput],
     extractor: &dyn CompletionModel,
     prompt_repository: &PromptRepository,
@@ -196,7 +204,7 @@ async fn extract_rows(
 
 async fn summarize_rows(
     config: &GraphRagConfig,
-    context: &PipelineRunContext,
+    context: &IndexPipelineContext,
     summarizer: &dyn CompletionModel,
     prompt_repository: &PromptRepository,
     tokenizer: &TiktokenTokenizer,
@@ -264,7 +272,7 @@ async fn summarize_rows(
 
 async fn write_graph_tables(
     config: &GraphRagConfig,
-    context: &mut PipelineRunContext,
+    context: &mut IndexPipelineContext,
     graph: &MergedGraph,
     summarized: &SummarizedGraph,
 ) -> Result<()> {

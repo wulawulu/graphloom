@@ -6,11 +6,12 @@ use polars_core::prelude::*;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphLoomError, GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput,
+    Result,
     dataframe::{list_column, usize_to_i64},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const LOAD_INPUT_DOCUMENTS_WORKFLOW: &str = "load_input_documents";
 
 /// Load input documents into the `documents` table.
@@ -18,7 +19,7 @@ pub const LOAD_INPUT_DOCUMENTS_WORKFLOW: &str = "load_input_documents";
 pub struct LoadInputDocumentsWorkflow;
 
 #[async_trait]
-impl Workflow for LoadInputDocumentsWorkflow {
+impl IndexWorkflow for LoadInputDocumentsWorkflow {
     fn name(&self) -> &'static str {
         LOAD_INPUT_DOCUMENTS_WORKFLOW
     }
@@ -26,8 +27,8 @@ impl Workflow for LoadInputDocumentsWorkflow {
     async fn run(
         &self,
         _config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let reader = context.input_reader();
         let mut stream = reader.read_documents();
         let mut table = context
@@ -76,7 +77,7 @@ impl Workflow for LoadInputDocumentsWorkflow {
         table.write(documents_dataframe(&rows)?).await?;
         table.close().await?;
         context.stats.document_count = rows.len();
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: sample,
             stop: false,
             input_rows: rows.len(),

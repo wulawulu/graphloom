@@ -1,4 +1,4 @@
-//! Runtime context shared by workflows.
+//! Runtime context for GraphRAG indexing workflows.
 
 use std::{path::Path, sync::Arc};
 
@@ -7,26 +7,32 @@ use graphloom_input::InputReader;
 use graphloom_storage::{Storage, TableProvider};
 use graphloom_vectors::VectorStore;
 
-use crate::{IndexRuntimeServices, ModelRegistry, PipelineRunStats, WorkflowCallbacks};
+use crate::{IndexRunStats, IndexRuntimeServices, IndexWorkflowCallbacks, ModelRegistry};
 
-/// Pipeline runtime state backed by a complete set of indexing services.
+/// Runtime context for GraphLoom indexing workflows.
+///
+/// This type is specific to the GraphRAG indexing pipeline. Query execution
+/// uses a separate runtime and does not share this pipeline abstraction.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct PipelineRunContext {
+pub struct IndexPipelineContext {
     services: IndexRuntimeServices,
     /// Current run statistics.
-    pub stats: PipelineRunStats,
-    /// Workflow callbacks.
-    pub callbacks: Arc<dyn WorkflowCallbacks>,
+    pub stats: IndexRunStats,
+    /// IndexWorkflow callbacks.
+    pub callbacks: Arc<dyn IndexWorkflowCallbacks>,
 }
 
-impl PipelineRunContext {
+impl IndexPipelineContext {
     /// Create a context from fully initialized indexing services.
     #[must_use]
-    pub fn new(services: IndexRuntimeServices, callbacks: Arc<dyn WorkflowCallbacks>) -> Self {
+    pub(crate) fn new(
+        services: IndexRuntimeServices,
+        callbacks: Arc<dyn IndexWorkflowCallbacks>,
+    ) -> Self {
         Self {
             services,
-            stats: PipelineRunStats::default(),
+            stats: IndexRunStats::default(),
             callbacks,
         }
     }
@@ -99,9 +105,10 @@ mod test_support {
         Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore,
     };
 
-    use super::PipelineRunContext;
+    use super::IndexPipelineContext;
     use crate::{
-        CacheService, IndexRuntimeIo, IndexRuntimeServices, ModelRegistry, NoopWorkflowCallbacks,
+        ModelRegistry, NoopIndexWorkflowCallbacks,
+        runtime::{CacheService, IndexRuntimeIo, IndexRuntimeServices},
     };
 
     #[derive(Debug, Default)]
@@ -151,7 +158,7 @@ mod test_support {
         }
     }
 
-    impl PipelineRunContext {
+    impl IndexPipelineContext {
         pub(crate) fn for_test(output_table_provider: Arc<dyn TableProvider>) -> Self {
             let storage = Arc::new(MemoryStorage::new());
             let services = IndexRuntimeServices::new(
@@ -166,7 +173,7 @@ mod test_support {
                 ModelRegistry::default(),
                 ".",
             );
-            Self::new(services, Arc::new(NoopWorkflowCallbacks))
+            Self::new(services, Arc::new(NoopIndexWorkflowCallbacks))
         }
 
         pub(crate) fn with_input_reader(mut self, input_reader: Arc<dyn InputReader>) -> Self {
@@ -176,7 +183,7 @@ mod test_support {
 
         pub(crate) fn with_callbacks(
             mut self,
-            callbacks: Arc<dyn crate::WorkflowCallbacks>,
+            callbacks: Arc<dyn crate::IndexWorkflowCallbacks>,
         ) -> Self {
             self.callbacks = callbacks;
             self
@@ -186,18 +193,18 @@ mod test_support {
             mut self,
             id: impl Into<String>,
             model: Arc<dyn CompletionModel>,
-        ) -> Self {
-            let _result = self.services.models.insert_completion(id, model);
-            self
+        ) -> crate::Result<Self> {
+            self.services.models.insert_completion(id, model)?;
+            Ok(self)
         }
 
         pub(crate) fn with_embedding_model(
             mut self,
             id: impl Into<String>,
             model: Arc<dyn EmbeddingModel>,
-        ) -> Self {
-            let _result = self.services.models.insert_embedding(id, model);
-            self
+        ) -> crate::Result<Self> {
+            self.services.models.insert_embedding(id, model)?;
+            Ok(self)
         }
 
         pub(crate) fn with_vector_store(mut self, vector_store: Arc<dyn VectorStore>) -> Self {

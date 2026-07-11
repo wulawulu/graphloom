@@ -12,12 +12,12 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
-    EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-    GraphLoomError, GraphRagConfig, LOAD_INPUT_DOCUMENTS_WORKFLOW, Result, WorkflowRegistry,
+    CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
+    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphLoomError, GraphRagConfig, IndexWorkflowRegistry,
+    LOAD_INPUT_DOCUMENTS_WORKFLOW, Result,
     config::{effective_completion_encoding, effective_embedding_encoding},
     project::{LoadedProject, ProjectPaths},
-    register_standard_workflows,
+    register_standard_index_workflows,
 };
 
 /// Load a project config from a root directory or concrete config file.
@@ -282,24 +282,16 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
     validate_input(&project.config.input.input_type)?;
     validate_cache(&project.config.cache.cache_type)?;
     project.paths.validate_destructive_paths()?;
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
-    registry
-        .validate_names(&project.config.workflow_order())
-        .map_err(|source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        })?;
+    build_index_pipeline(&project.config)?;
     Ok(())
 }
 
 async fn validate_optional(project: &LoadedProject) -> Result<()> {
     let active = active_workflows(&project.config);
-    let completion_models = referenced_completion_models(&project.config, &active);
-    for model_id in completion_models {
-        let model = require_model(&project.config.completion_models, &model_id)?;
-        validate_model(&model_id, model)?;
-    }
-    if active.contains(GENERATE_TEXT_EMBEDDINGS_WORKFLOW) {
+    let pipeline = build_index_pipeline(&project.config)?;
+    let requirements = pipeline.requirements(&project.config)?;
+    validate_required_models(&project.config, &requirements)?;
+    if requirements.embedding_models().next().is_some() {
         project
             .config
             .validate_embed_text()
@@ -307,9 +299,6 @@ async fn validate_optional(project: &LoadedProject) -> Result<()> {
                 model_id: project.config.embed_text.embedding_model_id.clone(),
                 message,
             })?;
-        let embedding_model_id = project.config.embed_text.embedding_model_id.clone();
-        let embedding_model = require_model(&project.config.embedding_models, &embedding_model_id)?;
-        validate_model(&embedding_model_id, embedding_model)?;
     }
     validate_chunking_if_needed(project, &active)?;
     for path in project.paths.active_prompt_paths(&project.config, &active) {
@@ -368,22 +357,26 @@ fn require_model<'a>(
         })
 }
 
-fn referenced_completion_models(
+pub(crate) fn build_index_pipeline(config: &GraphRagConfig) -> Result<crate::IndexPipeline> {
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry)?;
+    crate::IndexPipelineFactory::new(registry).standard(config)
+}
+
+pub(crate) fn validate_required_models(
     config: &GraphRagConfig,
-    active: &BTreeSet<String>,
-) -> BTreeSet<String> {
-    let mut models = BTreeSet::new();
-    if active.contains(EXTRACT_GRAPH_WORKFLOW) {
-        models.insert(config.extract_graph.completion_model_id.clone());
-        models.insert(config.summarize_descriptions.completion_model_id.clone());
+    requirements: &crate::IndexWorkflowRequirements,
+) -> Result<()> {
+    for model_id in requirements.completion_models() {
+        validate_model(
+            model_id,
+            require_model(&config.completion_models, model_id)?,
+        )?;
     }
-    if active.contains(EXTRACT_COVARIATES_WORKFLOW) && config.extract_claims.enabled {
-        models.insert(config.extract_claims.completion_model_id.clone());
+    for model_id in requirements.embedding_models() {
+        validate_model(model_id, require_model(&config.embedding_models, model_id)?)?;
     }
-    if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
-        models.insert(config.community_reports.completion_model_id.clone());
-    }
-    models
+    Ok(())
 }
 
 fn active_workflows(config: &GraphRagConfig) -> BTreeSet<String> {

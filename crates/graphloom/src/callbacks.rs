@@ -1,16 +1,16 @@
-//! Workflow callback hooks.
+//! IndexWorkflow callback hooks.
 
 use std::sync::Arc;
 
-use crate::PipelineRunStats;
+use crate::IndexRunStats;
 
 /// Callback hooks used by pipeline workflows.
-pub trait WorkflowCallbacks: Send + Sync + std::fmt::Debug {
+pub trait IndexWorkflowCallbacks: Send + Sync + std::fmt::Debug {
     /// Called when a workflow starts.
     fn workflow_started(&self, _workflow_name: &str) {}
 
     /// Called when a workflow completes successfully.
-    fn workflow_completed(&self, _workflow_name: &str, _stats: &PipelineRunStats) {}
+    fn workflow_completed(&self, _workflow_name: &str, _stats: &IndexRunStats) {}
 
     /// Called for progress updates.
     fn progress(&self, _workflow_name: &str, _completed: usize, _total: Option<usize>) {}
@@ -30,32 +30,32 @@ pub trait WorkflowCallbacks: Send + Sync + std::fmt::Debug {
 
 /// No-op callbacks implementation.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NoopWorkflowCallbacks;
+pub struct NoopIndexWorkflowCallbacks;
 
-impl WorkflowCallbacks for NoopWorkflowCallbacks {}
+impl IndexWorkflowCallbacks for NoopIndexWorkflowCallbacks {}
 
 /// Callback fan-out implementation.
 #[derive(Debug, Clone)]
-pub struct CallbackChain {
-    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
+pub struct IndexWorkflowCallbackChain {
+    callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
 }
 
-impl CallbackChain {
+impl IndexWorkflowCallbackChain {
     /// Create a callback chain.
     #[must_use]
-    pub fn new(callbacks: Vec<Arc<dyn WorkflowCallbacks>>) -> Self {
+    pub fn new(callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>) -> Self {
         Self { callbacks }
     }
 }
 
-impl WorkflowCallbacks for CallbackChain {
+impl IndexWorkflowCallbacks for IndexWorkflowCallbackChain {
     fn workflow_started(&self, workflow_name: &str) {
         for callback in &self.callbacks {
             callback.workflow_started(workflow_name);
         }
     }
 
-    fn workflow_completed(&self, workflow_name: &str, stats: &PipelineRunStats) {
+    fn workflow_completed(&self, workflow_name: &str, stats: &IndexRunStats) {
         for callback in &self.callbacks {
             callback.workflow_completed(workflow_name, stats);
         }
@@ -93,16 +93,11 @@ impl WorkflowCallbacks for CallbackChain {
 }
 
 pub(crate) fn callback_chain(
-    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
-) -> Arc<dyn WorkflowCallbacks> {
-    if callbacks.is_empty() {
-        Arc::new(NoopWorkflowCallbacks)
-    } else if callbacks.len() == 1 {
-        callbacks
-            .into_iter()
-            .next()
-            .expect("checked callback length")
-    } else {
-        Arc::new(CallbackChain::new(callbacks))
+    callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
+) -> Arc<dyn IndexWorkflowCallbacks> {
+    match callbacks.as_slice() {
+        [] => Arc::new(NoopIndexWorkflowCallbacks),
+        [callback] => Arc::clone(callback),
+        _ => Arc::new(IndexWorkflowCallbackChain::new(callbacks)),
     }
 }

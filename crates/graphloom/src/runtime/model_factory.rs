@@ -6,7 +6,9 @@ use graphloom_llm::{
     CompletionModel, EmbeddingModel, ModelConfig, OpenAiCompletionModel, OpenAiEmbeddingModel,
 };
 
-use crate::{GraphRagConfig, Result, runtime::ModelRegistry};
+use crate::{
+    GraphLoomError, GraphRagConfig, IndexWorkflowRequirements, Result, runtime::ModelRegistry,
+};
 
 /// Factory for provider-specific model clients.
 pub trait ModelFactory: Send + Sync + std::fmt::Debug {
@@ -61,16 +63,33 @@ impl ModelFactory for DefaultModelFactory {
 
 pub(crate) fn create_model_registry(
     config: &GraphRagConfig,
+    requirements: &IndexWorkflowRequirements,
     factory: &dyn ModelFactory,
 ) -> Result<ModelRegistry> {
     let mut registry = ModelRegistry::default();
-    for (id, model_config) in &config.completion_models {
+    for id in requirements.completion_models() {
+        let model_config =
+            config
+                .completion_models
+                .get(id)
+                .ok_or_else(|| GraphLoomError::InvalidModel {
+                    model_id: id.to_owned(),
+                    message: "required completion model is not configured".to_owned(),
+                })?;
         registry.insert_completion(
             id,
             factory.create_completion(id, model_config, config.concurrent_requests)?,
         )?;
     }
-    for (id, model_config) in &config.embedding_models {
+    for id in requirements.embedding_models() {
+        let model_config =
+            config
+                .embedding_models
+                .get(id)
+                .ok_or_else(|| GraphLoomError::InvalidModel {
+                    model_id: id.to_owned(),
+                    message: "required embedding model is not configured".to_owned(),
+                })?;
         registry.insert_embedding(
             id,
             factory.create_embedding(id, model_config, config.concurrent_requests)?,
@@ -91,7 +110,7 @@ mod tests {
     };
 
     use super::{ModelFactory, create_model_registry};
-    use crate::{GraphRagConfig, Result};
+    use crate::{GraphRagConfig, IndexWorkflowRequirements, Result};
 
     #[derive(Debug, Default)]
     struct CountingModelFactory {
@@ -136,8 +155,11 @@ mod tests {
             .completion_models
             .insert("shared".to_owned(), model_config);
         let factory = CountingModelFactory::default();
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_completion_model("shared");
 
-        let registry = create_model_registry(&config, &factory).expect("registry should build");
+        let registry =
+            create_model_registry(&config, &requirements, &factory).expect("registry should build");
         let first = registry.completion("shared").expect("first lookup");
         let second = registry.completion("shared").expect("second lookup");
 

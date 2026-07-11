@@ -6,13 +6,13 @@ use async_trait::async_trait;
 use graphloom_cache::{Cache, JsonCache};
 use graphloom_input::{FileInputReader, InputReader};
 use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
-use graphloom_vectors::{LanceDbVectorStore, VectorStore};
 
 use crate::{
-    GraphLoomError, Result,
+    GraphLoomError, IndexWorkflowRequirements, Result,
     project::LoadedProject,
     runtime::{
-        CacheService, DefaultModelFactory, IndexRuntimeIo, IndexRuntimeServices, ModelFactory,
+        CacheService, DefaultIndexVectorStoreFactory, DefaultModelFactory, IndexRuntimeIo,
+        IndexRuntimeServices, IndexVectorStoreFactory, ModelFactory,
         model_factory::create_model_registry,
     },
 };
@@ -25,7 +25,10 @@ pub(crate) trait IndexRuntimeFactory: Send + Sync + std::fmt::Debug {
         project: &LoadedProject,
         project_root: &std::path::Path,
         cache_enabled: bool,
+        requirements: &IndexWorkflowRequirements,
     ) -> Result<IndexRuntimeServices>;
+
+    fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory>;
 }
 
 /// Default factory preserving the existing file, Parquet, JSON, LanceDB, and OpenAI providers.
@@ -39,8 +42,21 @@ impl IndexRuntimeFactory for DefaultIndexRuntimeFactory {
         project: &LoadedProject,
         project_root: &std::path::Path,
         cache_enabled: bool,
+        requirements: &IndexWorkflowRequirements,
     ) -> Result<IndexRuntimeServices> {
-        create_default_services(project, project_root, cache_enabled, &DefaultModelFactory).await
+        create_default_services(
+            project,
+            project_root,
+            cache_enabled,
+            requirements,
+            &DefaultModelFactory,
+            &DefaultIndexVectorStoreFactory,
+        )
+        .await
+    }
+
+    fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory> {
+        Arc::new(DefaultIndexVectorStoreFactory)
     }
 }
 
@@ -48,7 +64,9 @@ async fn create_default_services(
     project: &LoadedProject,
     project_root: &std::path::Path,
     cache_enabled: bool,
+    requirements: &IndexWorkflowRequirements,
     model_factory: &dyn ModelFactory,
+    vector_store_factory: &dyn IndexVectorStoreFactory,
 ) -> Result<IndexRuntimeServices> {
     let output_table_provider: Arc<dyn TableProvider> =
         Arc::new(ParquetTableProvider::new(&project.paths.output_dir).map_err(runtime_build)?);
@@ -70,12 +88,10 @@ async fn create_default_services(
     } else {
         CacheService::Disabled
     };
-    let vector_store: Arc<dyn VectorStore> = Arc::new(
-        LanceDbVectorStore::connect(&project.config.vector_store)
-            .await
-            .map_err(runtime_build)?,
-    );
-    let models = create_model_registry(&project.config, model_factory)?;
+    let vector_store = vector_store_factory
+        .create(&project.config.vector_store)
+        .await?;
+    let models = create_model_registry(&project.config, requirements, model_factory)?;
 
     Ok(IndexRuntimeServices::new(
         IndexRuntimeIo::new(

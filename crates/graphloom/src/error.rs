@@ -46,14 +46,44 @@ pub enum GraphLoomError {
     /// A workflow name is not registered.
     #[error("workflow {name} is not registered")]
     UnknownWorkflow {
-        /// Workflow name.
+        /// IndexWorkflow name.
         name: String,
+    },
+
+    /// An indexing workflow name was registered more than once.
+    #[error("index workflow `{name}` is already registered")]
+    DuplicateIndexWorkflow {
+        /// Duplicate workflow name.
+        name: String,
+    },
+
+    /// A prepared model id was registered more than once for the same model kind.
+    #[error("{kind} model `{model_id}` is already registered")]
+    DuplicateModelRegistration {
+        /// Completion or embedding model kind.
+        kind: &'static str,
+        /// Duplicate model id.
+        model_id: String,
+    },
+
+    /// An indexing workflow requested a model absent from the prepared registry.
+    #[error(
+        "{kind} model `{model_id}` required by workflow `{workflow}` was not prepared in the \
+         indexing runtime"
+    )]
+    MissingPreparedModel {
+        /// Completion or embedding model kind.
+        kind: &'static str,
+        /// Missing model id.
+        model_id: String,
+        /// Workflow requiring the model.
+        workflow: &'static str,
     },
 
     /// A workflow failed.
     #[error("workflow {name} failed: {source}")]
     WorkflowFailed {
-        /// Workflow name.
+        /// IndexWorkflow name.
         name: String,
         /// Underlying failure.
         #[source]
@@ -70,7 +100,7 @@ pub enum GraphLoomError {
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {
-        /// Workflow name.
+        /// IndexWorkflow name.
         workflow: &'static str,
         /// Failure details.
         message: String,

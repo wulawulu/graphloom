@@ -4,7 +4,7 @@ use std::{
 };
 
 use graphloom::{
-    ALL_EMBEDDINGS, GraphRagConfig, PipelineRunStats, WorkflowCallbacks,
+    ALL_EMBEDDINGS, GraphRagConfig, IndexRunStats, IndexWorkflowCallbacks,
     api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
@@ -648,7 +648,7 @@ impl RecordingCallbacks {
     }
 }
 
-impl WorkflowCallbacks for RecordingCallbacks {
+impl IndexWorkflowCallbacks for RecordingCallbacks {
     fn workflow_started(&self, workflow_name: &str) {
         self.started
             .lock()
@@ -656,7 +656,7 @@ impl WorkflowCallbacks for RecordingCallbacks {
             .push(workflow_name.to_owned());
     }
 
-    fn workflow_completed(&self, workflow_name: &str, _stats: &PipelineRunStats) {
+    fn workflow_completed(&self, workflow_name: &str, _stats: &IndexRunStats) {
         self.completed
             .lock()
             .expect("completed lock")

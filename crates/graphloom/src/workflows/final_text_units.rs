@@ -6,14 +6,14 @@ use async_trait::async_trait;
 use polars_core::prelude::*;
 
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     dataframe::{
         i64_column_value, invalid_data, list_at, row_to_static, string_value, usize_to_i64,
     },
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const CREATE_FINAL_TEXT_UNITS_WORKFLOW: &str = "create_final_text_units";
 
 /// Fill final text-unit entity, relationship, and covariate references.
@@ -21,7 +21,7 @@ pub const CREATE_FINAL_TEXT_UNITS_WORKFLOW: &str = "create_final_text_units";
 pub struct CreateFinalTextUnitsWorkflow;
 
 #[async_trait]
-impl Workflow for CreateFinalTextUnitsWorkflow {
+impl IndexWorkflow for CreateFinalTextUnitsWorkflow {
     fn name(&self) -> &'static str {
         CREATE_FINAL_TEXT_UNITS_WORKFLOW
     }
@@ -29,8 +29,8 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let text_units = read_text_units(
             &context
                 .output_table_provider()
@@ -87,7 +87,7 @@ impl Workflow for CreateFinalTextUnitsWorkflow {
             .write_dataframe("text_units", text_units_dataframe(&rows)?)
             .await?;
 
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: rows.iter().take(5).map(TextUnitRow::to_value).collect(),
             stop: false,
             input_rows: rows.len(),

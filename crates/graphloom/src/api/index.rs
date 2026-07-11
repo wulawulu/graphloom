@@ -7,8 +7,8 @@ use std::{
 };
 
 use crate::{
-    GraphLoomError, GraphRagConfig, PipelineRunStats, Result, WorkflowCallbacks,
-    WorkflowFunctionOutput,
+    GraphLoomError, GraphRagConfig, IndexRunStats, IndexWorkflowCallbacks, IndexWorkflowOutput,
+    Result,
     config::load::{ValidationMode, validate_index_project},
     project::LoadedProject,
     runtime::{StagedIndexGeneration, preflight_index_runtime, prepare_full_index},
@@ -39,17 +39,17 @@ pub struct BuildIndexOptions {
     pub method: IndexingMethod,
     /// Cache mode.
     pub cache_mode: CacheMode,
-    /// Workflow callbacks.
-    pub callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
+    /// IndexWorkflow callbacks.
+    pub callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
 }
 
 /// Successful index run result.
 #[derive(Debug, Clone)]
 pub struct IndexRunResult {
-    /// Workflow outputs.
-    pub workflow_outputs: Vec<WorkflowFunctionOutput>,
+    /// IndexWorkflow outputs.
+    pub workflow_outputs: Vec<IndexWorkflowOutput>,
     /// Final stats.
-    pub stats: PipelineRunStats,
+    pub stats: IndexRunStats,
     /// Elapsed wall time.
     pub elapsed: Duration,
 }

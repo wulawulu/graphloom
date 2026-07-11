@@ -88,22 +88,17 @@ fn insert_model<T: ?Sized>(
     kind: &'static str,
 ) -> Result<()> {
     if models.contains_key(&id) {
-        return Err(GraphLoomError::InvalidData {
-            workflow: "model_registry",
-            message: format!("{kind} model `{id}` is already registered"),
-        });
+        return Err(GraphLoomError::DuplicateModelRegistration { kind, model_id: id });
     }
     models.insert(id, model);
     Ok(())
 }
 
 fn missing_model(id: &str, kind: &'static str, workflow: &'static str) -> GraphLoomError {
-    GraphLoomError::InvalidData {
+    GraphLoomError::MissingPreparedModel {
+        kind,
+        model_id: id.to_owned(),
         workflow,
-        message: format!(
-            "{kind} model `{id}` required by workflow `{workflow}` was not prepared in the \
-             indexing runtime"
-        ),
     }
 }
 

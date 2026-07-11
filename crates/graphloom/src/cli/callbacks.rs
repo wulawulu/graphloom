@@ -1,8 +1,8 @@
-//! Workflow callbacks for CLI progress.
+//! IndexWorkflow callbacks for CLI progress.
 
 use std::fmt;
 
-use crate::{PipelineRunStats, WorkflowCallbacks};
+use crate::{IndexRunStats, IndexWorkflowCallbacks};
 
 /// CLI workflow callbacks.
 pub struct ConsoleWorkflowCallbacks {
@@ -26,13 +26,13 @@ impl ConsoleWorkflowCallbacks {
     }
 }
 
-impl WorkflowCallbacks for ConsoleWorkflowCallbacks {
+impl IndexWorkflowCallbacks for ConsoleWorkflowCallbacks {
     fn workflow_started(&self, workflow_name: &str) {
         println!("Starting {workflow_name}");
         tracing::info!(workflow = workflow_name, "workflow started");
     }
 
-    fn workflow_completed(&self, workflow_name: &str, stats: &PipelineRunStats) {
+    fn workflow_completed(&self, workflow_name: &str, stats: &IndexRunStats) {
         println!("Completed {workflow_name}");
         tracing::info!(
             workflow = workflow_name,

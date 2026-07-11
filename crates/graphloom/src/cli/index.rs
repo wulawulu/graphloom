@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
-    PipelineRunStats, WorkflowCallbacks,
+    IndexRunStats, IndexWorkflowCallbacks,
     api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
     cli::{
         args::{IndexArgs, IndexMethodArg},
@@ -58,14 +58,14 @@ pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
         }
         return Ok(IndexRunResult {
             workflow_outputs: Vec::new(),
-            stats: PipelineRunStats::default(),
+            stats: IndexRunStats::default(),
             elapsed: Duration::ZERO,
         });
     }
 
     let _log_guard = init_logging(&project.paths.reporting_dir, args.verbose).await?;
     let callback =
-        Arc::new(ConsoleWorkflowCallbacks::new(args.verbose)) as Arc<dyn WorkflowCallbacks>;
+        Arc::new(ConsoleWorkflowCallbacks::new(args.verbose)) as Arc<dyn IndexWorkflowCallbacks>;
     let project_root = project.root.clone();
     let result = build_validated_index(
         project,
@@ -123,7 +123,7 @@ async fn init_logging(
     })
 }
 
-fn print_success_summary(stats: &PipelineRunStats, elapsed: Duration) {
+fn print_success_summary(stats: &IndexRunStats, elapsed: Duration) {
     println!("Index completed successfully");
     println!("Documents: {}", stats.document_count);
     println!("Text units: {}", stats.text_unit_count);

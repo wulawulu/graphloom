@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod dataframe;
 mod error;
+pub mod indexing;
 mod operations;
 #[allow(
     unsafe_code,
@@ -27,7 +28,6 @@ mod stats;
 mod workflow;
 pub mod workflows;
 
-pub use callbacks::{CallbackChain, NoopWorkflowCallbacks, WorkflowCallbacks};
 pub use config::{
     ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig, CacheStorageConfig,
     ClusterGraphConfig, CommunityReportsConfig, DEFAULT_EMBEDDINGS, ENTITY_DESCRIPTION_EMBEDDING,
@@ -35,22 +35,20 @@ pub use config::{
     ReportingConfig, SnapshotsConfig, StorageConfig, SummarizeDescriptionsConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
 };
-pub use context::PipelineRunContext;
 pub use error::{GraphLoomError, Result};
 pub use graphloom_storage as storage;
-pub use pipeline::{Pipeline, PipelineFactory};
-pub use runtime::{
-    CacheService, DefaultModelFactory, IndexRuntimeIo, IndexRuntimeServices, ModelFactory,
-    ModelRegistry,
+pub use indexing::{
+    IndexPipeline, IndexPipelineContext, IndexPipelineFactory, IndexPipelineStep, IndexRunStats,
+    IndexWorkflow, IndexWorkflowCallbackChain, IndexWorkflowCallbacks, IndexWorkflowOutput,
+    IndexWorkflowRegistry, IndexWorkflowRequirements, ModelRegistry, NoopIndexWorkflowCallbacks,
 };
-pub use stats::PipelineRunStats;
-pub use workflow::{Workflow, WorkflowFunctionOutput, WorkflowRegistry};
+pub(crate) use runtime::IndexRuntimeServices;
 pub use workflows::{
     CREATE_BASE_TEXT_UNITS_WORKFLOW, CREATE_COMMUNITIES_WORKFLOW,
     CREATE_COMMUNITY_REPORTS_WORKFLOW, CREATE_FINAL_DOCUMENTS_WORKFLOW,
     CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, LOAD_INPUT_DOCUMENTS_WORKFLOW,
-    register_standard_workflows,
+    register_standard_index_workflows,
 };
 #[cfg(test)]
 pub(crate) use workflows::{

@@ -25,9 +25,9 @@ pub use generate_text_embeddings::{
 };
 pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkflow};
 
-use crate::WorkflowRegistry;
+use crate::{IndexWorkflowRegistry, Result};
 
-/// Workflow prefix used by focused pipeline tests.
+/// IndexWorkflow prefix used by focused pipeline tests.
 #[cfg(test)]
 pub(crate) const STEP5_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
@@ -35,7 +35,7 @@ pub(crate) const STEP5_WORKFLOWS: &[&str] = &[
     CREATE_FINAL_DOCUMENTS_WORKFLOW,
 ];
 
-/// Workflow prefix used by focused validation tests.
+/// IndexWorkflow prefix used by focused validation tests.
 #[cfg(test)]
 pub(crate) const STEP8_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
@@ -49,7 +49,7 @@ pub(crate) const STEP8_WORKFLOWS: &[&str] = &[
     CREATE_COMMUNITY_REPORTS_WORKFLOW,
 ];
 
-/// Workflow names for the standard indexing pipeline.
+/// IndexWorkflow names for the standard indexing pipeline.
 pub const STANDARD_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
     CREATE_BASE_TEXT_UNITS_WORKFLOW,
@@ -65,43 +65,104 @@ pub const STANDARD_WORKFLOWS: &[&str] = &[
 
 /// Register the smallest workflow prefix used by focused tests.
 #[cfg(test)]
-pub(crate) fn register_step5_workflows(registry: &mut WorkflowRegistry) {
-    registry.register(LoadInputDocumentsWorkflow);
-    registry.register(CreateBaseTextUnitsWorkflow);
-    registry.register(CreateFinalDocumentsWorkflow);
+pub(crate) fn register_step5_workflows(registry: &mut IndexWorkflowRegistry) -> Result<()> {
+    registry.register(LoadInputDocumentsWorkflow)?;
+    registry.register(CreateBaseTextUnitsWorkflow)?;
+    registry.register(CreateFinalDocumentsWorkflow)
 }
 
 #[cfg(test)]
-pub(crate) fn register_step6_workflows(registry: &mut WorkflowRegistry) {
-    register_step5_workflows(registry);
-    registry.register(ExtractGraphWorkflow);
-    registry.register(FinalizeGraphWorkflow);
+pub(crate) fn register_step6_workflows(registry: &mut IndexWorkflowRegistry) -> Result<()> {
+    register_step5_workflows(registry)?;
+    registry.register(ExtractGraphWorkflow)?;
+    registry.register(FinalizeGraphWorkflow)
 }
 
 #[cfg(test)]
-pub(crate) fn register_step7_workflows(registry: &mut WorkflowRegistry) {
-    register_step6_workflows(registry);
-    registry.register(ExtractCovariatesWorkflow);
-    registry.register(CreateCommunitiesWorkflow);
-    registry.register(CreateFinalTextUnitsWorkflow);
+pub(crate) fn register_step7_workflows(registry: &mut IndexWorkflowRegistry) -> Result<()> {
+    register_step6_workflows(registry)?;
+    registry.register(ExtractCovariatesWorkflow)?;
+    registry.register(CreateCommunitiesWorkflow)?;
+    registry.register(CreateFinalTextUnitsWorkflow)
 }
 
 #[cfg(test)]
-pub(crate) fn register_step8_workflows(registry: &mut WorkflowRegistry) {
-    register_step7_workflows(registry);
-    registry.register(CreateCommunityReportsWorkflow);
+pub(crate) fn register_step8_workflows(registry: &mut IndexWorkflowRegistry) -> Result<()> {
+    register_step7_workflows(registry)?;
+    registry.register(CreateCommunityReportsWorkflow)
 }
 
 /// Register every workflow in the standard indexing pipeline.
-pub fn register_standard_workflows(registry: &mut WorkflowRegistry) {
-    registry.register(LoadInputDocumentsWorkflow);
-    registry.register(CreateBaseTextUnitsWorkflow);
-    registry.register(CreateFinalDocumentsWorkflow);
-    registry.register(ExtractGraphWorkflow);
-    registry.register(FinalizeGraphWorkflow);
-    registry.register(ExtractCovariatesWorkflow);
-    registry.register(CreateCommunitiesWorkflow);
-    registry.register(CreateFinalTextUnitsWorkflow);
-    registry.register(CreateCommunityReportsWorkflow);
-    registry.register(GenerateTextEmbeddingsWorkflow);
+pub fn register_standard_index_workflows(registry: &mut IndexWorkflowRegistry) -> Result<()> {
+    registry.register(LoadInputDocumentsWorkflow)?;
+    registry.register(CreateBaseTextUnitsWorkflow)?;
+    registry.register(CreateFinalDocumentsWorkflow)?;
+    registry.register(ExtractGraphWorkflow)?;
+    registry.register(FinalizeGraphWorkflow)?;
+    registry.register(ExtractCovariatesWorkflow)?;
+    registry.register(CreateCommunitiesWorkflow)?;
+    registry.register(CreateFinalTextUnitsWorkflow)?;
+    registry.register(CreateCommunityReportsWorkflow)?;
+    registry.register(GenerateTextEmbeddingsWorkflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CreateCommunityReportsWorkflow, ExtractCovariatesWorkflow, ExtractGraphWorkflow,
+        GenerateTextEmbeddingsWorkflow,
+    };
+    use crate::{GraphRagConfig, IndexWorkflow};
+
+    #[test]
+    fn test_should_declare_model_requirements_from_active_workflows() {
+        let mut config = GraphRagConfig::default();
+        config.extract_graph.completion_model_id = "extract".to_owned();
+        config.summarize_descriptions.completion_model_id = "summarize".to_owned();
+        config.extract_claims.completion_model_id = "claims".to_owned();
+        config.community_reports.completion_model_id = "reports".to_owned();
+        config.embed_text.embedding_model_id = "embeddings".to_owned();
+
+        let graph = ExtractGraphWorkflow
+            .requirements(&config)
+            .expect("graph requirements");
+        assert_eq!(
+            graph.completion_models().collect::<Vec<_>>(),
+            vec!["extract", "summarize"]
+        );
+        assert_eq!(
+            CreateCommunityReportsWorkflow
+                .requirements(&config)
+                .expect("report requirements")
+                .completion_models()
+                .collect::<Vec<_>>(),
+            vec!["reports"]
+        );
+        assert_eq!(
+            GenerateTextEmbeddingsWorkflow
+                .requirements(&config)
+                .expect("embedding requirements")
+                .embedding_models()
+                .collect::<Vec<_>>(),
+            vec!["embeddings"]
+        );
+
+        assert!(
+            ExtractCovariatesWorkflow
+                .requirements(&config)
+                .expect("disabled claims requirements")
+                .completion_models()
+                .next()
+                .is_none()
+        );
+        config.extract_claims.enabled = true;
+        assert_eq!(
+            ExtractCovariatesWorkflow
+                .requirements(&config)
+                .expect("enabled claims requirements")
+                .completion_models()
+                .collect::<Vec<_>>(),
+            vec!["claims"]
+        );
+    }
 }

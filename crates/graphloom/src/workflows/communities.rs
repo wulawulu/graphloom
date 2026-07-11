@@ -9,14 +9,14 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     dataframe::{invalid_data, list_at, list_column, row_to_static, string_value, usize_to_i64},
     operations::communities::{
         ClusterRelationship, CommunityCluster, cluster_graph as cluster_relationship_graph,
     },
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const CREATE_COMMUNITIES_WORKFLOW: &str = "create_communities";
 
 /// Cluster graph entities and relationships into communities.
@@ -24,7 +24,7 @@ pub const CREATE_COMMUNITIES_WORKFLOW: &str = "create_communities";
 pub struct CreateCommunitiesWorkflow;
 
 #[async_trait]
-impl Workflow for CreateCommunitiesWorkflow {
+impl IndexWorkflow for CreateCommunitiesWorkflow {
     fn name(&self) -> &'static str {
         CREATE_COMMUNITIES_WORKFLOW
     }
@@ -32,8 +32,8 @@ impl Workflow for CreateCommunitiesWorkflow {
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let entities = read_entities(
             &context
                 .output_table_provider()
@@ -60,7 +60,7 @@ impl Workflow for CreateCommunitiesWorkflow {
             .await?;
         context.stats.community_count = communities.len();
 
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: communities.iter().take(5).map(community_value).collect(),
             stop: false,
             input_rows: entities.len().saturating_add(relationships.len()),

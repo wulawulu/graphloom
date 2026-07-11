@@ -1,11 +1,11 @@
-//! Pipeline run statistics.
+//! IndexPipeline run statistics.
 
 use std::{collections::BTreeMap, time::Duration};
 
 /// Mutable statistics accumulated during a pipeline run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct PipelineRunStats {
+pub struct IndexRunStats {
     /// Number of documents read.
     pub document_count: usize,
     /// Number of text units created.
@@ -36,7 +36,7 @@ pub struct PipelineRunStats {
     pub workflow_elapsed_ms: BTreeMap<String, u128>,
 }
 
-impl PipelineRunStats {
+impl IndexRunStats {
     /// Record workflow elapsed time.
     pub fn record_workflow_elapsed(&mut self, workflow: &str, elapsed: Duration) {
         self.workflow_elapsed_ms

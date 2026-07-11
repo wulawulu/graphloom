@@ -17,12 +17,13 @@ use serde_json::{Value, json};
 use super::common::{resolve_embedding_encoding_model, resolve_embedding_model};
 use crate::{
     COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig,
-    PipelineRunContext, Result, TEXT_UNIT_TEXT_EMBEDDING, Workflow, WorkflowFunctionOutput,
+    IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, IndexWorkflowRequirements, Result,
+    TEXT_UNIT_TEXT_EMBEDDING,
     dataframe::invalid_data,
     operations::embeddings::{EmbeddingOperationConfig, EmbeddingSourceRow, embed_text_rows},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const GENERATE_TEXT_EMBEDDINGS_WORKFLOW: &str = "generate_text_embeddings";
 const CHUNK_OVERLAP: usize = 100;
 
@@ -97,16 +98,22 @@ impl FieldSummary {
 }
 
 #[async_trait]
-impl Workflow for GenerateTextEmbeddingsWorkflow {
+impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
     fn name(&self) -> &'static str {
         GENERATE_TEXT_EMBEDDINGS_WORKFLOW
+    }
+
+    fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
+        let mut requirements = IndexWorkflowRequirements::default();
+        requirements.require_embedding_model(&config.embed_text.embedding_model_id);
+        Ok(requirements)
     }
 
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         config
             .validate_embed_text()
             .map_err(|message| GraphLoomError::InvalidData {
@@ -177,7 +184,7 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
         }
 
         context.stats.embedding_count = context.stats.embedding_count.saturating_add(output_rows);
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: summaries.iter().map(FieldSummary::value).collect(),
             stop: false,
             input_rows,
@@ -188,7 +195,7 @@ impl Workflow for GenerateTextEmbeddingsWorkflow {
 
 async fn process_field(
     config: &GraphRagConfig,
-    context: &mut PipelineRunContext,
+    context: &mut IndexPipelineContext,
     field: &EmbeddingField,
     schema: &VectorIndexSchema,
     dependencies: &FieldDependencies,
@@ -249,7 +256,7 @@ async fn process_field(
 
 async fn process_field_inner(
     config: &GraphRagConfig,
-    context: &mut PipelineRunContext,
+    context: &mut IndexPipelineContext,
     field: &EmbeddingField,
     schema: &VectorIndexSchema,
     dependencies: &FieldDependencies,
@@ -336,7 +343,7 @@ async fn process_field_inner(
 }
 
 async fn flush_buffer(
-    context: &mut PipelineRunContext,
+    context: &mut IndexPipelineContext,
     operation_config: &EmbeddingOperationConfig,
     dependencies: &FieldDependencies,
     schema: &VectorIndexSchema,

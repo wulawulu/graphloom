@@ -5,6 +5,7 @@ mod generation;
 mod model_factory;
 mod model_registry;
 mod services;
+mod vector_store_factory;
 
 use std::{
     io::ErrorKind,
@@ -15,19 +16,20 @@ use std::{
 pub(crate) use factory::{DefaultIndexRuntimeFactory, IndexRuntimeFactory};
 pub(crate) use generation::StagedIndexGeneration;
 use graphloom_storage::{FileStorage, Storage};
-use graphloom_vectors::{LanceDbVectorStore, VectorStore};
+use graphloom_vectors::VectorStore;
 pub use model_factory::{DefaultModelFactory, ModelFactory};
 pub use model_registry::ModelRegistry;
 pub use services::{CacheService, IndexRuntimeIo, IndexRuntimeServices};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
+pub(crate) use vector_store_factory::{DefaultIndexVectorStoreFactory, IndexVectorStoreFactory};
 
 use crate::{
-    ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, Pipeline, PipelineFactory, PipelineRunContext,
-    Result, WorkflowCallbacks, WorkflowRegistry,
+    ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, IndexPipeline, IndexPipelineContext,
+    IndexPipelineFactory, IndexWorkflowCallbacks, IndexWorkflowRegistry, Result,
     path_safety::{path_is_within_or_equal, resolve_path_rejecting_links},
     project::{LoadedProject, ProjectPaths},
-    register_standard_workflows,
+    register_standard_index_workflows,
 };
 
 /// Runtime ready to execute standard indexing.
@@ -35,18 +37,19 @@ use crate::{
 pub struct IndexRuntime {
     /// Resolved config.
     pub config: GraphRagConfig,
-    /// Pipeline context.
-    pub context: PipelineRunContext,
+    /// IndexPipeline context.
+    pub context: IndexPipelineContext,
     /// Built pipeline.
-    pub pipeline: Pipeline,
+    pub pipeline: IndexPipeline,
 }
 
 /// Providers and pipeline that passed non-destructive runtime preflight.
 #[derive(Debug)]
 pub(crate) struct PreparedIndexRuntime {
     services: Option<IndexRuntimeServices>,
-    callbacks: Arc<dyn WorkflowCallbacks>,
-    pipeline: Pipeline,
+    callbacks: Arc<dyn IndexWorkflowCallbacks>,
+    pipeline: IndexPipeline,
+    vector_store_factory: Arc<dyn IndexVectorStoreFactory>,
 }
 
 /// Build standard-index providers and pipeline without clearing output or resetting vectors.
@@ -57,7 +60,7 @@ pub(crate) struct PreparedIndexRuntime {
 pub(crate) async fn preflight_index_runtime(
     project: &LoadedProject,
     cache_enabled: bool,
-    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
+    callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
 ) -> Result<PreparedIndexRuntime> {
     preflight_index_runtime_with_factory(
         project,
@@ -73,29 +76,31 @@ pub(crate) async fn preflight_index_runtime_with_factory(
     project: &LoadedProject,
     project_root: &Path,
     cache_enabled: bool,
-    callbacks: Vec<Arc<dyn WorkflowCallbacks>>,
+    callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
     factory: &dyn IndexRuntimeFactory,
 ) -> Result<PreparedIndexRuntime> {
     validate_managed_vector_schemas(&project.config)?;
     project.paths.validate_vector_path_safety()?;
     preflight_writable_paths(&project.paths, cache_enabled).await?;
-    let services = factory
-        .create_services(project, project_root, cache_enabled)
-        .await?;
-    let callbacks = crate::callbacks::callback_chain(callbacks);
-
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
-    let pipeline = PipelineFactory::new(registry)
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry)?;
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&project.config)
         .map_err(|source| GraphLoomError::RuntimeBuild {
             source: Box::new(source),
         })?;
+    let requirements = pipeline.requirements(&project.config)?;
+    crate::config::load::validate_required_models(&project.config, &requirements)?;
+    let services = factory
+        .create_services(project, project_root, cache_enabled, &requirements)
+        .await?;
+    let callbacks = crate::callbacks::callback_chain(callbacks);
 
     Ok(PreparedIndexRuntime {
         services: Some(services),
         callbacks,
         pipeline,
+        vector_store_factory: factory.vector_store_factory(),
     })
 }
 
@@ -125,7 +130,10 @@ pub(crate) async fn prepare_full_index(
             } = services;
             drop(vector_store);
             clear_output_dir(&project.paths.output_dir).await?;
-            let new_store = connect_vector_store(&project.config).await?;
+            let new_store = runtime
+                .vector_store_factory
+                .create(&project.config.vector_store)
+                .await?;
             reset_managed_indices(new_store.as_ref(), &project.config).await?;
             runtime.services = Some(IndexRuntimeServices::new(
                 IndexRuntimeIo::new(
@@ -157,7 +165,7 @@ impl PreparedIndexRuntime {
     ) -> Result<IndexRuntime> {
         let mut services = self.services.ok_or_else(missing_services)?;
         services.project_root = project_root.to_path_buf();
-        let context = PipelineRunContext::new(services, self.callbacks);
+        let context = IndexPipelineContext::new(services, self.callbacks);
 
         Ok(IndexRuntime {
             config,
@@ -205,16 +213,6 @@ fn validate_managed_vector_schemas(config: &GraphRagConfig) -> Result<()> {
             })?;
     }
     Ok(())
-}
-
-async fn connect_vector_store(config: &GraphRagConfig) -> Result<Arc<dyn VectorStore>> {
-    Ok(Arc::new(
-        LanceDbVectorStore::connect(&config.vector_store)
-            .await
-            .map_err(|source| GraphLoomError::RuntimeBuild {
-                source: Box::new(source),
-            })?,
-    ))
 }
 
 async fn preflight_writable_paths(paths: &ProjectPaths, cache_enabled: bool) -> Result<()> {
@@ -363,14 +361,17 @@ mod runtime_factory_tests {
     use graphloom_input::{DocumentStream, InputReader};
     use graphloom_storage::{MemoryStorage, MemoryTableProvider};
     use graphloom_vectors::{
-        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore,
+        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore, VectorStoreConfig,
     };
     use tempfile::TempDir;
 
-    use super::{IndexRuntimeFactory, preflight_index_runtime_with_factory};
+    use super::{
+        IndexRuntimeFactory, IndexVectorStoreFactory, preflight_index_runtime_with_factory,
+    };
     use crate::{
-        CacheService, GraphRagConfig, IndexRuntimeIo, IndexRuntimeServices, ModelRegistry, Result,
+        GraphRagConfig, IndexWorkflowRequirements, ModelRegistry, Result,
         project::LoadedProject,
+        runtime::{CacheService, IndexRuntimeIo, IndexRuntimeServices},
     };
 
     #[derive(Debug, Default)]
@@ -383,7 +384,16 @@ mod runtime_factory_tests {
     }
 
     #[derive(Debug, Default)]
-    struct EmptyVectorStore;
+    struct EmptyVectorStore {
+        resets: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for EmptyVectorStore {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[async_trait]
     impl VectorStore for EmptyVectorStore {
@@ -391,6 +401,7 @@ mod runtime_factory_tests {
             Ok(())
         }
         async fn reset_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn upsert_documents(
@@ -419,6 +430,25 @@ mod runtime_factory_tests {
     struct MemoryRuntimeFactory {
         calls: AtomicUsize,
         table_provider: Arc<MemoryTableProvider>,
+        vector_factory: Arc<MemoryVectorStoreFactory>,
+    }
+
+    #[derive(Debug, Default)]
+    struct MemoryVectorStoreFactory {
+        calls: AtomicUsize,
+        resets: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl IndexVectorStoreFactory for MemoryVectorStoreFactory {
+        async fn create(&self, _config: &VectorStoreConfig) -> Result<Arc<dyn VectorStore>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(EmptyVectorStore {
+                resets: self.resets.clone(),
+                drops: self.drops.clone(),
+            }))
+        }
     }
 
     #[async_trait]
@@ -428,6 +458,7 @@ mod runtime_factory_tests {
             _project: &LoadedProject,
             project_root: &std::path::Path,
             _cache_enabled: bool,
+            _requirements: &IndexWorkflowRequirements,
         ) -> Result<IndexRuntimeServices> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let storage = Arc::new(MemoryStorage::new());
@@ -439,24 +470,45 @@ mod runtime_factory_tests {
                     self.table_provider.clone(),
                 ),
                 CacheService::Disabled,
-                Arc::new(EmptyVectorStore),
+                self.vector_factory
+                    .create(&_project.config.vector_store)
+                    .await?,
                 ModelRegistry::default(),
                 project_root,
             ))
+        }
+
+        fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory> {
+            self.vector_factory.clone()
         }
     }
 
     #[tokio::test]
     async fn test_should_prepare_runtime_entirely_from_injected_factory() {
         let tempdir = TempDir::new().expect("tempdir");
-        let project = LoadedProject::from_config(tempdir.path(), GraphRagConfig::default())
-            .expect("project should load");
+        let mut config = GraphRagConfig {
+            workflows: vec![crate::LOAD_INPUT_DOCUMENTS_WORKFLOW.to_owned()],
+            ..Default::default()
+        };
+        config.vector_store.db_uri = tempdir
+            .path()
+            .join("output")
+            .join("lancedb")
+            .to_string_lossy()
+            .into_owned();
+        let project =
+            LoadedProject::from_config(tempdir.path(), config).expect("project should load");
         let factory = MemoryRuntimeFactory {
             calls: AtomicUsize::new(0),
             table_provider: Arc::new(MemoryTableProvider::new()),
+            vector_factory: Arc::new(MemoryVectorStoreFactory {
+                calls: AtomicUsize::new(0),
+                resets: Arc::new(AtomicUsize::new(0)),
+                drops: Arc::new(AtomicUsize::new(0)),
+            }),
         };
 
-        let prepared = preflight_index_runtime_with_factory(
+        let mut prepared = preflight_index_runtime_with_factory(
             &project,
             tempdir.path(),
             false,
@@ -465,11 +517,20 @@ mod runtime_factory_tests {
         )
         .await
         .expect("runtime should prepare");
+        super::prepare_full_index(&project, &mut prepared)
+            .await
+            .expect("full index should prepare");
         let runtime = prepared
             .into_runtime(project.config.clone(), tempdir.path())
             .expect("prepared runtime should convert");
 
         assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.vector_factory.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(factory.vector_factory.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            factory.vector_factory.resets.load(Ordering::SeqCst),
+            crate::ALL_EMBEDDINGS.len()
+        );
         assert_eq!(runtime.context.project_root(), tempdir.path());
         assert!(
             !runtime
@@ -478,6 +539,55 @@ mod runtime_factory_tests {
                 .has("documents")
                 .await
                 .expect("table lookup")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reuse_factory_store_when_vector_path_is_outside_output() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = GraphRagConfig {
+            workflows: vec![crate::LOAD_INPUT_DOCUMENTS_WORKFLOW.to_owned()],
+            ..Default::default()
+        };
+        config.vector_store.db_uri = tempdir
+            .path()
+            .join("vectors")
+            .to_string_lossy()
+            .into_owned();
+        let project =
+            LoadedProject::from_config(tempdir.path(), config).expect("project should load");
+        let vector_factory = Arc::new(MemoryVectorStoreFactory {
+            calls: AtomicUsize::new(0),
+            resets: Arc::new(AtomicUsize::new(0)),
+            drops: Arc::new(AtomicUsize::new(0)),
+        });
+        let factory = MemoryRuntimeFactory {
+            calls: AtomicUsize::new(0),
+            table_provider: Arc::new(MemoryTableProvider::new()),
+            vector_factory: vector_factory.clone(),
+        };
+        let mut prepared = preflight_index_runtime_with_factory(
+            &project,
+            tempdir.path(),
+            false,
+            Vec::new(),
+            &factory,
+        )
+        .await
+        .expect("runtime should prepare");
+
+        super::prepare_full_index(&project, &mut prepared)
+            .await
+            .expect("full index should prepare");
+        let _runtime = prepared
+            .into_runtime(project.config.clone(), tempdir.path())
+            .expect("prepared runtime should convert");
+
+        assert_eq!(vector_factory.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(vector_factory.drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            vector_factory.resets.load(Ordering::SeqCst),
+            crate::ALL_EMBEDDINGS.len()
         );
     }
 }

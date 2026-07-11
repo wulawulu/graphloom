@@ -7,11 +7,11 @@ use polars_core::prelude::DataFrame;
 
 use super::input_documents::{DocumentRow, documents_dataframe};
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     dataframe::{optional_string_at, row_to_static, string_value, usize_to_i64},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const CREATE_FINAL_DOCUMENTS_WORKFLOW: &str = "create_final_documents";
 
 /// Populate final `documents.text_unit_ids`.
@@ -19,7 +19,7 @@ pub const CREATE_FINAL_DOCUMENTS_WORKFLOW: &str = "create_final_documents";
 pub struct CreateFinalDocumentsWorkflow;
 
 #[async_trait]
-impl Workflow for CreateFinalDocumentsWorkflow {
+impl IndexWorkflow for CreateFinalDocumentsWorkflow {
     fn name(&self) -> &'static str {
         CREATE_FINAL_DOCUMENTS_WORKFLOW
     }
@@ -27,8 +27,8 @@ impl Workflow for CreateFinalDocumentsWorkflow {
     async fn run(
         &self,
         _config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let text_units = context
             .output_table_provider()
             .read_dataframe("text_units")
@@ -78,7 +78,7 @@ impl Workflow for CreateFinalDocumentsWorkflow {
             .write_dataframe("documents", documents_dataframe(&rows)?)
             .await?;
 
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: sample,
             stop: false,
             input_rows: documents.height().saturating_add(text_units.height()),

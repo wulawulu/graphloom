@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     operations::graph::{
         degree_map, final_entities_dataframe, final_relationships_dataframe, finalize_entities,
         finalize_graph_sample, finalize_relationships, graphml_snapshot, read_entity_rows,
@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
 
 /// Finalize extracted graph rows.
@@ -19,7 +19,7 @@ pub const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
 pub struct FinalizeGraphWorkflow;
 
 #[async_trait]
-impl Workflow for FinalizeGraphWorkflow {
+impl IndexWorkflow for FinalizeGraphWorkflow {
     fn name(&self) -> &'static str {
         FINALIZE_GRAPH_WORKFLOW
     }
@@ -27,8 +27,8 @@ impl Workflow for FinalizeGraphWorkflow {
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let entities = read_entity_rows(
             &context
                 .output_table_provider()
@@ -66,7 +66,7 @@ impl Workflow for FinalizeGraphWorkflow {
 
         context.stats.entity_count = final_entities.len();
         context.stats.relationship_count = final_relationships.len();
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: finalize_graph_sample(&final_entities, &final_relationships),
             stop: false,
             input_rows: entities.len().saturating_add(relationships.len()),

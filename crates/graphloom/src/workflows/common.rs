@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use graphloom_llm::{CompletionModel, EmbeddingModel};
 
-use crate::{GraphRagConfig, PipelineRunContext, Result};
+use crate::{GraphRagConfig, IndexPipelineContext, Result};
 
 pub(crate) fn resolve_completion_model(
-    context: &PipelineRunContext,
+    context: &IndexPipelineContext,
     model_id: &str,
     workflow: &'static str,
 ) -> Result<Arc<dyn CompletionModel>> {
@@ -22,7 +22,7 @@ pub(crate) fn resolve_completion_encoding_model<'a>(
 }
 
 pub(crate) fn resolve_embedding_model(
-    context: &PipelineRunContext,
+    context: &IndexPipelineContext,
     model_id: &str,
     workflow: &'static str,
 ) -> Result<Arc<dyn EmbeddingModel>> {

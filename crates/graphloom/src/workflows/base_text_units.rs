@@ -9,12 +9,12 @@ use polars_core::frame::row::Row;
 use serde_json::Value;
 
 use crate::{
-    GraphRagConfig, PipelineRunContext, Result, Workflow, WorkflowFunctionOutput,
+    GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     dataframe::{optional_string_at, string_at, usize_to_i64},
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
-/// Workflow name.
+/// IndexWorkflow name.
 pub const CREATE_BASE_TEXT_UNITS_WORKFLOW: &str = "create_base_text_units";
 
 /// Create base text units from documents.
@@ -22,7 +22,7 @@ pub const CREATE_BASE_TEXT_UNITS_WORKFLOW: &str = "create_base_text_units";
 pub struct CreateBaseTextUnitsWorkflow;
 
 #[async_trait]
-impl Workflow for CreateBaseTextUnitsWorkflow {
+impl IndexWorkflow for CreateBaseTextUnitsWorkflow {
     fn name(&self) -> &'static str {
         CREATE_BASE_TEXT_UNITS_WORKFLOW
     }
@@ -30,8 +30,8 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
     async fn run(
         &self,
         config: &GraphRagConfig,
-        context: &mut PipelineRunContext,
-    ) -> Result<WorkflowFunctionOutput> {
+        context: &mut IndexPipelineContext,
+    ) -> Result<IndexWorkflowOutput> {
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;
         let chunker = create_chunker(&config.chunking)?;
         let prepend_metadata = &config.chunking.prepend_metadata;
@@ -88,7 +88,7 @@ impl Workflow for CreateBaseTextUnitsWorkflow {
         }
         text_units.close().await?;
         context.stats.text_unit_count = rows.len();
-        Ok(WorkflowFunctionOutput {
+        Ok(IndexWorkflowOutput {
             result: sample,
             stop: false,
             input_rows,
@@ -169,7 +169,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        WorkflowCallbacks,
+        IndexWorkflowCallbacks,
         workflows::input_documents::{DocumentRow, documents_dataframe},
     };
 
@@ -219,7 +219,7 @@ mod tests {
         calls: Mutex<Vec<(usize, Option<usize>)>>,
     }
 
-    impl WorkflowCallbacks for ProgressCallbacks {
+    impl IndexWorkflowCallbacks for ProgressCallbacks {
         fn progress(&self, workflow_name: &str, completed: usize, total: Option<usize>) {
             if workflow_name == CREATE_BASE_TEXT_UNITS_WORKFLOW {
                 self.calls
@@ -261,7 +261,8 @@ mod tests {
             .await
             .expect("documents should write");
         let callbacks = Arc::new(ProgressCallbacks::default());
-        let mut context = PipelineRunContext::for_test(provider).with_callbacks(callbacks.clone());
+        let mut context =
+            IndexPipelineContext::for_test(provider).with_callbacks(callbacks.clone());
         let config = GraphRagConfig {
             chunking: ChunkingConfig::new(NonZeroUsize::new(1).expect("nonzero"), 0, Vec::new())
                 .expect("valid chunking config"),

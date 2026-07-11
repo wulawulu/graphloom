@@ -27,9 +27,10 @@ use tempfile::TempDir;
 use crate::{
     CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
     CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphRagConfig, PipelineFactory,
-    PipelineRunContext, WorkflowRegistry, register_standard_workflows, register_step5_workflows,
-    register_step6_workflows, register_step7_workflows, register_step8_workflows,
+    FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphRagConfig,
+    IndexPipelineContext, IndexPipelineFactory, IndexWorkflowRegistry,
+    register_standard_index_workflows, register_step5_workflows, register_step6_workflows,
+    register_step7_workflows, register_step8_workflows,
 };
 
 #[test]
@@ -216,9 +217,9 @@ async fn test_should_run_step5_pipeline_and_populate_documents() {
             Some(json!({"source": "unit-test"})),
         )],
     });
-    let mut context = PipelineRunContext::for_test(provider.clone()).with_input_reader(reader);
-    let mut registry = WorkflowRegistry::new();
-    register_step5_workflows(&mut registry);
+    let mut context = IndexPipelineContext::for_test(provider.clone()).with_input_reader(reader);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_step5_workflows(&mut registry).expect("step5 workflows should register");
     let config = GraphRagConfig {
         workflows: crate::workflows::STEP5_WORKFLOWS
             .iter()
@@ -226,7 +227,7 @@ async fn test_should_run_step5_pipeline_and_populate_documents() {
             .collect(),
         ..Default::default()
     };
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("standard pipeline should be created");
 
@@ -273,9 +274,9 @@ async fn test_should_fail_when_no_documents_are_read() {
     let reader = Arc::new(MemoryInputReader {
         documents: Vec::new(),
     });
-    let mut context = PipelineRunContext::for_test(provider).with_input_reader(reader);
-    let mut registry = WorkflowRegistry::new();
-    register_step5_workflows(&mut registry);
+    let mut context = IndexPipelineContext::for_test(provider).with_input_reader(reader);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_step5_workflows(&mut registry).expect("step5 workflows should register");
     let config = GraphRagConfig {
         workflows: crate::workflows::STEP5_WORKFLOWS
             .iter()
@@ -283,7 +284,7 @@ async fn test_should_fail_when_no_documents_are_read() {
             .collect(),
         ..Default::default()
     };
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("standard pipeline should be created");
 
@@ -324,11 +325,12 @@ async fn test_should_extract_and_finalize_graph_with_summaries_and_graphml() {
             "Alice works with and mentors Bob.".to_owned(),
         ],
     ));
-    let mut context = PipelineRunContext::for_test(provider.clone())
-        .with_completion_model("default_completion_model", model);
+    let mut context = IndexPipelineContext::for_test(provider.clone())
+        .with_completion_model("default_completion_model", model)
+        .expect("completion model should register");
     context = context.with_output_storage(storage.clone());
-    let mut registry = WorkflowRegistry::new();
-    register_step6_workflows(&mut registry);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_step6_workflows(&mut registry).expect("step6 workflows should register");
     let mut config = GraphRagConfig::default();
     config.extract_graph.max_gleanings = 0;
     config.snapshots.raw_graph = true;
@@ -337,7 +339,7 @@ async fn test_should_extract_and_finalize_graph_with_summaries_and_graphml() {
         EXTRACT_GRAPH_WORKFLOW.to_owned(),
         FINALIZE_GRAPH_WORKFLOW.to_owned(),
     ];
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step6 pipeline should be created");
 
@@ -491,10 +493,11 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
                 .to_owned(),
         ],
     ));
-    let mut context = PipelineRunContext::for_test(provider.clone())
-        .with_completion_model("default_completion_model", model);
-    let mut registry = WorkflowRegistry::new();
-    register_step7_workflows(&mut registry);
+    let mut context = IndexPipelineContext::for_test(provider.clone())
+        .with_completion_model("default_completion_model", model)
+        .expect("completion model should register");
+    let mut registry = IndexWorkflowRegistry::new();
+    register_step7_workflows(&mut registry).expect("step7 workflows should register");
     let mut config = GraphRagConfig::default();
     config.extract_claims.enabled = true;
     config.extract_claims.max_gleanings = 0;
@@ -504,7 +507,7 @@ async fn test_should_run_step7_covariates_communities_and_final_text_units() {
         CREATE_COMMUNITIES_WORKFLOW.to_owned(),
         CREATE_FINAL_TEXT_UNITS_WORKFLOW.to_owned(),
     ];
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step7 pipeline should be created");
 
@@ -636,15 +639,16 @@ async fn test_should_run_create_community_reports_workflow() {
         prompts: Arc::clone(&prompts),
         calls: AtomicUsize::new(0),
     });
-    let mut context = PipelineRunContext::for_test(provider.clone())
-        .with_completion_model("default_completion_model", model);
-    let mut registry = WorkflowRegistry::new();
-    register_step8_workflows(&mut registry);
+    let mut context = IndexPipelineContext::for_test(provider.clone())
+        .with_completion_model("default_completion_model", model)
+        .expect("completion model should register");
+    let mut registry = IndexWorkflowRegistry::new();
+    register_step8_workflows(&mut registry).expect("step8 workflows should register");
     let mut config = GraphRagConfig::default();
     config.extract_claims.enabled = true;
     config.community_reports.max_input_length = 80;
     config.workflows = vec![CREATE_COMMUNITY_REPORTS_WORKFLOW.to_owned()];
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step8 workflow should be registered");
 
@@ -862,8 +866,8 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -882,11 +886,12 @@ async fn test_should_generate_text_embeddings_to_lancedb_and_snapshots() {
             .await
             .expect("vector store should connect"),
     );
-    let mut context = PipelineRunContext::for_test(provider.clone())
+    let mut context = IndexPipelineContext::for_test(provider.clone())
         .with_embedding_model("default_embedding_model", model.clone())
+        .expect("embedding model should register")
         .with_vector_store(vector_store);
 
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     let outputs = pipeline
@@ -991,16 +996,16 @@ async fn test_should_fail_step9_when_embedding_model_is_not_injected_or_configur
         )
         .await
         .expect("text_units should write");
-    let mut context = PipelineRunContext::for_test(provider);
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
+    let mut context = IndexPipelineContext::for_test(provider);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
     let mut config = GraphRagConfig {
         workflows: vec![GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
         ..Default::default()
     };
     config.embedding_models.clear();
 
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     let error = pipeline
@@ -1033,8 +1038,8 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -1056,11 +1061,12 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
             .await
             .expect("vector store should connect"),
     );
-    let mut context = PipelineRunContext::for_test(provider.clone())
+    let mut context = IndexPipelineContext::for_test(provider.clone())
         .with_embedding_model("default_embedding_model", model.clone())
+        .expect("embedding model should register")
         .with_vector_store(vector_store);
 
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     let error = pipeline
@@ -1126,8 +1132,8 @@ async fn test_should_allow_same_source_id_in_different_embedding_fields() {
 
     let tempdir = TempDir::new().expect("tempdir should create");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -1146,11 +1152,12 @@ async fn test_should_allow_same_source_id_in_different_embedding_fields() {
             .await
             .expect("vector store should connect"),
     );
-    let mut context = PipelineRunContext::for_test(provider)
+    let mut context = IndexPipelineContext::for_test(provider)
         .with_embedding_model("default_embedding_model", model.clone())
+        .expect("embedding model should register")
         .with_vector_store(vector_store);
 
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     pipeline
@@ -1200,8 +1207,8 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
         .expect("first text_units should write");
 
     let tempdir = TempDir::new().expect("tempdir should create");
-    let mut registry = WorkflowRegistry::new();
-    register_standard_workflows(&mut registry);
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry).expect("standard workflows should register");
     let mut vector_store = VectorStoreConfig::default();
     vector_store.db_uri = tempdir.path().to_string_lossy().to_string();
     vector_store.vector_size = 2;
@@ -1222,12 +1229,13 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
             .expect("vector store should connect"),
     );
 
-    let pipeline = PipelineFactory::new(registry)
+    let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::for_test(provider.clone())
+    let mut context = IndexPipelineContext::for_test(provider.clone())
         .with_embedding_model("default_embedding_model", model)
+        .expect("embedding model should register")
         .with_vector_store(vector_store.clone());
     pipeline
         .run(&config, &mut context)
@@ -1260,8 +1268,9 @@ async fn test_should_truncate_embedding_snapshot_when_workflow_reruns_to_empty()
         .await
         .expect("second text_units should write");
     let model = Arc::new(CapturingEmbeddingModel::default());
-    let mut context = PipelineRunContext::for_test(provider.clone())
+    let mut context = IndexPipelineContext::for_test(provider.clone())
         .with_embedding_model("default_embedding_model", model)
+        .expect("embedding model should register")
         .with_vector_store(vector_store);
     pipeline
         .run(&config, &mut context)
