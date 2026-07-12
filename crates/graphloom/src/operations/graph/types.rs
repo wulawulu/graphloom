@@ -41,6 +41,12 @@ pub(crate) struct RelationshipRow {
     pub(crate) weight: f64,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExtractedGraph {
+    pub(crate) entities: Vec<EntityRow>,
+    pub(crate) relationships: Vec<RelationshipRow>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SummarizedEntityRow {
     pub(crate) title: String,
@@ -57,6 +63,12 @@ pub(crate) struct SummarizedRelationshipRow {
     pub(crate) description: String,
     pub(crate) text_unit_ids: Vec<String>,
     pub(crate) weight: f64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SummarizedGraph {
+    pub(crate) entities: Vec<SummarizedEntityRow>,
+    pub(crate) relationships: Vec<SummarizedRelationshipRow>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,4 +93,10 @@ pub(crate) struct FinalRelationshipRow {
     pub(crate) weight: f64,
     pub(crate) combined_degree: i64,
     pub(crate) text_unit_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FinalizedGraph {
+    pub(crate) entities: Vec<FinalEntityRow>,
+    pub(crate) relationships: Vec<FinalRelationshipRow>,
 }

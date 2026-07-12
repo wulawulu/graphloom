@@ -5,9 +5,8 @@ use async_trait::async_trait;
 use crate::{
     GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
     operations::graph::{
-        degree_map, final_entities_dataframe, final_relationships_dataframe, finalize_entities,
-        finalize_graph_sample, finalize_relationships, graphml_snapshot, read_entity_rows,
-        read_relationship_rows,
+        final_entities_dataframe, final_relationships_dataframe, finalize_graph,
+        finalize_graph_sample, graphml_snapshot, read_entity_rows, read_relationship_rows,
     },
 };
 
@@ -41,38 +40,37 @@ impl IndexWorkflow for FinalizeGraphWorkflow {
                 .read_dataframe("relationships")
                 .await?,
         )?;
-        let degree_map = degree_map(&relationships);
-        let final_entities = finalize_entities(&entities, &degree_map)?;
-        let final_relationships = finalize_relationships(&relationships, &degree_map)?;
+        let finalized = finalize_graph(&entities, &relationships)?;
 
         context
             .output_table_provider()
-            .write_dataframe("entities", final_entities_dataframe(&final_entities)?)
+            .write_dataframe("entities", final_entities_dataframe(&finalized.entities)?)
             .await?;
         context
             .output_table_provider()
             .write_dataframe(
                 "relationships",
-                final_relationships_dataframe(&final_relationships)?,
+                final_relationships_dataframe(&finalized.relationships)?,
             )
             .await?;
 
         if config.snapshots.graphml {
             let storage = context.output_storage();
             storage
-                .set_text("graph.graphml", &graphml_snapshot(&final_relationships))
+                .set_text("graph.graphml", &graphml_snapshot(&finalized.relationships))
                 .await?;
         }
 
-        context.stats.entity_count = final_entities.len();
-        context.stats.relationship_count = final_relationships.len();
+        context.stats.entity_count = finalized.entities.len();
+        context.stats.relationship_count = finalized.relationships.len();
         Ok(IndexWorkflowOutput {
-            result: finalize_graph_sample(&final_entities, &final_relationships),
+            result: finalize_graph_sample(&finalized.entities, &finalized.relationships),
             stop: false,
             input_rows: entities.len().saturating_add(relationships.len()),
-            output_rows: final_entities
+            output_rows: finalized
+                .entities
                 .len()
-                .saturating_add(final_relationships.len()),
+                .saturating_add(finalized.relationships.len()),
         })
     }
 }

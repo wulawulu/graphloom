@@ -6,7 +6,10 @@ use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, Tokenizer};
 use serde::Serialize;
 
-use super::{EntityRow, RelationshipRow, SummarizedEntityRow, SummarizedRelationshipRow};
+use super::{
+    EntityRow, ExtractedGraph, RelationshipRow, SummarizedEntityRow, SummarizedGraph,
+    SummarizedRelationshipRow,
+};
 use crate::{Result, prompts::PromptTemplate};
 
 #[derive(Debug, Serialize)]
@@ -30,6 +33,43 @@ struct SummarizeContext<'a> {
     tokenizer: &'a dyn Tokenizer,
     max_length: usize,
     max_input_tokens: usize,
+}
+
+pub(crate) async fn summarize_graph(
+    model: &dyn CompletionModel,
+    prompt_template: &PromptTemplate,
+    tokenizer: &dyn Tokenizer,
+    graph: &ExtractedGraph,
+    config: DescriptionSummarizeConfig,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<SummarizedGraph> {
+    let total = graph
+        .entities
+        .len()
+        .saturating_add(graph.relationships.len());
+    let entities = summarize_entities(
+        model,
+        prompt_template,
+        tokenizer,
+        &graph.entities,
+        config,
+        &|completed, _| progress(completed, total),
+    )
+    .await?;
+    let entity_count = entities.len();
+    let relationships = summarize_relationships(
+        model,
+        prompt_template,
+        tokenizer,
+        &graph.relationships,
+        config,
+        &|completed, _| progress(entity_count.saturating_add(completed), total),
+    )
+    .await?;
+    Ok(SummarizedGraph {
+        entities,
+        relationships,
+    })
 }
 
 pub(crate) async fn summarize_entities(
@@ -302,5 +342,88 @@ mod tests {
         assert_eq!(summarized[0].title, "B");
         assert_eq!(summarized[1].title, "A");
         assert_eq!(progress.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_summarize_graph_with_cumulative_progress() {
+        let template = crate::prompts::PromptRepository::new(".")
+            .load(crate::prompts::PromptKind::SummarizeDescriptions, None)
+            .await
+            .expect("summary template");
+        let graph = ExtractedGraph {
+            entities: vec![entity("B", "second", "tu-2"), entity("A", "first", "tu-1")],
+            relationships: vec![
+                relationship("B", "A", "second edge", "tu-2"),
+                relationship("A", "B", "first edge", "tu-1"),
+            ],
+        };
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_ref = Arc::clone(&progress);
+
+        let summarized = summarize_graph(
+            &UnusedModel,
+            &template,
+            &WhitespaceTokenizer,
+            &graph,
+            DescriptionSummarizeConfig {
+                max_length: 100,
+                max_input_tokens: 100,
+                concurrency: 2,
+            },
+            &|completed, total| {
+                progress_ref
+                    .lock()
+                    .expect("progress lock")
+                    .push((completed, total));
+            },
+        )
+        .await
+        .expect("graph summarization");
+
+        assert_eq!(
+            progress.lock().expect("progress lock").as_slice(),
+            &[(1, 4), (2, 4), (3, 4), (4, 4)]
+        );
+        assert_eq!(
+            summarized
+                .entities
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+        assert_eq!(
+            summarized
+                .relationships
+                .iter()
+                .map(|row| (row.source.as_str(), row.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("B", "A"), ("A", "B")]
+        );
+    }
+
+    fn entity(title: &str, description: &str, text_unit_id: &str) -> EntityRow {
+        EntityRow {
+            title: title.to_owned(),
+            entity_type: "person".to_owned(),
+            description: vec![description.to_owned()],
+            text_unit_ids: vec![text_unit_id.to_owned()],
+            frequency: 1,
+        }
+    }
+
+    fn relationship(
+        source: &str,
+        target: &str,
+        description: &str,
+        text_unit_id: &str,
+    ) -> RelationshipRow {
+        RelationshipRow {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            description: vec![description.to_owned()],
+            text_unit_ids: vec![text_unit_id.to_owned()],
+            weight: 1.0,
+        }
     }
 }

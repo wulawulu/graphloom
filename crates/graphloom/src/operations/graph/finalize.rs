@@ -4,10 +4,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 
-use super::{FinalEntityRow, FinalRelationshipRow, SummarizedEntityRow, SummarizedRelationshipRow};
+use super::{
+    FinalEntityRow, FinalRelationshipRow, FinalizedGraph, SummarizedEntityRow,
+    SummarizedRelationshipRow,
+};
 use crate::{Result, dataframe::usize_to_i64};
 
 const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
+
+pub(crate) fn finalize_graph(
+    entities: &[SummarizedEntityRow],
+    relationships: &[SummarizedRelationshipRow],
+) -> Result<FinalizedGraph> {
+    let degree = degree_map(relationships);
+    Ok(FinalizedGraph {
+        entities: finalize_entities(entities, &degree)?,
+        relationships: finalize_relationships(relationships, &degree)?,
+    })
+}
 
 pub(crate) fn degree_map(rows: &[SummarizedRelationshipRow]) -> BTreeMap<String, i64> {
     let mut seen = BTreeSet::new();
@@ -124,5 +138,66 @@ mod tests {
 
         assert_eq!(degree.get("ALICE"), Some(&1));
         assert_eq!(degree.get("BOB"), Some(&1));
+    }
+
+    #[test]
+    fn test_should_finalize_entities_and_relationships_with_shared_degree_map() {
+        let entities = vec![
+            summarized_entity("ALICE"),
+            summarized_entity("BOB"),
+            summarized_entity("BOB"),
+            summarized_entity("CAROL"),
+        ];
+        let relationships = vec![
+            summarized_relationship("ALICE", "BOB"),
+            summarized_relationship("ALICE", "BOB"),
+            summarized_relationship("BOB", "CAROL"),
+        ];
+
+        let graph = finalize_graph(&entities, &relationships).expect("finalized graph");
+
+        assert_eq!(graph.entities.len(), 3);
+        assert_eq!(graph.relationships.len(), 2);
+        assert_eq!(
+            graph
+                .entities
+                .iter()
+                .map(|row| (row.title.as_str(), row.degree, row.human_readable_id))
+                .collect::<Vec<_>>(),
+            vec![("ALICE", 1, 0), ("BOB", 2, 1), ("CAROL", 1, 2)]
+        );
+        assert_eq!(
+            graph
+                .relationships
+                .iter()
+                .map(|row| (
+                    row.source.as_str(),
+                    row.target.as_str(),
+                    row.combined_degree,
+                    row.human_readable_id
+                ))
+                .collect::<Vec<_>>(),
+            vec![("ALICE", "BOB", 3, 0), ("BOB", "CAROL", 3, 1)]
+        );
+    }
+
+    fn summarized_entity(title: &str) -> SummarizedEntityRow {
+        SummarizedEntityRow {
+            title: title.to_owned(),
+            entity_type: "person".to_owned(),
+            description: title.to_owned(),
+            text_unit_ids: vec!["tu-1".to_owned()],
+            frequency: 1,
+        }
+    }
+
+    fn summarized_relationship(source: &str, target: &str) -> SummarizedRelationshipRow {
+        SummarizedRelationshipRow {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            description: format!("{source} to {target}"),
+            text_unit_ids: vec!["tu-1".to_owned()],
+            weight: 1.0,
+        }
     }
 }
