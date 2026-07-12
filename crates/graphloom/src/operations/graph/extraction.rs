@@ -5,8 +5,8 @@ use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, parse_graph
 use serde::Serialize;
 
 use super::{
-    ExtractedGraph, RawEntityRow, RawRelationshipRow, TextUnitInput, filter_orphan_relationships,
-    merge_entities, merge_relationships,
+    ExtractedGraph, RawEntityRow, RawRelationshipRow, TextUnitInput,
+    merge::{filter_orphan_relationships, merge_entities, merge_relationships},
 };
 use crate::{
     GraphLoomError, Result,

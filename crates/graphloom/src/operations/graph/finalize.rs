@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{Result, dataframe::usize_to_i64};
 
-const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
+const FINALIZE_GRAPH_CONTEXT: &str = "finalize_graph";
 
 pub(crate) fn finalize_graph(
     entities: &[SummarizedEntityRow],
@@ -50,7 +50,7 @@ pub(crate) fn finalize_entities(
             id: Uuid::new_v4().to_string(),
             human_readable_id: usize_to_i64(
                 final_rows.len(),
-                FINALIZE_GRAPH_WORKFLOW,
+                FINALIZE_GRAPH_CONTEXT,
                 "human_readable_id",
             )?,
             title: row.title.clone(),
@@ -82,7 +82,7 @@ pub(crate) fn finalize_relationships(
             id: Uuid::new_v4().to_string(),
             human_readable_id: usize_to_i64(
                 final_rows.len(),
-                FINALIZE_GRAPH_WORKFLOW,
+                FINALIZE_GRAPH_CONTEXT,
                 "human_readable_id",
             )?,
             source: row.source.clone(),
