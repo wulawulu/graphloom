@@ -1,13 +1,10 @@
-//! Embedding execution, batching, cache, and vector reconstitution.
+//! Embedding execution, batching, and vector reconstitution.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use futures_util::{StreamExt, stream};
-use graphloom_cache::{Cache, JsonCacheExt};
 use graphloom_chunking::{ChunkingError, split_text_on_tokens};
-use graphloom_llm::{
-    EmbeddingModel, EmbeddingRequest, EmbeddingResponse, Tokenizer, embedding_request_cache_key,
-};
+use graphloom_llm::{CacheStatus, EmbeddingModel, EmbeddingRequest, EmbeddingResponse, Tokenizer};
 use graphloom_vectors::VectorDocument;
 
 use super::types::{EmbeddingBatchOutput, EmbeddingOperationConfig, EmbeddingSourceRow};
@@ -42,14 +39,13 @@ struct ApiBatchResult {
 ///
 /// # Errors
 ///
-/// Returns an error on invalid config, tokenizer/cache/model failures, malformed
+/// Returns an error on invalid config, tokenizer/model failures, malformed
 /// provider responses, duplicate ids, or invalid vectors.
 pub(crate) async fn embed_text_rows(
     rows: &[EmbeddingSourceRow],
     config: &EmbeddingOperationConfig,
     model: Arc<dyn EmbeddingModel>,
     tokenizer: Arc<dyn Tokenizer>,
-    cache: Option<Arc<dyn Cache>>,
 ) -> Result<EmbeddingBatchOutput> {
     validate_config(config)?;
     validate_source_ids(rows, &config.embedding_name)?;
@@ -68,8 +64,7 @@ pub(crate) async fn embed_text_rows(
     let concurrency = config.concurrency.max(1);
     let mut results = stream::iter(batches.into_iter().map(|batch| {
         let model = Arc::clone(&model);
-        let cache = cache.as_ref().map(Arc::clone);
-        async move { execute_batch(batch, config, model, cache).await }
+        async move { execute_batch(batch, config, model).await }
     }))
     .buffer_unordered(concurrency)
     .collect::<Vec<_>>()
@@ -226,17 +221,14 @@ async fn execute_batch(
     batch: ApiBatch,
     config: &EmbeddingOperationConfig,
     model: Arc<dyn EmbeddingModel>,
-    cache: Option<Arc<dyn Cache>>,
 ) -> Result<ApiBatchResult> {
-    let request = EmbeddingRequest {
-        input: batch
+    let request = EmbeddingRequest::new(
+        batch
             .snippets
             .iter()
             .map(|snippet| snippet.text.clone())
             .collect(),
-        dimensions: None,
-        cache_namespace: Some(config.model_instance_name.clone()),
-    };
+    );
     let mut result = ApiBatchResult {
         index: batch.index,
         row_indices: batch
@@ -251,29 +243,19 @@ async fn execute_batch(
         input_tokens: 0,
     };
 
-    let response = if let Some(cache) = cache {
-        let key = embedding_request_cache_key(&request)?;
-        let (response, should_cache) =
-            if let Some(response) = cache.get_json::<EmbeddingResponse>(&key).await? {
-                result.cache_hits = 1;
-                (response, false)
-            } else {
-                result.cache_misses = 1;
-                result.request_count = 1;
-                result.input_tokens = batch.token_count;
-                let response = model.embed(request.clone()).await?;
-                (response, true)
-            };
-        result.embeddings = validate_response(config, batch.index, request.input.len(), &response)?;
-        if should_cache {
-            cache.set_json(&key, &response).await?;
+    let response = model.embed(request.clone()).await?;
+    match response.metadata.cache_status {
+        CacheStatus::Hit => result.cache_hits = 1,
+        CacheStatus::Miss => {
+            result.cache_misses = 1;
+            result.request_count = 1;
+            result.input_tokens = batch.token_count;
         }
-        return Ok(result);
-    } else {
-        result.request_count = 1;
-        result.input_tokens = batch.token_count;
-        model.embed(request.clone()).await?
-    };
+        CacheStatus::NotUsed => {
+            result.request_count = 1;
+            result.input_tokens = batch.token_count;
+        }
+    }
 
     result.embeddings = validate_response(config, batch.index, request.input.len(), &response)?;
     Ok(result)
@@ -285,15 +267,15 @@ fn validate_response(
     expected_count: usize,
     response: &EmbeddingResponse,
 ) -> Result<Vec<Vec<f32>>> {
-    if response.embeddings.len() != expected_count {
+    if response.embeddings().len() != expected_count {
         return Err(invalid_data(format!(
             "{} batch {batch_index} expected {expected_count} embeddings, got {}",
             config.embedding_name,
-            response.embeddings.len()
+            response.embeddings().len()
         )));
     }
     let mut response_dimension = None;
-    for (index, vector) in response.embeddings.iter().enumerate() {
+    for (index, vector) in response.embeddings().enumerate() {
         if vector.is_empty() {
             return Err(invalid_data(format!(
                 "{} batch {batch_index} vector {index} is empty",
@@ -326,7 +308,10 @@ fn validate_response(
             )));
         }
     }
-    Ok(response.embeddings.clone())
+    Ok(response
+        .embeddings()
+        .map(|embedding| embedding.iter().map(|value| *value as f32).collect())
+        .collect())
 }
 
 fn collect_row_vectors(row_count: usize, results: &[ApiBatchResult]) -> Result<Vec<Vec<Vec<f32>>>> {
@@ -428,8 +413,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use graphloom_cache::MemoryCache;
-    use graphloom_llm::{EmbeddingModel, LlmError, Usage};
+    use graphloom_llm::{EmbeddingModel, LlmError};
     use tokio::sync::Notify;
 
     use super::*;
@@ -493,15 +477,10 @@ mod tests {
                 .push(request.clone());
             let mut responses = self.responses.lock().expect("responses lock");
             if responses.is_empty() {
-                return Ok(EmbeddingResponse {
-                    embeddings: request.input.iter().map(|_| vec![1.0, 0.0]).collect(),
-                    usage: Some(Usage {
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
-                    }),
-                    request_id: None,
-                });
+                return Ok(EmbeddingResponse::vectors_for_test(
+                    "recording",
+                    request.input.iter().map(|_| vec![1.0, 0.0]).collect(),
+                ));
             }
             Ok(responses.remove(0))
         }
@@ -530,7 +509,6 @@ mod tests {
             &operation_config(),
             model.clone(),
             Arc::new(CharTokenizer),
-            None,
         )
         .await
         .expect("embedding should succeed");
@@ -565,7 +543,6 @@ mod tests {
             },
             model.clone(),
             Arc::new(CharTokenizer),
-            None,
         )
         .await
         .expect("embedding should succeed");
@@ -583,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_duplicate_source_ids_before_model_or_cache_use() {
+    async fn test_should_reject_duplicate_source_ids_before_model_use() {
         for rows in [
             vec![
                 EmbeddingSourceRow {
@@ -626,21 +603,13 @@ mod tests {
                 },
             ],
         ] {
-            let cache = Arc::new(MemoryCache::new());
             let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
-            let request = EmbeddingRequest {
-                input: rows.iter().map(|row| row.text.clone()).collect(),
-                dimensions: None,
-                cache_namespace: Some("text_embedding".to_owned()),
-            };
-            let key = embedding_request_cache_key(&request).expect("cache key");
 
             let error = embed_text_rows(
                 &rows,
                 &operation_config(),
                 model.clone(),
                 Arc::new(CharTokenizer),
-                Some(cache.clone()),
             )
             .await
             .expect_err("duplicate id should fail");
@@ -648,7 +617,6 @@ mod tests {
             assert!(error.to_string().contains("text_unit_text"));
             assert!(error.to_string().contains("duplicate"));
             assert_eq!(model.calls(), 0);
-            assert!(!cache.has(&key).await.expect("cache has should work"));
         }
     }
 
@@ -704,11 +672,10 @@ mod tests {
                 vec![0.5, 0.5]
             };
             self.exit();
-            Ok(EmbeddingResponse {
-                embeddings: vec![vector],
-                usage: None,
-                request_id: None,
-            })
+            Ok(EmbeddingResponse::vectors_for_test(
+                "out-of-order",
+                vec![vector],
+            ))
         }
     }
 
@@ -736,7 +703,6 @@ mod tests {
             },
             model.clone(),
             Arc::new(CharTokenizer),
-            None,
         )
         .await
         .expect("embedding should succeed");
@@ -778,11 +744,7 @@ mod tests {
             &config,
             7,
             2,
-            &EmbeddingResponse {
-                embeddings: vec![vec![1.0, 0.0]],
-                usage: None,
-                request_id: None,
-            },
+            &EmbeddingResponse::vectors_for_test("test", vec![vec![1.0, 0.0]]),
         )
         .expect_err("count mismatch should fail");
         assert!(count_error.to_string().contains("batch 7 expected 2"));
@@ -791,11 +753,7 @@ mod tests {
             &config,
             7,
             1,
-            &EmbeddingResponse {
-                embeddings: vec![vec![1.0]],
-                usage: None,
-                request_id: None,
-            },
+            &EmbeddingResponse::vectors_for_test("test", vec![vec![1.0]]),
         )
         .expect_err("dimension mismatch should fail");
         assert!(dimension_error.to_string().contains("expected dimension 2"));
@@ -804,165 +762,9 @@ mod tests {
             &config,
             7,
             1,
-            &EmbeddingResponse {
-                embeddings: vec![vec![f32::NAN, 0.0]],
-                usage: None,
-                request_id: None,
-            },
+            &EmbeddingResponse::vectors_for_test("test", vec![vec![f32::NAN, 0.0]]),
         )
         .expect_err("nan should fail");
         assert!(finite_error.to_string().contains("non-finite"));
-    }
-
-    #[tokio::test]
-    async fn test_should_use_embedding_cache_for_repeated_batch() {
-        let cache = Arc::new(MemoryCache::new());
-        let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
-        let rows = [EmbeddingSourceRow {
-            id: "a".to_owned(),
-            text: "aa".to_owned(),
-        }];
-
-        let first = embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache.clone()),
-        )
-        .await
-        .expect("first run");
-        let second = embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache),
-        )
-        .await
-        .expect("second run");
-
-        assert_eq!(first.cache_misses, 1);
-        assert_eq!(first.cache_hits, 0);
-        assert_eq!(second.cache_hits, 1);
-        assert_eq!(second.request_count, 0);
-        assert_eq!(model.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_should_isolate_embedding_cache_by_child_namespace() {
-        let root = MemoryCache::new();
-        let cache_a = root.child("text_embedding_a").expect("child a");
-        let cache_b = root.child("text_embedding_b").expect("child b");
-        let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
-        let rows = [EmbeddingSourceRow {
-            id: "a".to_owned(),
-            text: "aa".to_owned(),
-        }];
-
-        let first = embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache_a),
-        )
-        .await
-        .expect("first namespace");
-        let second = embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache_b),
-        )
-        .await
-        .expect("second namespace");
-
-        assert_eq!(first.cache_misses, 1);
-        assert_eq!(second.cache_misses, 1);
-        assert_eq!(model.calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_should_not_cache_invalid_provider_response() {
-        let cache = Arc::new(MemoryCache::new());
-        let model = Arc::new(RecordingEmbeddingModel::new(vec![
-            EmbeddingResponse {
-                embeddings: vec![vec![1.0]],
-                usage: None,
-                request_id: None,
-            },
-            EmbeddingResponse {
-                embeddings: vec![vec![0.0, 1.0]],
-                usage: None,
-                request_id: None,
-            },
-        ]));
-        let rows = [EmbeddingSourceRow {
-            id: "a".to_owned(),
-            text: "aa".to_owned(),
-        }];
-
-        embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache.clone()),
-        )
-        .await
-        .expect_err("invalid response should fail");
-        let second = embed_text_rows(
-            &rows,
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache),
-        )
-        .await
-        .expect("second call should request provider again");
-
-        assert_eq!(second.cache_misses, 1);
-        assert_eq!(model.calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_should_reject_invalid_cached_response() {
-        let cache = Arc::new(MemoryCache::new());
-        let request = EmbeddingRequest {
-            input: vec!["aa".to_owned()],
-            dimensions: None,
-            cache_namespace: Some("text_embedding".to_owned()),
-        };
-        let key = embedding_request_cache_key(&request).expect("cache key");
-        cache
-            .set_json(
-                &key,
-                &EmbeddingResponse {
-                    embeddings: vec![vec![1.0]],
-                    usage: None,
-                    request_id: None,
-                },
-            )
-            .await
-            .expect("cache seed");
-        let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
-
-        let error = embed_text_rows(
-            &[EmbeddingSourceRow {
-                id: "a".to_owned(),
-                text: "aa".to_owned(),
-            }],
-            &operation_config(),
-            model.clone(),
-            Arc::new(CharTokenizer),
-            Some(cache),
-        )
-        .await
-        .expect_err("invalid cache should fail");
-
-        assert!(error.to_string().contains("expected dimension"));
-        assert_eq!(model.calls(), 0);
     }
 }

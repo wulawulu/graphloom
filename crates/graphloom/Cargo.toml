@@ -15,6 +15,7 @@ homepage.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 csv.workspace = true

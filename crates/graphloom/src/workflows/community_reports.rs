@@ -79,6 +79,7 @@ impl IndexWorkflow for CreateCommunityReportsWorkflow {
         let model = resolve_completion_model(
             context,
             &config.community_reports.completion_model_id,
+            &config.community_reports.model_instance_name,
             CREATE_COMMUNITY_REPORTS_WORKFLOW,
         )?;
         let encoding_model = resolve_completion_encoding_model(

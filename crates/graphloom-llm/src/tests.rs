@@ -59,17 +59,15 @@ fn test_should_parse_repaired_community_report_json_frame() {
 fn test_should_create_deterministic_cache_keys() {
     let config = model_config();
     let completion = CompletionRequest {
-        messages: vec![ChatMessage::user("hello")],
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_tokens: Some(128),
-        response_format: Some("json_object".to_owned()),
-        cache_namespace: Some("extract_graph".to_owned()),
+        response_format: Some(serde_json::json!({"type": "json_object"})),
+        ..CompletionRequest::new(vec![ChatMessage::user("hello")])
     };
     let embedding = EmbeddingRequest {
-        input: vec!["hello".to_owned()],
         dimensions: Some(3),
-        cache_namespace: Some("text_unit_text_embedding".to_owned()),
+        ..EmbeddingRequest::new(vec!["hello".to_owned()])
     };
 
     assert_eq!(
@@ -86,14 +84,10 @@ fn test_should_create_deterministic_cache_keys() {
 #[test]
 fn test_should_create_canonical_embedding_request_cache_keys() {
     let base = EmbeddingRequest {
-        input: vec!["hello".to_owned(), "world".to_owned()],
         dimensions: Some(3),
-        cache_namespace: Some("a".to_owned()),
+        ..EmbeddingRequest::new(vec!["hello".to_owned(), "world".to_owned()])
     };
-    let same = EmbeddingRequest {
-        cache_namespace: Some("b".to_owned()),
-        ..base.clone()
-    };
+    let same = base.clone();
     let changed_input = EmbeddingRequest {
         input: vec!["hello!".to_owned(), "world".to_owned()],
         ..base.clone()
@@ -273,28 +267,20 @@ fn test_should_reject_unsupported_provider_auth_and_placeholder_key() {
 async fn test_should_use_mock_models() {
     let completion = MockCompletionModel::new("mock", vec!["answer".to_owned()]);
     let response = completion
-        .complete(CompletionRequest {
-            messages: vec![ChatMessage::user("question")],
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            response_format: None,
-            cache_namespace: None,
-        })
+        .complete(CompletionRequest::new(vec![ChatMessage::user("question")]))
         .await
         .expect("mock completion should respond");
-    assert_eq!(response.content, "answer");
+    assert_eq!(response.content().expect("content"), "answer");
 
     let embedding = MockEmbeddingModel::new("mock", vec![1.0, 2.0]);
     let response = embedding
-        .embed(EmbeddingRequest {
-            input: vec!["a".to_owned(), "b".to_owned()],
-            dimensions: None,
-            cache_namespace: None,
-        })
+        .embed(EmbeddingRequest::new(vec!["a".to_owned(), "b".to_owned()]))
         .await
         .expect("mock embedding should respond");
-    assert_eq!(response.embeddings, vec![vec![1.0, 2.0], vec![1.0, 2.0]]);
+    assert_eq!(
+        response.embeddings().collect::<Vec<_>>(),
+        vec![&[1.0, 2.0][..], &[1.0, 2.0][..]]
+    );
 }
 
 #[test]

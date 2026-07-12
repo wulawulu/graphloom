@@ -12,7 +12,10 @@ readme.workspace = true
 [dependencies]
 async-openai.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
+graphloom-cache.workspace = true
 html-escape.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -21,3 +24,9 @@ tiktoken-rs.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+graphloom-storage.workspace = true
+serde_yaml.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true

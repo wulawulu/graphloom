@@ -1,0 +1,27 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "中文多行 prompt:\n'单引号' 与 \"双引号\"\nkey: value"
+    },
+    {
+      "role": "assistant",
+      "content": []
+    }
+  ],
+  "response_format": null,
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "max_tokens": 128,
+  "tools": [],
+  "metadata": {
+    "nested": {
+      "enabled": true
+    }
+  },
+  "metrics": {},
+  "stream": false,
+  "timeout": 30,
+  "api_key": "excluded-secret",
+  "base_url": "https://excluded.example"
+}

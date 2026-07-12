@@ -284,12 +284,8 @@ async fn extract_report_for_community(
         .render()?;
     let response = match model
         .complete(CompletionRequest {
-            messages: vec![ChatMessage::user(rendered_prompt)],
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            response_format: Some("json_object".to_owned()),
-            cache_namespace: None,
+            response_format: Some(serde_json::json!({"type": "json_object"})),
+            ..CompletionRequest::new(vec![ChatMessage::user(rendered_prompt)])
         })
         .await
     {
@@ -302,14 +298,14 @@ async fn extract_report_for_community(
             return Ok(None);
         }
     };
-    if response.content.trim().is_empty() {
+    let Ok(content) = response.content() else {
         warning(&format!(
             "community report {} returned an empty response",
             task.community.community
         ));
         return Ok(None);
-    }
-    let report = match parse_community_report(&response.content) {
+    };
+    let report = match parse_community_report(content) {
         Ok(report) => report,
         Err(source) => {
             return Err(invalid_data(
@@ -951,13 +947,13 @@ mod tests {
             let prompt = request
                 .messages
                 .first()
-                .map(|message| message.content.clone())
+                .and_then(|message| message.content.as_text())
                 .unwrap_or_default();
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.prompts
                 .lock()
                 .expect("prompts lock")
-                .push(prompt.clone());
+                .push(prompt.to_owned());
             if call == 1
                 && self
                     .fail_marker
@@ -969,11 +965,10 @@ mod tests {
                     message: "forced failure".to_owned(),
                 });
             }
-            Ok(CompletionResponse {
-                content: json_report(&format!("Captured {call}")),
-                usage: None,
-                request_id: None,
-            })
+            Ok(CompletionResponse::text_for_test(
+                "test",
+                json_report(&format!("Captured {call}")),
+            ))
         }
     }
 
@@ -1009,15 +1004,14 @@ mod tests {
             } else {
                 "Bob Report"
             };
-            Ok(CompletionResponse {
-                content: format!(
+            Ok(CompletionResponse::text_for_test(
+                "test",
+                format!(
                     "{{\"title\":\"{title}\",\"summary\":\"Summary\",\"rating\":5,\"\
                      rating_explanation\":\"Reason\",\"findings\":[{{\"summary\":\"Finding\",\"\
                      explanation\":\"Explanation\"}}]}}"
                 ),
-                usage: None,
-                request_id: None,
-            })
+            ))
         }
     }
 

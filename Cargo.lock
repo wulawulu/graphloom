@@ -2668,6 +2668,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "async-trait",
+ "bytes",
  "chrono",
  "clap",
  "csv",
@@ -2750,15 +2751,22 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
+ "bytes",
+ "graphloom-cache",
+ "graphloom-storage",
  "html-escape",
+ "regex",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror",
  "tiktoken-rs",
  "tokio",
  "tower",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

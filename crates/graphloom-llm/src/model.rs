@@ -5,7 +5,7 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{CompletionRequest, CompletionResponse, EmbeddingRequest, EmbeddingResponse, Result};
 
 fn default_max_retries() -> u32 {
     1
@@ -21,50 +21,6 @@ fn default_auth_method() -> String {
 
 fn default_retry_type() -> String {
     "exponential_backoff".to_owned()
-}
-
-/// OpenAI-compatible chat role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatRole {
-    /// System instruction.
-    System,
-    /// User message.
-    User,
-    /// Assistant message.
-    Assistant,
-    /// Developer instruction.
-    Developer,
-}
-
-/// Chat message used by completion models.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatMessage {
-    /// Message role.
-    pub role: ChatRole,
-    /// Text content.
-    pub content: String,
-}
-
-impl ChatMessage {
-    /// Create a user message.
-    #[must_use]
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::User,
-            content: content.into(),
-        }
-    }
-
-    /// Create an assistant message.
-    #[must_use]
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::Assistant,
-            content: content.into(),
-        }
-    }
 }
 
 /// Retry configuration nested under `GraphRAG` 3.1 model settings.
@@ -248,86 +204,18 @@ impl ModelConfig {
     }
 }
 
-/// Completion request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletionRequest {
-    /// Chat messages.
-    pub messages: Vec<ChatMessage>,
-    /// Sampling temperature.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// Nucleus sampling threshold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    /// Maximum generated tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    /// Response format, e.g. `json_object`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<String>,
-    /// Business cache namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_namespace: Option<String>,
-}
-
-/// Embedding request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EmbeddingRequest {
-    /// Input texts.
-    pub input: Vec<String>,
-    /// Optional embedding dimensions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dimensions: Option<u32>,
-    /// Business cache namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_namespace: Option<String>,
-}
-
-/// Provider usage counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Usage {
-    /// Prompt/input tokens.
-    pub prompt_tokens: u32,
-    /// Completion/output tokens.
-    pub completion_tokens: u32,
-    /// Total tokens.
-    pub total_tokens: u32,
-}
-
-/// Completion response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletionResponse {
-    /// First choice content, matching `GraphRAG`'s `.content` convenience field.
-    pub content: String,
-    /// Usage counters when the provider returns them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    /// Provider request id when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
-/// Embedding response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EmbeddingResponse {
-    /// Embeddings in provider order.
-    pub embeddings: Vec<Vec<f32>>,
-    /// Usage counters when the provider returns them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    /// Provider request id when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
 /// Provider-neutral completion model.
 #[async_trait]
 pub trait CompletionModel: Send + Sync + std::fmt::Debug {
+    /// Validate a completion request without performing I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when canonical request invariants are violated.
+    fn validate_request(&self, request: &CompletionRequest) -> Result<()> {
+        request.validate()
+    }
+
     /// Execute a completion request.
     ///
     /// # Errors
@@ -339,6 +227,15 @@ pub trait CompletionModel: Send + Sync + std::fmt::Debug {
 /// Provider-neutral embedding model.
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync + std::fmt::Debug {
+    /// Validate an embedding request without performing I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when canonical request invariants are violated.
+    fn validate_request(&self, request: &EmbeddingRequest) -> Result<()> {
+        request.validate()
+    }
+
     /// Execute an embedding request.
     ///
     /// # Errors

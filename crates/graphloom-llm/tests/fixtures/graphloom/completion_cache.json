@@ -1,0 +1,35 @@
+{
+  "result": {
+    "response": {
+      "id": "graphloom-completion",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "GraphLoom cache interoperability",
+            "refusal": null,
+            "reasoning_content": null,
+            "tool_calls": null,
+            "function_call": null,
+            "annotations": null,
+            "audio": null
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "model": "graphloom-test",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 3,
+        "total_tokens": 7
+      },
+      "service_tier": null,
+      "system_fingerprint": null
+    },
+    "metrics": {}
+  }
+}

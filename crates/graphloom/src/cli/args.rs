@@ -96,3 +96,28 @@ impl IndexArgs {
         self.cache && !self.no_cache
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    #[test]
+    fn test_should_enable_configured_cache_by_default() {
+        let cli = Cli::try_parse_from(["graphloom", "index"]).expect("CLI arguments");
+        let Command::Index(args) = cli.command else {
+            panic!("expected index command");
+        };
+        assert!(args.cache_enabled());
+    }
+
+    #[test]
+    fn test_should_disable_cache_with_no_cache_flag() {
+        let cli = Cli::try_parse_from(["graphloom", "index", "--no-cache"]).expect("CLI arguments");
+        let Command::Index(args) = cli.command else {
+            panic!("expected index command");
+        };
+        assert!(!args.cache_enabled());
+    }
+}

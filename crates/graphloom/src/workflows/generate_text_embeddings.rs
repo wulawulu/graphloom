@@ -7,7 +7,6 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use graphloom_cache::Cache;
 use graphloom_llm::TiktokenTokenizer;
 use graphloom_storage::{Table, TableProvider};
 use graphloom_vectors::{VectorDocument, VectorIndexSchema, VectorStore};
@@ -63,7 +62,6 @@ struct FieldDependencies {
     vector_store: Arc<dyn VectorStore>,
     model: Arc<dyn graphloom_llm::EmbeddingModel>,
     tokenizer: Arc<dyn graphloom_llm::Tokenizer>,
-    embedding_cache: Option<Arc<dyn Cache>>,
     snapshot_provider: Option<Arc<dyn TableProvider>>,
 }
 
@@ -130,6 +128,7 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
         let model = resolve_embedding_model(
             context,
             &config.embed_text.embedding_model_id,
+            &config.embed_text.model_instance_name,
             GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
         )?;
         let encoding_model =
@@ -137,11 +136,6 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
         let tokenizer: Arc<dyn graphloom_llm::Tokenizer> =
             Arc::new(TiktokenTokenizer::new(encoding_model)?);
         let vector_store = context.vector_store()?;
-        let embedding_cache = context
-            .cache()
-            .map(|cache| cache.child(&config.embed_text.model_instance_name))
-            .transpose()?;
-
         let field_map = embedding_fields();
         let snapshot_provider = if config.snapshots.embeddings {
             Some(context.output_table_provider().child(Some("embeddings"))?)
@@ -152,7 +146,6 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
             vector_store,
             model,
             tokenizer,
-            embedding_cache,
             snapshot_provider,
         };
         let mut summaries = Vec::new();
@@ -361,7 +354,6 @@ async fn flush_buffer(
         operation_config,
         Arc::clone(&dependencies.model),
         Arc::clone(&dependencies.tokenizer),
-        dependencies.embedding_cache.as_ref().map(Arc::clone),
     )
     .await?;
     dependencies

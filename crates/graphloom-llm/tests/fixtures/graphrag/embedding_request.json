@@ -1,0 +1,13 @@
+{
+  "input": [
+    "first: 中文",
+    "second 'quoted'",
+    ""
+  ],
+  "dimensions": 1024,
+  "encoding_format": "float",
+  "metrics": {},
+  "timeout": 30,
+  "api_base": "https://excluded.example",
+  "drop_params": true
+}

@@ -101,16 +101,10 @@ pub(crate) async fn extract_text_unit_graph(
     )];
 
     let mut output = model
-        .complete(CompletionRequest {
-            messages: messages.clone(),
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            response_format: None,
-            cache_namespace: None,
-        })
+        .complete(CompletionRequest::new(messages.clone()))
         .await?
-        .content;
+        .content()?
+        .to_owned();
     messages.push(ChatMessage::assistant(output.clone()));
 
     let continue_prompt = bind_empty_prompt(continue_template)?.render()?;
@@ -118,16 +112,10 @@ pub(crate) async fn extract_text_unit_graph(
     for glean_index in 0..max_gleanings {
         messages.push(ChatMessage::user(continue_prompt.clone()));
         let response = model
-            .complete(CompletionRequest {
-                messages: messages.clone(),
-                temperature: None,
-                top_p: None,
-                max_tokens: None,
-                response_format: None,
-                cache_namespace: None,
-            })
+            .complete(CompletionRequest::new(messages.clone()))
             .await?
-            .content;
+            .content()?
+            .to_owned();
         output.push_str(&response);
         messages.push(ChatMessage::assistant(response));
 
@@ -137,16 +125,10 @@ pub(crate) async fn extract_text_unit_graph(
 
         messages.push(ChatMessage::user(loop_prompt.clone()));
         let response = model
-            .complete(CompletionRequest {
-                messages: messages.clone(),
-                temperature: None,
-                top_p: None,
-                max_tokens: None,
-                response_format: None,
-                cache_namespace: None,
-            })
+            .complete(CompletionRequest::new(messages.clone()))
             .await?
-            .content;
+            .content()?
+            .to_owned();
         if response != "Y" {
             break;
         }
@@ -386,14 +368,13 @@ mod tests {
                     message: "unknown text unit".to_owned(),
                 });
             };
-            Ok(CompletionResponse {
-                content: graph_records(
+            Ok(CompletionResponse::text_for_test(
+                "delayed-graph",
+                graph_records(
                     &[("Alice", description), ("Bob", "shared")],
                     &[("Alice", "Bob", description)],
                 ),
-                usage: None,
-                request_id: None,
-            })
+            ))
         }
     }
 

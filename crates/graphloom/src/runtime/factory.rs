@@ -77,7 +77,7 @@ async fn create_default_services(
     );
     let output_storage: Arc<dyn Storage> =
         Arc::new(FileStorage::new(&project.paths.output_dir).map_err(runtime_build)?);
-    let cache = if cache_enabled && project.config.cache.cache_type.eq_ignore_ascii_case("json") {
+    let cache = if should_enable_cache(cache_enabled, &project.config.cache.cache_type) {
         let storage: Arc<dyn Storage> =
             Arc::new(FileStorage::new(&project.paths.cache_dir).map_err(runtime_build)?);
         CacheService::Enabled(Arc::new(JsonCache::new(storage)) as Arc<dyn Cache>)
@@ -94,8 +94,24 @@ async fn create_default_services(
     })
 }
 
+fn should_enable_cache(cache_enabled: bool, cache_type: &str) -> bool {
+    cache_enabled && cache_type.eq_ignore_ascii_case("json")
+}
+
 fn runtime_build(source: impl std::error::Error + Send + Sync + 'static) -> GraphLoomError {
     GraphLoomError::RuntimeBuild {
         source: Box::new(source),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_enable_cache;
+
+    #[test]
+    fn test_should_obey_cli_and_config_cache_controls() {
+        assert!(should_enable_cache(true, "json"));
+        assert!(!should_enable_cache(false, "json"));
+        assert!(!should_enable_cache(true, "none"));
     }
 }

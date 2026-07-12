@@ -148,6 +148,11 @@ mod test_support {
             Ok(self)
         }
 
+        pub(crate) fn with_cache(mut self, cache: Arc<dyn graphloom_cache::Cache>) -> Self {
+            self.services.cache = CacheService::Enabled(cache);
+            self
+        }
+
         pub(crate) fn with_embedding_model(
             mut self,
             id: impl Into<String>,

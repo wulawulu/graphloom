@@ -229,16 +229,10 @@ async fn summarize_description_list(
             )?;
             result = context
                 .model
-                .complete(CompletionRequest {
-                    messages: vec![ChatMessage::user(prompt)],
-                    temperature: None,
-                    top_p: None,
-                    max_tokens: None,
-                    response_format: None,
-                    cache_namespace: None,
-                })
+                .complete(CompletionRequest::new(vec![ChatMessage::user(prompt)]))
                 .await?
-                .content;
+                .content()?
+                .to_owned();
             if index != descriptions.len().saturating_sub(1) {
                 collected = vec![result.clone()];
                 usable_tokens = context

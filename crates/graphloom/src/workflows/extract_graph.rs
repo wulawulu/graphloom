@@ -53,11 +53,13 @@ impl IndexWorkflow for ExtractGraphWorkflow {
         let extractor = resolve_completion_model(
             context,
             &config.extract_graph.completion_model_id,
+            &config.extract_graph.model_instance_name,
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let summarizer = resolve_completion_model(
             context,
             &config.summarize_descriptions.completion_model_id,
+            &config.summarize_descriptions.model_instance_name,
             EXTRACT_GRAPH_WORKFLOW,
         )?;
         let tokenizer = TiktokenTokenizer::new(&config.chunking.encoding_model)?;

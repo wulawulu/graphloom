@@ -167,31 +167,19 @@ async fn extract_claims_for_text_unit(
     let loop_prompt = render_empty_prompt(loop_template)?;
     let mut messages = vec![ChatMessage::user(initial_prompt)];
     let initial = model
-        .complete(CompletionRequest {
-            messages: messages.clone(),
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            response_format: None,
-            cache_namespace: None,
-        })
+        .complete(CompletionRequest::new(messages.clone()))
         .await?
-        .content;
+        .content()?
+        .to_owned();
     messages.push(ChatMessage::assistant(initial.clone()));
 
     for glean_index in 0..config.max_gleanings {
         messages.push(ChatMessage::user(continue_prompt.clone()));
         let extension = model
-            .complete(CompletionRequest {
-                messages: messages.clone(),
-                temperature: None,
-                top_p: None,
-                max_tokens: None,
-                response_format: None,
-                cache_namespace: None,
-            })
+            .complete(CompletionRequest::new(messages.clone()))
             .await?
-            .content;
+            .content()?
+            .to_owned();
         messages.push(ChatMessage::assistant(extension));
 
         if glean_index >= config.max_gleanings.saturating_sub(1) {
@@ -200,16 +188,10 @@ async fn extract_claims_for_text_unit(
 
         messages.push(ChatMessage::user(loop_prompt.clone()));
         let response = model
-            .complete(CompletionRequest {
-                messages: messages.clone(),
-                temperature: None,
-                top_p: None,
-                max_tokens: None,
-                response_format: None,
-                cache_namespace: None,
-            })
+            .complete(CompletionRequest::new(messages.clone()))
             .await?
-            .content;
+            .content()?
+            .to_owned();
         if response != "Y" {
             break;
         }
@@ -541,11 +523,7 @@ mod tests {
                 claim("UNKNOWN", "UNKNOWN")
             };
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            Ok(CompletionResponse {
-                content: response,
-                usage: None,
-                request_id: None,
-            })
+            Ok(CompletionResponse::text_for_test("delayed", response))
         }
     }
 
@@ -570,11 +548,10 @@ mod tests {
                     message: "tu-2 failed".to_owned(),
                 });
             }
-            Ok(CompletionResponse {
-                content: claim("ALICE", "BOB"),
-                usage: None,
-                request_id: None,
-            })
+            Ok(CompletionResponse::text_for_test(
+                "failing",
+                claim("ALICE", "BOB"),
+            ))
         }
     }
 

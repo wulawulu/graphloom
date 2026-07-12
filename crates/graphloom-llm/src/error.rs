@@ -9,11 +9,24 @@ pub type Result<T> = std::result::Result<T, LlmError>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum LlmError {
+    /// Cache storage or serialization failed.
+    #[error(transparent)]
+    Cache(#[from] graphloom_cache::CacheError),
+
     /// The model configuration is invalid.
     #[error("invalid model configuration for {model_instance}: {message}")]
     InvalidConfig {
         /// Model instance name.
         model_instance: String,
+        /// Validation failure message.
+        message: String,
+    },
+
+    /// A canonical model request is internally inconsistent.
+    #[error("invalid model request during {operation}: {message}")]
+    InvalidRequest {
+        /// Operation that validated the request.
+        operation: &'static str,
         /// Validation failure message.
         message: String,
     },

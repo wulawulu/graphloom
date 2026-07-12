@@ -57,6 +57,7 @@ impl IndexWorkflow for ExtractCovariatesWorkflow {
         let model = resolve_completion_model(
             context,
             &config.extract_claims.completion_model_id,
+            &config.extract_claims.model_instance_name,
             EXTRACT_COVARIATES_WORKFLOW,
         )?;
         let prompt_repository = PromptRepository::new(context.prompt_root());

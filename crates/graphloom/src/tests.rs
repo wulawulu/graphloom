@@ -1369,8 +1369,9 @@ impl EmbeddingModel for CapturingEmbeddingModel {
             .lock()
             .expect("inputs lock")
             .extend(request.input.iter().cloned());
-        Ok(EmbeddingResponse {
-            embeddings: request
+        Ok(EmbeddingResponse::vectors_for_test(
+            "capturing",
+            request
                 .input
                 .iter()
                 .map(|input| {
@@ -1381,9 +1382,7 @@ impl EmbeddingModel for CapturingEmbeddingModel {
                     }
                 })
                 .collect(),
-            usage: None,
-            request_id: None,
-        })
+        ))
     }
 }
 
@@ -1403,20 +1402,19 @@ impl CompletionModel for CapturingWorkflowReportModel {
             .messages
             .into_iter()
             .next()
-            .map(|message| message.content)
+            .and_then(|message| message.content.as_text().map(str::to_owned))
             .unwrap_or_default();
         self.prompts.lock().expect("prompts lock").push(prompt);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let title = if call == 0 { "Child" } else { "Parent" };
-        Ok(CompletionResponse {
-            content: format!(
+        Ok(CompletionResponse::text_for_test(
+            "capturing-report",
+            format!(
                 "{{\"title\":\"{title}\",\"summary\":\"{title} \
                  summary\",\"rating\":7,\"rating_explanation\":\"{title} \
                  reason\",\"findings\":[{{\"summary\":\"{title} \
                  finding\",\"explanation\":\"{title} explanation\"}}]}}"
             ),
-            usage: None,
-            request_id: None,
-        })
+        ))
     }
 }

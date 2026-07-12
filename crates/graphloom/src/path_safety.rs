@@ -438,9 +438,10 @@ fn classify_compare_string_ordinal_result(result: i32) -> Option<bool> {
 pub(crate) mod tests {
     use std::path::Path;
 
+    #[cfg(not(windows))]
+    use super::relative_descendant;
     use super::{
         component_reaches_queryable_path, paths_overlap, reject_descendant_link_components,
-        relative_descendant,
     };
     use crate::GraphLoomError;
 

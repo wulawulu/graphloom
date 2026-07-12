@@ -40,11 +40,10 @@ impl CompletionModel for MockCompletionModel {
             });
         }
 
-        Ok(CompletionResponse {
-            content: responses.remove(0),
-            usage: None,
-            request_id: None,
-        })
+        Ok(CompletionResponse::text_for_test(
+            self.model_instance.clone(),
+            responses.remove(0),
+        ))
     }
 }
 
@@ -77,10 +76,9 @@ impl EmbeddingModel for MockEmbeddingModel {
             });
         }
 
-        Ok(EmbeddingResponse {
-            embeddings: vec![self.embedding.clone(); request.input.len()],
-            usage: None,
-            request_id: None,
-        })
+        Ok(EmbeddingResponse::vectors_for_test(
+            self.model_instance.clone(),
+            vec![self.embedding.clone(); request.input.len()],
+        ))
     }
 }
