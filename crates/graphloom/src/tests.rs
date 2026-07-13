@@ -161,7 +161,7 @@ fn test_should_deserialize_community_reports_camel_and_snake_case() {
         "communityReports": {
             "completionModelId": "chat",
             "modelInstanceName": "community_reporting",
-            "graphPrompt": "prompts/community_report.txt",
+            "graphPrompt": "prompts/community_report_graph.txt",
             "textPrompt": "text.txt",
             "maxLength": 123,
             "maxInputLength": 456
@@ -171,7 +171,7 @@ fn test_should_deserialize_community_reports_camel_and_snake_case() {
     assert_eq!(camel.community_reports.completion_model_id, "chat");
     assert_eq!(
         camel.community_reports.graph_prompt.as_deref(),
-        Some("prompts/community_report.txt")
+        Some("prompts/community_report_graph.txt")
     );
     assert_eq!(camel.community_reports.max_length, 123);
     assert_eq!(camel.community_reports.max_input_length, 456);

@@ -8,13 +8,14 @@ use std::{
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::{GraphLoomError, GraphRagConfig, IndexPipelineContext, Result};
+use crate::{GraphLoomError, GraphRagConfig, IndexPipelineContext, Result, prompts::PromptKind};
 
 /// Model dependencies declared by one or more indexing workflows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexWorkflowRequirements {
     completion_models: BTreeSet<String>,
     embedding_models: BTreeSet<String>,
+    prompt_templates: BTreeSet<PromptRequirement>,
     vector_store: bool,
     chunking_config: bool,
     tokenizer_encodings: BTreeSet<TokenizerRequirement>,
@@ -27,6 +28,13 @@ pub(crate) struct TokenizerRequirement {
     pub(crate) encoding: String,
 }
 
+/// One configurable prompt template used by an active workflow.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PromptRequirement {
+    pub(crate) kind: PromptKind,
+    pub(crate) configured_path: Option<String>,
+}
+
 impl IndexWorkflowRequirements {
     /// Require a completion model by configured identifier.
     pub fn require_completion_model(&mut self, model_id: impl Into<String>) {
@@ -36,6 +44,13 @@ impl IndexWorkflowRequirements {
     /// Require an embedding model by configured identifier.
     pub fn require_embedding_model(&mut self, model_id: impl Into<String>) {
         self.embedding_models.insert(model_id.into());
+    }
+
+    pub(crate) fn require_prompt(&mut self, kind: PromptKind, configured_path: Option<String>) {
+        self.prompt_templates.insert(PromptRequirement {
+            kind,
+            configured_path,
+        });
     }
 
     /// Iterate over required completion model identifiers.
@@ -52,6 +67,7 @@ impl IndexWorkflowRequirements {
     pub fn merge(&mut self, other: Self) {
         self.completion_models.extend(other.completion_models);
         self.embedding_models.extend(other.embedding_models);
+        self.prompt_templates.extend(other.prompt_templates);
         self.vector_store |= other.vector_store;
         self.chunking_config |= other.chunking_config;
         self.tokenizer_encodings.extend(other.tokenizer_encodings);
@@ -89,6 +105,10 @@ impl IndexWorkflowRequirements {
 
     pub(crate) fn tokenizer_requirements(&self) -> impl Iterator<Item = &TokenizerRequirement> {
         self.tokenizer_encodings.iter()
+    }
+
+    pub(crate) fn prompt_requirements(&self) -> impl Iterator<Item = &PromptRequirement> {
+        self.prompt_templates.iter()
     }
 }
 

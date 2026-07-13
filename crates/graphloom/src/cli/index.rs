@@ -13,8 +13,10 @@ use crate::{
         error::{CliError, Result},
     },
     config::load::{
-        ValidationMode, load_project_config, redacted_config_summary, validate_index_project,
+        ValidationMode, load_project_config, redacted_config_summary,
+        validate_index_project_with_factory,
     },
+    runtime::{DefaultModelFactory, ModelFactory},
 };
 
 impl From<IndexMethodArg> for IndexingMethod {
@@ -31,15 +33,25 @@ impl From<IndexMethodArg> for IndexingMethod {
 ///
 /// Returns a config, runtime, or pipeline error.
 pub async fn run(args: &IndexArgs) -> Result<IndexRunResult> {
+    run_with_model_factory(args, &DefaultModelFactory).await
+}
+
+async fn run_with_model_factory(
+    args: &IndexArgs,
+    model_factory: &dyn ModelFactory,
+) -> Result<IndexRunResult> {
     let project = load_project_config(&args.root).await?;
     let method = IndexingMethod::from(args.method);
-    validate_index_project(
+    validate_index_project_with_factory(
         &project,
         if args.skip_validation {
             ValidationMode::SkipOptional
         } else {
-            ValidationMode::Full
+            ValidationMode::Full {
+                cache_enabled: args.cache_enabled(),
+            }
         },
+        model_factory,
     )
     .await?;
     if args.dry_run {
@@ -137,6 +149,14 @@ fn print_success_summary(stats: &IndexRunStats, elapsed: Duration) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use graphloom_llm::{
+        CompletionModel, EmbeddingModel, MockCompletionModel, MockEmbeddingModel, ModelConfig,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -189,15 +209,19 @@ mod tests {
         .await
         .expect("input");
 
-        let result = run(&IndexArgs {
-            root: tempdir.path().to_path_buf(),
-            method: IndexMethodArg::Standard,
-            verbose: false,
-            dry_run: true,
-            cache: true,
-            no_cache: false,
-            skip_validation: false,
-        })
+        let factory = TestModelFactory::default();
+        let result = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: false,
+            },
+            &factory,
+        )
         .await
         .expect("dry run");
 
@@ -206,5 +230,343 @@ mod tests {
         assert!(!tempdir.path().join("output").join("lancedb").exists());
         assert!(!tempdir.path().join("cache").exists());
         assert!(!tempdir.path().join("logs").exists());
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_output_file_during_dry_run_without_side_effects() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        tokio::fs::write(
+            tempdir.path().join(".env"),
+            "GRAPHRAG_API_KEY=super-secret-key\n",
+        )
+        .await
+        .expect("dotenv");
+        tokio::fs::write(tempdir.path().join("input/doc.txt"), "Alice")
+            .await
+            .expect("input");
+        let output = tempdir.path().join("output");
+        tokio::fs::write(&output, "preserve dry-run output")
+            .await
+            .expect("output file");
+        let factory = TestModelFactory::default();
+
+        let error = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: false,
+            },
+            &factory,
+        )
+        .await
+        .expect_err("output file must fail dry-run validation");
+
+        assert!(error.to_string().contains("output publication"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(
+            tokio::fs::read_to_string(&output)
+                .await
+                .expect("output contents"),
+            "preserve dry-run output"
+        );
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+        assert!(!tempdir.path().join("cache").exists());
+        assert!(!tempdir.path().join("logs").exists());
+        assert!(!tempdir.path().join("output/lancedb").exists());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_output_file_when_skip_validation_is_enabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        let output = tempdir.path().join("output");
+        tokio::fs::write(&output, "skip-validation output")
+            .await
+            .expect("output file");
+        let factory = TestModelFactory::default();
+
+        let error = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: true,
+            },
+            &factory,
+        )
+        .await
+        .expect_err("skip-validation must retain output target safety");
+
+        assert!(error.to_string().contains("output publication"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(
+            tokio::fs::read_to_string(&output)
+                .await
+                .expect("output contents"),
+            "skip-validation output"
+        );
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+        assert!(!tempdir.path().join("logs").exists());
+        assert!(!tempdir.path().join("cache").exists());
+        assert!(!tempdir.path().join("output/lancedb").exists());
+        assert_no_index_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_external_vector_file_when_skip_validation_is_enabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        let settings_path = tempdir.path().join("settings.yaml");
+        let settings = tokio::fs::read_to_string(&settings_path)
+            .await
+            .expect("settings")
+            .replace("db_uri: output/lancedb", "db_uri: vector-db");
+        tokio::fs::write(&settings_path, settings)
+            .await
+            .expect("external vector settings");
+        let vector = tempdir.path().join("vector-db");
+        tokio::fs::write(&vector, "skip-validation vector")
+            .await
+            .expect("vector file");
+        let factory = TestModelFactory::default();
+
+        let error = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: true,
+            },
+            &factory,
+        )
+        .await
+        .expect_err("skip-validation must retain external vector target safety");
+
+        assert!(error.to_string().contains("vector DB publication"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(
+            tokio::fs::read_to_string(&vector)
+                .await
+                .expect("vector contents"),
+            "skip-validation vector"
+        );
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+        assert!(!tempdir.path().join("output").exists());
+        assert!(!tempdir.path().join("logs").exists());
+        assert!(!tempdir.path().join("cache").exists());
+        assert_no_index_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_retain_active_vector_path_safety_when_skip_validation_is_enabled() {
+        for (vector_uri, expected_error) in [
+            ("input", "overlap input"),
+            (".", "project root"),
+            ("output", "equal output"),
+            ("cache", "overlap cache"),
+            ("logs", "overlap logs"),
+        ] {
+            let tempdir = TempDir::new().expect("tempdir");
+            init_project(&InitArgs {
+                root: tempdir.path().to_path_buf(),
+                model: "gpt-test".to_owned(),
+                embedding: "embed-test".to_owned(),
+                force: false,
+            })
+            .await
+            .expect("init");
+            let settings_path = tempdir.path().join("settings.yaml");
+            let settings = tokio::fs::read_to_string(&settings_path)
+                .await
+                .expect("settings")
+                .replace("db_uri: output/lancedb", &format!("db_uri: {vector_uri}"));
+            tokio::fs::write(&settings_path, settings)
+                .await
+                .expect("unsafe vector settings");
+            let factory = TestModelFactory::default();
+
+            let error = run_with_model_factory(
+                &IndexArgs {
+                    root: tempdir.path().to_path_buf(),
+                    method: IndexMethodArg::Standard,
+                    verbose: false,
+                    dry_run: true,
+                    cache: true,
+                    no_cache: false,
+                    skip_validation: true,
+                },
+                &factory,
+            )
+            .await
+            .expect_err("skip-validation must retain active vector path safety");
+
+            assert!(
+                error.to_string().contains(expected_error),
+                "vector URI {vector_uri} returned unexpected error: {error}",
+            );
+            assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+            assert!(!tempdir.path().join("output").exists());
+            assert!(!tempdir.path().join("logs").exists());
+            assert!(!tempdir.path().join("cache").exists());
+            assert_no_index_residue(tempdir.path()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_optional_and_connectivity_validation() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        let factory = TestModelFactory::default();
+
+        let result = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: true,
+            },
+            &factory,
+        )
+        .await
+        .expect("skip-validation dry run");
+
+        assert!(result.workflow_outputs.is_empty());
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+        assert!(!tempdir.path().join("output").exists());
+        assert!(!tempdir.path().join("cache").exists());
+        assert!(!tempdir.path().join("logs").exists());
+    }
+
+    #[tokio::test]
+    async fn test_should_report_missing_input_before_model_connectivity() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_project(&InitArgs {
+            root: tempdir.path().to_path_buf(),
+            model: "gpt-test".to_owned(),
+            embedding: "embed-test".to_owned(),
+            force: false,
+        })
+        .await
+        .expect("init");
+        tokio::fs::write(
+            tempdir.path().join(".env"),
+            "GRAPHRAG_API_KEY=super-secret-key\n",
+        )
+        .await
+        .expect("dotenv");
+        let factory = TestModelFactory::default();
+
+        let error = run_with_model_factory(
+            &IndexArgs {
+                root: tempdir.path().to_path_buf(),
+                method: IndexMethodArg::Standard,
+                verbose: false,
+                dry_run: true,
+                cache: true,
+                no_cache: false,
+                skip_validation: false,
+            },
+            &factory,
+        )
+        .await
+        .expect_err("missing input should fail before model calls");
+
+        assert!(error.to_string().contains("no matching input files found"));
+        assert_eq!(factory.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.embedding_calls.load(Ordering::SeqCst), 0);
+    }
+
+    async fn assert_no_index_residue(root: &Path) {
+        let mut entries = tokio::fs::read_dir(root).await.expect("project entries");
+        while let Some(entry) = entries.next_entry().await.expect("project entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with(".graphloom-publication-probe-")
+                    && !name.starts_with(".graphloom-write-probe-")
+                    && !name.ends_with(".staging")
+                    && !name.ends_with(".backup"),
+                "validation or publication residue should not remain: {name}",
+            );
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestModelFactory {
+        completion_calls: AtomicUsize,
+        embedding_calls: AtomicUsize,
+    }
+
+    impl ModelFactory for TestModelFactory {
+        fn create_completion(
+            &self,
+            id: &str,
+            _config: &ModelConfig,
+            _concurrent_requests: usize,
+        ) -> crate::Result<Arc<dyn CompletionModel>> {
+            self.completion_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(MockCompletionModel::new(
+                id,
+                vec!["Any non-empty response".to_owned()],
+            )))
+        }
+
+        fn create_embedding(
+            &self,
+            id: &str,
+            _config: &ModelConfig,
+            _concurrent_requests: usize,
+        ) -> crate::Result<Arc<dyn EmbeddingModel>> {
+            self.embedding_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(MockEmbeddingModel::new(id, vec![0.0; 3_072])))
+        }
     }
 }

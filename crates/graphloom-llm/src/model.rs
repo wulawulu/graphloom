@@ -3,7 +3,8 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{CompletionRequest, CompletionResponse, EmbeddingRequest, EmbeddingResponse, Result};
 
@@ -21,6 +22,19 @@ fn default_auth_method() -> String {
 
 fn default_retry_type() -> String {
     "exponential_backoff".to_owned()
+}
+
+fn serialize_optional_secret<S>(
+    value: &Option<SecretString>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(_) => serializer.serialize_some("<redacted>"),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Retry configuration nested under `GraphRAG` 3.1 model settings.
@@ -61,9 +75,13 @@ pub struct ModelConfig {
     #[serde(alias = "auth_method", default = "default_auth_method")]
     pub auth_method: String,
     /// API key for OpenAI-compatible providers.
-    #[serde(alias = "api_key")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    #[serde(
+        alias = "api_key",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_secret"
+    )]
+    pub api_key: Option<SecretString>,
     /// API base URL for OpenAI-compatible providers.
     #[serde(alias = "api_base")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,7 +190,12 @@ impl ModelConfig {
             });
         }
 
-        let api_key = self.api_key.as_deref().unwrap_or_default().trim();
+        let api_key = self
+            .api_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .unwrap_or_default()
+            .trim();
         if api_key.is_empty() || api_key == "<API_KEY>" {
             return Err(crate::LlmError::InvalidConfig {
                 model_instance: model_instance.to_owned(),

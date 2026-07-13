@@ -1,13 +1,11 @@
 //! Project configuration paths.
 
 use std::{
-    collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     GraphLoomError, GraphRagConfig, Result,
     path_safety::{
         normalize_path, paths_overlap, resolve_path_following_links, resolve_path_rejecting_links,
@@ -178,39 +176,6 @@ impl ProjectPaths {
     /// Returns an error if the vector DB path is unsafe for reset.
     pub(crate) fn validate_vector_path_safety(&self) -> Result<()> {
         self.validate_vector_path_safety_with_home(user_home_dir().as_deref())
-    }
-
-    /// Resolve configured prompt paths used by active workflows.
-    #[must_use]
-    pub fn active_prompt_paths(
-        &self,
-        config: &GraphRagConfig,
-        active: &BTreeSet<String>,
-    ) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        if active.contains(EXTRACT_GRAPH_WORKFLOW) {
-            if let Some(path) = config.extract_graph.prompt.as_deref() {
-                paths.push(resolve_path(&self.root, path));
-            }
-            if let Some(path) = config.summarize_descriptions.prompt.as_deref() {
-                paths.push(resolve_path(&self.root, path));
-            }
-        }
-        if active.contains(EXTRACT_COVARIATES_WORKFLOW)
-            && config.extract_claims.enabled
-            && let Some(path) = config.extract_claims.prompt.as_deref()
-        {
-            paths.push(resolve_path(&self.root, path));
-        }
-        if active.contains(CREATE_COMMUNITY_REPORTS_WORKFLOW) {
-            if let Some(path) = config.community_reports.graph_prompt.as_deref() {
-                paths.push(resolve_path(&self.root, path));
-            }
-            if let Some(path) = config.community_reports.text_prompt.as_deref() {
-                paths.push(resolve_path(&self.root, path));
-            }
-        }
-        paths
     }
 }
 

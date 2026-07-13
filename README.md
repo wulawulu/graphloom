@@ -54,7 +54,7 @@ The default prompts are embedded in the binary and are based on Microsoft
 GraphRAG 3.1.0 prompt content under the MIT License.
 GraphLoom prompt templates use Tera/Jinja double-brace syntax, such as
 `{{ input_text }}`. The canonical community-report prompt is
-`prompts/community_report.txt`.
+`prompts/community_report_graph.txt` and `prompts/community_report_text.txt`.
 `graphloom init` currently generates only the prompt templates used by indexing
 workflows. Search and query prompts will be added when their workflows are
 implemented.
@@ -118,10 +118,17 @@ generate_text_embeddings
 graphloom index --root ./demo --dry-run
 ```
 
-Dry run loads and parses project configuration, performs the same full preflight
-validation as indexing, prints a redacted summary, and shows the workflow list.
-It does not call models, create output, create cache, create logs, connect
-LanceDB, or modify the current working directory.
+Dry run performs the same non-destructive prerequisite validation used before a
+real index run, including required model connectivity and storage path
+writability, then prints a redacted configuration summary and workflow order. It
+sends one short, uncached request to each completion and embedding model required
+by the active workflows, which may consume a small number of provider tokens.
+It exits before runtime resources are prepared: workflows are not executed,
+index output and logs are not created, model responses are not written to cache,
+and LanceDB is not created, connected, or modified. Unused configured models are
+not contacted. This validates non-destructive prerequisites; it does not promise
+that every provider construction or workflow operation will subsequently
+succeed.
 
 ## Skip Optional Validation
 
@@ -129,12 +136,14 @@ LanceDB, or modify the current working directory.
 graphloom index --root ./demo --skip-validation
 ```
 
-`--skip-validation` is a CLI-only escape hatch for optional preflight checks. It
-skips model, prompt, input-existence, and tokenizer checks that may be
-environment-specific, but it does not skip configuration parsing, provider type
-checks, workflow name checks, path safety, destructive-output safety, or runtime
-provider preflight. Public Rust callers using `graphloom::api::build_index`
-always get full validation.
+`--skip-validation` is a CLI-only escape hatch for external-resource and
+optional preflight checks. It skips model configuration and connectivity,
+prompt, input-existence, and tokenizer checks that may be environment-specific.
+It also skips storage writability probes and optional vector validation.
+It does not skip configuration parsing, workflow name checks, path safety, or
+destructive-output safety. With `--dry-run`, it can print a plan for a newly
+initialized project before input and credentials are available. Public Rust
+callers using `graphloom::api::build_index` always get full validation.
 
 If a future Web or application embedding needs a skip mode, it should use a
 separate controlled application API rather than weakening the public
@@ -184,11 +193,15 @@ database are replaced only after the complete pipeline succeeds. A pipeline or
 publication failure restores the previous active generation. Cache is
 preserved.
 
-Runtime preflight validates provider construction, managed vector schemas, and
-write access for output, logs, cache when enabled, and the vector database path
-before any generation is created. Vector database paths are resolved through their
-existing ancestors and must not use symlink or reparse-point components to
-escape the project layout.
+Unified index validation checks required provider configuration and
+connectivity, active vector schemas, ordinary write access for logs and enabled
+cache, and sibling-directory create/rename/remove support in the publication
+parents for output and an external vector database. A vector database inside
+output is covered by the output publication check.
+Runtime preparation begins only after that validation succeeds and constructs
+the configured storage, cache, table, model, and vector providers. Vector
+database paths are resolved through their existing ancestors and must not use
+symlink or reparse-point components to escape the project layout.
 
 Output and vector database locations are destructive paths: output may be
 recursively cleared, and managed LanceDB tables may be reset. GraphLoom rejects
@@ -208,7 +221,7 @@ and vector database paths may live under a normal project in the home directory,
 but they must not equal the home directory or be an ancestor of it.
 
 When the LanceDB database is inside the output directory, such as the default
-`output/lancedb`, GraphLoom closes the preflight LanceDB connection before
+`output/lancedb`, GraphLoom closes the prepared LanceDB connection before
 clearing output, then reconnects and recreates the managed vector tables. This
 keeps the lifecycle compatible with platforms that do not allow deleting files
 held by an open database connection.

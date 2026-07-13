@@ -8,7 +8,6 @@ mod services;
 mod vector_store_factory;
 
 use std::{
-    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -16,12 +15,11 @@ use std::{
 pub(crate) use factory::{DefaultIndexRuntimeFactory, IndexRuntimeFactory};
 pub(crate) use generation::StagedIndexGeneration;
 use graphloom_vectors::VectorStore;
+pub(crate) use model_factory::validate_model_connectivity;
 pub use model_factory::{DefaultModelFactory, ModelFactory};
 pub use model_registry::ModelRegistry;
 pub use services::{CacheService, IndexRuntimeIo, IndexRuntimeServices};
 pub(crate) use services::{PreparedIndexServices, VectorStoreService};
-use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
 pub(crate) use vector_store_factory::{DefaultIndexVectorStoreFactory, IndexVectorStoreFactory};
 
 use crate::{
@@ -43,7 +41,7 @@ pub struct IndexRuntime {
     pub pipeline: IndexPipeline,
 }
 
-/// Providers and pipeline that passed non-destructive runtime preflight.
+/// Providers and pipeline prepared for a validated index run.
 #[derive(Debug)]
 pub(crate) struct PreparedIndexRuntime {
     services: Option<PreparedIndexServices>,
@@ -58,13 +56,13 @@ pub(crate) struct PreparedIndexRuntime {
 ///
 /// # Errors
 ///
-/// Returns an error when provider construction, vector config, or pipeline build fails.
-pub(crate) async fn preflight_index_runtime(
+/// Returns an error when provider construction or pipeline build fails.
+pub(crate) async fn prepare_index_runtime(
     project: &LoadedProject,
     cache_enabled: bool,
     callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
 ) -> Result<PreparedIndexRuntime> {
-    preflight_index_runtime_with_factory(
+    prepare_index_runtime_with_factory(
         project,
         &project.root,
         cache_enabled,
@@ -74,7 +72,7 @@ pub(crate) async fn preflight_index_runtime(
     .await
 }
 
-pub(crate) async fn preflight_index_runtime_with_factory(
+pub(crate) async fn prepare_index_runtime_with_factory(
     project: &LoadedProject,
     project_root: &Path,
     cache_enabled: bool,
@@ -89,13 +87,7 @@ pub(crate) async fn preflight_index_runtime_with_factory(
             source: Box::new(source),
         })?;
     let requirements = pipeline.requirements(&project.config)?;
-    crate::config::load::validate_required_models(&project.config, &requirements)?;
     let requires_vector_store = requirements.requires_vector_store();
-    if requires_vector_store {
-        validate_managed_vector_schemas(&project.config)?;
-        project.paths.validate_vector_path_safety()?;
-    }
-    preflight_writable_paths(&project.paths, cache_enabled, requires_vector_store).await?;
     let vector_store_factory = factory.vector_store_factory();
     let services = factory
         .create_services(project, project_root, cache_enabled, &requirements)
@@ -222,121 +214,10 @@ async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig)
     Ok(())
 }
 
-fn validate_managed_vector_schemas(config: &GraphRagConfig) -> Result<()> {
-    config
-        .vector_store
-        .validate()
-        .map_err(|source| GraphLoomError::RuntimeBuild {
-            source: Box::new(source),
-        })?;
-    for embedding_name in ALL_EMBEDDINGS {
-        config
-            .vector_store
-            .schema_for(embedding_name)
-            .validate()
-            .map_err(|source| GraphLoomError::RuntimeBuild {
-                source: Box::new(source),
-            })?;
-    }
-    Ok(())
-}
-
-async fn preflight_writable_paths(
-    paths: &ProjectPaths,
-    cache_enabled: bool,
-    vector_store_enabled: bool,
-) -> Result<()> {
-    probe_directory_writable(&paths.output_dir, "output").await?;
-    probe_directory_writable(&paths.reporting_dir, "logs").await?;
-    if cache_enabled {
-        probe_directory_writable(&paths.cache_dir, "cache").await?;
-    }
-    if vector_store_enabled {
-        probe_directory_writable(&paths.vector_db_uri, "vector DB").await?;
-    }
-    Ok(())
-}
-
-async fn probe_directory_writable(directory: &Path, label: &'static str) -> Result<()> {
-    let probe_root = writable_probe_root(directory, label).await?;
-    let probe = probe_root.join(format!(".graphloom-write-probe-{}", Uuid::new_v4()));
-    let write_result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)
-            .await
-            .map_err(|source| io_error("create write probe", &probe, source))?;
-        file.write_all(b"graphloom")
-            .await
-            .map_err(|source| io_error("write probe", &probe, source))?;
-        file.flush()
-            .await
-            .map_err(|source| io_error("flush write probe", &probe, source))?;
-        drop(file);
-        tokio::fs::remove_file(&probe)
-            .await
-            .map_err(|source| io_error("remove write probe", &probe, source))?;
-        Ok(())
-    }
-    .await;
-
-    if write_result.is_err() {
-        let _ = tokio::fs::remove_file(&probe).await;
-    }
-    write_result
-}
-
-async fn writable_probe_root(directory: &Path, label: &'static str) -> Result<PathBuf> {
-    match tokio::fs::metadata(directory).await {
-        Ok(metadata) if metadata.is_dir() => Ok(directory.to_path_buf()),
-        Ok(_) => Err(GraphLoomError::RuntimeBuild {
-            source: Box::new(std::io::Error::new(
-                ErrorKind::AlreadyExists,
-                format!("{label} path {} is not a directory", directory.display()),
-            )),
-        }),
-        Err(source) if source.kind() == ErrorKind::NotFound => {
-            existing_ancestor(directory, label).await
-        }
-        Err(source) => Err(io_error("inspect writable directory", directory, source)),
-    }
-}
-
-async fn existing_ancestor(path: &Path, label: &'static str) -> Result<PathBuf> {
-    let mut current = path.to_path_buf();
-    while let Some(parent) = current.parent() {
-        match tokio::fs::metadata(parent).await {
-            Ok(metadata) if metadata.is_dir() => return Ok(parent.to_path_buf()),
-            Ok(_) => {
-                return Err(GraphLoomError::RuntimeBuild {
-                    source: Box::new(std::io::Error::new(
-                        ErrorKind::AlreadyExists,
-                        format!("{label} ancestor {} is not a directory", parent.display()),
-                    )),
-                });
-            }
-            Err(source) if source.kind() == ErrorKind::NotFound => {
-                current = parent.to_path_buf();
-            }
-            Err(source) => return Err(io_error("inspect writable ancestor", parent, source)),
-        }
-    }
-    Err(GraphLoomError::RuntimeBuild {
-        source: Box::new(std::io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "no writable ancestor found for {label} path {}",
-                path.display()
-            ),
-        )),
-    })
-}
-
 fn missing_services() -> GraphLoomError {
     GraphLoomError::RuntimeBuild {
         source: Box::new(std::io::Error::other(
-            "preflight services are missing from prepared runtime",
+            "services are missing from prepared runtime",
         )),
     }
 }
@@ -358,12 +239,12 @@ fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> Gra
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum VectorLocation {
+pub(crate) enum VectorLocation {
     InsideOutput(PathBuf),
     OutsideOutput,
 }
 
-fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
+pub(crate) fn vector_location(paths: &ProjectPaths) -> Result<VectorLocation> {
     let output = resolve_path_rejecting_links(&paths.output_dir)?;
     let vector = resolve_path_rejecting_links(&paths.vector_db_uri)?;
     Ok(
@@ -395,9 +276,7 @@ mod runtime_factory_tests {
     };
     use tempfile::TempDir;
 
-    use super::{
-        IndexRuntimeFactory, IndexVectorStoreFactory, preflight_index_runtime_with_factory,
-    };
+    use super::{IndexRuntimeFactory, IndexVectorStoreFactory, prepare_index_runtime_with_factory};
     use crate::{
         GraphLoomError, GraphRagConfig, IndexWorkflowRequirements, ModelRegistry, Result,
         project::LoadedProject,
@@ -606,7 +485,7 @@ mod runtime_factory_tests {
             input_reader: Arc::new(EmptyInputReader),
         };
 
-        let mut prepared = preflight_index_runtime_with_factory(
+        let mut prepared = prepare_index_runtime_with_factory(
             &project,
             tempdir.path(),
             false,
@@ -686,7 +565,7 @@ mod runtime_factory_tests {
             output_storage: Arc::new(CountingStorage::default()),
             input_reader: Arc::new(EmptyInputReader),
         };
-        let mut prepared = preflight_index_runtime_with_factory(
+        let mut prepared = prepare_index_runtime_with_factory(
             &project,
             tempdir.path(),
             false,
@@ -751,7 +630,7 @@ mod runtime_factory_tests {
                 )],
             }),
         };
-        let mut prepared = preflight_index_runtime_with_factory(
+        let mut prepared = prepare_index_runtime_with_factory(
             &project,
             tempdir.path(),
             false,

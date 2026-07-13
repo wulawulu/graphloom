@@ -13,8 +13,6 @@ use crate::{GraphLoomError, Result};
 pub(crate) enum PromptSource {
     /// Template embedded in the `GraphLoom` binary.
     BuiltIn,
-    /// Canonical override loaded from the current project.
-    ProjectOverride(PathBuf),
     /// Override selected explicitly by configuration.
     Explicit(PathBuf),
 }
@@ -23,9 +21,6 @@ impl fmt::Display for PromptSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BuiltIn => formatter.write_str("built-in defaults"),
-            Self::ProjectOverride(path) => {
-                write!(formatter, "project override {}", path.display())
-            }
             Self::Explicit(path) => write!(formatter, "explicit path {}", path.display()),
         }
     }
@@ -193,6 +188,8 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct NameContext<'a> {
         name: &'a str,
+        input_text: &'a str,
+        entity_types: &'a [&'a str],
     }
 
     #[derive(Debug, Serialize)]
@@ -208,7 +205,7 @@ mod tests {
 
     fn template(content: &str) -> PromptTemplate {
         PromptTemplate::try_new(
-            PromptKind::ExtractGraphContinue,
+            PromptKind::ExtractGraph,
             content.to_owned(),
             PromptSource::BuiltIn,
         )
@@ -216,7 +213,15 @@ mod tests {
     }
 
     fn prepare_prompt(template: &PromptTemplate) -> Result<Prompt> {
-        template.bind(&NameContext { name: "GraphLoom" })
+        template.bind(&name_context("GraphLoom"))
+    }
+
+    fn name_context(name: &str) -> NameContext<'_> {
+        NameContext {
+            name,
+            input_text: "",
+            entity_types: &[],
+        }
     }
 
     #[test]
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn test_should_extend_prompt_context() {
         let rendered = template("{{ greeting }} {{ name }}{{ punctuation }}")
-            .bind(&NameContext { name: "GraphLoom" })
+            .bind(&name_context("GraphLoom"))
             .expect("context should bind")
             .with_context(&GreetingContext { greeting: "Hello" })
             .expect("context should be extended")
@@ -246,9 +251,9 @@ mod tests {
     #[test]
     fn test_should_overwrite_context_values_when_extending_prompt() {
         let rendered = template("Hello {{ name }}")
-            .bind(&NameContext { name: "before" })
+            .bind(&name_context("before"))
             .expect("context should bind")
-            .with_context(&NameContext { name: "after" })
+            .with_context(&name_context("after"))
             .expect("context should be extended")
             .render()
             .expect("prompt should render");
@@ -261,12 +266,12 @@ mod tests {
         let template = template("Hello {{ name }}");
 
         let first = template
-            .bind(&NameContext { name: "A" })
+            .bind(&name_context("A"))
             .expect("first context should bind")
             .render()
             .expect("first prompt should render");
         let second = template
-            .bind(&NameContext { name: "B" })
+            .bind(&name_context("B"))
             .expect("second context should bind")
             .render()
             .expect("second prompt should render");
@@ -302,7 +307,12 @@ mod tests {
             "{% if enabled %}{% for item in items %}{{ item }}{% if not loop.last %},{% endif \
              %}{% endfor %}{% endif %}",
         )
-        .bind(&serde_json::json!({"enabled": true, "items": ["a", "b"]}))
+        .bind(&serde_json::json!({
+            "enabled": true,
+            "items": ["a", "b"],
+            "input_text": "",
+            "entity_types": [],
+        }))
         .expect("context should bind")
         .render()
         .expect("control statements should render");
@@ -313,27 +323,27 @@ mod tests {
     #[test]
     fn test_should_reject_missing_tera_variable() {
         let error = template("{{ missing_variable }}")
-            .bind(&serde_json::json!({}))
+            .bind(&serde_json::json!({"input_text": "", "entity_types": []}))
             .expect("empty context should bind")
             .render()
             .expect_err("missing variable should fail");
         let message = error.to_string();
 
         assert!(message.contains("missing_variable"));
-        assert!(message.contains("extract_graph_continue.txt"));
+        assert!(message.contains("extract_graph.txt"));
     }
 
     #[test]
     fn test_should_report_builtin_source_for_template_compile_error() {
         let error = PromptTemplate::try_new(
-            PromptKind::ExtractGraphContinue,
+            PromptKind::ExtractGraph,
             "{% if enabled %}",
             PromptSource::BuiltIn,
         )
         .expect_err("invalid built-in template should fail to compile");
         let message = error.to_string();
 
-        assert!(message.contains("extract_graph_continue.txt"));
+        assert!(message.contains("extract_graph.txt"));
         assert!(message.contains("built-in defaults"));
     }
 
@@ -358,14 +368,12 @@ mod tests {
                     "claim_description": "claims",
                     "input_text": "Alice reported Bob.",
                 }),
-                PromptKind::CommunityReport => serde_json::json!({
-                    "input_text": "Entities and relationships",
-                    "max_report_length": 2_000,
-                }),
-                PromptKind::ExtractGraphContinue
-                | PromptKind::ExtractGraphLoop
-                | PromptKind::ExtractClaimsContinue
-                | PromptKind::ExtractClaimsLoop => serde_json::json!({}),
+                PromptKind::CommunityReportGraph | PromptKind::CommunityReportText => {
+                    serde_json::json!({
+                        "input_text": "Entities and relationships",
+                        "max_report_length": 2_000,
+                    })
+                }
             };
 
             let rendered = template
@@ -380,7 +388,7 @@ mod tests {
     fn test_should_preserve_template_like_text_from_input_value() {
         let input = "{input_text} {{ input_text }} {% if example %}";
         let rendered = template("{{ input_text }}")
-            .bind(&serde_json::json!({"input_text": input}))
+            .bind(&serde_json::json!({"input_text": input, "entity_types": []}))
             .expect("context should bind")
             .render()
             .expect("input should render once");

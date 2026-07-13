@@ -10,7 +10,7 @@ use crate::{
         ClaimExtractionConfig, covariate_value, covariates_dataframe, default_claim_entity_types,
         extract_covariates, read_text_unit_inputs,
     },
-    prompts::PromptRepository,
+    prompts::{PromptKind, PromptRepository},
 };
 
 /// IndexWorkflow name.
@@ -30,6 +30,10 @@ impl IndexWorkflow for ExtractCovariatesWorkflow {
         let mut requirements = IndexWorkflowRequirements::default();
         if config.extract_claims.enabled {
             requirements.require_completion_model(&config.extract_claims.completion_model_id);
+            requirements.require_prompt(
+                PromptKind::ExtractClaims,
+                config.extract_claims.prompt.clone(),
+            );
         }
         Ok(requirements)
     }

@@ -289,6 +289,50 @@ pub(crate) async fn validate_publication_directory_root(
     Ok(())
 }
 
+/// Reject an existing publication target that is linked or is not a directory.
+///
+/// Missing targets are valid because publication may create them later. This check deliberately
+/// uses link-aware metadata so a symlink to a directory is never accepted as a publication root.
+pub(crate) async fn validate_existing_publication_target(
+    target: &Path,
+    operation: &'static str,
+) -> Result<()> {
+    match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) => validate_publication_target_metadata(&metadata, target, operation),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(GraphLoomError::Io {
+            operation,
+            path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Validate metadata already read for a publication target.
+pub(crate) fn validate_publication_target_metadata(
+    metadata: &Metadata,
+    target: &Path,
+    operation: &'static str,
+) -> Result<()> {
+    if is_symlink_or_reparse(metadata) {
+        return Err(GraphLoomError::UnsafePublicationRoot {
+            operation,
+            path: target.to_path_buf(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(GraphLoomError::Io {
+            operation,
+            path: target.to_path_buf(),
+            source: std::io::Error::new(
+                ErrorKind::NotADirectory,
+                "publication target is not a directory",
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn resolve_path_with_existing_ancestor(
     path: &Path,
     link_policy: LinkPolicy,

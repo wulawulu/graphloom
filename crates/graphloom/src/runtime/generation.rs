@@ -11,7 +11,9 @@ use super::{VectorLocation, io_error, vector_location};
 use crate::{
     GraphLoomError, Result,
     path_safety::{
-        reject_descendant_link_components, relative_descendant, validate_publication_directory_root,
+        reject_descendant_link_components, relative_descendant,
+        validate_existing_publication_target, validate_publication_directory_root,
+        validate_publication_target_metadata,
     },
     project::LoadedProject,
 };
@@ -25,8 +27,10 @@ pub(crate) struct StagedIndexGeneration {
 
 impl StagedIndexGeneration {
     /// Build paths for a new generation without touching the active index.
-    pub(crate) fn new(active: &LoadedProject, vector_store_enabled: bool) -> Result<Self> {
+    pub(crate) async fn new(active: &LoadedProject, vector_store_enabled: bool) -> Result<Self> {
         active.paths.validate_destructive_paths()?;
+        validate_existing_publication_target(&active.paths.output_dir, "output publication")
+            .await?;
 
         let staged_output = transaction_sibling(&active.paths.output_dir, "staging")?;
         let (staged_vector, external_vector, preserved_vectors) = if vector_store_enabled {
@@ -36,6 +40,11 @@ impl StagedIndexGeneration {
                     (staged_output.join(relative), None, Vec::new())
                 }
                 VectorLocation::OutsideOutput => {
+                    validate_existing_publication_target(
+                        &active.paths.vector_db_uri,
+                        "vector DB publication",
+                    )
+                    .await?;
                     let staged = transaction_sibling(&active.paths.vector_db_uri, "staging")?;
                     (
                         staged.clone(),
@@ -153,41 +162,63 @@ impl IndexPublication {
     {
         let mut published = Vec::with_capacity(self.targets.len());
         for (index, target) in self.targets.iter().enumerate() {
-            let backup = match backup_active_path(&target.live).await {
-                Ok(backup) => backup,
-                Err(error) => {
-                    let rollback =
-                        rollback_publication(&published, &mut before_preserved_restore).await;
-                    self.cleanup().await;
-                    return Err(with_rollback("publish index generation", error, rollback));
-                }
-            };
+            let backup =
+                match backup_active_path(&target.live, "validate publication target before backup")
+                    .await
+                {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        let rollback =
+                            rollback_publication(&published, &mut before_preserved_restore).await;
+                        self.cleanup().await;
+                        return Err(with_rollback("publish index generation", error, rollback));
+                    }
+                };
             if let Err(error) = before_publish(index) {
-                let rollback = rollback_backup_then_previous(
+                let error = rollback_failed_publication_target(
                     index,
                     &target.live,
                     backup.as_deref(),
                     &published,
+                    error,
                     &mut before_backup_restore,
                     &mut before_preserved_restore,
                 )
                 .await;
                 self.cleanup().await;
-                return Err(with_rollback("publish index generation", error, rollback));
+                return Err(error);
+            }
+            // Recheck immediately before publishing the staged directory. This prevents normal
+            // empty-directory replacement but cannot fully eliminate TOCTOU races without
+            // platform-specific no-replace rename operations.
+            if let Err(error) = validate_live_absent_before_staged_publish(&target.live).await {
+                let error = rollback_failed_publication_target(
+                    index,
+                    &target.live,
+                    backup.as_deref(),
+                    &published,
+                    error,
+                    &mut before_backup_restore,
+                    &mut before_preserved_restore,
+                )
+                .await;
+                self.cleanup().await;
+                return Err(error);
             }
             if let Err(source) = tokio::fs::rename(&target.staged, &target.live).await {
                 let error = io_error("publish staged index generation", &target.live, source);
-                let rollback = rollback_backup_then_previous(
+                let error = rollback_failed_publication_target(
                     index,
                     &target.live,
                     backup.as_deref(),
                     &published,
+                    error,
                     &mut before_backup_restore,
                     &mut before_preserved_restore,
                 )
                 .await;
                 self.cleanup().await;
-                return Err(with_rollback("publish index generation", error, rollback));
+                return Err(error);
             }
             let mut current = PublishedTarget {
                 live: target.live.clone(),
@@ -228,6 +259,46 @@ impl IndexPublication {
     }
 }
 
+async fn validate_live_absent_before_staged_publish(live: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(live).await {
+        Ok(_) => Err(GraphLoomError::Io {
+            operation: "publish staged index generation",
+            path: live.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "publication live root unexpectedly exists before staged publish",
+            ),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error(
+            "inspect publication live root before staged publish",
+            live,
+            source,
+        )),
+    }
+}
+
+async fn rollback_failed_publication_target(
+    current_index: usize,
+    live: &Path,
+    backup: Option<&Path>,
+    previous: &[PublishedTarget],
+    error: GraphLoomError,
+    before_backup_restore: &mut impl FnMut(usize, &Path, Option<&Path>) -> Result<()>,
+    before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
+) -> GraphLoomError {
+    let rollback = rollback_backup_then_previous(
+        current_index,
+        live,
+        backup,
+        previous,
+        before_backup_restore,
+        before_restore,
+    )
+    .await;
+    with_rollback("publish index generation", error, rollback)
+}
+
 async fn rollback_backup_then_previous(
     current_index: usize,
     live: &Path,
@@ -236,13 +307,26 @@ async fn rollback_backup_then_previous(
     before_backup_restore: &mut impl FnMut(usize, &Path, Option<&Path>) -> Result<()>,
     before_restore: &mut impl FnMut(usize, &Path, &Path) -> Result<()>,
 ) -> Result<()> {
+    let current_rollback =
+        rollback_current_backup_only(current_index, live, backup, before_backup_restore).await;
+    let previous_rollback = rollback_publication(previous, before_restore).await;
+    combine_rollback_results(current_rollback, previous_rollback)
+}
+
+async fn rollback_current_backup_only(
+    current_index: usize,
+    live: &Path,
+    backup: Option<&Path>,
+    before_backup_restore: &mut impl FnMut(usize, &Path, Option<&Path>) -> Result<()>,
+) -> Result<()> {
     before_backup_restore(current_index, live, backup)?;
-    if let Some(backup) = backup {
-        validate_publication_directory_root(backup, "validate backup-only rollback root").await?;
-    }
+    let Some(backup) = backup else {
+        // The target did not exist before publication, so there is no previous state to restore.
+        // Preserve any newly appeared live target; the original publication conflict describes it.
+        return Ok(());
+    };
+    validate_publication_directory_root(backup, "validate backup-only rollback root").await?;
     if path_exists_without_following_links(live).await? {
-        validate_publication_directory_root(live, "validate backup-only rollback live root")
-            .await?;
         return Err(GraphLoomError::Io {
             operation: "restore backup-only rollback root",
             path: live.to_path_buf(),
@@ -252,8 +336,20 @@ async fn rollback_backup_then_previous(
             ),
         });
     }
-    restore_active_path(live, backup).await?;
-    rollback_publication(previous, before_restore).await
+    restore_active_path(live, Some(backup)).await
+}
+
+fn combine_rollback_results(current: Result<()>, previous: Result<()>) -> Result<()> {
+    match (current, previous) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(current), Ok(())) => Err(current),
+        (Ok(()), Err(previous)) => Err(previous),
+        (Err(current), Err(previous)) => Err(GraphLoomError::RollbackFailed {
+            operation: "rollback current and previous publication targets",
+            source: Box::new(current),
+            rollback: Box::new(previous),
+        }),
+    }
 }
 
 async fn rollback_published_then_previous(
@@ -401,12 +497,13 @@ fn transaction_sibling(path: &Path, kind: &str) -> Result<PathBuf> {
     )))
 }
 
-async fn backup_active_path(path: &Path) -> Result<Option<PathBuf>> {
-    if !tokio::fs::try_exists(path)
-        .await
-        .map_err(|source| io_error("check active index path", path, source))?
-    {
-        return Ok(None);
+async fn backup_active_path(path: &Path, operation: &'static str) -> Result<Option<PathBuf>> {
+    // Revalidate immediately before the destructive rename. This narrows, but cannot eliminate,
+    // filesystem TOCTOU races without handle-based operations.
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => validate_publication_target_metadata(&metadata, path, operation)?,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io_error(operation, path, source)),
     }
     let backup = transaction_sibling(path, "backup")?;
     tokio::fs::rename(path, &backup)
@@ -514,10 +611,17 @@ async fn restore_preserved_descendants(
 
 async fn remove_publication_backups(targets: &[PublishedTarget]) {
     for target in targets {
-        if let Some(backup) = &target.backup
-            && let Err(source) = tokio::fs::remove_dir_all(backup).await
-        {
-            tracing::warn!(path = %backup.display(), error = %source, "failed to remove obsolete index backup");
+        if let Some(backup) = &target.backup {
+            if let Err(error) =
+                validate_publication_directory_root(backup, "validate obsolete publication backup")
+                    .await
+            {
+                tracing::warn!(path = %backup.display(), error = %error, "obsolete index backup violated the directory invariant");
+                continue;
+            }
+            if let Err(source) = tokio::fs::remove_dir_all(backup).await {
+                tracing::warn!(path = %backup.display(), error = %source, "failed to remove obsolete index backup");
+            }
         }
     }
 }
@@ -560,6 +664,443 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_should_defensively_reject_file_publication_targets() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = crate::GraphRagConfig::default();
+        config.vector_store.db_uri = "vector-db".to_owned();
+        let active = LoadedProject::from_config(tempdir.path(), config).expect("active project");
+
+        tokio::fs::write(&active.paths.output_dir, "output file")
+            .await
+            .expect("output file");
+        let error = StagedIndexGeneration::new(&active, true)
+            .await
+            .expect_err("output file must be rejected");
+        assert!(error.to_string().contains("output publication"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(
+            tokio::fs::read_to_string(&active.paths.output_dir)
+                .await
+                .expect("output file contents"),
+            "output file"
+        );
+
+        tokio::fs::remove_file(&active.paths.output_dir)
+            .await
+            .expect("remove output file");
+        tokio::fs::create_dir(&active.paths.output_dir)
+            .await
+            .expect("output directory");
+        tokio::fs::write(&active.paths.vector_db_uri, "vector file")
+            .await
+            .expect("vector file");
+        let error = StagedIndexGeneration::new(&active, true)
+            .await
+            .expect_err("external vector file must be rejected");
+        assert!(error.to_string().contains("vector DB publication"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(
+            tokio::fs::read_to_string(&active.paths.vector_db_uri)
+                .await
+                .expect("vector file contents"),
+            "vector file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_output_file_at_backup_boundary() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let active = LoadedProject::from_config(tempdir.path(), crate::GraphRagConfig::default())
+            .expect("active project");
+        write_marker(&active.paths.output_dir, "old-output").await;
+        let generation = StagedIndexGeneration::new(&active, false)
+            .await
+            .expect("generation");
+        let (staged, publication) = generation.into_parts();
+        let staged_output = staged.paths.output_dir.clone();
+        write_marker(&staged_output, "new-output").await;
+        tokio::fs::remove_dir_all(&active.paths.output_dir)
+            .await
+            .expect("replace output directory");
+        tokio::fs::write(&active.paths.output_dir, "external output file")
+            .await
+            .expect("replacement output file");
+
+        let error = publication
+            .publish()
+            .await
+            .expect_err("replacement output file must be rejected");
+
+        assert!(error.to_string().contains("publication target"));
+        assert!(error.to_string().contains("not a directory"));
+        assert!(active.paths.output_dir.is_file());
+        assert_eq!(
+            tokio::fs::read_to_string(&active.paths.output_dir)
+                .await
+                .expect("replacement output contents"),
+            "external output file"
+        );
+        assert!(!staged_output.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_output_symlink_at_backup_boundary() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = TempDir::new().expect("tempdir");
+        let external = TempDir::new().expect("external");
+        let active = LoadedProject::from_config(tempdir.path(), crate::GraphRagConfig::default())
+            .expect("active project");
+        write_marker(&active.paths.output_dir, "old-output").await;
+        write_marker(external.path(), "external-output").await;
+        let generation = StagedIndexGeneration::new(&active, false)
+            .await
+            .expect("generation");
+        let (staged, publication) = generation.into_parts();
+        let staged_output = staged.paths.output_dir.clone();
+        write_marker(&staged_output, "new-output").await;
+        tokio::fs::remove_dir_all(&active.paths.output_dir)
+            .await
+            .expect("replace output directory");
+        symlink(external.path(), &active.paths.output_dir).expect("replacement output symlink");
+
+        let error = publication
+            .publish()
+            .await
+            .expect_err("replacement output symlink must be rejected");
+
+        assert!(error.to_string().contains("symlink or reparse point"));
+        assert!(
+            tokio::fs::symlink_metadata(&active.paths.output_dir)
+                .await
+                .expect("output symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_marker(external.path()).await, "external-output");
+        assert!(!staged_output.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+        assert_no_transaction_residue(external.path()).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_rollback_output_when_external_vector_becomes_file_before_backup() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut config = crate::GraphRagConfig::default();
+        config.vector_store.db_uri = "vector-db".to_owned();
+        let active = LoadedProject::from_config(tempdir.path(), config).expect("active project");
+        write_marker(&active.paths.output_dir, "old-output").await;
+        let generation = StagedIndexGeneration::new(&active, true)
+            .await
+            .expect("generation");
+        let (staged, publication) = generation.into_parts();
+        let staged_output = staged.paths.output_dir.clone();
+        let staged_vector = staged.paths.vector_db_uri.clone();
+        write_marker(&staged_output, "new-output").await;
+        write_marker(&staged_vector, "new-vector").await;
+        tokio::fs::write(&active.paths.vector_db_uri, "external vector file")
+            .await
+            .expect("replacement vector file");
+
+        let error = publication
+            .publish()
+            .await
+            .expect_err("replacement vector file must be rejected");
+
+        assert!(error.to_string().contains("publication target"));
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(read_marker(&active.paths.output_dir).await, "old-output");
+        assert_eq!(
+            tokio::fs::read_to_string(&active.paths.vector_db_uri)
+                .await
+                .expect("replacement vector contents"),
+            "external vector file"
+        );
+        assert!(!staged_output.exists());
+        assert!(!staged_vector.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_preserve_empty_live_directory_and_rollback_previous_target() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let output = tempdir.path().join("output");
+        let staged_output = tempdir.path().join("output-staged");
+        let vector = tempdir.path().join("vector");
+        let staged_vector = tempdir.path().join("vector-staged");
+        write_marker(&output, "old-output").await;
+        write_marker(&staged_output, "new-output").await;
+        write_marker(&staged_vector, "new-vector").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(output.clone(), staged_output.clone()),
+                PublicationTarget::replace(vector.clone(), staged_vector.clone()),
+            ],
+        };
+
+        let error = publication
+            .publish_with_hook(|index| {
+                if index == 1 {
+                    create_dir_in_hook(&vector, "create empty vector conflict")?;
+                }
+                Ok(())
+            })
+            .await
+            .expect_err("empty vector directory must conflict with publication");
+
+        assert!(error.to_string().contains("unexpectedly exists"));
+        assert!(error.to_string().contains("before staged publish"));
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "publish staged index generation",
+                ..
+            }
+        ));
+        assert_eq!(read_marker(&output).await, "old-output");
+        assert!(vector.is_dir());
+        let mut vector_entries = tokio::fs::read_dir(&vector)
+            .await
+            .expect("vector directory");
+        assert!(
+            vector_entries
+                .next_entry()
+                .await
+                .expect("vector entry")
+                .is_none(),
+            "unexpected live vector directory must remain empty",
+        );
+        assert!(!staged_output.exists());
+        assert!(!staged_vector.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_preserve_empty_live_directory_for_single_target_conflict() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("output");
+        let staged = tempdir.path().join("output-staged");
+        write_marker(&staged, "new-output").await;
+        let publication = IndexPublication {
+            targets: vec![PublicationTarget::replace(live.clone(), staged.clone())],
+        };
+
+        let error = publication
+            .publish_with_hook(|_| create_dir_in_hook(&live, "create empty output conflict"))
+            .await
+            .expect_err("empty output directory must conflict with publication");
+
+        assert!(error.to_string().contains("unexpectedly exists"));
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "publish staged index generation",
+                ..
+            }
+        ));
+        assert!(live.is_dir());
+        let mut live_entries = tokio::fs::read_dir(&live).await.expect("live directory");
+        assert!(
+            live_entries
+                .next_entry()
+                .await
+                .expect("live entry")
+                .is_none(),
+            "unexpected single live directory must remain empty",
+        );
+        assert!(!staged.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_rollback_output_when_missing_vector_appears_as_file_before_publish() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let output = tempdir.path().join("output");
+        let staged_output = tempdir.path().join("output-staged");
+        let vector = tempdir.path().join("vector");
+        let staged_vector = tempdir.path().join("vector-staged");
+        write_marker(&output, "old-output").await;
+        write_marker(&staged_output, "new-output").await;
+        write_marker(&staged_vector, "new-vector").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(output.clone(), staged_output.clone()),
+                PublicationTarget::replace(vector.clone(), staged_vector.clone()),
+            ],
+        };
+
+        let error = publication
+            .publish_with_hook(|index| {
+                if index == 1 {
+                    write_in_hook(&vector, "unexpected vector file", "create vector conflict")?;
+                }
+                Ok(())
+            })
+            .await
+            .expect_err("unexpected vector file must fail publication");
+
+        assert!(error.to_string().contains("unexpectedly exists"));
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "publish staged index generation",
+                ..
+            }
+        ));
+        assert_eq!(read_marker(&output).await, "old-output");
+        assert_eq!(
+            tokio::fs::read_to_string(&vector)
+                .await
+                .expect("vector conflict contents"),
+            "unexpected vector file"
+        );
+        assert!(!staged_output.exists());
+        assert!(!staged_vector.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_rollback_output_when_missing_vector_appears_as_directory_before_publish() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let output = tempdir.path().join("output");
+        let staged_output = tempdir.path().join("output-staged");
+        let vector = tempdir.path().join("vector");
+        let staged_vector = tempdir.path().join("vector-staged");
+        write_marker(&output, "old-output").await;
+        write_marker(&staged_output, "new-output").await;
+        write_marker(&staged_vector, "new-vector").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(output.clone(), staged_output.clone()),
+                PublicationTarget::replace(vector.clone(), staged_vector.clone()),
+            ],
+        };
+
+        let error = publication
+            .publish_with_hook(|index| {
+                if index == 1 {
+                    write_marker_in_hook(
+                        &vector,
+                        "unexpected vector directory",
+                        "create vector directory conflict",
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect_err("unexpected vector directory must fail publication");
+
+        assert!(error.to_string().contains("unexpectedly exists"));
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "publish staged index generation",
+                ..
+            }
+        ));
+        assert_eq!(read_marker(&output).await, "old-output");
+        assert_eq!(read_marker(&vector).await, "unexpected vector directory");
+        assert!(!staged_output.exists());
+        assert!(!staged_vector.exists());
+        assert_no_transaction_residue(tempdir.path()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_rollback_previous_and_preserve_current_backup_on_live_conflict() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let output = tempdir.path().join("output");
+        let staged_output = tempdir.path().join("output-staged");
+        let vector = tempdir.path().join("vector");
+        let staged_vector = tempdir.path().join("vector-staged");
+        write_marker(&output, "old-output").await;
+        write_marker(&staged_output, "new-output").await;
+        write_marker(&vector, "old-vector").await;
+        write_marker(&staged_vector, "new-vector").await;
+        let publication = IndexPublication {
+            targets: vec![
+                PublicationTarget::replace(output.clone(), staged_output.clone()),
+                PublicationTarget::replace(vector.clone(), staged_vector.clone()),
+            ],
+        };
+
+        let error = publication
+            .publish_with_hook(|index| {
+                if index == 1 {
+                    write_marker_in_hook(
+                        &vector,
+                        "unexpected vector directory",
+                        "recreate vector live conflict",
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect_err("recreated vector live must fail rollback");
+
+        assert!(error.to_string().contains("unexpectedly exists"));
+        assert!(matches!(&error, GraphLoomError::RollbackFailed { .. }));
+        assert_eq!(read_marker(&output).await, "old-output");
+        assert_eq!(read_marker(&vector).await, "unexpected vector directory");
+        let vector_backup = find_single_backup(tempdir.path(), "vector").await;
+        assert_eq!(read_marker(&vector_backup).await, "old-vector");
+        assert!(!staged_output.exists());
+        assert!(!staged_vector.exists());
+        assert_no_transaction_residue_except(tempdir.path(), &vector_backup).await;
+    }
+
+    #[test]
+    fn test_should_combine_current_and_previous_rollback_results() {
+        let error = || GraphLoomError::Io {
+            operation: "inject rollback failure",
+            path: PathBuf::from("target"),
+            source: std::io::Error::other("rollback failure"),
+        };
+
+        assert!(combine_rollback_results(Ok(()), Ok(())).is_ok());
+        assert!(matches!(
+            combine_rollback_results(Err(error()), Ok(())),
+            Err(GraphLoomError::Io { .. })
+        ));
+        assert!(matches!(
+            combine_rollback_results(Ok(()), Err(error())),
+            Err(GraphLoomError::Io { .. })
+        ));
+        let combined = combine_rollback_results(Err(error()), Err(error()))
+            .expect_err("both rollback failures must be retained");
+        assert!(matches!(combined, GraphLoomError::RollbackFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_treat_existing_live_as_successful_rollback_without_backup() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let live = tempdir.path().join("live");
+        tokio::fs::write(&live, "unexpected live")
+            .await
+            .expect("live file");
+        let mut hook_calls = 0;
+
+        rollback_current_backup_only(3, &live, None, &mut |index, actual_live, backup| {
+            hook_calls += 1;
+            assert_eq!(index, 3);
+            assert_eq!(actual_live, live);
+            assert!(backup.is_none());
+            Ok(())
+        })
+        .await
+        .expect("no backup means no previous state needs restoration");
+
+        assert_eq!(hook_calls, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(&live)
+                .await
+                .expect("live contents"),
+            "unexpected live"
+        );
+    }
 
     #[tokio::test]
     async fn test_should_restore_all_active_directories_when_publication_fails() {
@@ -649,7 +1190,9 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let active = LoadedProject::from_config(tempdir.path(), config).expect("active project");
-        let generation = StagedIndexGeneration::new(&active, false).expect("generation");
+        let generation = StagedIndexGeneration::new(&active, false)
+            .await
+            .expect("generation");
         let (staged, publication) = generation.into_parts();
         assert_eq!(
             publication.targets[0].preserved_descendants,
@@ -1017,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_not_rollback_previous_target_when_current_backup_restore_fails() {
+    async fn test_should_rollback_previous_target_when_current_backup_restore_fails() {
         let tempdir = TempDir::new().expect("tempdir");
         let first_live = tempdir.path().join("first");
         let first_staged = tempdir.path().join("first-staged");
@@ -1029,7 +1572,7 @@ mod tests {
         write_marker(&second_staged, "second-new").await;
         let publication = IndexPublication {
             targets: vec![
-                PublicationTarget::replace(first_live.clone(), first_staged),
+                PublicationTarget::replace(first_live.clone(), first_staged.clone()),
                 PublicationTarget::replace(second_live.clone(), second_staged),
             ],
         };
@@ -1065,8 +1608,8 @@ mod tests {
             .expect_err("current restore must fail");
 
         assert!(matches!(error, GraphLoomError::RollbackFailed { .. }));
-        assert_eq!(read_marker(&first_live).await, "first-new");
-        assert!(find_single_backup(tempdir.path(), "first").await.is_dir());
+        assert_eq!(read_marker(&first_live).await, "first-old");
+        assert!(!first_staged.exists());
         assert!(!second_live.exists());
         assert!(find_single_backup(tempdir.path(), "second").await.is_dir());
     }
@@ -1446,6 +1989,34 @@ mod tests {
         })
     }
 
+    fn write_marker_in_hook(
+        directory: &Path,
+        contents: &str,
+        operation: &'static str,
+    ) -> Result<()> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::fs::create_dir_all(directory)
+                    .await
+                    .map_err(|error| io_error(operation, directory, error))?;
+                let marker = directory.join("marker");
+                tokio::fs::write(&marker, contents)
+                    .await
+                    .map_err(|error| io_error(operation, &marker, error))
+            })
+        })
+    }
+
+    fn create_dir_in_hook(directory: &Path, operation: &'static str) -> Result<()> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::fs::create_dir(directory)
+                    .await
+                    .map_err(|error| io_error(operation, directory, error))
+            })
+        })
+    }
+
     #[cfg(unix)]
     fn assert_unsafe_root_rollback(error: &GraphLoomError) {
         let GraphLoomError::RollbackFailed {
@@ -1484,6 +2055,28 @@ mod tests {
         }
         names.sort();
         assert_eq!(names, expected);
+    }
+
+    async fn assert_no_transaction_residue(root: &Path) {
+        let mut entries = tokio::fs::read_dir(root).await.expect("root entries");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.ends_with(".staging") && !name.ends_with(".backup"),
+                "publication transaction residue should not remain: {name}",
+            );
+        }
+    }
+
+    async fn assert_no_transaction_residue_except(root: &Path, retained: &Path) {
+        let mut entries = tokio::fs::read_dir(root).await.expect("root entries");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".staging") || name.ends_with(".backup") {
+                assert_eq!(path, retained, "unexpected transaction residue: {name}");
+            }
+        }
     }
 
     async fn find_single_backup(root: &Path, live_name: &str) -> PathBuf {

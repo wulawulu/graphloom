@@ -9,6 +9,7 @@ use async_openai::{
     middleware::{ReqwestService, retry::OpenAIRetryLayer},
 };
 use async_trait::async_trait;
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use tower::ServiceBuilder;
 
@@ -266,8 +267,13 @@ struct OpenAiModelConfig<'a>(&'a ModelConfig);
 impl From<OpenAiModelConfig<'_>> for OpenAIConfig {
     fn from(value: OpenAiModelConfig<'_>) -> Self {
         let config = value.0;
-        let mut openai =
-            OpenAIConfig::new().with_api_key(config.api_key.clone().unwrap_or_default());
+        let api_key = config
+            .api_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .unwrap_or_default()
+            .to_owned();
+        let mut openai = OpenAIConfig::new().with_api_key(api_key);
         if let Some(api_base) = &config.api_base {
             openai = openai.with_api_base(api_base);
         }
@@ -310,10 +316,12 @@ fn is_tower_timeout(error: &OpenAIError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use async_openai::config::{Config, OpenAIConfig};
+    use secrecy::ExposeSecret;
     use serde_json::Value;
 
-    use super::{OpenAiCompletionRequest, OpenAiEmbeddingRequest};
-    use crate::{ChatMessage, CompletionRequest, EmbeddingRequest};
+    use super::{OpenAiCompletionRequest, OpenAiEmbeddingRequest, OpenAiModelConfig};
+    use crate::{ChatMessage, CompletionRequest, EmbeddingRequest, ModelConfig};
 
     #[test]
     fn test_should_convert_completion_request_to_openai_type() {
@@ -356,5 +364,19 @@ mod tests {
         assert_eq!(request["model"], "embed-test");
         assert_eq!(request["dimensions"], 8);
         assert_eq!(request["input"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn test_should_expose_api_key_only_at_provider_config_boundary() {
+        let model: ModelConfig = serde_json::from_value(serde_json::json!({
+            "model_provider": "openai",
+            "model": "gpt-test",
+            "api_key": "provider-secret"
+        }))
+        .expect("model config");
+
+        let provider: OpenAIConfig = OpenAiModelConfig(&model).into();
+
+        assert_eq!(provider.api_key().expose_secret(), "provider-secret");
     }
 }

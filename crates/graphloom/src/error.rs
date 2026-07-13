@@ -7,6 +7,30 @@ use thiserror::Error;
 /// Result type used by the top-level `graphloom` crate.
 pub type Result<T> = std::result::Result<T, GraphLoomError>;
 
+/// Context for a failed required-model connectivity check.
+#[derive(Debug, Error)]
+#[error(
+    "failed to validate {model_kind} model {model_id} (provider model {provider_model}) during \
+     {operation}; provider {provider}, base URL {base_url}: {source}"
+)]
+pub(crate) struct ModelConnectivityError {
+    /// Completion or embedding.
+    pub(crate) model_kind: &'static str,
+    /// Required model identifier.
+    pub(crate) model_id: String,
+    /// Provider model name.
+    pub(crate) provider_model: String,
+    /// Connectivity operation.
+    pub(crate) operation: &'static str,
+    /// Non-sensitive provider name.
+    pub(crate) provider: String,
+    /// Non-sensitive configured or default base URL.
+    pub(crate) base_url: String,
+    /// Redacted source error retaining the sanitized original error chain.
+    #[source]
+    pub(crate) source: Box<dyn std::error::Error + Send + Sync>,
+}
+
 /// Errors raised by pipeline configuration and workflow orchestration.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -246,16 +270,13 @@ pub enum GraphLoomError {
         message: String,
     },
 
-    /// Missing prompt file.
-    #[error("missing prompt file {path}")]
-    MissingPrompt {
-        /// Prompt path.
-        path: PathBuf,
-    },
-
     /// Prompt template loading failed.
-    #[error("failed to load prompt template {path}: {source}")]
+    #[error("failed to load {kind} prompt template {name} from {path}: {source}")]
     PromptLoad {
+        /// Prompt kind.
+        kind: &'static str,
+        /// Canonical prompt filename.
+        name: &'static str,
         /// Template path.
         path: PathBuf,
         /// Original I/O error.
@@ -290,6 +311,30 @@ pub enum GraphLoomError {
         model_id: String,
         /// Message.
         message: String,
+    },
+
+    /// A required model could not complete its provider connectivity check.
+    #[error("{source}")]
+    ModelConnectivity {
+        /// Detailed, secret-safe connectivity failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A required embedding model returned a vector with the wrong dimension.
+    #[error(
+        "embedding model {model_id} returned {detected} dimensions, but vector schema \
+         {embedding_name} is configured as {configured}"
+    )]
+    EmbeddingDimensionMismatch {
+        /// Required embedding model identifier.
+        model_id: String,
+        /// Active embedding schema name.
+        embedding_name: String,
+        /// Configured vector dimension.
+        configured: usize,
+        /// Provider response dimension.
+        detected: usize,
     },
 
     /// Runtime build failed.

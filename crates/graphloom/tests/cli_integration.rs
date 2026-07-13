@@ -8,7 +8,11 @@ use std::{
 
 use assert_cmd::Command;
 use graphloom::{ALL_EMBEDDINGS, GraphRagConfig};
-use graphloom_storage::{ParquetTableProvider, TableProvider};
+use graphloom_llm::{
+    CachedModelResult, ChatMessage, CompletionRequest, CompletionResponse, EmbeddingRequest,
+    EmbeddingResponse, completion_request_cache_key, embedding_request_cache_key,
+};
+use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorStore};
 use polars_core::prelude::{AnyValue, DataFrame, DataType, NamedFrom, PlSmallStr, Series};
 use predicates::prelude::*;
@@ -76,15 +80,33 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         .assert()
         .success()
         .stdout(predicate::str::contains("Workflows:"))
-        .stdout(predicate::str::contains("super-secret-key").not());
+        .stdout(predicate::str::contains("<redacted>"))
+        .stdout(predicate::str::contains(format!("{}/v1", server.uri())))
+        .stdout(predicate::str::contains("super-secret-key").not())
+        .stderr(predicate::str::contains("super-secret-key").not());
     assert!(!tempdir.path().join("output").exists());
     assert!(!tempdir.path().join("cache").exists());
     assert!(!tempdir.path().join("logs").exists());
-    assert_eq!(
-        server.received_requests().await.expect("requests").len(),
-        0,
-        "dry-run must not call the OpenAI-compatible server",
+    let validation_requests = server.received_requests().await.expect("requests");
+    assert_eq!(validation_requests.len(), 2);
+    assert!(
+        validation_requests
+            .iter()
+            .any(request_last_message_contains(
+                "This is an LLM connectivity test. Say Hello World",
+            ))
     );
+    assert!(validation_requests.iter().any(|request| {
+        request
+            .body_json::<Value>()
+            .ok()
+            .and_then(|body| body["input"].as_array().cloned())
+            .is_some_and(|inputs| {
+                inputs
+                    .iter()
+                    .any(|input| input.as_str() == Some("This is an LLM Embedding Test String"))
+            })
+    }));
 
     Command::cargo_bin("graphloom")
         .expect("binary")
@@ -99,6 +121,23 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
 
     assert_standard_outputs(tempdir.path()).await;
     assert_log_redaction_and_success(tempdir.path()).await;
+    let requests_after_index = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests_after_index
+            .iter()
+            .filter(|request| is_completion_connectivity_request(request))
+            .count(),
+        2,
+        "dry-run and real index should each validate completion exactly once",
+    );
+    assert_eq!(
+        requests_after_index
+            .iter()
+            .filter(|request| is_embedding_connectivity_request(request))
+            .count(),
+        2,
+        "dry-run and real index should each validate embeddings exactly once",
+    );
     let first_document_ids = table_ids(tempdir.path(), "documents").await;
     let first_vector_ids = managed_vector_ids(tempdir.path()).await;
     assert!(tempdir.path().join("cache").exists());
@@ -106,6 +145,55 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
     assert_full_rerun_resets_vector_ids(tempdir.path(), &first_document_ids, &first_vector_ids)
         .await;
     assert!(tempdir.path().join("cache").exists());
+}
+
+#[tokio::test]
+async fn test_should_bypass_matching_cache_during_dry_run_connectivity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    tokio::fs::write(tempdir.path().join("input").join("document.txt"), "Alice")
+        .await
+        .expect("input");
+    patch_settings(tempdir.path(), &server.uri()).await;
+    write_matching_validation_cache(tempdir.path()).await;
+    let cache = FileStorage::existing(tempdir.path().join("cache")).expect("cache storage");
+    let before = cache.list("").await.expect("cache files before dry run");
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    assert_eq!(
+        cache.list("").await.expect("cache files after dry run"),
+        before
+    );
+    assert!(!tempdir.path().join("output").exists());
+    assert!(!tempdir.path().join("logs").exists());
 }
 
 #[tokio::test]
@@ -308,6 +396,47 @@ async fn test_should_fail_dry_run_when_api_key_is_placeholder() {
 }
 
 #[tokio::test]
+async fn test_should_fail_dry_run_on_real_model_authentication_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"message": "invalid API key super-secret-key"}
+        })))
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=super-secret-key\n",
+    )
+    .await
+    .expect("env");
+    tokio::fs::write(tempdir.path().join("input").join("document.txt"), "Alice")
+        .await
+        .expect("input");
+    patch_settings(tempdir.path(), &server.uri()).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "index",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("default_completion_model"))
+        .stderr(predicate::str::contains("completion connectivity check"))
+        .stderr(predicate::str::contains("super-secret-key").not());
+    assert!(!tempdir.path().join("output").exists());
+    assert!(!tempdir.path().join("cache").exists());
+    assert!(!tempdir.path().join("logs").exists());
+}
+
+#[tokio::test]
 async fn test_should_disable_cache_only_for_current_run() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -476,7 +605,7 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing prompt file"))
+        .stderr(predicate::str::contains("failed to load ExtractGraph"))
         .stderr(predicate::str::contains("super-secret-key").not());
 
     Command::cargo_bin("graphloom")
@@ -533,12 +662,6 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
 async fn test_should_fail_dry_run_when_no_input_matches_pattern() {
     let tempdir = TempDir::new().expect("tempdir");
     init_project(tempdir.path());
-    tokio::fs::write(
-        tempdir.path().join(".env"),
-        "GRAPHRAG_API_KEY=super-secret-key\n",
-    )
-    .await
-    .expect("env");
 
     Command::cargo_bin("graphloom")
         .expect("binary")
@@ -593,6 +716,10 @@ async fn test_should_report_common_preflight_errors_without_resetting_output() {
         (
             CliPreflightCase::OutputAncestorOfLogs,
             "output directory must not overlap logs directory",
+        ),
+        (
+            CliPreflightCase::OutputParentIsFile,
+            "path ancestor is not a directory",
         ),
         (CliPreflightCase::UnknownIndexWorkflow, "not_a_workflow"),
         (CliPreflightCase::MissingClaimsModel, "missing_claim_model"),
@@ -675,6 +802,7 @@ async fn test_should_log_workflow_failure_without_secret() {
             "index",
             "--root",
             tempdir.path().to_str().expect("utf8 root"),
+            "--skip-validation",
         ])
         .assert()
         .failure()
@@ -726,15 +854,12 @@ async fn test_should_fail_embedding_cardinality_mismatch_without_secret() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("generate_text_embeddings"))
+        .stderr(predicate::str::contains("embedding connectivity check"))
+        .stderr(predicate::str::contains("embedding returned no vectors"))
         .stderr(predicate::str::contains("super-secret-key").not());
 
-    let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
-        .await
-        .expect("log");
-    assert!(log.contains("generate_text_embeddings"));
-    assert!(log.contains("expected") && log.contains("embeddings"));
-    assert!(!log.contains("super-secret-key"));
+    assert!(!tempdir.path().join("logs").exists());
+    assert!(!tempdir.path().join("output").exists());
 }
 
 #[tokio::test]
@@ -807,6 +932,7 @@ enum CliPreflightCase {
     UnsupportedReportingStorage,
     UnsafeOutputRoot,
     OutputAncestorOfLogs,
+    OutputParentIsFile,
     UnknownIndexWorkflow,
     MissingClaimsModel,
     InvalidTokenizer,
@@ -1467,6 +1593,56 @@ async fn patch_settings(root: &std::path::Path, server_uri: &str) {
     patch_settings_with_max_gleanings(root, server_uri, 0).await;
 }
 
+async fn write_matching_validation_cache(root: &std::path::Path) {
+    let completion_request = CompletionRequest::new(vec![ChatMessage::user(
+        "This is an LLM connectivity test. Say Hello World".to_owned(),
+    )]);
+    let completion_key =
+        completion_request_cache_key(&completion_request).expect("completion cache key");
+    let completion = CachedModelResult {
+        response: CompletionResponse::text_for_test("cached", "cached hello"),
+        metrics: Default::default(),
+    };
+    for namespace in [
+        "default_completion_model",
+        "extract_graph",
+        "summarize_descriptions",
+        "community_reporting",
+    ] {
+        let directory = root.join("cache").join(namespace);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("completion cache directory");
+        tokio::fs::write(
+            directory.join(&completion_key),
+            serde_json::to_vec(&json!({"result": &completion})).expect("completion cache payload"),
+        )
+        .await
+        .expect("completion cache entry");
+    }
+
+    let embedding_request =
+        EmbeddingRequest::new(vec!["This is an LLM Embedding Test String".to_owned()]);
+    let embedding_key =
+        embedding_request_cache_key(&embedding_request).expect("embedding cache key");
+    let embedding = CachedModelResult {
+        response: EmbeddingResponse::vectors_for_test("cached", vec![vec![9.0; 4]]),
+        metrics: Default::default(),
+    };
+    for namespace in ["default_embedding_model", "text_embedding"] {
+        let directory = root.join("cache").join(namespace);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("embedding cache directory");
+        tokio::fs::write(
+            directory.join(&embedding_key),
+            serde_json::to_vec(&json!({"result": &embedding})).expect("embedding cache payload"),
+        )
+        .await
+        .expect("embedding cache entry");
+    }
+}
+
 async fn patch_settings_with_max_gleanings(
     root: &std::path::Path,
     server_uri: &str,
@@ -1490,6 +1666,11 @@ async fn patch_settings_with_max_gleanings(
 }
 
 async fn apply_cli_preflight_case(root: &std::path::Path, case: CliPreflightCase) {
+    if matches!(case, CliPreflightCase::OutputParentIsFile) {
+        tokio::fs::write(root.join("output-parent-file"), "not a directory")
+            .await
+            .expect("output parent file");
+    }
     let path = root.join("settings.yaml");
     let settings = tokio::fs::read_to_string(&path).await.expect("settings");
     let mut value: serde_yaml::Value = serde_yaml::from_str(&settings).expect("settings yaml");
@@ -1553,6 +1734,10 @@ fn cli_preflight_mutations(case: CliPreflightCase) -> Vec<(Vec<&'static str>, se
             (vec!["output_storage", "base_dir"], string("logs")),
             (vec!["reporting", "base_dir"], string("logs/index")),
         ],
+        CliPreflightCase::OutputParentIsFile => vec![(
+            vec!["output_storage", "base_dir"],
+            string("output-parent-file/output"),
+        )],
         CliPreflightCase::UnknownIndexWorkflow => vec![(
             vec!["workflows"],
             serde_yaml::Value::Sequence(vec![string("not_a_workflow")]),
@@ -1763,6 +1948,31 @@ fn request_last_message_contains(needle: &str) -> impl FnMut(&wiremock::Request)
             })
             .is_some_and(|content| content.contains(needle))
     }
+}
+
+fn is_completion_connectivity_request(request: &Request) -> bool {
+    request
+        .body_json::<Value>()
+        .ok()
+        .and_then(|body| {
+            body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str().map(str::to_owned))
+        })
+        .is_some_and(|content| content == "This is an LLM connectivity test. Say Hello World")
+}
+
+fn is_embedding_connectivity_request(request: &Request) -> bool {
+    request
+        .body_json::<Value>()
+        .ok()
+        .and_then(|body| body["input"].as_array().cloned())
+        .is_some_and(|inputs| {
+            inputs.len() == 1
+                && inputs.first().and_then(Value::as_str)
+                    == Some("This is an LLM Embedding Test String")
+        })
 }
 
 fn embedding_responder(request: &Request) -> ResponseTemplate {

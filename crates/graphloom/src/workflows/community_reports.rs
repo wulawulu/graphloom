@@ -13,7 +13,7 @@ use crate::{
         read_claim_context_rows, read_community_input_rows, read_entity_context_rows,
         read_relationship_context_rows,
     },
-    prompts::PromptRepository,
+    prompts::{PromptKind, PromptRepository},
 };
 
 /// IndexWorkflow name.
@@ -32,6 +32,10 @@ impl IndexWorkflow for CreateCommunityReportsWorkflow {
     fn requirements(&self, config: &GraphRagConfig) -> Result<IndexWorkflowRequirements> {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_completion_model(&config.community_reports.completion_model_id);
+        requirements.require_prompt(
+            PromptKind::CommunityReportGraph,
+            config.community_reports.graph_prompt.clone(),
+        );
         let model_id = &config.community_reports.completion_model_id;
         requirements.require_tokenizer(
             format!("completion_models.{model_id}.encoding_model"),

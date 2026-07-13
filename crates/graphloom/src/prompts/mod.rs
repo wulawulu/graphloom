@@ -1,6 +1,8 @@
 //! Project-scoped Tera prompt catalog, loading, context binding, and rendering.
 
 mod catalog;
+pub(crate) mod extract_claims;
+pub(crate) mod extract_graph;
 mod prompt;
 mod repository;
 

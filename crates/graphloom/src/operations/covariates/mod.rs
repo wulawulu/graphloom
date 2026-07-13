@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     dataframe::{string_value, usize_to_i64},
-    prompts::{PromptKind, PromptRepository, PromptTemplate},
+    prompts::{PromptKind, PromptRepository, PromptTemplate, extract_claims},
 };
 
 const EXTRACT_COVARIATES_CONTEXT: &str = "extract_covariates";
@@ -86,29 +86,14 @@ pub(crate) async fn extract_covariates(
     let extraction_template = prompt_repository
         .load(PromptKind::ExtractClaims, config.prompt_path.map(Path::new))
         .await?;
-    let continue_template = prompt_repository
-        .load(PromptKind::ExtractClaimsContinue, None)
-        .await?;
-    let loop_template = prompt_repository
-        .load(PromptKind::ExtractClaimsLoop, None)
-        .await?;
     let concurrency = config.concurrency.max(1);
     let mut results = stream::iter(text_units.iter().cloned().enumerate())
         .map(|(index, text_unit)| {
             let extraction_template = extraction_template.clone();
-            let continue_template = continue_template.clone();
-            let loop_template = loop_template.clone();
             async move {
-                extract_claims_for_text_unit(
-                    model,
-                    &extraction_template,
-                    &continue_template,
-                    &loop_template,
-                    &text_unit,
-                    &config,
-                )
-                .await
-                .map(|claims| (index, text_unit, claims))
+                extract_claims_for_text_unit(model, &extraction_template, &text_unit, &config)
+                    .await
+                    .map(|claims| (index, text_unit, claims))
             }
         })
         .buffer_unordered(concurrency);
@@ -152,8 +137,6 @@ pub(crate) async fn extract_covariates(
 async fn extract_claims_for_text_unit(
     model: &dyn CompletionModel,
     extraction_template: &PromptTemplate,
-    continue_template: &PromptTemplate,
-    loop_template: &PromptTemplate,
     text_unit: &TextUnitInput,
     config: &ClaimExtractionConfig<'_>,
 ) -> Result<Vec<graphloom_llm::ClaimRecord>> {
@@ -163,8 +146,6 @@ async fn extract_claims_for_text_unit(
         config.entity_types,
         config.claim_description,
     )?;
-    let continue_prompt = render_empty_prompt(continue_template)?;
-    let loop_prompt = render_empty_prompt(loop_template)?;
     let mut messages = vec![ChatMessage::user(initial_prompt)];
     let initial = model
         .complete(CompletionRequest::new(messages.clone()))
@@ -174,7 +155,9 @@ async fn extract_claims_for_text_unit(
     messages.push(ChatMessage::assistant(initial.clone()));
 
     for glean_index in 0..config.max_gleanings {
-        messages.push(ChatMessage::user(continue_prompt.clone()));
+        messages.push(ChatMessage::user(
+            extract_claims::CONTINUE_PROMPT.to_owned(),
+        ));
         let extension = model
             .complete(CompletionRequest::new(messages.clone()))
             .await?
@@ -186,7 +169,7 @@ async fn extract_claims_for_text_unit(
             break;
         }
 
-        messages.push(ChatMessage::user(loop_prompt.clone()));
+        messages.push(ChatMessage::user(extract_claims::LOOP_PROMPT.to_owned()));
         let response = model
             .complete(CompletionRequest::new(messages.clone()))
             .await?
@@ -216,13 +199,6 @@ fn render_claim_prompt(
         })?
         .render()
 }
-
-fn render_empty_prompt(template: &PromptTemplate) -> Result<String> {
-    template.bind(&EmptyPromptValues {})?.render()
-}
-
-#[derive(Debug, Serialize)]
-struct EmptyPromptValues {}
 
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
     Ok(df!(
@@ -352,6 +328,35 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].subject_id.as_deref(), Some("ALICE"));
+    }
+
+    #[tokio::test]
+    async fn test_should_send_fixed_graphrag_gleaning_messages() {
+        let model = RecordingClaimsModel::default();
+        let text_units = vec![TextUnitInput {
+            id: "tu-1".to_owned(),
+            text: "Alice reports Bob.".to_owned(),
+        }];
+
+        extract_covariates(
+            &model,
+            &PromptRepository::new("."),
+            &text_units,
+            ClaimExtractionConfig {
+                prompt_path: None,
+                claim_description: "claims",
+                entity_types: &default_claim_entity_types(),
+                max_gleanings: 2,
+                concurrency: 1,
+            },
+            &|_, _| {},
+        )
+        .await
+        .expect("claims should extract");
+
+        let messages = model.last_user_messages();
+        assert_eq!(messages[1], extract_claims::CONTINUE_PROMPT);
+        assert_eq!(messages[2], extract_claims::LOOP_PROMPT);
     }
 
     #[tokio::test]
@@ -529,6 +534,52 @@ mod tests {
 
     #[derive(Debug)]
     struct FailingContentModel;
+
+    #[derive(Debug, Default)]
+    struct RecordingClaimsModel {
+        last_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl RecordingClaimsModel {
+        fn last_user_messages(&self) -> Vec<String> {
+            self.last_user_messages
+                .lock()
+                .expect("message lock should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl CompletionModel for RecordingClaimsModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            let last = request
+                .messages
+                .last()
+                .map(|message| message.content.as_str().to_owned())
+                .unwrap_or_default();
+            let mut messages =
+                self.last_user_messages
+                    .lock()
+                    .map_err(|source| LlmError::InvalidResponse {
+                        model_instance: "recording-claims".to_owned(),
+                        operation: "completion",
+                        message: source.to_string(),
+                    })?;
+            messages.push(last);
+            let response = match messages.len() {
+                1 => claim("ALICE", "BOB"),
+                2 => claim("CAROL", "DAVE"),
+                _ => "N".to_owned(),
+            };
+            Ok(CompletionResponse::text_for_test(
+                "recording-claims",
+                response,
+            ))
+        }
+    }
 
     #[async_trait]
     impl CompletionModel for FailingContentModel {

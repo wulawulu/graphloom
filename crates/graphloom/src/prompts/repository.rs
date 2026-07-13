@@ -19,20 +19,15 @@ impl PromptRepository {
         }
     }
 
-    /// Load an explicit template, canonical project override, or built-in default.
+    /// Load an explicitly configured template or the built-in default.
     pub(crate) async fn load(
         &self,
         kind: PromptKind,
-        explicit_path: Option<&Path>,
+        configured_path: Option<&Path>,
     ) -> Result<PromptTemplate> {
-        if let Some(path) = explicit_path {
+        if let Some(path) = configured_path {
             let path = self.resolve(path);
             return load_file(kind, path, PromptSource::Explicit).await;
-        }
-
-        let canonical = self.project_root.join("prompts").join(kind.filename());
-        if path_exists(&canonical).await? {
-            return load_file(kind, canonical, PromptSource::ProjectOverride).await;
         }
 
         build_template(kind, kind.default_template(), PromptSource::BuiltIn)
@@ -56,6 +51,8 @@ async fn load_file(
         tokio::fs::read_to_string(&path)
             .await
             .map_err(|error| GraphLoomError::PromptLoad {
+                kind: kind.name(),
+                name: kind.filename(),
                 path: path.clone(),
                 source: error,
             })?;
@@ -70,15 +67,6 @@ fn build_template(
     let content = content.into();
     reject_legacy_single_brace_syntax(kind, &content, &source)?;
     PromptTemplate::try_new(kind, content, source)
-}
-
-async fn path_exists(path: &Path) -> Result<bool> {
-    tokio::fs::try_exists(path)
-        .await
-        .map_err(|source| GraphLoomError::PromptLoad {
-            path: path.to_path_buf(),
-            source,
-        })
 }
 
 fn reject_legacy_single_brace_syntax(
@@ -146,22 +134,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_load_project_override_with_source() {
+    async fn test_should_ignore_canonical_project_file_without_configured_path() {
         let project = TempDir::new().expect("project");
         let prompts = project.path().join("prompts");
         tokio::fs::create_dir(&prompts).await.expect("prompts");
-        let path = prompts.join("extract_graph.txt");
-        tokio::fs::write(&path, "Project {{ input_text }}")
-            .await
-            .expect("project prompt");
+        tokio::fs::write(
+            prompts.join("extract_graph.txt"),
+            "Project {{ input_text }}",
+        )
+        .await
+        .expect("project prompt");
 
         let template = PromptRepository::new(project.path())
             .load(PromptKind::ExtractGraph, None)
             .await
-            .expect("project prompt should load");
+            .expect("built-in prompt should load");
 
-        assert_eq!(template.content(), "Project {{ input_text }}");
-        assert_eq!(template.source(), &PromptSource::ProjectOverride(path));
+        assert_eq!(
+            template.content(),
+            PromptKind::ExtractGraph.default_template()
+        );
+        assert_eq!(template.source(), &PromptSource::BuiltIn);
     }
 
     #[tokio::test]
@@ -209,14 +202,30 @@ mod tests {
             .expect("invalid project prompt");
 
         let error = PromptRepository::new(project.path())
-            .load(PromptKind::ExtractGraph, None)
+            .load(
+                PromptKind::ExtractGraph,
+                Some(Path::new("prompts/extract_graph.txt")),
+            )
             .await
-            .expect_err("invalid template should fail while loading");
-        let message = error.to_string();
+            .expect_err("invalid configured template should fail while loading");
 
-        assert!(message.contains("ExtractGraph"));
-        assert!(message.contains("extract_graph.txt"));
-        assert!(message.contains(path.to_string_lossy().as_ref()));
+        match error {
+            GraphLoomError::PromptRender {
+                kind,
+                name,
+                prompt_source,
+                message,
+            } => {
+                assert_eq!(kind, "ExtractGraph");
+                assert_eq!(name, "extract_graph.txt");
+                assert_eq!(
+                    prompt_source,
+                    PromptSource::Explicit(path.clone()).to_string()
+                );
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected PromptRender error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -232,35 +241,50 @@ mod tests {
             .await
             .expect_err("invalid explicit template should fail while loading");
 
-        assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+        match error {
+            GraphLoomError::PromptRender {
+                kind,
+                name,
+                prompt_source,
+                message,
+            } => {
+                assert_eq!(kind, "ExtractGraph");
+                assert_eq!(name, "extract_graph.txt");
+                assert_eq!(
+                    prompt_source,
+                    PromptSource::Explicit(path.clone()).to_string()
+                );
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected PromptRender error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn test_should_load_continue_and_loop_prompt_project_overrides() {
+    async fn test_should_report_prompt_identity_and_path_for_load_error() {
         let project = TempDir::new().expect("project");
-        let prompts = project.path().join("prompts");
-        tokio::fs::create_dir(&prompts).await.expect("prompts");
-        let repository = PromptRepository::new(project.path());
+        let path = project.path().join("missing.txt");
 
-        for kind in [
-            PromptKind::ExtractGraphContinue,
-            PromptKind::ExtractGraphLoop,
-            PromptKind::ExtractClaimsContinue,
-            PromptKind::ExtractClaimsLoop,
-        ] {
-            let content = format!("Custom {} prompt", kind.filename());
-            let path = prompts.join(kind.filename());
-            tokio::fs::write(&path, &content)
-                .await
-                .expect("continue or loop override");
+        let error = PromptRepository::new(project.path())
+            .load(PromptKind::ExtractGraph, Some(Path::new("missing.txt")))
+            .await
+            .expect_err("missing configured template should fail");
+        let message = error.to_string();
 
-            let template = repository
-                .load(kind, None)
-                .await
-                .expect("continue or loop override should load");
-
-            assert_eq!(template.content(), content);
-            assert_eq!(template.source(), &PromptSource::ProjectOverride(path));
+        assert!(message.contains("ExtractGraph"));
+        assert!(message.contains("extract_graph.txt"));
+        match error {
+            GraphLoomError::PromptLoad {
+                kind,
+                name,
+                path: actual_path,
+                ..
+            } => {
+                assert_eq!(kind, "ExtractGraph");
+                assert_eq!(name, "extract_graph.txt");
+                assert_eq!(actual_path, path);
+            }
+            other => panic!("expected PromptLoad error, got {other:?}"),
         }
     }
 

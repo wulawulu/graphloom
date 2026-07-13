@@ -67,7 +67,7 @@ pub(crate) async fn create_community_reports(
 ) -> Result<Vec<CommunityReportRow>> {
     let report_template = prompt_repository
         .load(
-            PromptKind::CommunityReport,
+            PromptKind::CommunityReportGraph,
             config.prompt_path.map(Path::new),
         )
         .await?;

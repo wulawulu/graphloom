@@ -176,6 +176,23 @@ async fn test_should_build_standard_index_via_public_api() {
     let expected_order = test_config(&server.uri()).workflow_order();
     assert_eq!(callbacks.started(), expected_order);
     assert_eq!(callbacks.completed(), expected_order);
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| is_completion_connectivity_request(request))
+            .count(),
+        1,
+        "public API should run completion connectivity once",
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| is_embedding_connectivity_request(request))
+            .count(),
+        1,
+        "public API should run embedding connectivity once",
+    );
     assert_standard_outputs(tempdir.path(), &config).await;
     assert!(
         !tokio::fs::try_exists(
@@ -243,7 +260,7 @@ async fn test_should_validate_before_destructive_reset() {
 }
 
 #[tokio::test]
-async fn test_should_preserve_active_index_when_pipeline_fails_after_preflight() {
+async fn test_should_preserve_active_index_when_connectivity_preflight_fails() {
     let server = MockServer::start().await;
     let tempdir = TempDir::new().expect("tempdir");
     let mut config = test_config(&server.uri());
@@ -259,11 +276,124 @@ async fn test_should_preserve_active_index_when_pipeline_fails_after_preflight()
         },
     )
     .await
-    .expect_err("unconfigured mock server should fail during the pipeline");
+    .expect_err("unconfigured mock server should fail during preflight");
 
-    assert!(error.to_string().contains("index failed"));
+    assert!(error.to_string().contains("completion connectivity check"));
     assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
     assert_old_vector_still_exists(tempdir.path(), &config).await;
+    assert_no_generation_residue(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_reject_existing_output_file_before_model_connectivity_or_generation() {
+    let server = MockServer::start().await;
+    let tempdir = TempDir::new().expect("tempdir");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input directory");
+    tokio::fs::write(tempdir.path().join("input/document.txt"), "Alice")
+        .await
+        .expect("input document");
+    let output = tempdir.path().join("output");
+    tokio::fs::write(&output, "preserve output file")
+        .await
+        .expect("output file");
+
+    let error = build_index(
+        test_config(&server.uri()),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("output file must fail validation");
+
+    assert!(error.to_string().contains("output publication"));
+    assert!(error.to_string().contains("not a directory"));
+    assert!(output.is_file());
+    assert_eq!(
+        tokio::fs::read_to_string(&output)
+            .await
+            .expect("output file contents"),
+        "preserve output file"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+    assert!(!tempdir.path().join("cache").exists());
+    assert!(!tempdir.path().join("logs").exists());
+    assert_no_validation_probes(tempdir.path()).await;
+    assert_no_generation_residue(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_reject_existing_external_vector_file_before_connectivity_or_generation() {
+    let server = MockServer::start().await;
+    let tempdir = TempDir::new().expect("tempdir");
+    tokio::fs::create_dir(tempdir.path().join("input"))
+        .await
+        .expect("input directory");
+    tokio::fs::write(tempdir.path().join("input/document.txt"), "Alice")
+        .await
+        .expect("input document");
+    let output = tempdir.path().join("output");
+    tokio::fs::create_dir(&output)
+        .await
+        .expect("output directory");
+    let output_sentinel = output.join("sentinel.txt");
+    tokio::fs::write(&output_sentinel, "preserve output")
+        .await
+        .expect("output sentinel");
+    let vector = tempdir.path().join("vector-db");
+    tokio::fs::write(&vector, "preserve vector file")
+        .await
+        .expect("vector file");
+    let mut config = test_config(&server.uri());
+    config.vector_store.db_uri = vector.to_string_lossy().into_owned();
+
+    let error = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("external vector file must fail validation");
+
+    assert!(error.to_string().contains("vector DB publication"));
+    assert!(error.to_string().contains("not a directory"));
+    assert_eq!(
+        tokio::fs::read_to_string(&vector)
+            .await
+            .expect("vector file contents"),
+        "preserve vector file"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(&output_sentinel)
+            .await
+            .expect("output sentinel contents"),
+        "preserve output"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+    assert!(!tempdir.path().join("cache").exists());
+    assert!(!tempdir.path().join("logs").exists());
+    assert_no_validation_probes(tempdir.path()).await;
     assert_no_generation_residue(tempdir.path()).await;
 }
 
@@ -360,7 +490,7 @@ async fn test_should_reject_output_overlapping_input_before_reset() {
             .expect("requests")
             .is_empty()
     );
-    assert_no_write_probe_files(tempdir.path()).await;
+    assert_no_validation_probes(tempdir.path()).await;
 }
 
 #[cfg(unix)]
@@ -404,8 +534,8 @@ async fn test_should_index_from_symlinked_input_directory() {
     assert!(document.is_file());
     assert!(!external_input.path().join("output").exists());
     assert!(!external_input.path().join("lancedb").exists());
-    assert_no_write_probe_files(tempdir.path()).await;
-    assert_no_write_probe_files(external_input.path()).await;
+    assert_no_validation_probes(tempdir.path()).await;
+    assert_no_validation_probes(external_input.path()).await;
 }
 
 #[tokio::test]
@@ -414,7 +544,7 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
         RuntimePreflightCase::InvalidVectorSize,
         RuntimePreflightCase::InvalidVectorIndexName,
         RuntimePreflightCase::UnwritableVectorParent,
-        RuntimePreflightCase::OutputPathIsFile,
+        RuntimePreflightCase::OutputParentIsFile,
         RuntimePreflightCase::CachePathIsFile,
         RuntimePreflightCase::InputPathIsFile,
         RuntimePreflightCase::InvalidCompletionEncoding,
@@ -447,7 +577,7 @@ async fn test_should_preflight_runtime_failures_before_destructive_reset() {
             "case {case:?} must not clear old output"
         );
         assert_old_vector_still_exists(tempdir.path(), &old_config).await;
-        assert_no_write_probe_files(tempdir.path()).await;
+        assert_no_validation_probes(tempdir.path()).await;
     }
 }
 
@@ -495,9 +625,9 @@ async fn test_should_probe_symlink_cache_and_reporting_targets_without_residue()
     .await
     .expect("index with symlink cache and logs");
 
-    assert_no_write_probe_files(tempdir.path()).await;
-    assert_no_write_probe_files(external_cache.path()).await;
-    assert_no_write_probe_files(external_logs.path()).await;
+    assert_no_validation_probes(tempdir.path()).await;
+    assert_no_validation_probes(external_cache.path()).await;
+    assert_no_validation_probes(external_logs.path()).await;
 }
 
 #[tokio::test]
@@ -689,7 +819,7 @@ async fn test_should_fan_out_callbacks_in_api() {
 }
 
 #[tokio::test]
-async fn test_should_fail_embedding_dimension_mismatch_with_workflow_source_chain() {
+async fn test_should_fail_embedding_dimension_mismatch_during_preflight() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -726,8 +856,9 @@ async fn test_should_fail_embedding_dimension_mismatch_with_workflow_source_chai
     .expect_err("dimension mismatch should fail");
     let error_text = format!("{error:#}");
 
-    assert!(error_text.contains("generate_text_embeddings"));
-    assert!(error_text.contains("expected dimension 4, got 3"));
+    assert!(error_text.contains("default_embedding_model"));
+    assert!(error_text.contains("returned 3 dimensions"));
+    assert!(error_text.contains("configured as 4"));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -745,7 +876,7 @@ enum RuntimePreflightCase {
     InvalidVectorSize,
     InvalidVectorIndexName,
     UnwritableVectorParent,
-    OutputPathIsFile,
+    OutputParentIsFile,
     CachePathIsFile,
     InputPathIsFile,
     InvalidCompletionEncoding,
@@ -936,20 +1067,22 @@ async fn assert_old_vector_exists(config: &GraphRagConfig) {
     );
 }
 
-async fn assert_no_write_probe_files(root: &std::path::Path) {
+async fn assert_no_validation_probes(root: &std::path::Path) {
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
         let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
             continue;
         };
-        if metadata.is_file()
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".graphloom-write-probe-"))
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with(".graphloom-write-probe-")
+                    || name.starts_with(".graphloom-publication-probe-")
+            })
         {
             panic!(
-                "write probe file should not be left behind: {}",
+                "validation probe should not be left behind: {}",
                 path.display()
             );
         }
@@ -1033,11 +1166,11 @@ async fn apply_runtime_preflight_case(
                 .expect("vector parent file");
             config.vector_store.db_uri = file.join("db").to_string_lossy().to_string();
         }
-        RuntimePreflightCase::OutputPathIsFile => {
-            tokio::fs::write(root.join("output-file"), "not a directory")
+        RuntimePreflightCase::OutputParentIsFile => {
+            tokio::fs::write(root.join("output-parent-file"), "not a directory")
                 .await
-                .expect("output file");
-            "output-file".clone_into(&mut config.output_storage.base_dir);
+                .expect("output parent file");
+            "output-parent-file/output".clone_into(&mut config.output_storage.base_dir);
         }
         RuntimePreflightCase::CachePathIsFile => {
             tokio::fs::write(root.join("cache"), "not a directory")
@@ -1067,6 +1200,31 @@ async fn apply_runtime_preflight_case(
                 .encoding_model = Some("definitely-not-an-encoding".to_owned());
         }
     }
+}
+
+fn is_completion_connectivity_request(request: &Request) -> bool {
+    request
+        .body_json::<Value>()
+        .ok()
+        .and_then(|body| {
+            body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str().map(str::to_owned))
+        })
+        .is_some_and(|content| content == "This is an LLM connectivity test. Say Hello World")
+}
+
+fn is_embedding_connectivity_request(request: &Request) -> bool {
+    request
+        .body_json::<Value>()
+        .ok()
+        .and_then(|body| body["input"].as_array().cloned())
+        .is_some_and(|inputs| {
+            inputs.len() == 1
+                && inputs.first().and_then(Value::as_str)
+                    == Some("This is an LLM Embedding Test String")
+        })
 }
 
 fn chat_responder(request: &Request) -> ResponseTemplate {

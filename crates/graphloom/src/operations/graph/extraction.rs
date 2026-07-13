@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     GraphLoomError, Result,
-    prompts::{Prompt, PromptTemplate},
+    prompts::{Prompt, PromptTemplate, extract_graph},
 };
 
 const EXTRACT_GRAPH_CONTEXT: &str = "extract_graph";
@@ -25,8 +25,6 @@ pub(crate) struct GraphExtractionConfig<'a> {
 pub(crate) async fn extract_graph(
     model: &dyn CompletionModel,
     extraction_template: &PromptTemplate,
-    continue_template: &PromptTemplate,
-    loop_template: &PromptTemplate,
     text_units: &[TextUnitInput],
     config: GraphExtractionConfig<'_>,
     progress: &(dyn Fn(usize, usize) + Sync),
@@ -36,8 +34,6 @@ pub(crate) async fn extract_graph(
             extract_text_unit_graph(
                 model,
                 extraction_template,
-                continue_template,
-                loop_template,
                 config.entity_types,
                 &text_unit,
                 config.max_gleanings,
@@ -90,8 +86,6 @@ pub(crate) async fn extract_graph(
 pub(crate) async fn extract_text_unit_graph(
     model: &dyn CompletionModel,
     extraction_template: &PromptTemplate,
-    continue_template: &PromptTemplate,
-    loop_template: &PromptTemplate,
     entity_types: &[String],
     text_unit: &TextUnitInput,
     max_gleanings: usize,
@@ -107,10 +101,8 @@ pub(crate) async fn extract_text_unit_graph(
         .to_owned();
     messages.push(ChatMessage::assistant(output.clone()));
 
-    let continue_prompt = bind_empty_prompt(continue_template)?.render()?;
-    let loop_prompt = bind_empty_prompt(loop_template)?.render()?;
     for glean_index in 0..max_gleanings {
-        messages.push(ChatMessage::user(continue_prompt.clone()));
+        messages.push(ChatMessage::user(extract_graph::CONTINUE_PROMPT.to_owned()));
         let response = model
             .complete(CompletionRequest::new(messages.clone()))
             .await?
@@ -123,7 +115,7 @@ pub(crate) async fn extract_text_unit_graph(
             break;
         }
 
-        messages.push(ChatMessage::user(loop_prompt.clone()));
+        messages.push(ChatMessage::user(extract_graph::LOOP_PROMPT.to_owned()));
         let response = model
             .complete(CompletionRequest::new(messages.clone()))
             .await?
@@ -165,9 +157,6 @@ struct ExtractPromptValues<'a> {
     input_text: &'a str,
 }
 
-#[derive(Debug, Serialize)]
-struct EmptyPromptValues {}
-
 fn bind_extraction_prompt(
     template: &PromptTemplate,
     input_text: &str,
@@ -177,10 +166,6 @@ fn bind_extraction_prompt(
         entity_types: entity_types.join(","),
         input_text,
     })
-}
-
-fn bind_empty_prompt(template: &PromptTemplate) -> Result<Prompt> {
-    template.bind(&EmptyPromptValues {})
 }
 
 #[cfg(test)]
@@ -198,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_append_gleaned_graph_records() {
-        let (extraction_template, continue_template, loop_template) = extraction_templates().await;
+        let extraction_template = extraction_template().await;
         let model = MockCompletionModel::new(
             "mock",
             vec![
@@ -216,8 +201,6 @@ mod tests {
         let (entities, relationships) = extract_text_unit_graph(
             &model,
             &extraction_template,
-            &continue_template,
-            &loop_template,
             &[String::from("person")],
             &text_unit,
             1,
@@ -232,8 +215,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_send_fixed_graphrag_gleaning_messages() {
+        let extraction_template = extraction_template().await;
+        let model = RecordingGraphModel::default();
+        let text_unit = TextUnitInput {
+            id: "tu-1".to_owned(),
+            text: "Alice knows Bob.".to_owned(),
+        };
+
+        extract_text_unit_graph(
+            &model,
+            &extraction_template,
+            &[String::from("person")],
+            &text_unit,
+            2,
+        )
+        .await
+        .expect("graph extraction should succeed");
+
+        let messages = model.last_user_messages();
+        assert_eq!(messages[1], extract_graph::CONTINUE_PROMPT);
+        assert_eq!(messages[2], extract_graph::LOOP_PROMPT);
+    }
+
+    #[tokio::test]
     async fn test_should_extract_merge_and_filter_orphan_relationships() {
-        let (extraction_template, continue_template, loop_template) = extraction_templates().await;
+        let extraction_template = extraction_template().await;
         let model = MockCompletionModel::new(
             "mock",
             vec![
@@ -257,8 +264,6 @@ mod tests {
         let graph = extract_graph(
             &model,
             &extraction_template,
-            &continue_template,
-            &loop_template,
             &text_units,
             extraction_config(1),
             &|completed, total| {
@@ -293,12 +298,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_preserve_input_order_when_extractions_finish_out_of_order() {
-        let (extraction_template, continue_template, loop_template) = extraction_templates().await;
+        let extraction_template = extraction_template().await;
         let graph = extract_graph(
             &DelayedGraphModel,
             &extraction_template,
-            &continue_template,
-            &loop_template,
             &text_units(),
             extraction_config(2),
             &|_, _| {},
@@ -344,6 +347,55 @@ mod tests {
     #[derive(Debug)]
     struct DelayedGraphModel;
 
+    #[derive(Debug, Default)]
+    struct RecordingGraphModel {
+        last_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl RecordingGraphModel {
+        fn last_user_messages(&self) -> Vec<String> {
+            self.last_user_messages
+                .lock()
+                .expect("message lock should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl CompletionModel for RecordingGraphModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            let last = request
+                .messages
+                .last()
+                .map(|message| message.content.as_str().to_owned())
+                .unwrap_or_default();
+            let mut messages =
+                self.last_user_messages
+                    .lock()
+                    .map_err(|source| LlmError::InvalidResponse {
+                        model_instance: "recording-graph".to_owned(),
+                        operation: "completion",
+                        message: source.to_string(),
+                    })?;
+            messages.push(last);
+            let response = match messages.len() {
+                1 => "(\"entity\"<|>Alice<|>person<|>Alice)##",
+                2 => {
+                    "(\"entity\"<|>Bob<|>person<|>Bob)##(\"relationship\"\
+                     <|>Alice<|>Bob<|>knows<|>1)##<|COMPLETE|>"
+                }
+                _ => "N",
+            };
+            Ok(CompletionResponse::text_for_test(
+                "recording-graph",
+                response,
+            ))
+        }
+    }
+
     #[async_trait]
     impl CompletionModel for DelayedGraphModel {
         async fn complete(
@@ -378,21 +430,12 @@ mod tests {
         }
     }
 
-    async fn extraction_templates() -> (PromptTemplate, PromptTemplate, PromptTemplate) {
+    async fn extraction_template() -> PromptTemplate {
         let repository = crate::prompts::PromptRepository::new(".");
-        let extraction = repository
+        repository
             .load(crate::prompts::PromptKind::ExtractGraph, None)
             .await
-            .expect("extraction template");
-        let continuation = repository
-            .load(crate::prompts::PromptKind::ExtractGraphContinue, None)
-            .await
-            .expect("continue template");
-        let loop_template = repository
-            .load(crate::prompts::PromptKind::ExtractGraphLoop, None)
-            .await
-            .expect("loop template");
-        (extraction, continuation, loop_template)
+            .expect("extraction template")
     }
 
     fn text_units() -> Vec<TextUnitInput> {
@@ -417,12 +460,10 @@ mod tests {
     }
 
     async fn extract_with_response(response: &str) -> Result<ExtractedGraph> {
-        let (extraction_template, continue_template, loop_template) = extraction_templates().await;
+        let extraction_template = extraction_template().await;
         extract_graph(
             &MockCompletionModel::new("mock", vec![response.to_owned()]),
             &extraction_template,
-            &continue_template,
-            &loop_template,
             &[TextUnitInput {
                 id: "tu-1".to_owned(),
                 text: "empty graph".to_owned(),

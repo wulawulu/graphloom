@@ -112,7 +112,7 @@ mod tests {
         CreateBaseTextUnitsWorkflow, CreateCommunityReportsWorkflow, ExtractCovariatesWorkflow,
         ExtractGraphWorkflow, GenerateTextEmbeddingsWorkflow,
     };
-    use crate::{GraphRagConfig, IndexWorkflow};
+    use crate::{GraphRagConfig, IndexWorkflow, prompts::PromptKind};
 
     #[test]
     fn test_should_declare_model_requirements_from_active_workflows() {
@@ -129,6 +129,13 @@ mod tests {
         assert_eq!(
             graph.completion_models().collect::<Vec<_>>(),
             vec!["extract", "summarize"]
+        );
+        assert_eq!(
+            graph
+                .prompt_requirements()
+                .map(|requirement| requirement.kind)
+                .collect::<Vec<_>>(),
+            vec![PromptKind::ExtractGraph, PromptKind::SummarizeDescriptions]
         );
         assert!(!graph.requires_chunking_config());
         assert_eq!(
@@ -149,6 +156,13 @@ mod tests {
         assert_eq!(
             report_requirements.completion_models().collect::<Vec<_>>(),
             vec!["reports"]
+        );
+        assert_eq!(
+            report_requirements
+                .prompt_requirements()
+                .map(|requirement| requirement.kind)
+                .collect::<Vec<_>>(),
+            vec![PromptKind::CommunityReportGraph]
         );
         assert_eq!(
             report_requirements

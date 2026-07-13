@@ -294,15 +294,6 @@ mod tests {
                 kind.default_template(),
             );
         }
-
-        let continue_template = crate::prompts::PromptRepository::new(tempdir.path())
-            .load(PromptKind::ExtractGraphContinue, None)
-            .await
-            .expect("initialized continue prompt should load as an override");
-        assert!(matches!(
-            continue_template.source(),
-            crate::prompts::PromptSource::ProjectOverride(_)
-        ));
     }
 
     #[tokio::test]
@@ -329,6 +320,16 @@ mod tests {
         }
 
         assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 5);
+        for obsolete in [
+            "extract_graph_continue.txt",
+            "extract_graph_loop.txt",
+            "extract_claims_continue.txt",
+            "extract_claims_loop.txt",
+            "community_report.txt",
+        ] {
+            assert!(!actual.contains(obsolete));
+        }
     }
 
     #[tokio::test]
@@ -340,13 +341,14 @@ mod tests {
         let repository = crate::prompts::PromptRepository::new(tempdir.path());
 
         for kind in PromptKind::all() {
+            let configured_path = Path::new("prompts").join(kind.filename());
             let template = repository
-                .load(*kind, None)
+                .load(*kind, Some(&configured_path))
                 .await
                 .expect("initialized prompt should compile");
             assert!(matches!(
                 template.source(),
-                crate::prompts::PromptSource::ProjectOverride(_)
+                crate::prompts::PromptSource::Explicit(_)
             ));
         }
     }
@@ -397,7 +399,11 @@ mod tests {
         );
         assert_eq!(
             config.community_reports.graph_prompt.as_deref(),
-            Some("prompts/community_report.txt")
+            Some("prompts/community_report_graph.txt")
+        );
+        assert_eq!(
+            config.community_reports.text_prompt.as_deref(),
+            Some("prompts/community_report_text.txt")
         );
         assert!(config.sections.contains_key("local_search"));
         assert!(config.sections.contains_key("global_search"));

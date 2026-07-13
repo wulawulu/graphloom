@@ -1,24 +1,18 @@
 //! Project prompt kinds and their built-in Tera templates.
 
 /// `GraphRAG` prompt kinds used by indexing workflows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum PromptKind {
     /// Entity and relationship extraction.
     ExtractGraph,
-    /// Entity and relationship extraction continuation.
-    ExtractGraphContinue,
-    /// Entity and relationship extraction loop check.
-    ExtractGraphLoop,
     /// Entity and relationship description summarization.
     SummarizeDescriptions,
     /// Claim extraction.
     ExtractClaims,
-    /// Claim extraction continuation.
-    ExtractClaimsContinue,
-    /// Claim extraction loop check.
-    ExtractClaimsLoop,
-    /// Community report generation.
-    CommunityReport,
+    /// Graph-context community report generation.
+    CommunityReportGraph,
+    /// Text-context community report generation.
+    CommunityReportText,
 }
 
 impl PromptKind {
@@ -26,13 +20,10 @@ impl PromptKind {
     pub(crate) const fn all() -> &'static [Self] {
         &[
             Self::ExtractGraph,
-            Self::ExtractGraphContinue,
-            Self::ExtractGraphLoop,
             Self::SummarizeDescriptions,
             Self::ExtractClaims,
-            Self::ExtractClaimsContinue,
-            Self::ExtractClaimsLoop,
-            Self::CommunityReport,
+            Self::CommunityReportGraph,
+            Self::CommunityReportText,
         ]
     }
 
@@ -40,13 +31,10 @@ impl PromptKind {
     pub(crate) const fn filename(self) -> &'static str {
         match self {
             Self::ExtractGraph => "extract_graph.txt",
-            Self::ExtractGraphContinue => "extract_graph_continue.txt",
-            Self::ExtractGraphLoop => "extract_graph_loop.txt",
             Self::SummarizeDescriptions => "summarize_descriptions.txt",
             Self::ExtractClaims => "extract_claims.txt",
-            Self::ExtractClaimsContinue => "extract_claims_continue.txt",
-            Self::ExtractClaimsLoop => "extract_claims_loop.txt",
-            Self::CommunityReport => "community_report.txt",
+            Self::CommunityReportGraph => "community_report_graph.txt",
+            Self::CommunityReportText => "community_report_text.txt",
         }
     }
 
@@ -54,15 +42,12 @@ impl PromptKind {
     pub(crate) const fn default_template(self) -> &'static str {
         match self {
             Self::ExtractGraph => include_str!("defaults/extract_graph.txt"),
-            Self::ExtractGraphContinue => include_str!("defaults/extract_graph_continue.txt"),
-            Self::ExtractGraphLoop => include_str!("defaults/extract_graph_loop.txt"),
             Self::SummarizeDescriptions => {
                 include_str!("defaults/summarize_descriptions.txt")
             }
             Self::ExtractClaims => include_str!("defaults/extract_claims.txt"),
-            Self::ExtractClaimsContinue => include_str!("defaults/extract_claims_continue.txt"),
-            Self::ExtractClaimsLoop => include_str!("defaults/extract_claims_loop.txt"),
-            Self::CommunityReport => include_str!("defaults/community_report.txt"),
+            Self::CommunityReportGraph => include_str!("defaults/community_report_graph.txt"),
+            Self::CommunityReportText => include_str!("defaults/community_report_text.txt"),
         }
     }
 
@@ -72,11 +57,9 @@ impl PromptKind {
             Self::ExtractGraph => &["entity_types", "input_text"],
             Self::SummarizeDescriptions => &["entity_name", "description_list", "max_length"],
             Self::ExtractClaims => &["entity_specs", "claim_description", "input_text"],
-            Self::CommunityReport => &["input_text", "max_report_length"],
-            Self::ExtractGraphContinue
-            | Self::ExtractGraphLoop
-            | Self::ExtractClaimsContinue
-            | Self::ExtractClaimsLoop => &[],
+            Self::CommunityReportGraph | Self::CommunityReportText => {
+                &["input_text", "max_report_length"]
+            }
         }
     }
 
@@ -84,13 +67,10 @@ impl PromptKind {
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::ExtractGraph => "ExtractGraph",
-            Self::ExtractGraphContinue => "ExtractGraphContinue",
-            Self::ExtractGraphLoop => "ExtractGraphLoop",
             Self::SummarizeDescriptions => "SummarizeDescriptions",
             Self::ExtractClaims => "ExtractClaims",
-            Self::ExtractClaimsContinue => "ExtractClaimsContinue",
-            Self::ExtractClaimsLoop => "ExtractClaimsLoop",
-            Self::CommunityReport => "CommunityReport",
+            Self::CommunityReportGraph => "CommunityReportGraph",
+            Self::CommunityReportText => "CommunityReportText",
         }
     }
 }
@@ -104,8 +84,12 @@ mod tests {
     #[test]
     fn test_should_expose_prompt_tuning_metadata_without_public_api() {
         assert_eq!(
-            PromptKind::CommunityReport.filename(),
-            "community_report.txt"
+            PromptKind::CommunityReportGraph.filename(),
+            "community_report_graph.txt"
+        );
+        assert_eq!(
+            PromptKind::CommunityReportText.filename(),
+            "community_report_text.txt"
         );
         assert_eq!(
             PromptKind::ExtractGraph.variables(),
@@ -115,7 +99,6 @@ mod tests {
             PromptKind::ExtractClaims.variables(),
             &["entity_specs", "claim_description", "input_text"]
         );
-        assert!(PromptKind::ExtractClaimsLoop.variables().is_empty());
     }
 
     #[test]
@@ -126,6 +109,23 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(filenames.len(), PromptKind::all().len());
+    }
+
+    #[test]
+    fn test_should_expose_only_configurable_index_prompt_assets() {
+        assert_eq!(
+            PromptKind::all()
+                .iter()
+                .map(|kind| kind.filename())
+                .collect::<Vec<_>>(),
+            vec![
+                "extract_graph.txt",
+                "summarize_descriptions.txt",
+                "extract_claims.txt",
+                "community_report_graph.txt",
+                "community_report_text.txt",
+            ]
+        );
     }
 
     #[test]

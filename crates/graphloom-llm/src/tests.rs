@@ -1,3 +1,5 @@
+use secrecy::ExposeSecret;
+
 use crate::{
     ChatMessage, CompletionModel, CompletionRequest, EmbeddingModel, EmbeddingRequest,
     MockCompletionModel, MockEmbeddingModel, ModelConfig, Tokenizer, completion_cache_key,
@@ -169,13 +171,51 @@ fn test_should_parse_graphrag_snake_case_model_config() {
     }))
     .expect("snake_case config should parse");
 
-    assert_eq!(config.api_key.as_deref(), Some("sk-test"));
+    assert_eq!(
+        config.api_key.as_ref().map(ExposeSecret::expose_secret),
+        Some("sk-test")
+    );
     assert_eq!(config.api_base.as_deref(), Some("https://example.test/v1"));
     assert_eq!(config.provider_type(), "openai");
     assert_eq!(config.auth_method, "api_key");
     assert_eq!(config.effective_retry_strategy(), "exponential_backoff");
     assert_eq!(config.effective_max_retries(), 3);
     assert_eq!(config.encoding_model.as_deref(), Some("cl100k_base"));
+}
+
+#[test]
+fn test_should_deserialize_yaml_api_key_as_secret() {
+    let config: ModelConfig = serde_yaml::from_str(
+        "model_provider: openai\nmodel: gpt-test\nauth_method: api_key\napi_key: yaml-secret\n",
+    )
+    .expect("YAML model config should parse");
+
+    assert_eq!(
+        config.api_key.as_ref().map(ExposeSecret::expose_secret),
+        Some("yaml-secret")
+    );
+}
+
+#[test]
+fn test_should_redact_api_key_in_serialization_and_debug() {
+    let config: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "openai",
+        "model": "gpt-test",
+        "api_key": "serialization-secret",
+        "api_base": "https://models.example/v1"
+    }))
+    .expect("model config should parse");
+
+    let json = serde_json::to_value(&config).expect("JSON serialization");
+    let yaml = serde_yaml::to_string(&config).expect("YAML serialization");
+    let debug = format!("{config:?}");
+
+    assert_eq!(json["apiKey"], "<redacted>");
+    assert_eq!(json["apiBase"], "https://models.example/v1");
+    for rendered in [json.to_string(), yaml, debug] {
+        assert!(!rendered.contains("serialization-secret"));
+        assert!(rendered.contains("<redacted>"));
+    }
 }
 
 #[test]
@@ -261,6 +301,15 @@ fn test_should_reject_unsupported_provider_auth_and_placeholder_key() {
     .expect("config");
     assert!(placeholder.validate_openai_compatible("chat").is_err());
     assert!(!format!("{placeholder:?}").contains("<API_KEY>"));
+
+    let empty: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "openai",
+        "model": "gpt",
+        "auth_method": "api_key",
+        "api_key": "  "
+    }))
+    .expect("config");
+    assert!(empty.validate_openai_compatible("chat").is_err());
 }
 
 #[tokio::test]
@@ -300,7 +349,7 @@ fn model_config() -> ModelConfig {
         provider_type: "openai".to_owned(),
         model: "gpt-4o-mini".to_owned(),
         auth_method: "api_key".to_owned(),
-        api_key: Some("sk-test".to_owned()),
+        api_key: Some("sk-test".to_owned().into()),
         api_base: None,
         organization: None,
         timeout: None,

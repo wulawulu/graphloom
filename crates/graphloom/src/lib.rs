@@ -47,14 +47,12 @@ pub(crate) use runtime::{IndexRuntimeServices, ModelRegistry};
 pub(crate) use workflow::{IndexWorkflow, IndexWorkflowRegistry, IndexWorkflowRequirements};
 #[cfg(test)]
 pub(crate) use workflows::{
-    CREATE_COMMUNITIES_WORKFLOW, CREATE_FINAL_TEXT_UNITS_WORKFLOW, FINALIZE_GRAPH_WORKFLOW,
-    GENERATE_TEXT_EMBEDDINGS_WORKFLOW, register_step5_workflows, register_step6_workflows,
-    register_step7_workflows, register_step8_workflows,
+    CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
+    CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
+    FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, register_step5_workflows,
+    register_step6_workflows, register_step7_workflows, register_step8_workflows,
 };
-pub(crate) use workflows::{
-    CREATE_COMMUNITY_REPORTS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
-    LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows,
-};
+pub(crate) use workflows::{LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows};
 
 #[cfg(test)]
 mod tests;

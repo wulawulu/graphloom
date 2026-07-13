@@ -75,7 +75,7 @@ pub struct IndexArgs {
     /// Print more detailed progress.
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
-    /// Validate configuration and print a run plan without side effects.
+    /// Validate non-destructive indexing prerequisites and exit before runtime preparation.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     /// Use LLM cache for this run.
@@ -84,7 +84,7 @@ pub struct IndexArgs {
     /// Disable LLM cache for this run.
     #[arg(long = "no-cache", action = clap::ArgAction::SetTrue)]
     pub no_cache: bool,
-    /// Skip optional preflight checks.
+    /// Skip optional external-resource preflight checks.
     #[arg(long = "skip-validation")]
     pub skip_validation: bool,
 }

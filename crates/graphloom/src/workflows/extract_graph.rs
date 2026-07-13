@@ -35,6 +35,14 @@ impl IndexWorkflow for ExtractGraphWorkflow {
         let mut requirements = IndexWorkflowRequirements::default();
         requirements.require_completion_model(&config.extract_graph.completion_model_id);
         requirements.require_completion_model(&config.summarize_descriptions.completion_model_id);
+        requirements.require_prompt(
+            PromptKind::ExtractGraph,
+            config.extract_graph.prompt.clone(),
+        );
+        requirements.require_prompt(
+            PromptKind::SummarizeDescriptions,
+            config.summarize_descriptions.prompt.clone(),
+        );
         requirements.require_tokenizer("chunking.encoding_model", &config.chunking.encoding_model);
         Ok(requirements)
     }
@@ -71,17 +79,9 @@ impl IndexWorkflow for ExtractGraphWorkflow {
                 config.extract_graph.prompt.as_deref().map(Path::new),
             )
             .await?;
-        let continue_template = prompt_repository
-            .load(PromptKind::ExtractGraphContinue, None)
-            .await?;
-        let loop_template = prompt_repository
-            .load(PromptKind::ExtractGraphLoop, None)
-            .await?;
         let graph = extract_graph(
             extractor.as_ref(),
             &extraction_template,
-            &continue_template,
-            &loop_template,
             &text_units,
             GraphExtractionConfig {
                 entity_types: &config.extract_graph.entity_types,

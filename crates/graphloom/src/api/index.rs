@@ -11,7 +11,7 @@ use crate::{
     Result,
     config::load::{ValidationMode, validate_index_project},
     project::LoadedProject,
-    runtime::{StagedIndexGeneration, preflight_index_runtime, prepare_full_index},
+    runtime::{StagedIndexGeneration, prepare_full_index, prepare_index_runtime},
 };
 
 /// Supported indexing method.
@@ -65,7 +65,13 @@ pub async fn build_index(
 ) -> Result<IndexRunResult> {
     let project = LoadedProject::from_config(options.project_root.clone(), config)?;
     tracing::info!(project_root = %project.root.display(), "validating index configuration");
-    validate_index_project(&project, ValidationMode::Full).await?;
+    validate_index_project(
+        &project,
+        ValidationMode::Full {
+            cache_enabled: matches!(options.cache_mode, CacheMode::Configured),
+        },
+    )
+    .await?;
     build_validated_index(project, options).await
 }
 
@@ -84,12 +90,13 @@ pub(crate) async fn build_validated_index(
     let active_root = project.root.clone();
     let pipeline = crate::config::load::build_index_pipeline(&project.config)?;
     let requirements = pipeline.requirements(&project.config)?;
-    let generation = StagedIndexGeneration::new(&project, requirements.requires_vector_store())?;
+    let generation =
+        StagedIndexGeneration::new(&project, requirements.requires_vector_store()).await?;
     let (staged_project, publication) = generation.into_parts();
-    tracing::info!(project_root = %active_root.display(), "preflighting isolated index generation");
+    tracing::info!(project_root = %active_root.display(), "preparing isolated index generation");
     let generation_result = async {
         let mut prepared =
-            preflight_index_runtime(&staged_project, cache_enabled, options.callbacks).await?;
+            prepare_index_runtime(&staged_project, cache_enabled, options.callbacks).await?;
         prepare_full_index(&staged_project, &mut prepared).await?;
         let mut runtime = prepared.into_runtime(staged_project.config.clone(), &active_root)?;
         tracing::info!(project_root = %active_root.display(), "index run started");
