@@ -16,14 +16,10 @@ use uuid::Uuid;
 
 use crate::{
     GraphLoomError, GraphRagConfig, IndexWorkflowRegistry, LOAD_INPUT_DOCUMENTS_WORKFLOW, Result,
-    path_safety::validate_existing_publication_target,
     project::{LoadedProject, ProjectPaths},
     prompts::PromptRepository,
     register_standard_index_workflows,
-    runtime::{
-        DefaultModelFactory, ModelFactory, VectorLocation, validate_model_connectivity,
-        vector_location,
-    },
+    runtime::{DefaultModelFactory, ModelFactory, validate_model_connectivity},
 };
 
 /// Load a project config from a root directory or concrete config file.
@@ -259,7 +255,9 @@ async fn validate_project(project: &LoadedProject, skip_optional: bool) -> Resul
     validate_required(project)?;
     let pipeline = build_index_pipeline(&project.config)?;
     let requirements = pipeline.requirements(&project.config)?;
-    validate_publication_target_safety(project, &requirements).await?;
+    if requirements.requires_vector_store() {
+        project.paths.validate_vector_path_safety()?;
+    }
     if skip_optional {
         return Ok(());
     }
@@ -283,7 +281,9 @@ pub(crate) async fn validate_index_project_with_factory(
     validate_required(project)?;
     let pipeline = build_index_pipeline(&project.config)?;
     let requirements = pipeline.requirements(&project.config)?;
-    validate_publication_target_safety(project, &requirements).await?;
+    if requirements.requires_vector_store() {
+        project.paths.validate_vector_path_safety()?;
+    }
     if matches!(mode, ValidationMode::SkipOptional) {
         return Ok(());
     }
@@ -313,7 +313,7 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
     validate_reporting(&project.config.reporting.reporting_type)?;
     validate_input(&project.config.input.input_type)?;
     validate_cache(&project.config.cache.cache_type)?;
-    project.paths.validate_destructive_paths()?;
+    project.paths.validate_output_path_safety()?;
     Ok(())
 }
 
@@ -406,83 +406,20 @@ async fn validate_prompt_requirements(
     Ok(())
 }
 
-async fn validate_publication_target_safety(
-    project: &LoadedProject,
-    requirements: &crate::IndexWorkflowRequirements,
-) -> Result<()> {
-    validate_existing_publication_target(&project.paths.output_dir, "output publication").await?;
-    if requirements.requires_vector_store() {
-        project.paths.validate_vector_path_safety()?;
-        if matches!(
-            vector_location(&project.paths)?,
-            VectorLocation::OutsideOutput
-        ) {
-            validate_existing_publication_target(
-                &project.paths.vector_db_uri,
-                "vector DB publication",
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
 async fn validate_runtime_path_writability(
     project: &LoadedProject,
     requirements: &crate::IndexWorkflowRequirements,
     cache_enabled: bool,
 ) -> Result<()> {
-    probe_publication_parent(&project.paths.output_dir, "output publication").await?;
+    probe_directory_writable(&project.paths.output_dir, "output").await?;
     probe_directory_writable(&project.paths.reporting_dir, "logs").await?;
     if cache_enabled && project.config.cache.cache_type.eq_ignore_ascii_case("json") {
         probe_directory_writable(&project.paths.cache_dir, "cache").await?;
     }
-    if requirements.requires_vector_store()
-        && matches!(
-            vector_location(&project.paths)?,
-            VectorLocation::OutsideOutput
-        )
-    {
-        probe_publication_parent(&project.paths.vector_db_uri, "vector DB publication").await?;
+    if requirements.requires_vector_store() {
+        probe_directory_writable(&project.paths.vector_db_uri, "vector DB").await?;
     }
     Ok(())
-}
-
-async fn probe_publication_parent(target: &Path, label: &'static str) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| GraphLoomError::RuntimeBuild {
-            source: Box::new(std::io::Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{label} target {} has no parent directory",
-                    target.display()
-                ),
-            )),
-        })?;
-    let probe_root = writable_probe_root(parent, label).await?;
-    let probe_id = Uuid::new_v4();
-    let source = probe_root.join(format!(".graphloom-publication-probe-{probe_id}-source"));
-    let renamed = probe_root.join(format!(".graphloom-publication-probe-{probe_id}-target"));
-    let probe_result = async {
-        tokio::fs::create_dir(&source)
-            .await
-            .map_err(|error| probe_io_error("create publication probe", &source, error))?;
-        tokio::fs::rename(&source, &renamed)
-            .await
-            .map_err(|error| probe_io_error("rename publication probe", &renamed, error))?;
-        tokio::fs::remove_dir(&renamed)
-            .await
-            .map_err(|error| probe_io_error("remove publication probe", &renamed, error))?;
-        Ok(())
-    }
-    .await;
-
-    if probe_result.is_err() {
-        let _ = tokio::fs::remove_dir(&source).await;
-        let _ = tokio::fs::remove_dir(&renamed).await;
-    }
-    probe_result
 }
 
 async fn probe_directory_writable(directory: &Path, label: &'static str) -> Result<()> {
@@ -1221,46 +1158,14 @@ embedding_models:
         let no_vectors = crate::IndexWorkflowRequirements::default();
 
         project.paths.output_dir = blocked.clone();
-        let error = validate_publication_target_safety(&project, &no_vectors)
-            .await
-            .expect_err("existing output file must be rejected");
-        assert!(error.to_string().contains("output publication"));
-        assert!(error.to_string().contains("not a directory"));
-        assert_eq!(
-            tokio::fs::read_to_string(&blocked)
-                .await
-                .expect("output file must remain readable"),
-            "not a directory"
-        );
-        project.paths.output_dir = blocked.join("output");
         let error = validate_runtime_path_writability(&project, &no_vectors, false)
             .await
-            .expect_err("output publication parent should be probed");
-        assert!(error.to_string().contains("output publication"));
+            .expect_err("output file must be rejected");
+        assert!(error.to_string().contains("output path"));
+        assert!(error.to_string().contains("not a directory"));
         project.paths.output_dir = tempdir.path().join("output");
 
-        project.paths.reporting_dir = blocked.clone();
-        let error = validate_runtime_path_writability(&project, &no_vectors, false)
-            .await
-            .expect_err("reporting path should be probed");
-        assert!(error.to_string().contains("logs path"));
-        project.paths.reporting_dir = tempdir.path().join("logs");
-
-        project.paths.cache_dir = blocked.clone();
-        validate_runtime_path_writability(&project, &no_vectors, false)
-            .await
-            .expect("disabled cache path should not be probed");
-        let error = validate_runtime_path_writability(&project, &no_vectors, true)
-            .await
-            .expect_err("enabled cache path should be probed");
-        assert!(error.to_string().contains("cache path"));
-
-        project.paths.cache_dir = tempdir.path().join("cache");
-        project.paths.vector_db_uri = blocked.join("vector-db");
-        let error = probe_publication_parent(&project.paths.vector_db_uri, "vector DB publication")
-            .await
-            .expect_err("external vector publication parent should be probed");
-        assert!(error.to_string().contains("vector DB publication"));
+        project.paths.vector_db_uri = blocked.clone();
         validate_runtime_path_writability(&project, &no_vectors, false)
             .await
             .expect("inactive vector path should not be probed");
@@ -1268,153 +1173,8 @@ embedding_models:
         vectors.require_vector_store();
         let error = validate_runtime_path_writability(&project, &vectors, false)
             .await
-            .expect_err("external vector publication parent should be probed");
-        assert!(!error.to_string().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_should_accept_missing_and_directory_publication_targets() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let mut project = initialized_project(tempdir.path()).await;
-        project.paths.reporting_dir = tempdir.path().join("future-logs");
-        let requirements = crate::IndexWorkflowRequirements::default();
-
-        project.paths.output_dir = tempdir.path().join("missing-output");
-        validate_publication_target_safety(&project, &requirements)
-            .await
-            .expect("missing output target");
-        assert!(!project.paths.output_dir.exists());
-
-        tokio::fs::create_dir(&project.paths.output_dir)
-            .await
-            .expect("output directory");
-        validate_publication_target_safety(&project, &requirements)
-            .await
-            .expect("directory output target");
-        assert_no_validation_probes(tempdir.path()).await;
-    }
-
-    #[tokio::test]
-    async fn test_should_validate_only_active_external_vector_publication_targets() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let mut project = initialized_project(tempdir.path()).await;
-        tokio::fs::create_dir_all(&project.paths.output_dir)
-            .await
-            .expect("output directory");
-        project.paths.reporting_dir = tempdir.path().join("future-logs");
-        let mut vectors = crate::IndexWorkflowRequirements::default();
-        vectors.require_vector_store();
-
-        project.paths.vector_db_uri = tempdir.path().join("missing-vector-db");
-        validate_publication_target_safety(&project, &vectors)
-            .await
-            .expect("missing external vector target");
-        assert!(!project.paths.vector_db_uri.exists());
-
-        tokio::fs::create_dir(&project.paths.vector_db_uri)
-            .await
-            .expect("vector directory");
-        validate_publication_target_safety(&project, &vectors)
-            .await
-            .expect("directory external vector target");
-
-        tokio::fs::remove_dir(&project.paths.vector_db_uri)
-            .await
-            .expect("remove vector directory");
-        tokio::fs::write(&project.paths.vector_db_uri, "external vector sentinel")
-            .await
-            .expect("vector file");
-        let error = validate_publication_target_safety(&project, &vectors)
-            .await
-            .expect_err("external vector file must be rejected");
-        assert!(error.to_string().contains("vector DB publication"));
-        assert!(error.to_string().contains("not a directory"));
-        assert_eq!(
-            tokio::fs::read_to_string(&project.paths.vector_db_uri)
-                .await
-                .expect("vector file must remain readable"),
-            "external vector sentinel"
-        );
-
-        validate_publication_target_safety(&project, &crate::IndexWorkflowRequirements::default())
-            .await
-            .expect("inactive external vector target must not be checked");
-
-        project.paths.vector_db_uri = project.paths.output_dir.join("lancedb");
-        tokio::fs::write(&project.paths.vector_db_uri, "inside output resource")
-            .await
-            .expect("inside-output vector file");
-        validate_publication_target_safety(&project, &vectors)
-            .await
-            .expect("inside-output vector is not an independent publication target");
-        assert_no_validation_probes(tempdir.path()).await;
-    }
-
-    #[tokio::test]
-    async fn test_should_apply_vector_path_safety_only_to_active_requirements() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let mut project = initialized_project(tempdir.path()).await;
-        project.paths.vector_db_uri = project.paths.input_dir.clone();
-
-        validate_publication_target_safety(&project, &crate::IndexWorkflowRequirements::default())
-            .await
-            .expect("inactive vector configuration must be ignored");
-
-        let mut active = crate::IndexWorkflowRequirements::default();
-        active.require_vector_store();
-        let error = validate_publication_target_safety(&project, &active)
-            .await
-            .expect_err("active vector path overlapping input must fail");
-        assert!(error.to_string().contains("overlap input"));
-        assert_no_validation_probes(tempdir.path()).await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_should_reject_linked_publication_targets_without_touching_destinations() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
-        let mut project = initialized_project(tempdir.path()).await;
-        project.paths.reporting_dir = tempdir.path().join("future-logs");
-        tokio::fs::write(external.path().join("sentinel"), "preserve")
-            .await
-            .expect("external sentinel");
-
-        project.paths.output_dir = tempdir.path().join("output-link");
-        std::os::unix::fs::symlink(external.path(), &project.paths.output_dir)
-            .expect("output symlink");
-        let error = validate_publication_target_safety(
-            &project,
-            &crate::IndexWorkflowRequirements::default(),
-        )
-        .await
-        .expect_err("linked output target must be rejected");
-        assert!(error.to_string().contains("output publication"));
-        assert!(error.to_string().contains("symlink"));
-        tokio::fs::remove_file(&project.paths.output_dir)
-            .await
-            .expect("remove output symlink");
-
-        tokio::fs::create_dir(&project.paths.output_dir)
-            .await
-            .expect("output directory");
-        project.paths.vector_db_uri = tempdir.path().join("vector-link");
-        std::os::unix::fs::symlink(external.path(), &project.paths.vector_db_uri)
-            .expect("vector symlink");
-        let mut vectors = crate::IndexWorkflowRequirements::default();
-        vectors.require_vector_store();
-        let error = validate_publication_target_safety(&project, &vectors)
-            .await
-            .expect_err("linked external vector target must be rejected");
-        assert!(error.to_string().contains("symlink"));
-        assert_eq!(
-            tokio::fs::read_to_string(external.path().join("sentinel"))
-                .await
-                .expect("external sentinel"),
-            "preserve"
-        );
-        assert_no_validation_probes(tempdir.path()).await;
-        assert_no_validation_probes(external.path()).await;
+            .expect_err("active vector path must be probed");
+        assert!(error.to_string().contains("vector DB path"));
     }
 
     #[tokio::test]
@@ -1462,28 +1222,6 @@ embedding_models:
     }
 
     #[tokio::test]
-    async fn test_should_not_probe_inside_output_vector_as_external_publication() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let mut project = initialized_project(tempdir.path()).await;
-        project.paths.output_dir = tempdir.path().join("future-output");
-        project.paths.vector_db_uri = project.paths.output_dir.join("lancedb");
-        project.paths.reporting_dir = tempdir.path().join("future-logs");
-        let mut requirements = crate::IndexWorkflowRequirements::default();
-        requirements.require_vector_store();
-
-        validate_publication_target_safety(&project, &requirements)
-            .await
-            .expect("inside-output vector target safety");
-        validate_runtime_path_writability(&project, &requirements, false)
-            .await
-            .expect("inside-output vector uses output publication parent");
-
-        assert!(!project.paths.output_dir.exists());
-        assert!(!project.paths.reporting_dir.exists());
-        assert_no_validation_probes(tempdir.path()).await;
-    }
-
-    #[tokio::test]
     async fn test_should_skip_optional_writability_probes() {
         let tempdir = TempDir::new().expect("tempdir");
         let mut project = initialized_project(tempdir.path()).await;
@@ -1508,7 +1246,6 @@ embedding_models:
         while let Some(entry) = entries.next_entry().await.expect("project entry") {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            assert!(!name.starts_with(".graphloom-publication-probe-"));
             assert!(!name.starts_with(".graphloom-write-probe-"));
         }
     }

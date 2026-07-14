@@ -11,7 +11,7 @@ use crate::{
     Result,
     config::load::{ValidationMode, validate_index_project},
     project::LoadedProject,
-    runtime::{StagedIndexGeneration, prepare_full_index, prepare_index_runtime},
+    runtime::prepare_index_runtime,
 };
 
 /// Supported indexing method.
@@ -88,40 +88,27 @@ pub(crate) async fn build_validated_index(
     let started = Instant::now();
     let cache_enabled = matches!(options.cache_mode, CacheMode::Configured);
     let active_root = project.root.clone();
-    let pipeline = crate::config::load::build_index_pipeline(&project.config)?;
-    let requirements = pipeline.requirements(&project.config)?;
-    let generation =
-        StagedIndexGeneration::new(&project, requirements.requires_vector_store()).await?;
-    let (staged_project, publication) = generation.into_parts();
-    tracing::info!(project_root = %active_root.display(), "preparing isolated index generation");
-    let generation_result = async {
-        let mut prepared =
-            prepare_index_runtime(&staged_project, cache_enabled, options.callbacks).await?;
-        prepare_full_index(&staged_project, &mut prepared).await?;
-        let mut runtime = prepared.into_runtime(staged_project.config.clone(), &active_root)?;
-        tracing::info!(project_root = %active_root.display(), "index run started");
-        tracing::info!(project_root = %active_root.display(), "running isolated indexing pipeline");
-        let outputs = runtime
-            .pipeline
-            .run(&runtime.config, &mut runtime.context)
-            .await
-            .map_err(|source| GraphLoomError::IndexFailed {
+    let prepared = prepare_index_runtime(&project, cache_enabled, options.callbacks).await?;
+    let mut runtime = prepared.into_runtime(project.config.clone(), &active_root);
+    tracing::info!(project_root = %active_root.display(), "index run started");
+    tracing::info!(project_root = %active_root.display(), "running indexing pipeline");
+    let outputs = runtime
+        .pipeline
+        .run(&runtime.config, &mut runtime.context)
+        .await
+        .map_err(|source| {
+            // Completed workflows write directly to the configured output and are intentionally
+            // retained. Incremental merge semantics belong to a future update pipeline.
+            tracing::error!(
+                project_root = %active_root.display(),
+                error = %source,
+                "index run failed; output may contain results from completed workflows"
+            );
+            GraphLoomError::IndexFailed {
                 source: Box::new(source),
-            })?;
-        let stats = runtime.context.stats.clone();
-        drop(runtime);
-        Ok((outputs, stats))
-    }
-    .await;
-    let (outputs, stats) = match generation_result {
-        Ok(result) => result,
-        Err(error) => {
-            publication.cleanup().await;
-            return Err(error);
-        }
-    };
-    tracing::info!(project_root = %active_root.display(), "publishing completed index generation");
-    publication.publish().await?;
+            }
+        })?;
+    let stats = runtime.context.stats.clone();
     let elapsed = started.elapsed();
     tracing::info!(
         documents = stats.document_count,
@@ -132,7 +119,7 @@ pub(crate) async fn build_validated_index(
         reports = stats.report_count,
         embeddings = stats.embedding_count,
         elapsed_ms = elapsed.as_millis(),
-        "index completed"
+        "index run completed"
     );
     Ok(IndexRunResult {
         workflow_outputs: outputs,

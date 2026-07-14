@@ -1528,7 +1528,7 @@ async fn assert_log_redaction_and_success(root: &std::path::Path) {
         .await
         .expect("log");
     assert!(log.contains("index run started"));
-    assert!(log.contains("index completed"));
+    assert!(log.contains("index run completed"));
     assert!(!log.contains("super-secret-key"));
 }
 

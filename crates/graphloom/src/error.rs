@@ -121,67 +121,6 @@ pub enum GraphLoomError {
         capability: &'static str,
     },
 
-    /// An inactive managed descendant is unsafe to preserve during publication.
-    #[error("invalid preserved descendant {descendant} for publication target {target}: {message}")]
-    InvalidPreservedDescendant {
-        /// Live publication target.
-        target: PathBuf,
-        /// Relative descendant rejected by validation.
-        descendant: PathBuf,
-        /// Validation failure.
-        message: String,
-    },
-
-    /// Staged output already contains a path reserved for an inactive resource.
-    #[error(
-        "cannot preserve inactive managed descendant because destination {path} already exists"
-    )]
-    PreservedDescendantConflict {
-        /// Conflicting destination path.
-        path: PathBuf,
-    },
-
-    /// Moving a preserved descendant between live and backup storage failed.
-    #[error("{operation} from {source_path} to {destination_path}: {source}")]
-    PreservedDescendantMove {
-        /// Publication or rollback operation.
-        operation: &'static str,
-        /// Existing descendant path.
-        source_path: PathBuf,
-        /// Intended descendant path.
-        destination_path: PathBuf,
-        /// Filesystem failure.
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// A preserved descendant crosses a symlink or Windows reparse point.
-    #[error(
-        "refusing to {operation} preserved descendant {descendant} under {root} through symlink \
-         or reparse point {path}"
-    )]
-    UnsafePreservedDescendantPath {
-        /// Publication or rollback operation.
-        operation: &'static str,
-        /// Publication root containing the descendant.
-        root: PathBuf,
-        /// Validated relative descendant.
-        descendant: PathBuf,
-        /// Link or reparse-point component that made the path unsafe.
-        path: PathBuf,
-    },
-
-    /// A publication transaction root is a symlink or Windows reparse point.
-    #[error(
-        "refusing to {operation} because publication root {path} is a symlink or reparse point"
-    )]
-    UnsafePublicationRoot {
-        /// Publication or rollback operation.
-        operation: &'static str,
-        /// Linked publication root.
-        path: PathBuf,
-    },
-
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {
@@ -353,7 +292,7 @@ pub enum GraphLoomError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// A transaction failed and its recovery also failed.
+    /// A file transaction failed and its recovery also failed.
     #[error("{operation} failed: {source}; rollback also failed: {rollback}")]
     RollbackFailed {
         /// Transaction being recovered.

@@ -17,7 +17,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn test_should_preserve_inactive_vector_store_inside_output() {
+async fn test_should_write_directly_without_touching_inactive_vector_store() {
     let tempdir = TempDir::new().expect("tempdir");
     let input = tempdir.path().join("input");
     let output = tempdir.path().join("output");
@@ -55,10 +55,11 @@ async fn test_should_preserve_inactive_vector_store_inside_output() {
     let provider = ParquetTableProvider::new(&output).expect("output provider");
     assert!(provider.has("documents").await.expect("documents table"));
     assert!(provider.has("text_units").await.expect("text units table"));
-    assert!(
-        !tokio::fs::try_exists(output.join("old-sentinel"))
+    assert_eq!(
+        tokio::fs::read_to_string(output.join("old-sentinel"))
             .await
-            .expect("sentinel lookup")
+            .expect("sentinel lookup"),
+        "replace me"
     );
     assert_eq!(
         tokio::fs::read_to_string(output.join("lancedb").join("vector-marker"))
@@ -66,7 +67,7 @@ async fn test_should_preserve_inactive_vector_store_inside_output() {
             .expect("vector marker"),
         "preserve me"
     );
-    assert_no_generation_residue(tempdir.path()).await;
+    assert_no_index_transaction_directories(tempdir.path()).await;
 }
 
 #[tokio::test]
@@ -109,7 +110,134 @@ async fn test_should_leave_inactive_external_vector_store_untouched() {
             .expect("vector marker"),
         "unchanged"
     );
-    assert_no_generation_residue(tempdir.path()).await;
+    assert_no_index_transaction_directories(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_run_dependent_workflow_against_existing_output() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    let output = tempdir.path().join("output");
+    tokio::fs::create_dir(&input).await.expect("input dir");
+    tokio::fs::write(input.join("doc.txt"), "alpha beta gamma")
+        .await
+        .expect("input document");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec![
+        "load_input_documents".to_owned(),
+        "create_base_text_units".to_owned(),
+    ];
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("base workflows should succeed");
+
+    assert!(output.join("documents.parquet").is_file());
+    assert!(output.join("text_units.parquet").is_file());
+    config.workflows = vec!["create_final_documents".to_owned()];
+
+    build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("final documents should read existing output tables");
+
+    let provider = ParquetTableProvider::new(&output).expect("output provider");
+    let documents = provider
+        .read_dataframe("documents")
+        .await
+        .expect("documents dataframe");
+    let text_unit_ids = documents
+        .column("text_unit_ids")
+        .expect("text_unit_ids column")
+        .list()
+        .expect("text_unit_ids list");
+    assert!(
+        (0..documents.height()).any(|index| {
+            text_unit_ids
+                .get_as_series(index)
+                .is_some_and(|ids| !ids.is_empty())
+        }),
+        "create_final_documents should populate text_unit_ids"
+    );
+    assert_no_index_transaction_directories(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_report_missing_existing_workflow_input() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec!["create_final_documents".to_owned()];
+
+    let error = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("missing text_units table should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("table text_units does not exist")
+    );
+}
+
+#[tokio::test]
+async fn test_should_keep_completed_workflow_output_after_later_failure() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    let output = tempdir.path().join("output");
+    tokio::fs::create_dir(&input).await.expect("input dir");
+    tokio::fs::write(input.join("doc.txt"), "alpha beta gamma")
+        .await
+        .expect("input document");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec![
+        "load_input_documents".to_owned(),
+        "create_final_documents".to_owned(),
+    ];
+
+    let error = build_index(
+        config,
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("later workflow should fail");
+
+    assert!(error.to_string().contains("create_final_documents"));
+    assert!(
+        error
+            .to_string()
+            .contains("table text_units does not exist")
+    );
+    assert!(output.join("documents.parquet").is_file());
+    assert!(!output.join("text_units.parquet").exists());
+    assert_no_index_transaction_directories(tempdir.path()).await;
 }
 
 #[tokio::test]
@@ -194,8 +322,8 @@ async fn test_should_build_standard_index_via_public_api() {
         "public API should run embedding connectivity once",
     );
     assert_standard_outputs(tempdir.path(), &config).await;
-    assert!(
-        !tokio::fs::try_exists(
+    assert_eq!(
+        tokio::fs::read_to_string(
             tempdir
                 .path()
                 .join("output")
@@ -203,7 +331,8 @@ async fn test_should_build_standard_index_via_public_api() {
                 .join("old-vector-marker")
         )
         .await
-        .expect("old vector marker lookup")
+        .expect("old vector marker lookup"),
+        "old"
     );
     let mut vector_config = config.vector_store;
     vector_config.db_uri = tempdir
@@ -221,7 +350,7 @@ async fn test_should_build_standard_index_via_public_api() {
 }
 
 #[tokio::test]
-async fn test_should_validate_before_destructive_reset() {
+async fn test_should_validate_before_running_workflows() {
     for case in [
         InvalidConfigCase::InvalidRegex,
         InvalidConfigCase::MissingModel,
@@ -281,11 +410,11 @@ async fn test_should_preserve_active_index_when_connectivity_preflight_fails() {
     assert!(error.to_string().contains("completion connectivity check"));
     assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
     assert_old_vector_still_exists(tempdir.path(), &config).await;
-    assert_no_generation_residue(tempdir.path()).await;
+    assert_no_index_transaction_directories(tempdir.path()).await;
 }
 
 #[tokio::test]
-async fn test_should_reject_existing_output_file_before_model_connectivity_or_generation() {
+async fn test_should_reject_existing_output_file_before_model_connectivity() {
     let server = MockServer::start().await;
     let tempdir = TempDir::new().expect("tempdir");
     tokio::fs::create_dir(tempdir.path().join("input"))
@@ -311,7 +440,6 @@ async fn test_should_reject_existing_output_file_before_model_connectivity_or_ge
     .await
     .expect_err("output file must fail validation");
 
-    assert!(error.to_string().contains("output publication"));
     assert!(error.to_string().contains("not a directory"));
     assert!(output.is_file());
     assert_eq!(
@@ -330,11 +458,11 @@ async fn test_should_reject_existing_output_file_before_model_connectivity_or_ge
     assert!(!tempdir.path().join("cache").exists());
     assert!(!tempdir.path().join("logs").exists());
     assert_no_validation_probes(tempdir.path()).await;
-    assert_no_generation_residue(tempdir.path()).await;
+    assert_no_index_transaction_directories(tempdir.path()).await;
 }
 
 #[tokio::test]
-async fn test_should_reject_existing_external_vector_file_before_connectivity_or_generation() {
+async fn test_should_reject_existing_external_vector_file_before_connectivity() {
     let server = MockServer::start().await;
     let tempdir = TempDir::new().expect("tempdir");
     tokio::fs::create_dir(tempdir.path().join("input"))
@@ -370,7 +498,7 @@ async fn test_should_reject_existing_external_vector_file_before_connectivity_or
     .await
     .expect_err("external vector file must fail validation");
 
-    assert!(error.to_string().contains("vector DB publication"));
+    assert!(error.to_string().contains("vector DB path"));
     assert!(error.to_string().contains("not a directory"));
     assert_eq!(
         tokio::fs::read_to_string(&vector)
@@ -394,62 +522,11 @@ async fn test_should_reject_existing_external_vector_file_before_connectivity_or
     assert!(!tempdir.path().join("cache").exists());
     assert!(!tempdir.path().join("logs").exists());
     assert_no_validation_probes(tempdir.path()).await;
-    assert_no_generation_residue(tempdir.path()).await;
+    assert_no_index_transaction_directories(tempdir.path()).await;
 }
 
 #[tokio::test]
-async fn test_should_publish_output_and_external_vector_generation_together() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(chat_responder)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/embeddings"))
-        .respond_with(embedding_responder)
-        .mount(&server)
-        .await;
-    let tempdir = TempDir::new().expect("tempdir");
-    let mut config = test_config(&server.uri());
-    let external_vector = tempdir.path().join("vector-db");
-    prepare_old_output_and_vector_at(tempdir.path(), &mut config, &external_vector).await;
-
-    build_index(
-        config.clone(),
-        BuildIndexOptions {
-            project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
-            cache_mode: CacheMode::Configured,
-            callbacks: Vec::new(),
-        },
-    )
-    .await
-    .expect("external-vector index should publish");
-
-    assert!(!tempdir.path().join("output").join("sentinel.txt").exists());
-    let provider = ParquetTableProvider::new(tempdir.path().join("output")).expect("provider");
-    assert!(provider.has("documents").await.expect("documents"));
-    let store = LanceDbVectorStore::connect(&config.vector_store)
-        .await
-        .expect("external vector store");
-    for embedding in ALL_EMBEDDINGS {
-        let schema = config.vector_store.schema_for(embedding);
-        assert!(store.count(&schema).await.expect("vector count") > 0);
-    }
-    let entity_schema = config.vector_store.schema_for("entity_description");
-    assert!(
-        store
-            .get_by_id(&entity_schema, "old-id")
-            .await
-            .expect("old vector lookup")
-            .is_none(),
-    );
-    assert_no_generation_residue(tempdir.path()).await;
-}
-
-#[tokio::test]
-async fn test_should_reject_output_overlapping_input_before_reset() {
+async fn test_should_reject_output_overlapping_input_before_workflows() {
     let server = MockServer::start().await;
     let tempdir = TempDir::new().expect("tempdir");
     let mut config = test_config(&server.uri());
@@ -539,7 +616,7 @@ async fn test_should_index_from_symlinked_input_directory() {
 }
 
 #[tokio::test]
-async fn test_should_preflight_runtime_failures_before_destructive_reset() {
+async fn test_should_report_runtime_preflight_failures_before_workflows() {
     for case in [
         RuntimePreflightCase::InvalidVectorSize,
         RuntimePreflightCase::InvalidVectorIndexName,
@@ -628,109 +705,6 @@ async fn test_should_probe_symlink_cache_and_reporting_targets_without_residue()
     assert_no_validation_probes(tempdir.path()).await;
     assert_no_validation_probes(external_cache.path()).await;
     assert_no_validation_probes(external_logs.path()).await;
-}
-
-#[tokio::test]
-async fn test_should_drop_inside_output_lancedb_before_clearing_output() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(chat_responder)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/embeddings"))
-        .respond_with(embedding_responder)
-        .mount(&server)
-        .await;
-
-    let tempdir = TempDir::new().expect("tempdir");
-    let mut config = test_config(&server.uri());
-    prepare_old_output_and_vector(tempdir.path(), &mut config).await;
-
-    build_index(
-        config.clone(),
-        BuildIndexOptions {
-            project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
-            cache_mode: CacheMode::Configured,
-            callbacks: Vec::new(),
-        },
-    )
-    .await
-    .expect("inside-output index should succeed");
-
-    assert!(!tempdir.path().join("output").join("sentinel.txt").exists());
-    let store = LanceDbVectorStore::connect(&config.vector_store)
-        .await
-        .expect("reopen lancedb");
-    for embedding in ALL_EMBEDDINGS {
-        let schema = config.vector_store.schema_for(embedding);
-        assert!(
-            store.count(&schema).await.expect("managed table count") > 0,
-            "{embedding} should be recreated and populated"
-        );
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_should_reject_vector_child_symlink_before_destructive_reset() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let external = TempDir::new().expect("external");
-    let mut config = test_config("http://127.0.0.1:1");
-    let external_db = external.path().join("lancedb");
-    prepare_old_output_and_vector_at(tempdir.path(), &mut config, external_db.clone()).await;
-    let old_config = config.clone();
-    let vector_link = tempdir.path().join("output").join("lancedb");
-    std::os::unix::fs::symlink(&external_db, &vector_link).expect("vector symlink");
-    config.vector_store.db_uri = vector_link.to_string_lossy().to_string();
-
-    let error = build_index(
-        config,
-        BuildIndexOptions {
-            project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
-            cache_mode: CacheMode::Configured,
-            callbacks: Vec::new(),
-        },
-    )
-    .await
-    .expect_err("vector symlink should fail before reset");
-
-    assert!(error.to_string().contains("symlink"));
-    assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
-    assert_old_vector_exists(&old_config).await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_should_reject_vector_ancestor_symlink_before_destructive_reset() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let external = TempDir::new().expect("external");
-    let mut config = test_config("http://127.0.0.1:1");
-    let external_db = external.path().join("db");
-    prepare_old_output_and_vector_at(tempdir.path(), &mut config, external_db).await;
-    let old_config = config.clone();
-    let vector_link = tempdir.path().join("vector-link");
-    std::os::unix::fs::symlink(external.path(), &vector_link).expect("vector ancestor symlink");
-    config.vector_store.db_uri = vector_link.join("db").to_string_lossy().to_string();
-
-    let error = build_index(
-        config,
-        BuildIndexOptions {
-            project_root: tempdir.path().to_path_buf(),
-            method: IndexingMethod::Standard,
-            cache_mode: CacheMode::Configured,
-            callbacks: Vec::new(),
-        },
-    )
-    .await
-    .expect_err("vector ancestor symlink should fail before reset");
-
-    assert!(error.to_string().contains("symlink"));
-    assert!(tempdir.path().join("output").join("sentinel.txt").is_file());
-    assert_old_vector_exists(&old_config).await;
 }
 
 #[tokio::test]
@@ -1076,10 +1050,7 @@ async fn assert_no_validation_probes(root: &std::path::Path) {
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                name.starts_with(".graphloom-write-probe-")
-                    || name.starts_with(".graphloom-publication-probe-")
-            })
+            .is_some_and(|name| name.starts_with(".graphloom-write-probe-"))
         {
             panic!(
                 "validation probe should not be left behind: {}",
@@ -1095,7 +1066,7 @@ async fn assert_no_validation_probes(root: &std::path::Path) {
     }
 }
 
-async fn assert_no_generation_residue(root: &Path) {
+async fn assert_no_index_transaction_directories(root: &Path) {
     let mut entries = tokio::fs::read_dir(root).await.expect("project entries");
     while let Some(entry) = entries.next_entry().await.expect("project entry") {
         let name = entry.file_name().to_string_lossy().into_owned();

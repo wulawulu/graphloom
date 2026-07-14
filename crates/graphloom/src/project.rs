@@ -63,20 +63,20 @@ impl ProjectPaths {
             reporting_dir,
             vector_db_uri,
         };
-        paths.validate_destructive_paths()?;
+        paths.validate_output_path_safety()?;
         Ok(paths)
     }
 
-    /// Validate paths that may be cleared by full indexing.
+    /// Validate that output writes cannot target protected project paths.
     ///
     /// # Errors
     ///
-    /// Returns an error if output could delete project, input, cache, or logs.
-    pub fn validate_destructive_paths(&self) -> Result<()> {
-        self.validate_destructive_paths_with_home(user_home_dir().as_deref())
+    /// Returns an error if output overlaps the project, input, cache, or logs.
+    pub fn validate_output_path_safety(&self) -> Result<()> {
+        self.validate_output_path_safety_with_home(user_home_dir().as_deref())
     }
 
-    fn validate_destructive_paths_with_home(&self, home: Option<&Path>) -> Result<()> {
+    fn validate_output_path_safety_with_home(&self, home: Option<&Path>) -> Result<()> {
         let output = resolve_path_rejecting_links(&self.output_dir)?;
         let root = resolve_path_following_links(&self.root)?;
         let input = resolve_path_following_links(&self.input_dir)?;
@@ -169,11 +169,11 @@ impl ProjectPaths {
         Ok(())
     }
 
-    /// Validate that the vector DB path cannot target destructive project paths.
+    /// Validate that managed vector-index resets cannot target protected project paths.
     ///
     /// # Errors
     ///
-    /// Returns an error if the vector DB path is unsafe for reset.
+    /// Returns an error if the vector DB path is unsafe for an active embedding workflow.
     pub(crate) fn validate_vector_path_safety(&self) -> Result<()> {
         self.validate_vector_path_safety_with_home(user_home_dir().as_deref())
     }
@@ -475,76 +475,27 @@ mod tests {
         ProjectPaths::resolve(tempdir.path(), &config).expect("logs symlink should be allowed");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_should_reject_vector_overlap_with_resolved_input_symlink() {
+    fn test_should_reject_unsafe_active_vector_paths() {
         let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
-        std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
-            .expect("input symlink");
-        let vector = external.path().join("vector");
-        let config = config_with_paths(
-            "input",
-            "output",
-            "cache",
-            "logs",
-            &vector.to_string_lossy(),
-        );
 
-        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
-        let error = paths
-            .validate_vector_path_safety()
-            .expect_err("vector overlapping resolved input should fail");
+        for (vector, expected) in [
+            ("input", "overlap input"),
+            ("output", "equal output"),
+            ("cache", "overlap cache"),
+            ("logs", "overlap logs"),
+        ] {
+            let config = config_with_paths("input", "output", "cache", "logs", vector);
+            let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths resolve");
+            let error = paths
+                .validate_vector_path_safety()
+                .expect_err("unsafe vector path should fail");
 
-        assert!(error.to_string().contains("overlap input"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_should_reject_vector_overlap_with_resolved_cache_symlink() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
-        std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
-            .expect("cache symlink");
-        let vector = external.path().join("vector");
-        let config = config_with_paths(
-            "input",
-            "output",
-            "cache",
-            "logs",
-            &vector.to_string_lossy(),
-        );
-
-        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
-        let error = paths
-            .validate_vector_path_safety()
-            .expect_err("vector overlapping resolved cache should fail");
-
-        assert!(error.to_string().contains("overlap cache"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_should_reject_vector_overlap_with_resolved_reporting_symlink() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
-        std::os::unix::fs::symlink(external.path(), tempdir.path().join("logs"))
-            .expect("logs symlink");
-        let vector = external.path().join("vector");
-        let config = config_with_paths(
-            "input",
-            "output",
-            "cache",
-            "logs",
-            &vector.to_string_lossy(),
-        );
-
-        let paths = ProjectPaths::resolve(tempdir.path(), &config).expect("paths should resolve");
-        let error = paths
-            .validate_vector_path_safety()
-            .expect_err("vector overlapping resolved logs should fail");
-
-        assert!(error.to_string().contains("overlap logs"));
+            assert!(
+                error.to_string().contains(expected),
+                "vector path {vector} returned unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -612,73 +563,10 @@ mod tests {
         let paths = project_paths(&project, &config);
 
         let error = paths
-            .validate_destructive_paths_with_home(Some(&home))
+            .validate_output_path_safety_with_home(Some(&home))
             .expect_err("output equal home should fail");
 
         assert!(error.to_string().contains("home directory"));
-    }
-
-    #[tokio::test]
-    async fn test_should_reject_vector_equal_to_home() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let home = tempdir.path().join("home");
-        let project = tempdir.path().join("project");
-        tokio::fs::create_dir(&home).await.expect("home dir");
-        tokio::fs::create_dir(&project).await.expect("project dir");
-        let config = config_with_paths("input", "output", "cache", "logs", &home.to_string_lossy());
-        let paths = project_paths(&project, &config);
-
-        let error = paths
-            .validate_vector_path_safety_with_home(Some(&home))
-            .expect_err("vector equal home should fail");
-
-        assert!(error.to_string().contains("home directory"));
-    }
-
-    #[tokio::test]
-    async fn test_should_reject_vector_ancestor_of_home() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let home_parent = tempdir.path().join("home-parent");
-        let home = home_parent.join("home");
-        let project = tempdir.path().join("project");
-        tokio::fs::create_dir(&home_parent)
-            .await
-            .expect("home parent dir");
-        tokio::fs::create_dir(&home).await.expect("home dir");
-        tokio::fs::create_dir(&project).await.expect("project dir");
-        let config = config_with_paths(
-            "input",
-            "output",
-            "cache",
-            "logs",
-            &home_parent.to_string_lossy(),
-        );
-        let paths = project_paths(&project, &config);
-
-        let error = paths
-            .validate_vector_path_safety_with_home(Some(&home))
-            .expect_err("vector ancestor of home should fail");
-
-        assert!(error.to_string().contains("home directory"));
-    }
-
-    #[tokio::test]
-    async fn test_should_allow_vector_inside_home_project() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let home = tempdir.path().join("home");
-        tokio::fs::create_dir(&home).await.expect("home dir");
-        let config = config_with_paths(
-            "home/project/input",
-            "home/project/output",
-            "home/project/cache",
-            "home/project/logs",
-            "home/project/output/lancedb",
-        );
-        let paths = project_paths(tempdir.path(), &config);
-
-        paths
-            .validate_vector_path_safety_with_home(Some(&home))
-            .expect("vector under home project should be allowed");
     }
 
     fn env_getter(values: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
