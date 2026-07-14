@@ -2,7 +2,10 @@ use std::{fmt, io::Cursor, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use polars_core::prelude::DataFrame;
-use polars_io::prelude::{ParquetReader, ParquetWriter, SerReader};
+use polars_io::{
+    parquet::write::ParquetCompression,
+    prelude::{ParquetReader, ParquetWriter, SerReader},
+};
 
 use super::{
     Table, TableProvider, append_optional_dataframe, id_column_index, next_dataframe_row,
@@ -262,6 +265,7 @@ fn read_parquet_dataframe(bytes: Vec<u8>) -> Result<DataFrame> {
 fn write_parquet_dataframe(mut dataframe: DataFrame) -> Result<Vec<u8>> {
     let mut buffer = Cursor::new(Vec::new());
     ParquetWriter::new(&mut buffer)
+        .with_compression(ParquetCompression::Snappy)
         .finish(&mut dataframe)
         .map_err(StorageError::Polars)?;
     Ok(buffer.into_inner())

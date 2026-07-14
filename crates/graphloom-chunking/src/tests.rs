@@ -172,6 +172,50 @@ fn test_should_create_token_overlap_chunker_from_config() {
 }
 
 #[test]
+fn test_should_chunk_invalid_utf8_token_windows_through_production_tokenizer() {
+    let text = "GraphLoom 🦀 你好世界 🙂 𠮷 龘";
+    let bpe = tiktoken_rs::o200k_base_singleton();
+    let tokens = bpe.encode_ordinary(text);
+    let config = ChunkingConfig {
+        chunker_type: ChunkerType::TokenOverlap,
+        encoding_model: "o200k_base".to_owned(),
+        size: NonZeroUsize::new(1).expect("nonzero"),
+        overlap: 0,
+        prepend_metadata: Vec::new(),
+    };
+    let chunker = create_chunker(&config).expect("chunker should be created");
+
+    let chunks = chunker
+        .chunk(text, None)
+        .expect("invalid UTF-8 token windows should use replacement characters");
+
+    assert_eq!(chunks.len(), tokens.len());
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.original.contains('\u{fffd}'))
+    );
+    for (index, (chunk, token)) in chunks.iter().zip(tokens).enumerate() {
+        let bytes = bpe
+            .decode_bytes(&[token])
+            .expect("encoded token ID should decode to bytes");
+        let expected = String::from_utf8_lossy(&bytes);
+
+        assert_eq!(chunk.original, expected);
+        assert_eq!(chunk.text, expected);
+        assert_eq!(chunk.index, index);
+        assert_eq!(chunk.start_char, None);
+        assert_eq!(chunk.end_char, None);
+        assert_eq!(chunk.start_token, Some(index));
+        assert_eq!(chunk.end_token, Some(index));
+        assert_eq!(
+            chunk.token_count,
+            Some(bpe.encode_ordinary(&expected).len())
+        );
+    }
+}
+
+#[test]
 fn test_should_create_semantic_text_chunker_from_config() {
     let config = ChunkingConfig {
         chunker_type: ChunkerType::SemanticText,
