@@ -1,5 +1,9 @@
 # Documentation
 
+## Optimization backlog
+
+- [社区报告层级上下文优化](community-report-hierarchical-context-optimization.md)
+
 ## Research
 
 - [GraphRAG v4 LLM cache interoperability](research/study-graphrag-llm-cache.md)

@@ -1,4 +1,4 @@
-//! Graph context construction for community reports.
+//! GraphRAG-compatible graph context construction for community reports.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6,541 +6,237 @@ use csv::WriterBuilder;
 use graphloom_llm::Tokenizer;
 
 use super::{
-    ClaimContextRow, CommunityInputRow, CommunityLocalContext, ContextRecords, EntityContextRow,
-    ExplodedEntityRow, RelationshipContextRow, ReportContextRow,
+    ClaimContextRow, CommunityInputRow, CommunityLocalContext, EntityContextRow, ExplodedEntityRow,
+    RelationshipContextRow,
 };
 use crate::{Result, dataframe::invalid_data};
 
 const COMMUNITY_REPORTS_CONTEXT: &str = "create_community_reports";
 const NO_DESCRIPTION: &str = "No Description";
 
+#[derive(Debug, Clone)]
+struct LocalContextRecord {
+    title: String,
+    entity: EntityContextRow,
+    relationships: Vec<RelationshipContextRow>,
+}
+
+#[derive(Debug, Default)]
+struct RenderRecords {
+    entities: Vec<EntityContextRow>,
+    relationships: Vec<RelationshipContextRow>,
+}
+
 pub(crate) fn explode_communities(
     communities: &[CommunityInputRow],
     entities: &[EntityContextRow],
 ) -> Vec<ExplodedEntityRow> {
-    let entities_by_id = entities
+    let memberships = communities
         .iter()
-        .map(|entity| (entity.id.as_str(), entity))
-        .collect::<BTreeMap<_, _>>();
-    let mut exploded = Vec::new();
-    for community in communities {
-        for entity_id in &community.entity_ids {
-            if let Some(entity) = entities_by_id.get(entity_id.as_str()) {
-                exploded.push(ExplodedEntityRow {
+        .flat_map(|community| {
+            community
+                .entity_ids
+                .iter()
+                .map(move |entity_id| (entity_id.as_str(), community))
+        })
+        .fold(
+            BTreeMap::<&str, Vec<&CommunityInputRow>>::new(),
+            |mut memberships, (entity_id, community)| {
+                memberships.entry(entity_id).or_default().push(community);
+                memberships
+            },
+        );
+
+    entities
+        .iter()
+        .flat_map(|entity| {
+            memberships
+                .get(entity.id.as_str())
+                .into_iter()
+                .flatten()
+                .map(move |community| ExplodedEntityRow {
                     community: community.community,
                     level: community.level,
-                    entity: (*entity).clone(),
-                });
-            }
-        }
-    }
-    exploded
+                    entity: entity.clone(),
+                })
+        })
+        .collect()
 }
 
+/// Build the exact graph-context strings used by GraphRAG's standard community-report workflow.
+///
+/// GraphRAG currently prepares claims as scalar merge values while its context sorter only
+/// accepts claim lists. Consequently claims are absent from the rendered graph context. The
+/// unused argument is retained because it remains part of the public workflow input contract.
 pub(crate) fn build_local_contexts(
     communities: &[CommunityInputRow],
     entities: &[EntityContextRow],
     relationships: &[RelationshipContextRow],
-    claims: &[ClaimContextRow],
+    _claims: &[ClaimContextRow],
     tokenizer: &dyn Tokenizer,
     max_input_length: usize,
 ) -> Result<BTreeMap<i64, CommunityLocalContext>> {
     let exploded = explode_communities(communities, entities);
-    let mut entities_by_community: BTreeMap<i64, Vec<EntityContextRow>> = BTreeMap::new();
-    for row in exploded {
-        entities_by_community
-            .entry(row.community)
-            .or_default()
-            .push(row.entity);
-    }
-
+    let levels = exploded
+        .iter()
+        .map(|row| row.level)
+        .collect::<BTreeSet<_>>();
     let mut contexts = BTreeMap::new();
-    for community in communities {
-        let mut community_entities = entities_by_community
-            .get(&community.community)
-            .cloned()
-            .unwrap_or_default();
-        community_entities.sort_by(|left, right| {
-            right
-                .degree
-                .cmp(&left.degree)
-                .then_with(|| left.human_readable_id.cmp(&right.human_readable_id))
+
+    for level in levels.into_iter().rev() {
+        let level_rows = exploded
+            .iter()
+            .filter(|row| row.level == level)
+            .collect::<Vec<_>>();
+        let level_titles = level_rows
+            .iter()
+            .map(|row| row.entity.title.as_str())
+            .collect::<BTreeSet<_>>();
+        let level_relationships = relationships
+            .iter()
+            .filter(|relationship| {
+                level_titles.contains(relationship.source.as_str())
+                    && level_titles.contains(relationship.target.as_str())
+            })
+            .collect::<Vec<_>>();
+        let source_first = first_relationships_by_title(&level_relationships, |relationship| {
+            relationship.source.as_str()
         });
-        let context = build_context_for_entities(
-            community.community,
-            &community_entities,
-            relationships,
-            claims,
-            tokenizer,
-            max_input_length,
-        )?;
-        contexts.insert(community.community, context);
+        let target_first = first_relationships_by_title(&level_relationships, |relationship| {
+            relationship.target.as_str()
+        });
+        let mut grouped = BTreeMap::<(String, i64, i64), LocalContextRecord>::new();
+
+        for row in level_rows {
+            let title = row.entity.title.clone();
+            let key = (title.clone(), row.community, row.entity.degree);
+            let record = grouped.entry(key).or_insert_with(|| LocalContextRecord {
+                title: title.clone(),
+                entity: entity_with_default_description(&row.entity),
+                relationships: Vec::new(),
+            });
+            if let Some(relationship) = source_first
+                .get(title.as_str())
+                .or_else(|| target_first.get(title.as_str()))
+            {
+                record
+                    .relationships
+                    .push(relationship_with_default_description(relationship));
+            }
+        }
+
+        let mut records_by_community = BTreeMap::<i64, Vec<LocalContextRecord>>::new();
+        for ((_, community, _), record) in grouped {
+            records_by_community
+                .entry(community)
+                .or_default()
+                .push(record);
+        }
+        for community in communities
+            .iter()
+            .filter(|community| community.level == level)
+        {
+            let records = records_by_community
+                .remove(&community.community)
+                .unwrap_or_default();
+            let context = sort_context(&records, tokenizer, max_input_length)?;
+            contexts.insert(community.community, CommunityLocalContext { context });
+        }
     }
     Ok(contexts)
 }
 
-fn build_context_for_entities(
-    community: i64,
-    entities: &[EntityContextRow],
-    relationships: &[RelationshipContextRow],
-    claims: &[ClaimContextRow],
+fn first_relationships_by_title<'a, F>(
+    relationships: &[&'a RelationshipContextRow],
+    title: F,
+) -> BTreeMap<&'a str, &'a RelationshipContextRow>
+where
+    F: Fn(&'a RelationshipContextRow) -> &'a str,
+{
+    relationships
+        .iter()
+        .fold(BTreeMap::new(), |mut first, row| {
+            first.entry(title(row)).or_insert(row);
+            first
+        })
+}
+
+fn sort_context(
+    local_context: &[LocalContextRecord],
     tokenizer: &dyn Tokenizer,
     max_input_length: usize,
-) -> Result<CommunityLocalContext> {
-    let entity_by_title = entities
+) -> Result<String> {
+    let mut relationships = local_context
         .iter()
-        .map(|entity| (entity.title.as_str(), entity))
-        .collect::<BTreeMap<_, _>>();
-    let entity_titles = entity_by_title.keys().copied().collect::<BTreeSet<_>>();
-    let claims_by_subject = claims_by_subject(claims);
-    let mut ordered_relationships = relationships
-        .iter()
-        .filter(|relationship| {
-            entity_titles.contains(relationship.source.as_str())
-                && entity_titles.contains(relationship.target.as_str())
-        })
-        .cloned()
+        .flat_map(|record| record.relationships.iter().cloned())
         .collect::<Vec<_>>();
-    ordered_relationships.sort_by(|left, right| {
+    relationships.sort_by(|left, right| {
         right
             .combined_degree
             .cmp(&left.combined_degree)
             .then_with(|| left.human_readable_id.cmp(&right.human_readable_id))
     });
-
-    if ordered_relationships.is_empty() {
-        return build_entity_only_context(
-            community,
-            entities,
-            &claims_by_subject,
-            tokenizer,
-            max_input_length,
-        );
-    }
-
-    let full_records =
-        full_relationship_records(&ordered_relationships, &entity_by_title, &claims_by_subject);
-    let (full_text, full_token_count) = render_and_count(&full_records, tokenizer)?;
-    let (records, context, token_count) = trim_relationship_records(
-        ordered_relationships,
-        &entity_by_title,
-        &claims_by_subject,
-        tokenizer,
-        max_input_length,
-    )?;
-
-    let was_truncated = full_token_count > max_input_length || full_text != context;
-    Ok(CommunityLocalContext {
-        community,
-        full_records,
-        records,
-        context,
-        token_count,
-        full_token_count,
-        was_truncated,
-    })
-}
-
-fn full_relationship_records(
-    relationships: &[RelationshipContextRow],
-    entity_by_title: &BTreeMap<&str, &EntityContextRow>,
-    claims_by_subject: &BTreeMap<&str, Vec<&ClaimContextRow>>,
-) -> ContextRecords {
-    let mut records = ContextRecords::default();
-    for relationship in relationships {
-        add_entity_and_claims(
-            &mut records,
-            relationship.source.as_str(),
-            entity_by_title,
-            claims_by_subject,
-        );
-        add_entity_and_claims(
-            &mut records,
-            relationship.target.as_str(),
-            entity_by_title,
-            claims_by_subject,
-        );
-        records.add_relationship(relationship.clone());
-    }
-    records
-}
-
-fn trim_relationship_records(
-    relationships: Vec<RelationshipContextRow>,
-    entity_by_title: &BTreeMap<&str, &EntityContextRow>,
-    claims_by_subject: &BTreeMap<&str, Vec<&ClaimContextRow>>,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<(ContextRecords, String, usize)> {
-    let mut committed = ContextRecords::default();
-    let mut committed_text = String::new();
-    let mut committed_tokens = tokenizer.count(&committed_text)?;
-
-    for relationship in relationships {
-        let mut candidate = committed.clone();
-        add_entity_and_claims(
-            &mut candidate,
-            relationship.source.as_str(),
-            entity_by_title,
-            claims_by_subject,
-        );
-        add_entity_and_claims(
-            &mut candidate,
-            relationship.target.as_str(),
-            entity_by_title,
-            claims_by_subject,
-        );
-        candidate.add_relationship(relationship.clone());
-        if commit_if_within_limit(
-            &candidate,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )? {
-            continue;
-        }
-
-        try_add_entity(
-            relationship.source.as_str(),
-            entity_by_title,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
-        if contains_entity_for_title(&committed, relationship.source.as_str(), entity_by_title) {
-            try_add_claims(
-                relationship.source.as_str(),
-                claims_by_subject,
-                &mut committed,
-                &mut committed_text,
-                &mut committed_tokens,
-                tokenizer,
-                max_input_length,
-            )?;
-        }
-        try_add_entity(
-            relationship.target.as_str(),
-            entity_by_title,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
-        if contains_entity_for_title(&committed, relationship.target.as_str(), entity_by_title) {
-            try_add_claims(
-                relationship.target.as_str(),
-                claims_by_subject,
-                &mut committed,
-                &mut committed_text,
-                &mut committed_tokens,
-                tokenizer,
-                max_input_length,
-            )?;
-        }
-        if contains_entity_for_title(&committed, relationship.source.as_str(), entity_by_title)
-            && contains_entity_for_title(&committed, relationship.target.as_str(), entity_by_title)
-        {
-            let _ = try_add_relationship(
-                relationship,
-                &mut committed,
-                &mut committed_text,
-                &mut committed_tokens,
-                tokenizer,
-                max_input_length,
-            )?;
-        }
-    }
-    Ok((committed, committed_text, committed_tokens))
-}
-
-fn build_entity_only_context(
-    community: i64,
-    entities: &[EntityContextRow],
-    claims_by_subject: &BTreeMap<&str, Vec<&ClaimContextRow>>,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<CommunityLocalContext> {
-    let entity_by_title = entities
+    let entities_by_title = local_context
         .iter()
-        .map(|entity| (entity.title.as_str(), entity))
+        .map(|record| (record.title.as_str(), &record.entity))
         .collect::<BTreeMap<_, _>>();
-    let mut full_records = ContextRecords::default();
-    for entity in entities {
-        add_entity_and_claims(
-            &mut full_records,
-            entity.title.as_str(),
-            &entity_by_title,
-            claims_by_subject,
-        );
-    }
-    let (full_text, full_token_count) = render_and_count(&full_records, tokenizer)?;
+    let mut entity_ids = BTreeSet::new();
+    let mut relationship_ids = BTreeSet::new();
+    let mut rendered = RenderRecords::default();
+    let mut context = String::new();
 
-    let mut committed = ContextRecords::default();
-    let mut committed_text = String::new();
-    let mut committed_tokens = tokenizer.count(&committed_text)?;
-
-    for entity in entities {
-        let mut candidate = committed.clone();
-        add_entity_and_claims(
-            &mut candidate,
-            entity.title.as_str(),
-            &entity_by_title,
-            claims_by_subject,
-        );
-        if commit_if_within_limit(
-            &candidate,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )? {
-            continue;
+    for relationship in relationships {
+        for title in [relationship.source.as_str(), relationship.target.as_str()] {
+            if let Some(entity) = entities_by_title.get(title)
+                && entity_ids.insert(entity.human_readable_id)
+            {
+                rendered.entities.push((*entity).clone());
+            }
+        }
+        if relationship_ids.insert(relationship.human_readable_id) {
+            rendered.relationships.push(relationship);
         }
 
-        try_add_entity(
-            entity.title.as_str(),
-            &entity_by_title,
-            &mut committed,
-            &mut committed_text,
-            &mut committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
-        if committed.entity_ids.contains(&entity.human_readable_id) {
-            try_add_claims(
-                entity.title.as_str(),
-                claims_by_subject,
-                &mut committed,
-                &mut committed_text,
-                &mut committed_tokens,
-                tokenizer,
-                max_input_length,
-            )?;
+        let candidate = render_context(&rendered)?;
+        if tokenizer.count(&candidate)? > max_input_length {
+            break;
         }
+        context = candidate;
     }
 
-    let was_truncated = full_token_count > max_input_length || full_text != committed_text;
-    Ok(CommunityLocalContext {
-        community,
-        full_records,
-        records: committed,
-        context: committed_text,
-        token_count: committed_tokens,
-        full_token_count,
-        was_truncated,
-    })
-}
-
-fn add_entity_and_claims<'a>(
-    records: &mut ContextRecords,
-    title: &str,
-    entity_by_title: &BTreeMap<&str, &'a EntityContextRow>,
-    claims_by_subject: &BTreeMap<&str, Vec<&'a ClaimContextRow>>,
-) {
-    if let Some(entity) = entity_by_title.get(title) {
-        records.add_entity((*entity).clone());
-    }
-    if let Some(claims) = claims_by_subject.get(title) {
-        for claim in claims {
-            records.add_claim((*claim).clone());
-        }
-    }
-}
-
-fn try_add_entity(
-    title: &str,
-    entity_by_title: &BTreeMap<&str, &EntityContextRow>,
-    committed: &mut ContextRecords,
-    committed_text: &mut String,
-    committed_tokens: &mut usize,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<()> {
-    let Some(entity) = entity_by_title.get(title) else {
-        return Ok(());
-    };
-    let mut candidate = committed.clone();
-    candidate.add_entity((*entity).clone());
-    let _ = commit_if_within_limit(
-        &candidate,
-        committed,
-        committed_text,
-        committed_tokens,
-        tokenizer,
-        max_input_length,
-    )?;
-    Ok(())
-}
-
-fn try_add_claims(
-    title: &str,
-    claims_by_subject: &BTreeMap<&str, Vec<&ClaimContextRow>>,
-    committed: &mut ContextRecords,
-    committed_text: &mut String,
-    committed_tokens: &mut usize,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<()> {
-    let Some(claims) = claims_by_subject.get(title) else {
-        return Ok(());
-    };
-    for claim in claims {
-        let mut candidate = committed.clone();
-        candidate.add_claim((*claim).clone());
-        let _ = commit_if_within_limit(
-            &candidate,
-            committed,
-            committed_text,
-            committed_tokens,
-            tokenizer,
-            max_input_length,
-        )?;
-    }
-    Ok(())
-}
-
-fn try_add_relationship(
-    relationship: RelationshipContextRow,
-    committed: &mut ContextRecords,
-    committed_text: &mut String,
-    committed_tokens: &mut usize,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<bool> {
-    let mut candidate = committed.clone();
-    candidate.add_relationship(relationship);
-    commit_if_within_limit(
-        &candidate,
-        committed,
-        committed_text,
-        committed_tokens,
-        tokenizer,
-        max_input_length,
-    )
-}
-
-fn contains_entity_for_title(
-    records: &ContextRecords,
-    title: &str,
-    entity_by_title: &BTreeMap<&str, &EntityContextRow>,
-) -> bool {
-    entity_by_title
-        .get(title)
-        .is_some_and(|entity| records.entity_ids.contains(&entity.human_readable_id))
-}
-
-fn commit_if_within_limit(
-    candidate: &ContextRecords,
-    committed: &mut ContextRecords,
-    committed_text: &mut String,
-    committed_tokens: &mut usize,
-    tokenizer: &dyn Tokenizer,
-    max_input_length: usize,
-) -> Result<bool> {
-    let candidate_text = render_context(candidate)?;
-    let candidate_tokens = tokenizer.count(&candidate_text)?;
-    if candidate_tokens > max_input_length {
-        return Ok(false);
-    }
-    *committed = candidate.clone();
-    *committed_text = candidate_text;
-    *committed_tokens = candidate_tokens;
-    Ok(true)
-}
-
-fn claims_by_subject(claims: &[ClaimContextRow]) -> BTreeMap<&str, Vec<&ClaimContextRow>> {
-    let mut grouped: BTreeMap<&str, Vec<&ClaimContextRow>> = BTreeMap::new();
-    for claim in claims {
-        grouped
-            .entry(claim.subject_id.as_str())
-            .or_default()
-            .push(claim);
-    }
-    for values in grouped.values_mut() {
-        values.sort_by_key(|claim| claim.human_readable_id);
-    }
-    grouped
-}
-
-pub(crate) fn render_context(records: &ContextRecords) -> Result<String> {
-    let reports = if records.reports.is_empty() {
-        String::new()
+    if context.is_empty() {
+        render_context(&rendered)
     } else {
-        render_reports_csv(&records.reports)?
-    };
-    let entities = if records.entities.is_empty() {
-        String::new()
-    } else {
-        render_entities_csv(&records.entities)?
-    };
-    let claims = if records.claims.is_empty() {
-        String::new()
-    } else {
-        render_claims_csv(&records.claims)?
-    };
-    let relationships = if records.relationships.is_empty() {
-        String::new()
-    } else {
-        render_relationships_csv(&records.relationships)?
-    };
+        Ok(context)
+    }
+}
 
-    Ok([reports, entities, claims, relationships]
+fn render_context(records: &RenderRecords) -> Result<String> {
+    let entities = (!records.entities.is_empty())
+        .then(|| render_entities_csv(&records.entities))
+        .transpose()?;
+    let relationships = (!records.relationships.is_empty())
+        .then(|| render_relationships_csv(&records.relationships))
+        .transpose()?;
+
+    Ok([entities, relationships]
         .into_iter()
-        .filter(|section| !section.is_empty())
+        .flatten()
         .collect::<Vec<_>>()
-        .join("\n"))
-}
-
-fn render_reports_csv(rows: &[ReportContextRow]) -> Result<String> {
-    render_section(
-        "----Reports-----",
-        &["community", "full_content"],
-        rows.iter()
-            .map(|report| vec![report.community.to_string(), report.full_content.clone()])
-            .collect(),
-    )
+        .join("\n\n"))
 }
 
 fn render_entities_csv(rows: &[EntityContextRow]) -> Result<String> {
     render_section(
         "-----Entities-----",
-        &["human_readable_id", "title", "description"],
+        &["human_readable_id", "title", "description", "degree"],
         rows.iter()
             .map(|entity| {
                 vec![
                     entity.human_readable_id.to_string(),
                     entity.title.clone(),
-                    description_or_default(&entity.description),
-                ]
-            })
-            .collect(),
-    )
-}
-
-fn render_claims_csv(rows: &[ClaimContextRow]) -> Result<String> {
-    render_section(
-        "-----Claims-----",
-        &[
-            "human_readable_id",
-            "subject_id",
-            "type",
-            "status",
-            "description",
-        ],
-        rows.iter()
-            .map(|claim| {
-                vec![
-                    claim.human_readable_id.to_string(),
-                    claim.subject_id.clone(),
-                    claim.claim_type.clone(),
-                    claim.status.clone(),
-                    description_or_default(&claim.description),
+                    entity.description.clone(),
+                    entity.degree.to_string(),
                 ]
             })
             .collect(),
@@ -550,64 +246,74 @@ fn render_claims_csv(rows: &[ClaimContextRow]) -> Result<String> {
 fn render_relationships_csv(rows: &[RelationshipContextRow]) -> Result<String> {
     render_section(
         "-----Relationships-----",
-        &["human_readable_id", "source", "target", "description"],
+        &[
+            "human_readable_id",
+            "source",
+            "target",
+            "description",
+            "combined_degree",
+        ],
         rows.iter()
             .map(|relationship| {
                 vec![
                     relationship.human_readable_id.to_string(),
                     relationship.source.clone(),
                     relationship.target.clone(),
-                    description_or_default(&relationship.description),
+                    relationship.description.clone(),
+                    relationship.combined_degree.to_string(),
                 ]
             })
             .collect(),
     )
 }
 
-fn render_and_count(
-    records: &ContextRecords,
-    tokenizer: &dyn Tokenizer,
-) -> Result<(String, usize)> {
-    let text = render_context(records)?;
-    let count = tokenizer.count(&text)?;
-    Ok((text, count))
-}
-
 fn render_section(title: &str, headers: &[&str], rows: Vec<Vec<String>>) -> Result<String> {
     let mut writer = WriterBuilder::new()
         .has_headers(false)
         .from_writer(Vec::new());
-    writer.write_record(headers).map_err(|source| {
-        invalid_data(
-            COMMUNITY_REPORTS_CONTEXT,
-            &format!("failed to write community context csv: {source}"),
-        )
-    })?;
+    writer
+        .write_record(headers)
+        .map_err(|source| csv_context_error(&source))?;
     for row in rows {
-        writer.write_record(row).map_err(|source| {
-            invalid_data(
-                COMMUNITY_REPORTS_CONTEXT,
-                &format!("failed to write community context csv: {source}"),
-            )
-        })?;
+        writer
+            .write_record(row)
+            .map_err(|source| csv_context_error(&source))?;
     }
-    let bytes = writer.into_inner().map_err(|source| {
-        invalid_data(
-            COMMUNITY_REPORTS_CONTEXT,
-            &format!("failed to finish csv section {title}: {source}"),
-        )
-    })?;
+    let bytes = writer
+        .into_inner()
+        .map_err(|source| csv_context_error(&source))?;
     let csv = String::from_utf8(bytes).map_err(|source| {
         invalid_data(
             COMMUNITY_REPORTS_CONTEXT,
-            &format!("failed to encode csv section {title}: {source}"),
+            &format!("failed to encode community context csv: {source}"),
         )
     })?;
-    Ok(format!("{title}\n{}", csv.trim_end()))
+    Ok(format!("{title}\n{csv}"))
+}
+
+fn csv_context_error(source: &impl std::fmt::Display) -> crate::GraphLoomError {
+    invalid_data(
+        COMMUNITY_REPORTS_CONTEXT,
+        &format!("failed to write community context csv: {source}"),
+    )
+}
+
+fn entity_with_default_description(entity: &EntityContextRow) -> EntityContextRow {
+    let mut entity = entity.clone();
+    entity.description = description_or_default(&entity.description);
+    entity
+}
+
+fn relationship_with_default_description(
+    relationship: &RelationshipContextRow,
+) -> RelationshipContextRow {
+    let mut relationship = relationship.clone();
+    relationship.description = description_or_default(&relationship.description);
+    relationship
 }
 
 fn description_or_default(description: &str) -> String {
-    if description.trim().is_empty() {
+    if description.is_empty() {
         NO_DESCRIPTION.to_owned()
     } else {
         description.to_owned()
@@ -621,318 +327,155 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_explode_entity_memberships_across_levels() {
-        let entities = vec![entity("e1", 0, "ALICE", 2)];
-        let communities = vec![
-            community(0, 0, vec!["e1"]),
-            community(1, 1, vec!["missing", "e1"]),
-        ];
+    fn test_should_explode_memberships_in_entity_input_order() {
+        let entities = vec![entity("e2", 2, "BOB", 1), entity("e1", 1, "ALICE", 2)];
+        let communities = vec![community(0, 0, vec!["e1", "e2"])];
 
         let exploded = explode_communities(&communities, &entities);
 
         assert_eq!(
             exploded
                 .iter()
-                .map(|row| (row.community, row.level, row.entity.id.as_str()))
+                .map(|row| row.entity.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![(0, 0, "e1"), (1, 1, "e1")]
+            vec!["e2", "e1"]
         );
     }
 
     #[test]
-    fn test_should_escape_csv_and_sort_relationship_context() {
+    fn test_should_match_graphrag_csv_shape_and_newlines() {
         let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-        let communities = vec![community(0, 0, vec!["e1", "e2", "e3"])];
-        let entities = vec![
-            entity("e1", 0, "ALICE", 1),
-            entity("e2", 1, "BOB", 1),
-            entity("e3", 2, "CAROL", 1),
-        ];
-        let relationships = vec![
-            relationship_with_degree(2, "ALICE", "BOB", "low", 8),
-            relationship_with_degree(1, "BOB", "CAROL", "quote \"and\", comma\nline", 9),
-        ];
         let contexts = build_local_contexts(
+            &[community(0, 0, vec!["e1", "e2"])],
+            &[
+                entity("e1", 10, "ALICE", 7),
+                entity_with_description("e2", 20, "BOB", 3, "quote \"and\", comma\nline"),
+            ],
+            &[relationship(30, "ALICE", "BOB", "works", 10)],
+            &[],
+            &tokenizer,
+            8_000,
+        )
+        .expect("contexts");
+
+        assert_eq!(
+            contexts.get(&0).expect("context").context,
+            "-----Entities-----\nhuman_readable_id,title,description,degree\n10,ALICE,ALICE \
+             description,7\n20,BOB,\"quote \"\"and\"\", \
+             comma\nline\",3\n\n\n-----Relationships-----\nhuman_readable_id,source,target,\
+             description,combined_degree\n30,ALICE,BOB,works,10\n"
+        );
+    }
+
+    #[test]
+    fn test_should_use_first_source_edge_before_first_target_edge() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["e1", "e2", "e3"])],
+            &[
+                entity("e1", 1, "ALICE", 3),
+                entity("e2", 2, "BOB", 2),
+                entity("e3", 3, "CAROL", 1),
+            ],
+            &[
+                relationship(10, "BOB", "ALICE", "target first", 5),
+                relationship(11, "ALICE", "CAROL", "source wins", 4),
+                relationship(12, "ALICE", "BOB", "later source", 20),
+            ],
+            &[],
+            &tokenizer,
+            1_000,
+        )
+        .expect("contexts");
+        let context = &contexts.get(&0).expect("context").context;
+
+        assert!(context.contains("10,BOB,ALICE,target first,5"));
+        assert!(context.contains("11,ALICE,CAROL,source wins,4"));
+        assert!(!context.contains("12,ALICE,BOB,later source,20"));
+        assert!(!context.contains("-----Claims-----"));
+    }
+
+    #[test]
+    fn test_should_return_empty_context_when_graphrag_has_no_selected_edge() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["e1"])],
+            &[entity("e1", 1, "ALICE", 1)],
+            &[],
+            &[],
+            &tokenizer,
+            1_000,
+        )
+        .expect("contexts");
+
+        assert!(contexts.get(&0).expect("context").context.is_empty());
+    }
+
+    #[test]
+    fn test_should_keep_first_edge_when_it_alone_exceeds_limit_like_graphrag() {
+        let tokenizer = WordCountTokenizer;
+        let communities = [community(0, 0, vec!["e1", "e2"])];
+        let entities = [
+            entity_with_description("e1", 1, "ALICE", 2, "description with several words"),
+            entity_with_description("e2", 2, "BOB", 1, "another long description"),
+        ];
+        let relationships = [relationship(
+            10,
+            "ALICE",
+            "BOB",
+            "relationship description",
+            3,
+        )];
+
+        let constrained =
+            build_local_contexts(&communities, &entities, &relationships, &[], &tokenizer, 1)
+                .expect("constrained context");
+        let unconstrained = build_local_contexts(
             &communities,
             &entities,
             &relationships,
             &[],
             &tokenizer,
-            8_000,
-        )
-        .expect("contexts");
-
-        let context = &contexts.get(&0).expect("community").context;
-
-        assert!(context.contains("\"quote \"\"and\"\", comma\nline\""));
-        assert!(
-            context.find("1,BOB,CAROL").expect("relationship 1")
-                < context.find("2,ALICE,BOB").expect("relationship 2")
-        );
-    }
-
-    #[test]
-    fn test_should_include_entities_without_relationships() {
-        let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1"])],
-            &[entity("e1", 0, "ALICE", 3)],
-            &[],
-            &[],
-            &tokenizer,
-            8_000,
-        )
-        .expect("contexts");
-
-        assert!(contexts.get(&0).expect("context").context.contains("ALICE"));
-    }
-
-    #[test]
-    fn test_should_preserve_relationship_degree_priority_over_id_order() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1", "e2", "e3"])],
-            &[
-                entity("e1", 10, "ALICE", 1),
-                entity("e2", 11, "BOB", 1),
-                entity("e3", 12, "CAROL", 1),
-            ],
-            &[
-                relationship_with_degree(1, "BOB", "CAROL", "low", 2),
-                relationship_with_degree(100, "ALICE", "BOB", "high", 20),
-            ],
-            &[],
-            &tokenizer,
             1_000,
         )
-        .expect("contexts");
+        .expect("unconstrained context");
+        let constrained = &constrained.get(&0).expect("constrained community").context;
+        let unconstrained = &unconstrained
+            .get(&0)
+            .expect("unconstrained community")
+            .context;
 
-        let context = &contexts.get(&0).expect("community").context;
-
-        assert!(
-            context.find("100,ALICE,BOB").expect("relationship 100")
-                < context.find("1,BOB,CAROL").expect("relationship 1")
-        );
+        assert_eq!(constrained, unconstrained);
+        assert!(tokenizer.count(constrained).expect("token count") > 1);
     }
 
-    #[test]
-    fn test_should_preserve_entity_only_degree_priority_over_id_order() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1", "e2"])],
-            &[entity("e1", 1, "LOW", 2), entity("e2", 100, "HIGH", 20)],
-            &[],
-            &[],
-            &tokenizer,
-            1_000,
-        )
-        .expect("contexts");
+    #[derive(Debug)]
+    struct WordCountTokenizer;
 
-        let context = &contexts.get(&0).expect("community").context;
+    impl Tokenizer for WordCountTokenizer {
+        fn count(&self, text: &str) -> graphloom_llm::Result<usize> {
+            Ok(text.split_whitespace().count())
+        }
 
-        assert!(context.find("100,HIGH").expect("high") < context.find("1,LOW").expect("low"));
-    }
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            Ok((0..text.split_whitespace().count())
+                .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+                .collect())
+        }
 
-    #[test]
-    fn test_should_deduplicate_without_losing_first_insert_order() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1", "e2", "e3"])],
-            &[
-                entity("e1", 10, "ALICE", 1),
-                entity("e2", 20, "BOB", 1),
-                entity("e3", 30, "CAROL", 1),
-            ],
-            &[
-                relationship_with_degree(100, "ALICE", "BOB", "first", 20),
-                relationship_with_degree(100, "ALICE", "BOB", "duplicate", 19),
-                relationship_with_degree(1, "BOB", "CAROL", "second", 2),
-            ],
-            &[
-                claim(7, "ALICE", "alpha"),
-                claim(7, "ALICE", "duplicate alpha"),
-                claim(8, "BOB", "beta"),
-            ],
-            &tokenizer,
-            1_000,
-        )
-        .expect("contexts");
-
-        let context = &contexts.get(&0).expect("community").context;
-
-        assert_eq!(context.matches("10,ALICE").count(), 1);
-        assert_eq!(context.matches("7,ALICE,TYPE").count(), 1);
-        assert_eq!(context.matches("100,ALICE,BOB").count(), 1);
-        assert!(
-            context.find("100,ALICE,BOB").expect("relationship 100")
-                < context.find("1,BOB,CAROL").expect("relationship 1")
-        );
-    }
-
-    #[test]
-    fn test_should_not_commit_oversized_first_relationship_bundle() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1", "e2"])],
-            &[
-                entity_with_description("e1", 10, "ALICE", 1, "small"),
-                entity_with_description("e2", 20, "BOB", 1, "tiny"),
-            ],
-            &[relationship_with_degree(
-                100,
-                "ALICE",
-                "BOB",
-                "one two three four five six seven eight",
-                20,
-            )],
-            &[],
-            &tokenizer,
-            4,
-        )
-        .expect("contexts");
-        let local = contexts.get(&0).expect("community");
-
-        assert!(local.token_count <= 4);
-        assert!(
-            !local
-                .context
-                .contains("one two three four five six seven eight")
-        );
-        assert!(local.context.is_char_boundary(local.context.len()));
-    }
-
-    #[test]
-    fn test_should_skip_oversized_first_entity_and_continue() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["e1", "e2"])],
-            &[
-                entity_with_description("e1", 100, "BIG", 20, "one two three four five"),
-                entity_with_description("e2", 1, "SMALL", 2, "tiny"),
-            ],
-            &[],
-            &[],
-            &tokenizer,
-            9,
-        )
-        .expect("contexts");
-        let local = contexts.get(&0).expect("community");
-
-        assert!(local.token_count <= 9);
-        assert!(!local.context.contains("BIG"));
-        assert!(local.context.contains("SMALL"));
-    }
-
-    #[test]
-    fn test_should_not_add_claim_or_relationship_when_source_entity_is_missing() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["source", "target"])],
-            &[
-                entity_with_description(
-                    "source",
-                    10,
-                    "SOURCE",
-                    2,
-                    "one two three four five six seven eight nine ten eleven twelve",
-                ),
-                entity_with_description("target", 20, "TARGET", 1, "tiny"),
-            ],
-            &[relationship_with_degree(
-                100, "SOURCE", "TARGET", "link", 20,
-            )],
-            &[claim(7, "SOURCE", "short")],
-            &tokenizer,
-            18,
-        )
-        .expect("contexts");
-        let local = contexts.get(&0).expect("community");
-
-        assert!(local.token_count <= 18);
-        assert!(!local.records.entity_ids.contains(&10));
-        assert!(local.records.entity_ids.contains(&20));
-        assert!(!local.records.claim_ids.contains(&7));
-        assert!(!local.records.relationship_ids.contains(&100));
-        assert!(!local.context.contains("SOURCE"));
-        assert!(!local.context.contains("-----Claims-----"));
-        assert!(!local.context.contains("-----Relationships-----"));
-        assert!(local.context.contains("TARGET"));
-    }
-
-    #[test]
-    fn test_should_not_add_relationship_when_target_entity_is_missing() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["source", "target"])],
-            &[
-                entity_with_description("source", 10, "SOURCE", 2, "tiny"),
-                entity_with_description(
-                    "target",
-                    20,
-                    "TARGET",
-                    1,
-                    "one two three four five six seven eight nine ten",
-                ),
-            ],
-            &[relationship_with_degree(
-                100, "SOURCE", "TARGET", "link", 20,
-            )],
-            &[],
-            &tokenizer,
-            18,
-        )
-        .expect("contexts");
-        let local = contexts.get(&0).expect("community");
-
-        assert!(local.token_count <= 18);
-        assert!(local.records.entity_ids.contains(&10));
-        assert!(!local.records.entity_ids.contains(&20));
-        assert!(!local.records.relationship_ids.contains(&100));
-        assert!(local.context.contains("SOURCE"));
-        assert!(!local.context.contains("TARGET"));
-        assert!(!local.context.contains("-----Relationships-----"));
-    }
-
-    #[test]
-    fn test_should_add_relationship_when_both_endpoint_entities_exist() {
-        let tokenizer = WordCountTokenizer;
-        let contexts = build_local_contexts(
-            &[community(0, 0, vec!["source", "target"])],
-            &[
-                entity_with_description("source", 10, "SOURCE", 2, "tiny"),
-                entity_with_description("target", 20, "TARGET", 1, "small"),
-            ],
-            &[relationship_with_degree(
-                100, "SOURCE", "TARGET", "link", 20,
-            )],
-            &[claim(7, "SOURCE", "short")],
-            &tokenizer,
-            100,
-        )
-        .expect("contexts");
-        let local = contexts.get(&0).expect("community");
-
-        assert!(local.records.entity_ids.contains(&10));
-        assert!(local.records.entity_ids.contains(&20));
-        assert!(local.records.claim_ids.contains(&7));
-        assert!(local.records.relationship_ids.contains(&100));
-        assert!(local.context.contains("100,SOURCE,TARGET"));
-    }
-
-    fn community(community: i64, level: i64, entity_ids: Vec<&str>) -> CommunityInputRow {
-        CommunityInputRow {
-            community,
-            level,
-            parent: -1,
-            children: Vec::new(),
-            entity_ids: entity_ids.into_iter().map(str::to_owned).collect(),
-            period: "2026-07-08".to_owned(),
-            size: 1,
+        fn decode(&self, _tokens: &[u32]) -> graphloom_llm::Result<String> {
+            Ok(String::new())
         }
     }
 
     fn entity(id: &str, human_readable_id: i64, title: &str, degree: i64) -> EntityContextRow {
-        entity_with_description(id, human_readable_id, title, degree, "desc")
+        entity_with_description(
+            id,
+            human_readable_id,
+            title,
+            degree,
+            &format!("{title} description"),
+        )
     }
 
     fn entity_with_description(
@@ -951,7 +494,7 @@ mod tests {
         }
     }
 
-    fn relationship_with_degree(
+    fn relationship(
         human_readable_id: i64,
         source: &str,
         target: &str,
@@ -959,7 +502,7 @@ mod tests {
         combined_degree: i64,
     ) -> RelationshipContextRow {
         RelationshipContextRow {
-            id: format!("rel-{human_readable_id}"),
+            id: format!("r{human_readable_id}"),
             human_readable_id,
             source: source.to_owned(),
             target: target.to_owned(),
@@ -968,33 +511,15 @@ mod tests {
         }
     }
 
-    fn claim(human_readable_id: i64, subject_id: &str, description: &str) -> ClaimContextRow {
-        ClaimContextRow {
-            human_readable_id,
-            subject_id: subject_id.to_owned(),
-            claim_type: "TYPE".to_owned(),
-            status: "TRUE".to_owned(),
-            description: description.to_owned(),
-        }
-    }
-
-    #[derive(Debug)]
-    struct WordCountTokenizer;
-
-    impl Tokenizer for WordCountTokenizer {
-        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
-            Ok(vec![0; self.count(text)?])
-        }
-
-        fn decode(&self, _tokens: &[u32]) -> graphloom_llm::Result<String> {
-            Ok(String::new())
-        }
-
-        fn count(&self, text: &str) -> graphloom_llm::Result<usize> {
-            Ok(text
-                .split(|character: char| !character.is_alphanumeric())
-                .filter(|token| !token.is_empty())
-                .count())
+    fn community(community: i64, level: i64, entity_ids: Vec<&str>) -> CommunityInputRow {
+        CommunityInputRow {
+            community,
+            level,
+            parent: -1,
+            children: Vec::new(),
+            entity_ids: entity_ids.into_iter().map(str::to_owned).collect(),
+            period: String::new(),
+            size: 0,
         }
     }
 }

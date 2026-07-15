@@ -863,7 +863,7 @@ async fn test_should_fail_embedding_cardinality_mismatch_without_secret() {
 }
 
 #[tokio::test]
-async fn test_should_fail_malformed_community_report_without_secret() {
+async fn test_should_skip_malformed_community_report_without_secret() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -900,17 +900,18 @@ async fn test_should_fail_malformed_community_report_without_secret() {
             tempdir.path().to_str().expect("utf8 root"),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("create_community_reports"))
+        .success()
+        .stdout(predicate::str::contains("Reports: 0"))
+        .stderr(predicate::str::contains("returned invalid JSON"))
         .stderr(predicate::str::contains("super-secret-key").not());
 
     assert!(
-        !tempdir
+        tempdir
             .path()
             .join("output")
             .join("community_reports.parquet")
             .exists(),
-        "malformed report must not be accepted as an empty successful report",
+        "malformed reports should be skipped while preserving the workflow output",
     );
     let log = tokio::fs::read_to_string(tempdir.path().join("logs").join("indexing-engine.log"))
         .await

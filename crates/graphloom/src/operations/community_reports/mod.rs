@@ -16,6 +16,5 @@ pub(crate) use tables::{
 };
 pub(crate) use types::{
     ClaimContextRow, CommunityInputRow, CommunityLocalContext, CommunityReportFindingRow,
-    CommunityReportRow, ContextRecords, EntityContextRow, ExplodedEntityRow,
-    RelationshipContextRow, ReportContextRow,
+    CommunityReportRow, EntityContextRow, ExplodedEntityRow, RelationshipContextRow,
 };

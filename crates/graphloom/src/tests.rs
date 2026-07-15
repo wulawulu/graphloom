@@ -690,8 +690,8 @@ async fn test_should_run_create_community_reports_workflow() {
         let prompts = prompts.lock().expect("prompts lock");
         assert_eq!(prompts.len(), 2);
         assert!(!prompts[0].contains("----Reports-----"));
-        assert!(prompts[1].contains("----Reports-----"));
-        assert!(prompts[1].contains("# Child"));
+        assert!(!prompts[1].contains("----Reports-----"));
+        assert!(!prompts[1].contains("# Child"));
     }
     let reports = provider
         .read_dataframe("community_reports")
