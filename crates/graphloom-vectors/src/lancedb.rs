@@ -3,20 +3,27 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
-    StringArray, types::Float32Type,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
+    RecordBatchIterator, RecordBatchReader, StringArray, types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
+use chrono::{Datelike, Timelike, Utc};
 use futures_util::TryStreamExt;
 use lancedb::{
     Connection, Table, connect,
+    expr::{col, is_in, lit},
+    index::{Index, IndexType, vector::IvfFlatIndexBuilder},
     query::{ExecutableQuery, QueryBase, Select},
 };
 
 use crate::{
     Result, VectorDocument, VectorError, VectorIndexSchema, VectorStore, VectorStoreConfig,
 };
+
+const DUMMY_ID: &str = "__DUMMY__";
+const CREATE_DATE_FIELD: &str = "create_date";
+const UPDATE_DATE_FIELD: &str = "update_date";
 
 /// LanceDB-backed vector store.
 pub struct LanceDbVectorStore {
@@ -60,6 +67,21 @@ impl LanceDbVectorStore {
             .await
             .map_err(VectorError::from)
     }
+
+    async fn create_indexed_table(&self, schema: &VectorIndexSchema) -> Result<Table> {
+        let dummy = VectorDocument {
+            id: DUMMY_ID.to_owned(),
+            vector: vec![0.0; schema.vector_size],
+        };
+        let table = self
+            .connection
+            .create_table(&schema.index_name, documents_reader(schema, &[dummy])?)
+            .execute()
+            .await?;
+        create_vector_index(&table, schema).await?;
+        delete_dummy(&table, schema).await?;
+        Ok(table)
+    }
 }
 
 #[async_trait]
@@ -69,13 +91,11 @@ impl VectorStore for LanceDbVectorStore {
         if self.table_exists(&schema.index_name).await? {
             let table = self.open_table(schema).await?;
             validate_table_schema(schema, table.schema().await?.as_ref())?;
+            ensure_vector_index(&table, schema).await?;
             return Ok(());
         }
 
-        self.connection
-            .create_empty_table(&schema.index_name, arrow_schema(schema)?)
-            .execute()
-            .await?;
+        self.create_indexed_table(schema).await?;
         Ok(())
     }
 
@@ -84,10 +104,7 @@ impl VectorStore for LanceDbVectorStore {
         if self.table_exists(&schema.index_name).await? {
             self.connection.drop_table(&schema.index_name, &[]).await?;
         }
-        self.connection
-            .create_empty_table(&schema.index_name, arrow_schema(schema)?)
-            .execute()
-            .await?;
+        self.create_indexed_table(schema).await?;
         Ok(())
     }
 
@@ -105,11 +122,17 @@ impl VectorStore for LanceDbVectorStore {
         let table = self.open_table(schema).await?;
         let reader = documents_reader(schema, documents)?;
 
-        let mut upsert = table.merge_insert(&[schema.id_field.as_str()]);
-        upsert
-            .when_matched_update_all(None)
-            .when_not_matched_insert_all();
-        upsert.execute(reader).await?;
+        if contains_existing_id(&table, schema, documents).await? {
+            let mut upsert = table.merge_insert(&[schema.id_field.as_str()]);
+            upsert
+                .when_matched_update_all(None)
+                .when_not_matched_insert_all();
+            upsert.execute(reader).await?;
+            ensure_vector_index(&table, schema).await?;
+        } else {
+            table.add(reader).execute().await?;
+            ensure_vector_index(&table, schema).await?;
+        }
         Ok(())
     }
 
@@ -196,17 +219,104 @@ fn arrow_schema(schema: &VectorIndexSchema) -> Result<SchemaRef> {
                 schema.vector_size
             ),
         })?;
-    Ok(Arc::new(Schema::new(vec![
-        Field::new(&schema.id_field, DataType::Utf8, false),
+    let mut fields = vec![
+        Field::new(&schema.id_field, DataType::Utf8, true),
         Field::new(
             &schema.vector_field,
             DataType::FixedSizeList(
                 Arc::new(Field::new("item", DataType::Float32, true)),
                 vector_size,
             ),
-            false,
+            true,
         ),
-    ])))
+        Field::new(CREATE_DATE_FIELD, DataType::Utf8, true),
+        Field::new(UPDATE_DATE_FIELD, DataType::Utf8, true),
+    ];
+    fields.extend(timestamp_component_fields(CREATE_DATE_FIELD));
+    fields.extend(timestamp_component_fields(UPDATE_DATE_FIELD));
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn timestamp_component_fields(prefix: &str) -> Vec<Field> {
+    vec![
+        Field::new(format!("{prefix}_year"), DataType::Int64, true),
+        Field::new(format!("{prefix}_month"), DataType::Int64, true),
+        Field::new(format!("{prefix}_month_name"), DataType::Utf8, true),
+        Field::new(format!("{prefix}_day"), DataType::Int64, true),
+        Field::new(format!("{prefix}_day_of_week"), DataType::Utf8, true),
+        Field::new(format!("{prefix}_hour"), DataType::Int64, true),
+        Field::new(format!("{prefix}_quarter"), DataType::Int64, true),
+    ]
+}
+
+async fn create_vector_index(table: &Table, schema: &VectorIndexSchema) -> Result<()> {
+    table
+        .create_index(
+            &[schema.vector_field.as_str()],
+            Index::IvfFlat(IvfFlatIndexBuilder::default()),
+        )
+        .execute()
+        .await?;
+    Ok(())
+}
+
+async fn delete_dummy(table: &Table, schema: &VectorIndexSchema) -> Result<()> {
+    let predicate = format!("{} = '{DUMMY_ID}'", schema.id_field);
+    table.delete(&predicate).await?;
+    Ok(())
+}
+
+async fn ensure_vector_index(table: &Table, schema: &VectorIndexSchema) -> Result<()> {
+    let indices = table.list_indices().await?;
+    if indices.iter().any(|index| {
+        index.index_type == IndexType::IvfFlat
+            && index.columns.as_slice() == [schema.vector_field.as_str()]
+    }) {
+        return Ok(());
+    }
+
+    if table.count_rows(None).await? == 0 {
+        let dummy = VectorDocument {
+            id: DUMMY_ID.to_owned(),
+            vector: vec![0.0; schema.vector_size],
+        };
+        table
+            .add(documents_reader(schema, &[dummy])?)
+            .execute()
+            .await?;
+        create_vector_index(table, schema).await?;
+        delete_dummy(table, schema).await?;
+    } else {
+        create_vector_index(table, schema).await?;
+    }
+    Ok(())
+}
+
+async fn contains_existing_id(
+    table: &Table,
+    schema: &VectorIndexSchema,
+    documents: &[VectorDocument],
+) -> Result<bool> {
+    let filter = is_in(
+        col(&schema.id_field),
+        documents
+            .iter()
+            .map(|document| lit(document.id.clone()))
+            .collect(),
+    );
+    let mut rows = table
+        .query()
+        .select(Select::columns(&[&schema.id_field]))
+        .only_if_expr(filter)
+        .limit(1)
+        .execute()
+        .await?;
+    while let Some(batch) = rows.try_next().await? {
+        if batch.num_rows() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_table_schema(schema: &VectorIndexSchema, table_schema: &Schema) -> Result<()> {
@@ -260,6 +370,35 @@ fn validate_table_schema(schema: &VectorIndexSchema, table_schema: &Schema) -> R
                 vector_field.data_type(),
             ),
         });
+    }
+    for expected in [
+        Field::new(CREATE_DATE_FIELD, DataType::Utf8, true),
+        Field::new(UPDATE_DATE_FIELD, DataType::Utf8, true),
+    ]
+    .into_iter()
+    .chain(timestamp_component_fields(CREATE_DATE_FIELD))
+    .chain(timestamp_component_fields(UPDATE_DATE_FIELD))
+    {
+        let actual = table_schema
+            .field_with_name(expected.name())
+            .map_err(|source| VectorError::InvalidConfig {
+                message: format!(
+                    "index {} missing GraphRAG metadata field {}: {source}",
+                    schema.index_name,
+                    expected.name(),
+                ),
+            })?;
+        if actual.data_type() != expected.data_type() {
+            return Err(VectorError::InvalidConfig {
+                message: format!(
+                    "index {} metadata field {} must be {:?}, got {:?}",
+                    schema.index_name,
+                    expected.name(),
+                    expected.data_type(),
+                    actual.data_type(),
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -326,14 +465,88 @@ fn documents_reader(
         }),
         vector_size,
     );
-    let batch = RecordBatch::try_new(
-        Arc::clone(&arrow_schema),
-        vec![Arc::new(ids), Arc::new(vectors)],
-    )?;
+    let timestamps = documents
+        .iter()
+        .map(|_| TimestampMetadata::now())
+        .collect::<Vec<_>>();
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(vectors)];
+    columns.extend(timestamp_arrays(&timestamps));
+    let batch = RecordBatch::try_new(Arc::clone(&arrow_schema), columns)?;
     Ok(Box::new(RecordBatchIterator::new(
         vec![Ok(batch)],
         arrow_schema,
     )))
+}
+
+#[derive(Debug)]
+struct TimestampMetadata {
+    iso: String,
+    year: i64,
+    month: i64,
+    month_name: String,
+    day: i64,
+    day_of_week: String,
+    hour: i64,
+    quarter: i64,
+}
+
+impl TimestampMetadata {
+    fn now() -> Self {
+        let now = Utc::now();
+        let month = now.month();
+        Self {
+            iso: now.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string(),
+            year: i64::from(now.year()),
+            month: i64::from(month),
+            month_name: now.format("%B").to_string(),
+            day: i64::from(now.day()),
+            day_of_week: now.format("%A").to_string(),
+            hour: i64::from(now.hour()),
+            quarter: i64::from((month - 1) / 3 + 1),
+        }
+    }
+}
+
+fn timestamp_arrays(timestamps: &[TimestampMetadata]) -> Vec<ArrayRef> {
+    let row_count = timestamps.len();
+    vec![
+        Arc::new(StringArray::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.iso.as_str()),
+        )),
+        Arc::new(StringArray::new_null(row_count)),
+        Arc::new(Int64Array::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.year),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.month),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            timestamps
+                .iter()
+                .map(|timestamp| timestamp.month_name.as_str()),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.day),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            timestamps
+                .iter()
+                .map(|timestamp| timestamp.day_of_week.as_str()),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.hour),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            timestamps.iter().map(|timestamp| timestamp.quarter),
+        )),
+        Arc::new(Int64Array::new_null(row_count)),
+        Arc::new(Int64Array::new_null(row_count)),
+        Arc::new(StringArray::new_null(row_count)),
+        Arc::new(Int64Array::new_null(row_count)),
+        Arc::new(StringArray::new_null(row_count)),
+        Arc::new(Int64Array::new_null(row_count)),
+        Arc::new(Int64Array::new_null(row_count)),
+    ]
 }
 
 fn vector_value(
@@ -453,6 +666,97 @@ mod tests {
                 .vector,
             vec![0.0, 1.0]
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_match_graphrag_schema_timestamps_and_vector_index() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let schema = schema("text_unit_text", 2);
+        let store = connect_store(&tempdir).await;
+        store
+            .upsert_documents(
+                &schema,
+                &[VectorDocument {
+                    id: "document".to_owned(),
+                    vector: vec![1.0, 0.0],
+                }],
+            )
+            .await
+            .expect("upsert");
+
+        let table = store.open_table(&schema).await.expect("open table");
+        let table_schema = table.schema().await.expect("table schema");
+        assert_eq!(
+            table_schema.as_ref(),
+            arrow_schema(&schema).expect("expected schema").as_ref(),
+        );
+        assert_eq!(
+            table_schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "id",
+                "vector",
+                "create_date",
+                "update_date",
+                "create_date_year",
+                "create_date_month",
+                "create_date_month_name",
+                "create_date_day",
+                "create_date_day_of_week",
+                "create_date_hour",
+                "create_date_quarter",
+                "update_date_year",
+                "update_date_month",
+                "update_date_month_name",
+                "update_date_day",
+                "update_date_day_of_week",
+                "update_date_hour",
+                "update_date_quarter",
+            ],
+        );
+        let indices = table.list_indices().await.expect("list indices");
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices[0].name, "vector_idx");
+        assert_eq!(indices[0].index_type, IndexType::IvfFlat);
+        assert_eq!(indices[0].columns, vec!["vector"]);
+
+        let mut rows = table.query().execute().await.expect("query table");
+        let batch = rows
+            .try_next()
+            .await
+            .expect("read table")
+            .expect("one record batch");
+        assert_eq!(batch.num_rows(), 1);
+        let create_dates = batch
+            .column_by_name(CREATE_DATE_FIELD)
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .expect("create_date string column");
+        let update_dates = batch
+            .column_by_name(UPDATE_DATE_FIELD)
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .expect("update_date string column");
+        let create_years = batch
+            .column_by_name("create_date_year")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .expect("create_date_year int64 column");
+        let timestamp = chrono::DateTime::parse_from_rfc3339(create_dates.value(0))
+            .expect("GraphRAG-compatible ISO timestamp");
+        assert_eq!(create_years.value(0), i64::from(timestamp.year()));
+        assert!(update_dates.is_null(0));
+        for name in timestamp_component_fields(UPDATE_DATE_FIELD)
+            .iter()
+            .map(Field::name)
+        {
+            assert!(
+                batch
+                    .column_by_name(name)
+                    .expect("update component")
+                    .is_null(0)
+            );
+        }
     }
 
     #[tokio::test]
