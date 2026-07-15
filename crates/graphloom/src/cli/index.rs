@@ -9,7 +9,7 @@ use crate::{
     api::{BuildIndexOptions, CacheMode, IndexRunResult, IndexingMethod, build_validated_index},
     cli::{
         args::{IndexArgs, IndexMethodArg},
-        callbacks::ConsoleIndexWorkflowCallbacks,
+        callbacks::{ConsoleIndexWorkflowCallbacks, ConsoleStageProgress},
         error::{CliError, Result},
     },
     config::load::{
@@ -40,8 +40,16 @@ async fn run_with_model_factory(
     args: &IndexArgs,
     model_factory: &dyn ModelFactory,
 ) -> Result<IndexRunResult> {
+    let progress = ConsoleStageProgress::start("project configuration load", args.verbose);
     let project = load_project_config(&args.root).await?;
+    progress.finish();
     let method = IndexingMethod::from(args.method);
+    let validation_stage = if args.skip_validation {
+        "required project validation"
+    } else {
+        "project and model connectivity validation"
+    };
+    let progress = ConsoleStageProgress::start(validation_stage, args.verbose);
     validate_index_project_with_factory(
         &project,
         if args.skip_validation {
@@ -54,6 +62,7 @@ async fn run_with_model_factory(
         model_factory,
     )
     .await?;
+    progress.finish();
     if args.dry_run {
         let summary = redacted_config_summary(&project.config)?;
         println!("Dry run for {}", project.root.display());
@@ -108,20 +117,28 @@ async fn init_logging(
             path: reporting_dir.to_path_buf(),
             source,
         })?;
-    let filter = if verbose {
+    let file_filter = if verbose {
         EnvFilter::new("debug")
     } else {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
+    let console_filter = if verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::new("off")
+    };
     let file_appender = tracing_appender::rolling::never(reporting_dir, "indexing-engine.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
-    let console_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
+    let console_layer = fmt::layer()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .with_filter(console_filter);
     let file_layer = fmt::layer()
         .with_target(true)
         .with_ansi(false)
-        .with_writer(file_writer);
+        .with_writer(file_writer)
+        .with_filter(file_filter);
     let subscriber = tracing_subscriber::registry()
-        .with(filter)
         .with(console_layer)
         .with(file_layer);
     Ok(match tracing::subscriber::set_global_default(subscriber) {

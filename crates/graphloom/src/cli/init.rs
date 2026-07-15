@@ -12,6 +12,7 @@ use transaction::execute_plan_with_hook;
 use crate::{
     cli::{
         args::InitArgs,
+        callbacks::ConsoleStageProgress,
         error::{CliError, Result},
     },
     path_safety::{
@@ -35,8 +36,12 @@ fn prompt_assets() -> impl Iterator<Item = (&'static str, &'static str)> {
 ///
 /// Returns an error when the root cannot be created or managed files cannot be written.
 pub async fn init_project(args: &InitArgs) -> Result<()> {
+    let progress = ConsoleStageProgress::start("project initialization preflight", false);
     let plan = InitPlan::build(args).await?;
+    progress.finish();
+    let progress = ConsoleStageProgress::start("project file publication", false);
     execute_plan(&plan).await?;
+    progress.finish();
 
     println!("Initialized GraphLoom project at {}", plan.root.display());
     Ok(())

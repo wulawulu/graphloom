@@ -53,7 +53,13 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
             "embed-test",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains(
+            "Starting project initialization preflight",
+        ))
+        .stdout(predicate::str::contains(
+            "Completed project file publication",
+        ));
 
     tokio::fs::write(
         tempdir.path().join("input").join("document.txt"),
@@ -79,6 +85,12 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains(
+            "Starting project configuration load",
+        ))
+        .stdout(predicate::str::contains(
+            "Completed project and model connectivity validation",
+        ))
         .stdout(predicate::str::contains("Workflows:"))
         .stdout(predicate::str::contains("<redacted>"))
         .stdout(predicate::str::contains(format!("{}/v1", server.uri())))
@@ -117,6 +129,14 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains(
+            "Starting indexing runtime preparation",
+        ))
+        .stdout(predicate::str::contains(
+            "Completed indexing runtime preparation",
+        ))
+        .stdout(predicate::str::contains("create_base_text_units:"))
+        .stderr(predicate::str::contains("index run started").not())
         .stdout(predicate::str::contains("Index completed successfully"));
 
     assert_standard_outputs(tempdir.path()).await;

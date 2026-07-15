@@ -1,4 +1,4 @@
-//! IndexWorkflow callback hooks.
+//! `IndexWorkflow` callback hooks.
 
 use std::sync::Arc;
 
@@ -6,6 +6,9 @@ use crate::IndexRunStats;
 
 /// Callback hooks used by pipeline workflows.
 pub trait IndexWorkflowCallbacks: Send + Sync + std::fmt::Debug {
+    /// Called after the indexing runtime is ready to execute workflows.
+    fn runtime_prepared(&self) {}
+
     /// Called when a workflow starts.
     fn workflow_started(&self, _workflow_name: &str) {}
 
@@ -49,6 +52,12 @@ impl IndexWorkflowCallbackChain {
 }
 
 impl IndexWorkflowCallbacks for IndexWorkflowCallbackChain {
+    fn runtime_prepared(&self) {
+        for callback in &self.callbacks {
+            callback.runtime_prepared();
+        }
+    }
+
     fn workflow_started(&self, workflow_name: &str) {
         for callback in &self.callbacks {
             callback.workflow_started(workflow_name);

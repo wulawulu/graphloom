@@ -94,6 +94,7 @@ pub(crate) async fn prepare_index_runtime_with_factory(
         None
     };
     let callbacks = crate::callbacks::callback_chain(callbacks);
+    callbacks.runtime_prepared();
 
     Ok(PreparedIndexRuntime {
         services,

@@ -28,6 +28,7 @@ graphloom-llm.workspace = true
 graphloom-storage.workspace = true
 graphloom-vectors.workspace = true
 html-escape.workspace = true
+indicatif.workspace = true
 network_partitions.workspace = true
 polars-core.workspace = true
 rand.workspace = true
@@ -54,6 +55,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 assert_cmd.workspace = true
+indicatif = { workspace = true, features = ["in_memory"] }
 predicates.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
