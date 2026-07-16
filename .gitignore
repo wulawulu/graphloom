@@ -2,3 +2,6 @@
 .vscode
 
 .history
+__pycache__/
+*.py[cod]
+.venv/

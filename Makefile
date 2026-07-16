@@ -13,6 +13,16 @@ test-api:
 test-integration:
 	@cargo nextest run -p graphloom --test cli_integration --test api_index
 
+test-compat:
+	@cargo build -p graphloom
+	@uv run --project tests/compat --locked ruff format --check tests/compat
+	@uv run --project tests/compat --locked ruff check tests/compat
+	@GRAPHLOOM_BIN="$$(cargo metadata --no-deps --format-version 1 | \
+		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/graphloom" \
+		uv run --project tests/compat --locked \
+		pytest -q tests/compat
+	@cargo test -p graphloom-llm --test cache_compat
+
 test-all:
 	@cargo nextest run --all-features
 
@@ -42,4 +52,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-all check-agent-sync release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-all check-agent-sync release update-submodule

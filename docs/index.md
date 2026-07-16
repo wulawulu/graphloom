@@ -1,5 +1,9 @@
 # Documentation
 
+## Compatibility
+
+- [Python GraphRAG compatibility testing](python-compatibility-testing.md)
+
 ## Optimization backlog
 
 - [社区报告层级上下文优化](community-report-hierarchical-context-optimization.md)

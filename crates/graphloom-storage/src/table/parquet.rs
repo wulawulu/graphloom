@@ -1,11 +1,15 @@
 use std::{fmt, io::Cursor, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use polars_core::prelude::DataFrame;
+use polars_core::{
+    prelude::{CompatLevel, DataFrame},
+    schema::SchemaExt,
+};
 use polars_io::{
     parquet::write::ParquetCompression,
-    prelude::{ParquetReader, ParquetWriter, SerReader},
+    prelude::{KeyValueMetadata, ParquetReader, ParquetWriter, SerReader},
 };
+use polars_parquet::write::schema_to_metadata_key;
 
 use super::{
     Table, TableProvider, append_optional_dataframe, id_column_index, next_dataframe_row,
@@ -264,8 +268,16 @@ fn read_parquet_dataframe(bytes: Vec<u8>) -> Result<DataFrame> {
 
 fn write_parquet_dataframe(mut dataframe: DataFrame) -> Result<Vec<u8>> {
     let mut buffer = Cursor::new(Vec::new());
+    let arrow_schema = dataframe.schema().to_arrow(CompatLevel::oldest());
+    let compatibility_metadata = schema_to_metadata_key(&arrow_schema);
     ParquetWriter::new(&mut buffer)
         .with_compression(ParquetCompression::Snappy)
+        // Polars 0.54 exports String columns as Arrow Utf8View at its newest
+        // compatibility level. Persisting that Arrow schema metadata makes
+        // PyArrow 22 reconstruct list<string_view>, which pandas cannot
+        // materialize. Persist the oldest compatible Arrow schema so Python
+        // readers reconstruct canonical string/list<string> logical types.
+        .with_key_value_metadata(Some(KeyValueMetadata::Static(vec![compatibility_metadata])))
         .finish(&mut dataframe)
         .map_err(StorageError::Polars)?;
     Ok(buffer.into_inner())
@@ -274,6 +286,7 @@ fn write_parquet_dataframe(mut dataframe: DataFrame) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use polars_core::prelude::{DataFrame, DataType, NamedFrom, Series};
+    use polars_parquet::arrow::read::read_metadata;
     use tempfile::TempDir;
 
     use super::*;
@@ -303,6 +316,34 @@ mod tests {
             ],
         )
         .expect("one-row dataframe")
+    }
+
+    #[test]
+    fn test_should_write_python_compatible_arrow_schema_metadata() {
+        let list_values = vec![Series::new("item".into(), ["alpha", "beta"])];
+        let dataframe = DataFrame::new(
+            1,
+            vec![
+                Series::new("name".into(), ["fixture"]).into(),
+                Series::new("tags".into(), list_values).into(),
+            ],
+        )
+        .expect("compatibility dataframe");
+        let expected = schema_to_metadata_key(&dataframe.schema().to_arrow(CompatLevel::oldest()));
+        let incompatible =
+            schema_to_metadata_key(&dataframe.schema().to_arrow(CompatLevel::newest()));
+
+        let bytes = write_parquet_dataframe(dataframe).expect("write parquet");
+        let mut reader = Cursor::new(bytes);
+        let metadata = read_metadata(&mut reader).expect("read parquet metadata");
+        let actual = metadata
+            .key_value_metadata()
+            .as_ref()
+            .and_then(|items| items.iter().find(|item| item.key == expected.key))
+            .expect("ARROW:schema metadata");
+
+        assert_ne!(expected.value, incompatible.value);
+        assert_eq!(actual.value, expected.value);
     }
 
     #[tokio::test]

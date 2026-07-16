@@ -2802,6 +2802,7 @@ dependencies = [
  "futures-util",
  "polars-core",
  "polars-io",
+ "polars-parquet",
  "regex",
  "serde",
  "serde_json",

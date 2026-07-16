@@ -1952,7 +1952,7 @@ CLI 端到端测试至少覆盖：
 
 ## 25.4 GraphRAG 交叉兼容验证
 
-十个 Standard Index workflows 已完成手工交叉验证，当前确认项见 [2.1](#21-必须兼容)。这组证据是当前行为基线；仍需建立可重复执行的自动化命令：
+十个 Standard Index workflows 已完成手工交叉验证，当前确认项见 [2.1](#21-必须兼容)。以下可重复执行的自动化命令已经落地：
 
 ```text
 make test-compat
@@ -1960,8 +1960,8 @@ make test-compat
 
 该测试：
 
-1. checkout 固定 Python GraphRAG commit；
-2. 安装其依赖；
+1. 通过 uv 安装固定的 Python `graphrag==3.1.0` distribution；
+2. 使用 `tests/compat/uv.lock` 创建可复现的隔离依赖环境；
 3. 使用相同 fixture；
 4. 使用等价 Mock LLM 响应；
 5. 分别运行 Python 和 Rust standard index；
@@ -1969,30 +1969,35 @@ make test-compat
 7. 比较列名和列顺序；
 8. 比较 Arrow schema；
 9. 比较归一化后的内容；
-10. 交叉读取对方生成的 Parquet。
+10. 使用 PyArrow、pandas 和 GraphRAG `DataReader` 读取 GraphLoom Parquet；
+11. 使用 Python GraphRAG Global Search 直接查询 GraphLoom index；
+12. 验证 v3.1.0 GraphRAG `extract_graph` cache 可直接供 GraphLoom 使用；
+13. 运行基于 `79ab7c9…` fixture 的 cache key 与 payload compatibility tests。
 
 比较前允许归一化：
 
-* UUID；
-* period；
-  -无业务含义的行顺序；`relationships.parquet` 在 `create_communities` 之前的顺序不属于此类，
-   因为重复无向边采用 keep-last，顺序会影响最终边权；
-  -浮点精度；
-* LLM 自然语言空白。
+- UUID；
+- `creation_date` 和 `period`；
+- opaque community cluster ID，以及由该 ID 生成的 `Community N` title；归一化后仍须按
+  level 与 entity membership 严格比较 parent、children 和 report 归属；
+- 无业务含义的行顺序；`relationships.parquet` 在 `create_communities` 之前的顺序不属于此类，
+  因为重复无向边采用 keep-last，顺序会影响最终边权；
+- 浮点表示精度。
 
 不得归一化：
 
--实体名称；
--关系 source/target；
--列表关联；
--community level/parent；
--weight；
--degree；
+- 非 community 表的 `human_readable_id`；
+- 实体名称；
+- 关系 source/target；
+- 列表关联；
+- community level/parent/children 的语义结构；
+- weight；
+- degree；
+- ID 引用关系；
+- null 和空列表差异；
+- LLM 自然语言内容及空白。
 
-* ID 引用关系；
-  -null 和空列表差异。
-
-自动化测试尚未落地时，文档必须明确区分“手工验证通过”和“持续集成门禁”。自动化后，任何已经纳入基线的兼容检查持续失败都必须阻止对应里程碑完成。
+该门禁不宣称两个 Parquet 文件字节一致，也不宣称不同 LanceDB 版本的目录格式兼容。Local Search 依赖后一个边界，暂不属于该门禁；不依赖 LanceDB 目录互读的 Global Search 已覆盖。任何已经纳入基线的兼容检查持续失败都必须阻止对应里程碑完成。详细运行方式与基准边界见 [Python GraphRAG compatibility testing](../docs/python-compatibility-testing.md)。
 
 ---
 

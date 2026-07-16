@@ -244,20 +244,23 @@ the same indexing decisions and produce logically equivalent data. This stable
 baseline comes before GraphLoom-specific optimizations.
 
 Manual cross-implementation testing has exercised all ten standard workflows
-listed above. It confirmed identical chunk boundaries under matching chunking
-configuration, direct reuse of GraphRAG `extract_graph` cache entries by
-GraphLoom, direct reuse of GraphLoom `create_community_reports` cache entries by
-GraphRAG, and matching community results. Cache interoperability is a protocol
-contract and is tested independently from Parquet or LanceDB storage bytes.
+listed above. The automated `make test-compat` gate now runs GraphLoom and the
+uv-locked GraphRAG 3.1.0 package against one deterministic OpenAI-compatible
+server, checks all seven standard Parquet tables through PyArrow, pandas, and
+GraphRAG's typed `DataReader`, compares UUID-independent index semantics and
+references, runs upstream Global Search over the GraphLoom index, and verifies
+GraphLoom can reuse GraphRAG's `extract_graph` cache. Cache key and payload
+compatibility for the newer `79ab7c9...` protocol baseline remains a separate
+golden-fixture gate.
 
 This does not mean the persisted artifacts are byte-for-byte interchangeable.
 GraphLoom's Rust Parquet writer and Arrow representation differ from GraphRAG's
-Python/PyArrow stack, although the logical table schema and semantics remain the
-target. The two projects also use different LanceDB versions, so a LanceDB
-directory created by GraphLoom is not currently promised to open in GraphRAG.
-Physical Parquet parity and LanceDB on-disk compatibility are known
-storage-level gaps; automated Parquet cross-reading coverage is still pending.
-These gaps are tracked separately from workflow and cache behavior.
+Python/PyArrow stack, but GraphLoom's standard tables are now automatically
+cross-read at the logical schema level. The two projects still use different
+LanceDB versions, so a LanceDB directory created by GraphLoom is not currently
+promised to open in GraphRAG. LanceDB on-disk compatibility remains a known
+storage-level gap tracked separately from workflow and cache behavior. See the
+[compatibility test guide](docs/python-compatibility-testing.md).
 
 One known behavioral difference remains in `extract_graph`: when one title has
 multiple entity types, GraphLoom currently preserves `(title, type)` identity
@@ -281,7 +284,7 @@ Supported:
 - LanceDB vector storage
 - Linux and Windows CI
 - tag releases published once by a dedicated Ubuntu release job after Linux and
-  Windows build jobs pass
+  Windows build jobs and the GraphRAG compatibility gate pass
 
 Not yet supported:
 
@@ -291,12 +294,11 @@ Not yet supported:
 - Azure OpenAI or Azure managed identity
 - blob storage, CosmosDB, or Azure AI Search
 - CSV, JSON, or JSONL input
-- an automated Python/GraphRAG cross-implementation compatibility suite
 
 Settings, prompts, workflow behavior, cache protocol, logical Parquet schemas,
-and vector record schemas target GraphRAG compatibility. Manual interoperability
-has established the current behavioral baseline; automating that corpus and
-hardening physical Parquet/LanceDB interoperability remain follow-up work.
+and vector record schemas target GraphRAG compatibility. Automated and manual
+interoperability establish the current behavioral baseline; hardening LanceDB
+on-disk interoperability remains follow-up work.
 
 ## License
 
