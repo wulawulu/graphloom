@@ -196,6 +196,68 @@ impl CompletionRequest {
         }
     }
 
+    /// Apply provider call arguments to their canonical request fields.
+    ///
+    /// Unknown arguments are retained in [`Self::extra`]. The provider model
+    /// name is deliberately ignored because model selection belongs to
+    /// [`crate::ModelConfig`], while `stream` is parsed so orchestration can
+    /// explicitly override it when streaming is mandatory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::InvalidRequest`] when a canonical argument has an
+    /// incompatible JSON type or is outside the corresponding Rust integer
+    /// range.
+    pub fn apply_call_args(&mut self, call_args: &BTreeMap<String, Value>) -> Result<()> {
+        for (field, value) in call_args {
+            match field.as_str() {
+                "temperature" => self.temperature = Some(finite_number(field, value)?),
+                "top_p" => self.top_p = Some(finite_number(field, value)?),
+                "max_tokens" => self.max_tokens = Some(unsigned_integer(field, value)?),
+                "max_completion_tokens" => {
+                    self.max_completion_tokens = Some(unsigned_integer(field, value)?);
+                }
+                "n" => self.n = Some(unsigned_integer(field, value)?),
+                "seed" => self.seed = Some(signed_integer(field, value)?),
+                "stop" => self.stop = Some(value.clone()),
+                "tools" => {
+                    self.tools = Some(
+                        value
+                            .as_array()
+                            .cloned()
+                            .ok_or_else(|| invalid_call_arg(field, "must be a JSON array"))?,
+                    );
+                }
+                "tool_choice" => self.tool_choice = Some(value.clone()),
+                "presence_penalty" => {
+                    self.presence_penalty = Some(finite_number(field, value)?);
+                }
+                "frequency_penalty" => {
+                    self.frequency_penalty = Some(finite_number(field, value)?);
+                }
+                "response_format" => self.response_format = Some(value.clone()),
+                "stream" => {
+                    self.stream = Some(
+                        value
+                            .as_bool()
+                            .ok_or_else(|| invalid_call_arg(field, "must be a JSON boolean"))?,
+                    );
+                }
+                "model" => {}
+                _ if COMPLETION_RESERVED_FIELDS.contains(&field.as_str()) => {
+                    return Err(invalid_call_arg(
+                        field,
+                        "is supplied by the completion orchestration",
+                    ));
+                }
+                _ => {
+                    self.extra.insert(field.clone(), value.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate that provider extensions cannot override canonical fields.
     ///
     /// # Errors
@@ -207,6 +269,33 @@ impl CompletionRequest {
             COMPLETION_RESERVED_FIELDS,
             "validate completion request",
         )
+    }
+}
+
+fn finite_number(field: &str, value: &Value) -> Result<f64> {
+    value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid_call_arg(field, "must be a finite JSON number"))
+}
+
+fn unsigned_integer(field: &str, value: &Value) -> Result<u32> {
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| invalid_call_arg(field, "must be a non-negative JSON integer"))?;
+    u32::try_from(raw).map_err(|_| invalid_call_arg(field, "exceeds u32"))
+}
+
+fn signed_integer(field: &str, value: &Value) -> Result<i64> {
+    value
+        .as_i64()
+        .ok_or_else(|| invalid_call_arg(field, "must be a JSON integer within i64"))
+}
+
+fn invalid_call_arg(field: &str, message: &str) -> LlmError {
+    LlmError::InvalidRequest {
+        operation: "apply completion call_args",
+        message: format!("completion call_args field {field:?} {message}"),
     }
 }
 
@@ -275,9 +364,11 @@ fn validate_extra_fields(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
-    use super::ChatMessage;
+    use super::{ChatMessage, CompletionRequest};
 
     #[test]
     fn test_should_match_graphrag_assistant_message_shape() {
@@ -301,5 +392,80 @@ mod tests {
                 "content": "prompt",
             }),
         );
+    }
+
+    #[test]
+    fn test_should_apply_canonical_completion_call_args_without_reserved_extras() {
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("query")]);
+        request
+            .apply_call_args(&BTreeMap::from([
+                ("temperature".to_owned(), json!(0.2)),
+                ("top_p".to_owned(), json!(0.8)),
+                ("n".to_owned(), json!(1)),
+                ("max_tokens".to_owned(), json!(100)),
+                ("max_completion_tokens".to_owned(), json!(120)),
+                ("seed".to_owned(), json!(42)),
+                ("stop".to_owned(), json!(["END"])),
+                (
+                    "tools".to_owned(),
+                    json!([{"type": "function", "function": {"name": "lookup"}}]),
+                ),
+                ("tool_choice".to_owned(), json!("auto")),
+                ("presence_penalty".to_owned(), json!(0.1)),
+                ("frequency_penalty".to_owned(), json!(0.2)),
+                ("response_format".to_owned(), json!({"type": "json_object"})),
+                ("stream".to_owned(), json!(false)),
+                ("model".to_owned(), json!("configured-elsewhere")),
+                ("parallel_tool_calls".to_owned(), json!(false)),
+            ]))
+            .expect("valid call_args");
+
+        assert_eq!(request.temperature, Some(0.2));
+        assert_eq!(request.top_p, Some(0.8));
+        assert_eq!(request.n, Some(1));
+        assert_eq!(request.max_tokens, Some(100));
+        assert_eq!(request.max_completion_tokens, Some(120));
+        assert_eq!(request.seed, Some(42));
+        assert_eq!(request.stop, Some(json!(["END"])));
+        assert_eq!(
+            request.tools,
+            Some(vec![
+                json!({"type": "function", "function": {"name": "lookup"}})
+            ])
+        );
+        assert_eq!(request.tool_choice, Some(json!("auto")));
+        assert_eq!(request.presence_penalty, Some(0.1));
+        assert_eq!(request.frequency_penalty, Some(0.2));
+        assert_eq!(
+            request.response_format,
+            Some(json!({"type": "json_object"}))
+        );
+        assert_eq!(request.stream, Some(false));
+        assert_eq!(
+            request.extra,
+            BTreeMap::from([("parallel_tool_calls".to_owned(), json!(false))])
+        );
+        request.validate().expect("request should validate");
+    }
+
+    #[test]
+    fn test_should_reject_invalid_canonical_completion_call_args() {
+        for (field, value, expected) in [
+            ("seed", json!(1.5), "within i64"),
+            ("seed", json!(u64::MAX), "within i64"),
+            ("max_tokens", json!(-1), "non-negative"),
+            ("max_tokens", json!(u64::MAX), "exceeds u32"),
+            ("tools", json!({"type": "function"}), "JSON array"),
+            ("temperature", json!("0.2"), "finite JSON number"),
+            ("presence_penalty", json!("NaN"), "finite JSON number"),
+        ] {
+            let mut request = CompletionRequest::new(vec![ChatMessage::user("query")]);
+            let error = request
+                .apply_call_args(&BTreeMap::from([(field.to_owned(), value)]))
+                .expect_err("invalid call_arg must fail");
+            let message = error.to_string();
+            assert!(message.contains(field), "{message}");
+            assert!(message.contains(expected), "{message}");
+        }
     }
 }

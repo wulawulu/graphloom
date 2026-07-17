@@ -1,15 +1,10 @@
 //! Basic Search completion orchestration.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionRequest, CompletionStream, Tokenizer};
 use serde::Serialize;
-use serde_json::Value;
 
 use super::super::{
     QueryError, QueryEvent, QueryEventStream, QueryResult, QueryRuntime, QueryUsage,
@@ -104,10 +99,21 @@ pub(crate) async fn basic_search_streaming(
             operation: "count Basic Search prompt tokens",
             message: source.to_string(),
         })?;
-    let request = completion_request(
-        &runtime.completion_config.call_args,
-        vec![ChatMessage::system(rendered), ChatMessage::user(query)],
-    )?;
+    let mut request = CompletionRequest::new(vec![
+        ChatMessage::system(rendered),
+        ChatMessage::user(query),
+    ]);
+    request
+        .apply_call_args(&runtime.completion_config.call_args)
+        .and_then(|()| {
+            request.stream = Some(true);
+            request.validate()
+        })
+        .map_err(|source| QueryError::InvalidQueryConfig {
+            method: SearchMethod::Basic,
+            operation: "build Basic Search completion request",
+            message: source.to_string(),
+        })?;
     runtime.callbacks.on_context(&built.context);
     let provider = runtime
         .completion_model
@@ -212,79 +218,6 @@ fn completed_event(state: BasicStreamState) -> (Result<QueryEvent>, Option<Basic
         usage,
     };
     (Ok(QueryEvent::Completed(result)), None)
-}
-
-fn completion_request(
-    call_args: &BTreeMap<String, Value>,
-    messages: Vec<ChatMessage>,
-) -> Result<CompletionRequest> {
-    let mut request = CompletionRequest::new(messages);
-    request.stream = Some(true);
-    request.temperature = optional_f64(call_args, "temperature")?;
-    request.top_p = optional_f64(call_args, "top_p")?;
-    request.n = optional_u32(call_args, "n")?;
-    request.max_tokens = optional_u32(call_args, "max_tokens")?;
-    request.max_completion_tokens = optional_u32(call_args, "max_completion_tokens")?;
-    request.response_format = call_args.get("response_format").cloned();
-    let canonical = BTreeSet::from([
-        "temperature",
-        "top_p",
-        "n",
-        "max_tokens",
-        "max_completion_tokens",
-        "response_format",
-        "stream",
-        "model",
-    ]);
-    request.extra.extend(
-        call_args
-            .iter()
-            .filter(|(key, _)| !canonical.contains(key.as_str()))
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
-    request
-        .validate()
-        .map_err(|source| QueryError::InvalidQueryConfig {
-            method: SearchMethod::Basic,
-            operation: "build Basic Search completion request",
-            message: source.to_string(),
-        })?;
-    Ok(request)
-}
-
-fn optional_f64(values: &BTreeMap<String, Value>, key: &str) -> Result<Option<f64>> {
-    let Some(value) = values.get(key) else {
-        return Ok(None);
-    };
-    let value = value
-        .as_f64()
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| QueryError::InvalidQueryConfig {
-            method: SearchMethod::Basic,
-            operation: "parse completion call_args",
-            message: format!("{key} must be a finite number"),
-        })?;
-    Ok(Some(value))
-}
-
-fn optional_u32(values: &BTreeMap<String, Value>, key: &str) -> Result<Option<u32>> {
-    let Some(value) = values.get(key) else {
-        return Ok(None);
-    };
-    let raw = value
-        .as_u64()
-        .ok_or_else(|| QueryError::InvalidQueryConfig {
-            method: SearchMethod::Basic,
-            operation: "parse completion call_args",
-            message: format!("{key} must be a non-negative integer"),
-        })?;
-    u32::try_from(raw)
-        .map(Some)
-        .map_err(|_| QueryError::InvalidQueryConfig {
-            method: SearchMethod::Basic,
-            operation: "parse completion call_args",
-            message: format!("{key} exceeds u32"),
-        })
 }
 
 #[cfg(test)]
@@ -458,7 +391,12 @@ mod tests {
                 "n": 1,
                 "max_tokens": 100,
                 "max_completion_tokens": 120,
+                "seed": 42,
+                "stop": ["END"],
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
                 "response_format": {"type": "json_object"},
+                "stream": false,
                 "parallel_tool_calls": false
             }
         }))
@@ -541,6 +479,10 @@ mod tests {
         assert_eq!(request.n, Some(1));
         assert_eq!(request.max_tokens, Some(100));
         assert_eq!(request.max_completion_tokens, Some(120));
+        assert_eq!(request.seed, Some(42));
+        assert_eq!(request.stop, Some(json!(["END"])));
+        assert_eq!(request.presence_penalty, Some(0.1));
+        assert_eq!(request.frequency_penalty, Some(0.2));
         assert_eq!(
             request.response_format,
             Some(json!({"type": "json_object"}))
@@ -564,23 +506,5 @@ mod tests {
         assert_eq!(result.usage.categories["build_context"].llm_calls, 0);
         assert_eq!(result.usage.categories["response"].llm_calls, 1);
         assert_eq!(result.usage.output_tokens, "first answer".len());
-    }
-
-    #[test]
-    fn test_should_reject_non_finite_and_out_of_range_completion_call_args() {
-        let messages = vec![ChatMessage::user("query")];
-        let error = completion_request(
-            &BTreeMap::from([("temperature".to_owned(), json!("NaN"))]),
-            messages.clone(),
-        )
-        .expect_err("invalid temperature");
-        assert!(matches!(error, QueryError::InvalidQueryConfig { .. }));
-
-        let error = completion_request(
-            &BTreeMap::from([("max_tokens".to_owned(), json!(u64::MAX))]),
-            messages,
-        )
-        .expect_err("oversized max_tokens");
-        assert!(matches!(error, QueryError::InvalidQueryConfig { .. }));
     }
 }

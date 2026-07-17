@@ -74,23 +74,15 @@ fn model_config(server: &MockServer, model: &str) -> ModelConfig {
         "call_args": {
             "temperature": 0.0,
             "top_p": 1.0,
-            "max_completion_tokens": 128
+            "max_completion_tokens": 128,
+            "seed": 42,
+            "stop": ["END"],
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+            "stream": false
         }
     }))
     .expect("model config")
-}
-
-fn list_column(name: &str, rows: &[Vec<String>]) -> polars_core::prelude::Column {
-    let values = rows
-        .iter()
-        .map(|row| {
-            Series::new(
-                "item".into(),
-                row.iter().map(String::as_str).collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>();
-    Series::new(name.into(), values).into()
 }
 
 fn text_units(first_text: &str, second_text: &str) -> DataFrame {
@@ -99,14 +91,9 @@ fn text_units(first_text: &str, second_text: &str) -> DataFrame {
         vec![
             Series::new("id".into(), ["A", "B"]).into(),
             Series::new("text".into(), [first_text, second_text]).into(),
-            Series::new("n_tokens".into(), [2_u32, 2]).into(),
-            Series::new("document_id".into(), ["doc-a", "doc-b"]).into(),
-            list_column("entity_ids", &[Vec::new(), Vec::new()]),
-            list_column("relationship_ids", &[Vec::new(), Vec::new()]),
-            list_column("covariate_ids", &[Vec::new(), Vec::new()]),
         ],
     )
-    .expect("text units")
+    .expect("sparse GraphRAG text units")
 }
 
 async fn write_text_units(root: &Path, dataframe: DataFrame) -> std::path::PathBuf {
@@ -291,6 +278,10 @@ async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
     assert_eq!(completion["temperature"], 0.0);
     assert_eq!(completion["top_p"], 1.0);
     assert_eq!(completion["max_completion_tokens"], 128);
+    assert_eq!(completion["seed"], 42);
+    assert_eq!(completion["stop"], json!(["END"]));
+    assert_eq!(completion["presence_penalty"], 0.1);
+    assert_eq!(completion["frequency_penalty"], 0.2);
     assert!(
         completion["messages"][0]["content"]
             .as_str()

@@ -23,6 +23,7 @@ from compat_harness import (
 )
 from graphrag.data_model import schemas
 from graphrag.data_model.data_reader import DataReader
+from graphrag.query.indexer_adapters import read_indexer_reports
 from graphrag_storage import create_storage
 from graphrag_storage.tables.table_provider_factory import create_table_provider
 
@@ -62,6 +63,74 @@ EXPECTED_LOGICAL_LIST_TYPES = {
         "findings",
     ): "list<struct<explanation:string,summary:string>>",
 }
+
+
+def test_graphrag_3_1_report_rollup_golden() -> None:
+    """Lock title grouping, level filtering, and merge order to GraphRAG 3.1.0."""
+    communities = pd.DataFrame(
+        {
+            "id": [
+                "co-1",
+                "co-4",
+                "co-2",
+                "co-3",
+                "co-9",
+                "co-null",
+                "co-no-title",
+            ],
+            "community": [1, 4, 2, 3, 9, None, 8],
+            "level": [0, 1, 1, 1, 3, 1, 1],
+            "title": ["Alpha", "Alpha", "Beta", "Gamma", "Alpha", "Delta", None],
+            "entity_ids": [
+                ["entity-x"],
+                ["entity-y"],
+                ["entity-x"],
+                ["entity-y"],
+                ["entity-z"],
+                ["entity-null"],
+                ["entity-no-title"],
+            ],
+        }
+    )
+    reports = pd.DataFrame(
+        {
+            "id": ["rp-3", "rp-1", "rp-4", "rp-2", "rp-9", "rp-neg", "rp-8"],
+            "community": [3, 1, 4, 2, 9, -1, 8],
+            "level": [1, 0, 1, 2, 3, 1, 1],
+            "title": [
+                "Report 3",
+                "Report 1",
+                "Report 4",
+                "Report 2",
+                None,
+                "Report -1",
+                "Report 8",
+            ],
+            "summary": ["S3", "S1", "S4", "S2", "S9", "SN", "S8"],
+            "full_content": ["F3", "F1", "F4", "F2", "F9", "FN", "F8"],
+        }
+    )
+
+    rolled_up = read_indexer_reports(reports, communities, 1)
+    dynamic = read_indexer_reports(
+        reports,
+        communities,
+        1,
+        dynamic_community_selection=True,
+    )
+
+    assert [(report.id, report.community_id) for report in rolled_up] == [
+        ("rp-3", "3"),
+        ("rp-4", "4"),
+        ("rp-neg", "-1"),
+    ]
+    assert [(report.id, report.community_id) for report in dynamic] == [
+        ("rp-3", "3"),
+        ("rp-1", "1"),
+        ("rp-4", "4"),
+        ("rp-neg", "-1"),
+        ("rp-8", "8"),
+    ]
 
 
 def test_python_should_read_every_graphloom_parquet(
