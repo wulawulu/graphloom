@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, Int64Array, RecordBatch,
     RecordBatchIterator, RecordBatchReader, StringArray, types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -18,7 +18,8 @@ use lancedb::{
 };
 
 use crate::{
-    Result, VectorDocument, VectorError, VectorIndexSchema, VectorStore, VectorStoreConfig,
+    Result, VectorDocument, VectorError, VectorIndexSchema, VectorSearchResult, VectorStore,
+    VectorStoreConfig,
 };
 
 const DUMMY_ID: &str = "__DUMMY__";
@@ -138,7 +139,13 @@ impl VectorStore for LanceDbVectorStore {
 
     async fn count(&self, schema: &VectorIndexSchema) -> Result<usize> {
         schema.validate()?;
+        if !self.table_exists(&schema.index_name).await? {
+            return Err(VectorError::MissingIndex {
+                index_name: schema.index_name.clone(),
+            });
+        }
         let table = self.open_table(schema).await?;
+        validate_table_schema(schema, table.schema().await?.as_ref())?;
         table.count_rows(None).await.map_err(VectorError::from)
     }
 
@@ -176,7 +183,13 @@ impl VectorStore for LanceDbVectorStore {
         id: &str,
     ) -> Result<Option<VectorDocument>> {
         schema.validate()?;
+        if !self.table_exists(&schema.index_name).await? {
+            return Err(VectorError::MissingIndex {
+                index_name: schema.index_name.clone(),
+            });
+        }
         let table = self.open_table(schema).await?;
+        validate_table_schema(schema, table.schema().await?.as_ref())?;
         let mut stream = table
             .query()
             .select(Select::columns(&[&schema.id_field, &schema.vector_field]))
@@ -208,6 +221,166 @@ impl VectorStore for LanceDbVectorStore {
             }
         }
         Ok(None)
+    }
+
+    async fn similarity_search_by_vector(
+        &self,
+        schema: &VectorIndexSchema,
+        query_vector: &[f32],
+        k: usize,
+        include_vectors: bool,
+    ) -> Result<Vec<VectorSearchResult>> {
+        validate_search_query(schema, query_vector, k)?;
+        if !self.table_exists(&schema.index_name).await? {
+            return Err(VectorError::MissingIndex {
+                index_name: schema.index_name.clone(),
+            });
+        }
+        let table = self.open_table(schema).await?;
+        validate_table_schema(schema, table.schema().await?.as_ref())?;
+        let columns = if include_vectors {
+            vec![schema.id_field.as_str(), schema.vector_field.as_str()]
+        } else {
+            vec![schema.id_field.as_str()]
+        };
+        let mut stream = table
+            .query()
+            .nearest_to(query_vector)?
+            .column(&schema.vector_field)
+            .limit(k)
+            .select(Select::columns(&columns))
+            .execute()
+            .await?;
+        let mut results = Vec::with_capacity(k);
+        while let Some(batch) = stream.try_next().await? {
+            append_search_batch(schema, &batch, include_vectors, &mut results)?;
+        }
+        Ok(results)
+    }
+}
+
+fn validate_search_query(schema: &VectorIndexSchema, query_vector: &[f32], k: usize) -> Result<()> {
+    schema.validate()?;
+    if k == 0 {
+        return Err(VectorError::InvalidQuery {
+            index_name: schema.index_name.clone(),
+            message: "k must be greater than zero".to_owned(),
+        });
+    }
+    if query_vector.is_empty() {
+        return Err(VectorError::InvalidQuery {
+            index_name: schema.index_name.clone(),
+            message: "query vector must not be empty".to_owned(),
+        });
+    }
+    if query_vector.len() != schema.vector_size {
+        return Err(VectorError::InvalidQuery {
+            index_name: schema.index_name.clone(),
+            message: format!(
+                "query vector dimension mismatch: expected {}, got {}",
+                schema.vector_size,
+                query_vector.len()
+            ),
+        });
+    }
+    if query_vector.iter().any(|value| !value.is_finite()) {
+        return Err(VectorError::InvalidQuery {
+            index_name: schema.index_name.clone(),
+            message: "query vector contains a non-finite value".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Float64 ANN distances are range- and finiteness-checked before conversion"
+)]
+fn append_search_batch(
+    schema: &VectorIndexSchema,
+    batch: &RecordBatch,
+    include_vectors: bool,
+    results: &mut Vec<VectorSearchResult>,
+) -> Result<()> {
+    let ids = batch
+        .column_by_name(&schema.id_field)
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| invalid_search_result(schema, "id column is not Utf8"))?;
+    let distance_column = batch
+        .column_by_name("_distance")
+        .ok_or_else(|| invalid_search_result(schema, "_distance column is missing"))?;
+    let distances_f32 = distance_column.as_any().downcast_ref::<Float32Array>();
+    let distances_f64 = distance_column.as_any().downcast_ref::<Float64Array>();
+    if distances_f32.is_none() && distances_f64.is_none() {
+        return Err(invalid_search_result(
+            schema,
+            "_distance column is neither Float32 nor Float64",
+        ));
+    }
+    let vectors = if include_vectors {
+        Some(
+            batch
+                .column_by_name(&schema.vector_field)
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+                .ok_or_else(|| {
+                    invalid_search_result(schema, "vector column is not FixedSizeList")
+                })?,
+        )
+    } else {
+        None
+    };
+    for row_index in 0..batch.num_rows() {
+        if ids.is_null(row_index) || ids.value(row_index).is_empty() {
+            return Err(invalid_search_result(schema, "search result id is empty"));
+        }
+        if distance_column.is_null(row_index) {
+            return Err(invalid_search_result(
+                schema,
+                "search result distance is null",
+            ));
+        }
+        let distance = if let Some(distances) = distances_f32 {
+            distances.value(row_index)
+        } else if let Some(distances) = distances_f64 {
+            let value = distances.value(row_index);
+            if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
+                return Err(invalid_search_result(
+                    schema,
+                    "search result distance cannot be represented as finite Float32",
+                ));
+            }
+            value as f32
+        } else {
+            return Err(invalid_search_result(
+                schema,
+                "search result distance is unavailable",
+            ));
+        };
+        if !distance.is_finite() {
+            return Err(invalid_search_result(
+                schema,
+                "search result distance is non-finite",
+            ));
+        }
+        let vector = vectors.map_or_else(
+            || Ok(Vec::new()),
+            |vectors| vector_value(schema, vectors, row_index),
+        )?;
+        results.push(VectorSearchResult {
+            document: VectorDocument {
+                id: ids.value(row_index).to_owned(),
+                vector,
+            },
+            score: 1.0 - distance.abs(),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_search_result(schema: &VectorIndexSchema, message: &str) -> VectorError {
+    VectorError::InvalidQuery {
+        index_name: schema.index_name.clone(),
+        message: message.to_owned(),
     }
 }
 
@@ -937,5 +1110,161 @@ mod tests {
             vec![0.25, 0.75]
         );
         assert_eq!(reopened.count(&other_schema).await.expect("other count"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_search_top_k_in_distance_order_with_graphrag_scores() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let schema = schema("text_unit_text", 2);
+        let store = connect_store(&tempdir).await;
+        store
+            .upsert_documents(
+                &schema,
+                &[
+                    VectorDocument {
+                        id: "z-nearest".to_owned(),
+                        vector: vec![0.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "a-second".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "m-farthest".to_owned(),
+                        vector: vec![3.0, 0.0],
+                    },
+                ],
+            )
+            .await
+            .expect("seed vectors");
+
+        let results = store
+            .similarity_search_by_vector(&schema, &[0.2, 0.0], 2, true)
+            .await
+            .expect("search");
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.document.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z-nearest", "a-second"]
+        );
+        assert_eq!(results[0].document.vector, vec![0.0, 0.0]);
+        assert!((results[0].score - 0.96).abs() < 1e-5);
+        assert!((results[1].score - 0.36).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn test_should_omit_vectors_without_changing_search_order() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let schema = schema("text_unit_text", 2);
+        let store = connect_store(&tempdir).await;
+        store
+            .upsert_documents(
+                &schema,
+                &[
+                    VectorDocument {
+                        id: "b".to_owned(),
+                        vector: vec![0.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "a".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                ],
+            )
+            .await
+            .expect("seed vectors");
+
+        let results = store
+            .similarity_search_by_vector(&schema, &[0.1, 0.0], 2, false)
+            .await
+            .expect("search");
+
+        assert_eq!(results[0].document.id, "b");
+        assert!(
+            results
+                .iter()
+                .all(|result| result.document.vector.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_similarity_query_before_provider_access() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let schema = schema("text_unit_text", 2);
+        let store = connect_store(&tempdir).await;
+
+        for (vector, k, expected) in [
+            (vec![0.0, 0.0], 0, "k must be greater than zero"),
+            (Vec::new(), 1, "must not be empty"),
+            (vec![0.0], 1, "expected 2, got 1"),
+            (vec![f32::NAN, 0.0], 1, "non-finite"),
+            (vec![f32::INFINITY, 0.0], 1, "non-finite"),
+        ] {
+            let error = store
+                .similarity_search_by_vector(&schema, &vector, k, false)
+                .await
+                .expect_err("invalid query");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let error = store
+            .similarity_search_by_vector(&schema, &[0.0, 0.0], 1, false)
+            .await
+            .expect_err("missing index");
+        assert!(matches!(error, VectorError::MissingIndex { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_search_empty_index_and_reject_wrong_schema() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let expected_schema = schema("text_unit_text", 2);
+        let store = connect_store(&tempdir).await;
+        store
+            .ensure_index(&expected_schema)
+            .await
+            .expect("empty index");
+        assert!(
+            store
+                .similarity_search_by_vector(&expected_schema, &[0.0, 0.0], 10, false)
+                .await
+                .expect("empty search")
+                .is_empty()
+        );
+        let wrong = schema("text_unit_text", 3);
+        let error = store
+            .similarity_search_by_vector(&wrong, &[0.0, 0.0, 0.0], 1, false)
+            .await
+            .expect_err("schema mismatch");
+        assert!(error.to_string().contains("size 3"));
+
+        store
+            .upsert_documents(
+                &expected_schema,
+                &[VectorDocument {
+                    id: "coexists".to_owned(),
+                    vector: vec![0.5, 0.5],
+                }],
+            )
+            .await
+            .expect("upsert");
+        assert!(
+            store
+                .get_by_id(&expected_schema, "coexists")
+                .await
+                .expect("get")
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .similarity_search_by_vector(&expected_schema, &[0.5, 0.5], 1, false)
+                .await
+                .expect("search")[0]
+                .document
+                .id,
+            "coexists"
+        );
     }
 }

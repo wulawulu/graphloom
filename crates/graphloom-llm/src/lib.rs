@@ -28,7 +28,7 @@ pub use middleware::{
     CacheMetrics, CachedCompletionModel, CachedEmbeddingModel, CachedModelResult,
 };
 pub use mock::{MockCompletionModel, MockEmbeddingModel};
-pub use model::{CompletionModel, EmbeddingModel, ModelConfig};
+pub use model::{CompletionModel, CompletionStream, EmbeddingModel, ModelConfig};
 pub use openai::{OpenAiCompletionModel, OpenAiEmbeddingModel};
 pub use parser::{
     ClaimRecord, CommunityReport, EntityRecord, GraphExtraction, RelationshipRecord,
@@ -37,7 +37,8 @@ pub use parser::{
 };
 pub use tokenizer::{TiktokenTokenizer, Tokenizer};
 pub use types::{
-    CacheStatus, ChatMessage, ChatRole, CompletionChoice, CompletionMessage, CompletionRequest,
-    CompletionResponse, CompletionUsage, EmbeddingData, EmbeddingRequest, EmbeddingResponse,
-    EmbeddingUsage, MessageContent, ModelCallMetadata,
+    CacheStatus, ChatMessage, ChatRole, CompletionChoice, CompletionChunk, CompletionChunkChoice,
+    CompletionDelta, CompletionMessage, CompletionRequest, CompletionResponse, CompletionUsage,
+    EmbeddingData, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage, MessageContent,
+    ModelCallMetadata,
 };

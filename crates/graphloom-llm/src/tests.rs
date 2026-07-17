@@ -413,5 +413,6 @@ fn model_config() -> ModelConfig {
         tokens_per_minute: None,
         requests_per_minute: None,
         encoding_model: Some("cl100k_base".to_owned()),
+        call_args: std::collections::BTreeMap::new(),
     }
 }

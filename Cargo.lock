@@ -2773,6 +2773,7 @@ dependencies = [
  "async-openai",
  "async-trait",
  "bytes",
+ "futures-util",
  "graphloom-cache",
  "graphloom-storage",
  "html-escape",

@@ -13,6 +13,7 @@ readme.workspace = true
 async-openai.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
 graphloom-cache.workspace = true
 html-escape.workspace = true
 regex.workspace = true

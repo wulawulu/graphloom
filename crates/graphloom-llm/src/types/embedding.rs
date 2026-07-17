@@ -33,7 +33,7 @@ pub struct EmbeddingData {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// Provider-neutral embedding response compatible with GraphRAG cache JSON.
+/// Provider-neutral embedding response compatible with `GraphRAG` cache JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
     /// Wire object kind.
@@ -54,12 +54,18 @@ pub struct EmbeddingResponse {
 
 impl EmbeddingResponse {
     /// Iterate over embedding vectors without cloning.
+    #[must_use]
     pub fn embeddings(&self) -> impl ExactSizeIterator<Item = &[f64]> {
         self.data.iter().map(|item| item.embedding.as_slice())
     }
 
     /// Consume the response and return embedding vectors in provider order.
     #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "provider f64 embeddings are stored as f32 vectors and validated before \
+                  storage/search"
+    )]
     pub fn into_embeddings(self) -> Vec<Vec<f32>> {
         self.data
             .into_iter()

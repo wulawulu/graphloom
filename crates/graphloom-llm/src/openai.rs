@@ -1,6 +1,6 @@
 //! OpenAI-compatible model adapters backed by `async-openai`.
 
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 use async_openai::{
     Client,
@@ -9,13 +9,14 @@ use async_openai::{
     middleware::{ReqwestService, retry::OpenAIRetryLayer},
 };
 use async_trait::async_trait;
+use futures_util::{Stream, StreamExt};
 use secrecy::ExposeSecret;
 use serde_json::Value;
 use tower::ServiceBuilder;
 
 use crate::{
-    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, EmbeddingRequest,
-    EmbeddingResponse, LlmError, ModelConfig, Result,
+    CompletionChunk, CompletionModel, CompletionRequest, CompletionResponse, CompletionStream,
+    EmbeddingModel, EmbeddingRequest, EmbeddingResponse, LlmError, ModelConfig, Result,
 };
 
 const OPENAI_CLIENT_ONLY_FIELDS: &[&str] = &[
@@ -126,6 +127,37 @@ impl CompletionModel for OpenAiCompletionModel {
         })?;
         Ok(response)
     }
+
+    async fn stream(&self, mut request: CompletionRequest) -> Result<CompletionStream> {
+        request.stream = Some(true);
+        let request: Value = OpenAiCompletionRequest {
+            model: self.config.model.clone(),
+            request,
+        }
+        .try_into()?;
+        let stream: Pin<
+            Box<dyn Stream<Item = std::result::Result<CompletionChunk, OpenAIError>> + Send>,
+        > = self
+            .client
+            .chat()
+            .create_stream_byot(request)
+            .await
+            .map_err(|source| {
+                provider_error(
+                    &self.model_instance,
+                    "completion stream",
+                    self.config.effective_max_retries(),
+                    source,
+                )
+            })?;
+        let model_instance = self.model_instance.clone();
+        let attempts = self.config.effective_max_retries();
+        Ok(Box::pin(stream.map(move |chunk| {
+            chunk.map_err(|source| {
+                provider_error(&model_instance, "completion stream", attempts, source)
+            })
+        })))
+    }
 }
 
 #[async_trait]
@@ -166,7 +198,8 @@ impl TryFrom<OpenAiCompletionRequest> for Value {
 
     fn try_from(value: OpenAiCompletionRequest) -> std::result::Result<Self, Self::Error> {
         validate_openai_completion_request(&value.request)?;
-        let mut payload = serde_json::to_value(value.request).map_err(provider_request_error)?;
+        let mut payload = serde_json::to_value(value.request)
+            .map_err(|source| provider_request_error(&source))?;
         let object = payload
             .as_object_mut()
             .ok_or_else(|| LlmError::InvalidRequest {
@@ -192,7 +225,8 @@ impl TryFrom<OpenAiEmbeddingRequest> for Value {
 
     fn try_from(value: OpenAiEmbeddingRequest) -> std::result::Result<Self, Self::Error> {
         validate_openai_embedding_request(&value.request)?;
-        let mut payload = serde_json::to_value(value.request).map_err(provider_request_error)?;
+        let mut payload = serde_json::to_value(value.request)
+            .map_err(|source| provider_request_error(&source))?;
         let object = payload
             .as_object_mut()
             .ok_or_else(|| LlmError::InvalidRequest {
@@ -204,7 +238,7 @@ impl TryFrom<OpenAiEmbeddingRequest> for Value {
     }
 }
 
-fn provider_request_error(source: serde_json::Error) -> LlmError {
+fn provider_request_error(source: &serde_json::Error) -> LlmError {
     LlmError::InvalidRequest {
         operation: "build OpenAI provider request",
         message: source.to_string(),
@@ -314,12 +348,23 @@ fn is_tower_timeout(error: &OpenAIError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use async_openai::config::{Config, OpenAIConfig};
+    use futures_util::StreamExt;
     use secrecy::ExposeSecret;
     use serde_json::Value;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
-    use super::{OpenAiCompletionRequest, OpenAiEmbeddingRequest, OpenAiModelConfig};
-    use crate::{ChatMessage, CompletionRequest, EmbeddingRequest, ModelConfig};
+    use super::{
+        OpenAiCompletionModel, OpenAiCompletionRequest, OpenAiEmbeddingRequest, OpenAiModelConfig,
+    };
+    use crate::{
+        ChatMessage, CompletionModel, CompletionRequest, EmbeddingRequest, LlmError, ModelConfig,
+    };
 
     #[test]
     fn test_should_convert_completion_request_to_openai_type() {
@@ -391,5 +436,136 @@ mod tests {
         let provider: OpenAIConfig = OpenAiModelConfig(&model).into();
 
         assert_eq!(provider.api_base(), "http://localhost:11434/v1");
+    }
+
+    #[tokio::test]
+    async fn test_should_stream_real_openai_compatible_sse_chunks_in_order() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"id\":\"chunk-1\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":\
+             {\"content\":\"first \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chunk-2\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":\
+             {},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chunk-3\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":\
+             {\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let model = streaming_model(&server).expect("streaming model");
+
+        let mut stream = model
+            .stream(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect("start stream");
+        let mut contents = Vec::new();
+        let mut finish_reason = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("valid chunk");
+            let choice = chunk.choices.first().expect("choice");
+            contents.push(choice.delta.content.clone());
+            if choice.finish_reason.is_some() {
+                finish_reason = choice.finish_reason.clone();
+            }
+        }
+
+        assert_eq!(
+            contents,
+            vec![Some("first ".to_owned()), None, Some("second".to_owned())]
+        );
+        assert_eq!(finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[tokio::test]
+    async fn test_should_propagate_stream_decode_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {not-json}\n\ndata: [DONE]\n\n"),
+            )
+            .mount(&server)
+            .await;
+        let model = streaming_model(&server).expect("streaming model");
+        let mut stream = model
+            .stream(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect("start stream");
+
+        let error = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("malformed SSE must fail");
+
+        assert!(error.to_string().contains("completion stream"));
+        assert!(!format!("{error:?}").contains("stream-secret"));
+    }
+
+    #[tokio::test]
+    async fn test_should_propagate_completion_transport_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(2))
+                    .set_body_json(serde_json::json!({
+                        "id": "completion-1",
+                        "model": "gpt-test",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "late"},
+                            "finish_reason": "stop"
+                        }]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let config: ModelConfig = serde_json::from_value(serde_json::json!({
+            "model_provider": "openai",
+            "model": "gpt-test",
+            "api_key": "timeout-secret",
+            "api_base": server.uri(),
+            "timeout": 1
+        }))
+        .expect("model config");
+        let model =
+            OpenAiCompletionModel::new("timeout-model", config, 1).expect("completion model");
+
+        let error = model
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect_err("delayed provider must time out");
+
+        assert!(matches!(
+            error,
+            LlmError::Timeout {
+                operation: "completion",
+                attempts: 1,
+                ..
+            }
+        ));
+        assert!(!format!("{error:?}").contains("timeout-secret"));
+    }
+
+    fn streaming_model(server: &MockServer) -> crate::Result<OpenAiCompletionModel> {
+        let config: ModelConfig = serde_json::from_value(serde_json::json!({
+            "model_provider": "openai",
+            "model": "gpt-test",
+            "api_key": "stream-secret",
+            "api_base": server.uri()
+        }))
+        .expect("model config");
+        OpenAiCompletionModel::new("streaming", config, 1)
     }
 }

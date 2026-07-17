@@ -25,6 +25,22 @@ pub enum VectorError {
         message: String,
     },
 
+    /// A vector similarity query is invalid.
+    #[error("invalid vector query for index {index_name}: {message}")]
+    InvalidQuery {
+        /// Index/table name.
+        index_name: String,
+        /// Validation failure details.
+        message: String,
+    },
+
+    /// A required vector index does not exist.
+    #[error("vector index {index_name} does not exist")]
+    MissingIndex {
+        /// Missing index/table name.
+        index_name: String,
+    },
+
     /// `LanceDB` operation failed.
     #[error("lancedb operation failed: {source}")]
     LanceDb {

@@ -148,7 +148,7 @@ pub fn graphrag_cache_key(input_args: &Value) -> Result<String> {
     Ok(format!("{}_v{CACHE_VERSION}", to_hex(&hash)))
 }
 
-/// Serialize raw model kwargs exactly as GraphRAG's PyYAML cache hasher does.
+/// Serialize raw model kwargs exactly as `GraphRAG`'s `PyYAML` cache hasher does.
 ///
 /// # Errors
 ///
@@ -663,9 +663,7 @@ fn needs_yaml_escape(character: char) -> bool {
 }
 
 fn yaml_escape(character: char) -> String {
-    yaml_escape_replacement(character)
-        .map(str::to_owned)
-        .unwrap_or_else(|| yaml_numeric_escape(character))
+    yaml_escape_replacement(character).map_or_else(|| yaml_numeric_escape(character), str::to_owned)
 }
 
 fn yaml_escape_replacement(character: char) -> Option<&'static str> {

@@ -80,6 +80,23 @@ pub trait VectorStore: Send + Sync + Debug {
         schema: &VectorIndexSchema,
         id: &str,
     ) -> Result<Option<VectorDocument>>;
+
+    /// Search an existing index by vector, preserving provider distance order.
+    ///
+    /// An empty vector in a returned document means vectors were intentionally
+    /// omitted through `include_vectors=false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid query, missing index, schema mismatch,
+    /// provider failure, or malformed search result.
+    async fn similarity_search_by_vector(
+        &self,
+        schema: &VectorIndexSchema,
+        query_vector: &[f32],
+        k: usize,
+        include_vectors: bool,
+    ) -> Result<Vec<VectorSearchResult>>;
 }
 
 /// Create the configured vector store.

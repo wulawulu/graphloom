@@ -1,12 +1,20 @@
 //! Provider-neutral model request and response types.
 
-use std::fmt;
+use std::{fmt, pin::Pin};
 
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
 
-use crate::{CompletionRequest, CompletionResponse, EmbeddingRequest, EmbeddingResponse, Result};
+use crate::{
+    CompletionChunk, CompletionRequest, CompletionResponse, EmbeddingRequest, EmbeddingResponse,
+    Result,
+};
+
+/// Provider-neutral completion stream.
+pub type CompletionStream =
+    Pin<Box<dyn futures_util::Stream<Item = Result<CompletionChunk>> + Send>>;
 
 fn default_max_retries() -> u32 {
     1
@@ -29,6 +37,10 @@ fn default_retry_type() -> String {
     "exponential_backoff".to_owned()
 }
 
+#[allow(
+    clippy::ref_option,
+    reason = "serde serialize_with callbacks receive a reference to the declared Option field"
+)]
 fn serialize_optional_secret<S>(
     value: &Option<SecretString>,
     serializer: S,
@@ -120,6 +132,9 @@ pub struct ModelConfig {
     #[serde(alias = "encoding_model")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding_model: Option<String>,
+    /// Base provider call arguments used by Query and indexing operations.
+    #[serde(alias = "call_args", default)]
+    pub call_args: std::collections::BTreeMap<String, Value>,
 }
 
 impl fmt::Debug for ModelConfig {
@@ -139,6 +154,7 @@ impl fmt::Debug for ModelConfig {
             .field("tokens_per_minute", &self.tokens_per_minute)
             .field("requests_per_minute", &self.requests_per_minute)
             .field("encoding_model", &self.encoding_model)
+            .field("call_args_keys", &self.call_args.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -298,6 +314,23 @@ pub trait CompletionModel: Send + Sync + std::fmt::Debug {
     ///
     /// Returns an error when the provider fails or returns malformed output.
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse>;
+
+    /// Stream a completion request.
+    ///
+    /// Custom models receive a correct single-chunk fallback. Provider adapters
+    /// should override this method when their transport supports true streaming.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when request validation or completion fails.
+    async fn stream(&self, mut request: CompletionRequest) -> Result<CompletionStream> {
+        self.validate_request(&request)?;
+        request.stream = Some(false);
+        let response = self.complete(request).await?;
+        Ok(Box::pin(futures_util::stream::once(async move {
+            Ok(CompletionChunk::from_response(response))
+        })))
+    }
 }
 
 /// Provider-neutral embedding model.

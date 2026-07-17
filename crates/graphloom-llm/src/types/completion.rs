@@ -62,7 +62,7 @@ pub struct CompletionChoice {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// Provider-neutral completion response compatible with GraphRAG cache JSON.
+/// Provider-neutral completion response compatible with `GraphRAG` cache JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionResponse {
     /// Provider response id.

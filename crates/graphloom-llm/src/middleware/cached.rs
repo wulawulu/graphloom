@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
-    CacheStatus, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    EmbeddingRequest, EmbeddingResponse, Result, completion_request_cache_key,
+    CacheStatus, CompletionModel, CompletionRequest, CompletionResponse, CompletionStream,
+    EmbeddingModel, EmbeddingRequest, EmbeddingResponse, Result, completion_request_cache_key,
     embedding_request_cache_key,
 };
 
 /// GraphRAG-compatible per-call metrics payload.
 pub type CacheMetrics = BTreeMap<String, Value>;
 
-/// Shared cache payload stored inside GraphRAG's outer `result` envelope.
+/// Shared cache payload stored inside `GraphRAG`'s outer `result` envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CachedModelResult<R> {
     /// Full canonical provider response.
@@ -27,7 +27,7 @@ pub struct CachedModelResult<R> {
     pub metrics: CacheMetrics,
 }
 
-/// Cached completion model using GraphRAG v4 keys and payloads.
+/// Cached completion model using `GraphRAG` v4 keys and payloads.
 #[derive(Debug, Clone)]
 pub struct CachedCompletionModel {
     inner: Arc<dyn CompletionModel>,
@@ -66,9 +66,14 @@ impl CompletionModel for CachedCompletionModel {
         write_cached(&*self.cache, &key, &response).await?;
         Ok(response)
     }
+
+    async fn stream(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.validate_request(&request)?;
+        self.inner.stream(request).await
+    }
 }
 
-/// Cached embedding model using GraphRAG v4 keys and payloads.
+/// Cached embedding model using `GraphRAG` v4 keys and payloads.
 #[derive(Debug, Clone)]
 pub struct CachedEmbeddingModel {
     inner: Arc<dyn EmbeddingModel>,

@@ -657,7 +657,7 @@ async fn test_should_cache_completion_miss_and_invalidate_legacy_payload() {
     assert!(value.get("response").is_some());
     assert_eq!(
         value.get("metrics"),
-        Some(&Value::Object(Default::default()))
+        Some(&Value::Object(serde_json::Map::default()))
     );
 }
 
@@ -823,7 +823,7 @@ fn test_should_reject_embedding_extra_reserved_key() {
     ));
 }
 
-fn openai_test_config(api_base: String, model: &str) -> ModelConfig {
+fn openai_test_config(api_base: &str, model: &str) -> ModelConfig {
     serde_json::from_value(serde_json::json!({
         "model_provider": "openai",
         "model": model,
@@ -834,7 +834,7 @@ fn openai_test_config(api_base: String, model: &str) -> ModelConfig {
     .expect("test model config")
 }
 
-fn provider_test_config(provider: &str, api_base: String, model: &str) -> ModelConfig {
+fn provider_test_config(provider: &str, api_base: &str, model: &str) -> ModelConfig {
     serde_json::from_value(serde_json::json!({
         "model_provider": provider,
         "model": model,
@@ -937,7 +937,7 @@ async fn test_should_send_completion_extra_fields_in_http_body() {
         .mount(&server)
         .await;
     let model =
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("model");
     let mut request = CompletionRequest::new(vec![ChatMessage::user("extra")]);
     request.extra.insert(
@@ -980,7 +980,7 @@ async fn test_should_send_embedding_extra_fields_in_http_body() {
         .await;
     let model = OpenAiEmbeddingModel::new(
         "embedding",
-        openai_test_config(server.uri(), "embed-test"),
+        openai_test_config(&server.uri(), "embed-test"),
         1,
     )
     .expect("model");
@@ -1009,7 +1009,7 @@ async fn test_should_use_deepseek_provider_with_openai_compatible_transport() {
         .await;
     let model = OpenAiCompletionModel::new(
         "chat",
-        provider_test_config("deepseek", server.uri(), "deepseek-test"),
+        provider_test_config("deepseek", &server.uri(), "deepseek-test"),
         1,
     )
     .expect("model");
@@ -1035,7 +1035,7 @@ async fn test_should_append_openai_v1_path_for_ollama_provider() {
         .await;
     let model = OpenAiEmbeddingModel::new(
         "embedding",
-        provider_test_config("ollama", server.uri(), "bge-m3"),
+        provider_test_config("ollama", &server.uri(), "bge-m3"),
         1,
     )
     .expect("model");
@@ -1065,7 +1065,7 @@ const CLIENT_ONLY_EXTRA_FIELDS: &[&str] = &[
 async fn test_should_reject_completion_client_only_extra_fields() {
     let server = MockServer::start().await;
     let model =
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("model");
 
     for field in CLIENT_ONLY_EXTRA_FIELDS {
@@ -1098,7 +1098,7 @@ async fn test_should_reject_embedding_client_only_extra_fields() {
     let server = MockServer::start().await;
     let model = OpenAiEmbeddingModel::new(
         "embedding",
-        openai_test_config(server.uri(), "embed-test"),
+        openai_test_config(&server.uri(), "embed-test"),
         1,
     )
     .expect("model");
@@ -1132,11 +1132,11 @@ async fn test_should_reject_embedding_client_only_extra_fields() {
 async fn test_should_not_send_mock_response_to_openai_provider() {
     let server = MockServer::start().await;
     let completion =
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("completion model");
     let embedding = OpenAiEmbeddingModel::new(
         "embedding",
-        openai_test_config(server.uri(), "embed-test"),
+        openai_test_config(&server.uri(), "embed-test"),
         1,
     )
     .expect("embedding model");
@@ -1173,7 +1173,7 @@ async fn test_should_not_send_mock_response_to_openai_provider() {
 async fn test_should_not_expose_api_key_value_in_error() {
     let server = MockServer::start().await;
     let model =
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("model");
     let mut request = CompletionRequest::new(vec![ChatMessage::user("secret")]);
     request.extra.insert(
@@ -1201,7 +1201,7 @@ async fn seed_completion_cache(cache: &MemoryCache, request: &CompletionRequest)
     let key = graphloom_llm::completion_request_cache_key(request).expect("completion key");
     let payload = CachedModelResult {
         response: CompletionResponse::text_for_test("cached", "cached answer"),
-        metrics: Default::default(),
+        metrics: std::collections::BTreeMap::default(),
     };
     cache
         .set(
@@ -1216,7 +1216,7 @@ async fn seed_embedding_cache(cache: &MemoryCache, request: &EmbeddingRequest) {
     let key = graphloom_llm::embedding_request_cache_key(request).expect("embedding key");
     let payload = CachedModelResult {
         response: EmbeddingResponse::vectors_for_test("cached", vec![vec![1.0, 2.0]]),
-        metrics: Default::default(),
+        metrics: std::collections::BTreeMap::default(),
     };
     cache
         .set(
@@ -1231,7 +1231,7 @@ async fn seed_embedding_cache(cache: &MemoryCache, request: &EmbeddingRequest) {
 async fn test_should_reject_completion_client_only_fields_before_cache_lookup() {
     let server = MockServer::start().await;
     let inner = Arc::new(
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("model"),
     );
     let cache = Arc::new(MemoryCache::new());
@@ -1280,7 +1280,7 @@ async fn test_should_reject_embedding_client_only_fields_before_cache_lookup() {
     let inner = Arc::new(
         OpenAiEmbeddingModel::new(
             "embedding",
-            openai_test_config(server.uri(), "embed-test"),
+            openai_test_config(&server.uri(), "embed-test"),
             1,
         )
         .expect("model"),
@@ -1329,7 +1329,7 @@ async fn test_should_reject_embedding_client_only_fields_before_cache_lookup() {
 async fn test_should_reject_mock_response_before_cached_openai_call() {
     let server = MockServer::start().await;
     let inner = Arc::new(
-        OpenAiCompletionModel::new("chat", openai_test_config(server.uri(), "chat-test"), 1)
+        OpenAiCompletionModel::new("chat", openai_test_config(&server.uri(), "chat-test"), 1)
             .expect("model"),
     );
     let cache = Arc::new(MemoryCache::new());
