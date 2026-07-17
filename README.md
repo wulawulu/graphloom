@@ -21,13 +21,13 @@ cargo run -p graphloom -- --help
 
 The `graphloom` crate is both the Rust library and the command-line binary.
 
-- `graphloom::api` exposes programmatic entry points. The current public API is
-  `build_index`, which runs standard indexing and returns structured workflow
-  output and pipeline stats. `build_index` always performs full validation and
-  then runs workflows directly against the configured output, so API callers do
-  not need to run CLI validation first. Completed writes are not rolled back if
-  a later workflow fails. Future query and prompt-tuning APIs will live under
-  the same API layer.
+- `graphloom::api` exposes programmatic indexing and Query entry points.
+  `build_index` runs standard indexing and returns structured workflow output
+  and pipeline stats. `query`, `query_stream`, `basic_search`, and
+  `basic_search_streaming` provide read-only Query access. `build_index` always
+  performs full validation and then runs workflows directly against the
+  configured output, so API callers do not need to run CLI validation first.
+  Completed writes are not rolled back if a later workflow fails.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` loads project
   configuration and performs CLI validation before dry-run output or indexing.
@@ -57,9 +57,10 @@ GraphRAG 3.1.0 prompt content under the MIT License.
 GraphLoom prompt templates use Tera/Jinja double-brace syntax, such as
 `{{ input_text }}`. The canonical community-report prompt is
 `prompts/community_report_graph.txt` and `prompts/community_report_text.txt`.
-`graphloom init` currently generates only the prompt templates used by indexing
-workflows. Search and query prompts will be added when their workflows are
-implemented.
+`graphloom init` generates all 13 GraphRAG 3.1.0 managed indexing and Query
+prompts. Query prompts include Basic, Local, Global, DRIFT, and question
+generation templates; methods not yet implemented still fail explicitly rather
+than falling back to another search algorithm.
 
 `init` performs path and symlink preflight before creating directories or
 writing managed files. If a project path, `input/`, `prompts/`, or managed file
@@ -132,6 +133,34 @@ not contacted. This validates non-destructive prerequisites; it does not promise
 that every provider construction or workflow operation will subsequently
 succeed.
 
+## Query
+
+Basic Search is the first supported Query method:
+
+```bash
+graphloom query --root ./demo --method basic "What are the main facts?"
+```
+
+Provider deltas can be streamed directly to stdout:
+
+```bash
+graphloom query --root ./demo --method basic --streaming "What are the main facts?"
+```
+
+Basic Search embeds the query, searches the existing `text_unit_text` LanceDB
+index, restores matching text units to their original Parquet row order, builds
+the GraphRAG-compatible Sources context, and streams the final completion. It is
+strictly read-only: it does not create missing table/vector directories, reset
+indices, write Parquet, or populate the indexing cache. Query logs are written
+to `logs/query.log`; stdout contains only the answer.
+
+The CLI keeps GraphRAG's default method, `global`. During the current Phase 2
+slice, `global`, `local`, and `drift` are recognized but return an explicit
+typed “not yet provided” error. They never fall back to Basic Search.
+
+`--data <directory>` overrides only the Parquet table directory. LanceDB still
+uses `vector_store.db_uri` from project settings.
+
 ## Skip Optional Validation
 
 ```bash
@@ -187,12 +216,13 @@ demo/output/community_reports.parquet
 demo/output/lancedb/
 demo/cache/
 demo/logs/indexing-engine.log
+demo/logs/query.log
 ```
 
 `covariates.parquet` is written only when claim extraction is enabled. LanceDB
 is prepared only when an active workflow requires vector storage, cache storage
-only when cache is enabled, and the log file is a CLI artifact rather than an
-output of the library API.
+only when cache is enabled, and log files are CLI artifacts rather than outputs
+of the library APIs. `query.log` is created only when Query CLI runs.
 
 `graphloom index` runs workflows directly against the configured output, which
 matches GraphRAG's normal indexing lifecycle. Each workflow replaces the tables
@@ -282,13 +312,15 @@ Supported:
   `openai`, `deepseek`, or `ollama` provider names; provider defaults normalize
   DeepSeek and Ollama API bases without GraphLoom-only settings changes
 - LanceDB vector storage
+- Basic Search through the Rust API and `graphloom query --method basic`, with
+  provider-native streaming
 - Linux and Windows CI
 - tag releases published once by a dedicated Ubuntu release job after Linux and
   Windows build jobs and the GraphRAG compatibility gate pass
 
 Not yet supported:
 
-- query commands
+- Local, Global, Dynamic Community Selection, and DRIFT Query execution
 - update commands
 - prompt tuning
 - Azure OpenAI or Azure managed identity
