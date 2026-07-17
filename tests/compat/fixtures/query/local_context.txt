@@ -1,0 +1,40 @@
+-----Conversation History-----
+turn|content
+user|old question
+user|new question
+
+
+-----Reports-----
+id|title|content
+2|Report 2|Shared report
+1|Report 1|Alpha report
+
+
+-----Entities-----
+id|entity|description|number of relationships
+0|Alice|Alice description|5
+1|Bob|Bob description|4
+
+
+-----Relationships-----
+id|source|target|description|weight|links
+0|Alice|Bob|Alice to Bob|1.5|1
+1|Alice|External|Alice to External||2
+2|Bob|External|Bob to External|2.0|2
+
+
+-----claims-----
+id|entity|object_id|status|start_date|end_date|description
+10|Alice||TRUE|||Alice claim
+
+
+-----facts-----
+id|entity|object_id|status|start_date|end_date|description
+11|Bob||TRUE|||Bob fact
+
+
+-----Sources-----
+id|text
+0|Alice source
+1|Bob source
+3|Shared source

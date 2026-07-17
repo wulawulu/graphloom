@@ -1,6 +1,7 @@
 //! Query contracts, read-only runtime, data adapters, and search implementations.
 
 mod callbacks;
+mod context;
 mod data_loader;
 mod data_model;
 mod error;
@@ -10,11 +11,13 @@ mod result;
 mod runtime;
 
 pub(crate) mod basic;
+pub(crate) mod local;
 
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 pub use callbacks::{NoopQueryCallbacks, QueryCallbackChain, QueryCallbacks};
 use clap::ValueEnum;
+pub use context::{ConversationHistory, ConversationRole, ConversationTurn};
 pub use data_loader::{
     BasicQueryData, DriftQueryData, GlobalQueryData, LocalQueryData, QueryDataLoader,
 };
@@ -30,7 +33,7 @@ pub use result::{
     QueryContext, QueryContextRecords, QueryContextText, QueryEvent, QueryEventStream, QueryResult,
     QueryUsage, QueryUsageCategory,
 };
-pub(crate) use runtime::{QueryRuntime, QueryRuntimeFactory};
+pub(crate) use runtime::{BasicQueryRuntime, LocalQueryRuntime, QueryRuntimeFactory};
 
 /// Public `GraphRAG` query method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
@@ -96,6 +99,8 @@ pub struct QueryOptions {
     pub response_type: String,
     /// Query callbacks.
     pub callbacks: Vec<Arc<dyn QueryCallbacks>>,
+    /// Optional prior conversation turns.
+    pub conversation_history: Option<ConversationHistory>,
 }
 
 impl QueryOptions {
@@ -111,6 +116,7 @@ impl QueryOptions {
             dynamic_community_selection: false,
             response_type: "Multiple Paragraphs".to_owned(),
             callbacks: Vec::new(),
+            conversation_history: None,
         }
     }
 }

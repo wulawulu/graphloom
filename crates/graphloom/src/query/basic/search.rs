@@ -7,7 +7,7 @@ use graphloom_llm::{ChatMessage, CompletionRequest, CompletionStream, Tokenizer}
 use serde::Serialize;
 
 use super::super::{
-    QueryError, QueryEvent, QueryEventStream, QueryResult, QueryRuntime, QueryUsage,
+    BasicQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryResult, QueryUsage,
     QueryUsageCategory, Result, SearchMethod,
 };
 
@@ -38,7 +38,7 @@ enum BasicStreamPhase {
 }
 
 pub(crate) async fn basic_search(
-    runtime: QueryRuntime,
+    runtime: BasicQueryRuntime,
     query: &str,
     response_type: &str,
 ) -> Result<QueryResult> {
@@ -61,7 +61,7 @@ pub(crate) async fn basic_search(
 }
 
 pub(crate) async fn basic_search_streaming(
-    runtime: QueryRuntime,
+    runtime: BasicQueryRuntime,
     query: &str,
     response_type: &str,
 ) -> Result<QueryEventStream> {
@@ -240,7 +240,7 @@ mod tests {
         BasicSearchConfig,
         prompts::{PromptKind, PromptRepository},
         query::{
-            QueryCallbacks, QueryContext, QueryContextText, QueryRuntime, TextUnit,
+            BasicQueryRuntime, QueryCallbacks, QueryContext, QueryContextText, TextUnit,
             basic::BasicContextBuilder,
         },
     };
@@ -347,7 +347,7 @@ mod tests {
         tempdir: &TempDir,
         requests: Arc<Mutex<Vec<CompletionRequest>>>,
         order: Arc<Mutex<Vec<String>>>,
-    ) -> QueryRuntime {
+    ) -> BasicQueryRuntime {
         let mut vector_config = VectorStoreConfig::default();
         vector_config.db_uri = tempdir.path().join("lancedb").display().to_string();
         vector_config.vector_size = 2;
@@ -406,7 +406,7 @@ mod tests {
             .load(PromptKind::BasicSearch, None)
             .await
             .expect("prompt");
-        QueryRuntime {
+        BasicQueryRuntime {
             basic_context: BasicContextBuilder {
                 config: BasicSearchConfig {
                     k: 2,

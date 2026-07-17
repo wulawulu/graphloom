@@ -2,19 +2,23 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     path::Path,
+    sync::{Arc, Mutex},
     time::SystemTime,
 };
 
 use futures_util::StreamExt;
 use graphloom::{
-    GraphLoomError, GraphRagConfig, TEXT_UNIT_TEXT_EMBEDDING,
+    ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig, TEXT_UNIT_TEXT_EMBEDDING,
     api::{query, query_stream},
-    query::{QueryContextText, QueryError, QueryEvent, QueryOptions, SearchMethod},
+    query::{
+        QueryCallbacks, QueryContext, QueryContextText, QueryError, QueryEvent, QueryOptions,
+        SearchMethod,
+    },
 };
 use graphloom_llm::ModelConfig;
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorIndexSchema, VectorStore};
-use polars_core::prelude::{DataFrame, NamedFrom, Series};
+use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
@@ -29,6 +33,27 @@ struct QueryFixture {
     text_units_hash: u64,
     text_units_modified: SystemTime,
     vector_ids: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct RecordingQueryCallbacks {
+    events: Mutex<Vec<String>>,
+}
+
+impl QueryCallbacks for RecordingQueryCallbacks {
+    fn on_context(&self, _context: &QueryContext) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push("context".to_owned());
+    }
+
+    fn on_llm_new_token(&self, token: &str) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push(format!("token:{token}"));
+    }
 }
 
 async fn mount_query_stub() -> MockServer {
@@ -94,6 +119,126 @@ fn text_units(first_text: &str, second_text: &str) -> DataFrame {
         ],
     )
     .expect("sparse GraphRAG text units")
+}
+
+fn string_list_column(name: &str, rows: &[Vec<String>]) -> Column {
+    let values = rows
+        .iter()
+        .map(|row| {
+            Series::new(
+                "item".into(),
+                row.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Series::new(name.into(), values).into()
+}
+
+fn i64_list_column(name: &str, rows: &[Vec<i64>]) -> Column {
+    let values = rows
+        .iter()
+        .map(|row| Series::new("item".into(), row.as_slice()))
+        .collect::<Vec<_>>();
+    Series::new(name.into(), values).into()
+}
+
+async fn write_local_tables(root: &Path) -> Vec<std::path::PathBuf> {
+    let provider = ParquetTableProvider::new(root).expect("Parquet provider");
+    let mut entities = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["entity-a"]).into(),
+            Series::new("human_readable_id".into(), [0_i64]).into(),
+            Series::new("title".into(), ["Alice"]).into(),
+            Series::new("description".into(), ["Alice description"]).into(),
+            Series::new("degree".into(), [2_i64]).into(),
+        ],
+    )
+    .expect("entities");
+    entities
+        .with_column(string_list_column(
+            "text_unit_ids",
+            &[vec!["A".to_owned(), "B".to_owned()]],
+        ))
+        .expect("entity text units");
+    let mut communities = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["community-a"]).into(),
+            Series::new("community".into(), [1_i64]).into(),
+            Series::new("level".into(), [0_i64]).into(),
+            Series::new("title".into(), ["Community A"]).into(),
+            Series::new("parent".into(), [-1_i64]).into(),
+        ],
+    )
+    .expect("communities");
+    communities
+        .with_column(string_list_column(
+            "entity_ids",
+            &[vec!["entity-a".to_owned()]],
+        ))
+        .expect("community entities");
+    communities
+        .with_column(i64_list_column("children", &[Vec::new()]))
+        .expect("community children");
+    let reports = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["report-a"]).into(),
+            Series::new("community".into(), [1_i64]).into(),
+            Series::new("level".into(), [0_i64]).into(),
+            Series::new("title".into(), ["Report A"]).into(),
+            Series::new("summary".into(), ["Alice summary"]).into(),
+            Series::new("full_content".into(), ["Alice full report"]).into(),
+            Series::new("rank".into(), [9.0_f64]).into(),
+        ],
+    )
+    .expect("reports");
+    let mut units = text_units("first source", "second source");
+    units
+        .with_column(string_list_column(
+            "relationship_ids",
+            &[vec!["relationship-a".to_owned()], Vec::new()],
+        ))
+        .expect("text unit relationships");
+    let mut relationships = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["relationship-a"]).into(),
+            Series::new("human_readable_id".into(), [0_i64]).into(),
+            Series::new("source".into(), ["Alice"]).into(),
+            Series::new("target".into(), ["External"]).into(),
+            Series::new("description".into(), ["Alice to External"]).into(),
+            Series::new("weight".into(), [1.0_f64]).into(),
+            Series::new("combined_degree".into(), [2_i64]).into(),
+        ],
+    )
+    .expect("relationships");
+    relationships
+        .with_column(string_list_column("text_unit_ids", &[vec!["A".to_owned()]]))
+        .expect("relationship text units");
+    for (name, dataframe) in [
+        ("entities", entities),
+        ("communities", communities),
+        ("community_reports", reports),
+        ("text_units", units),
+        ("relationships", relationships),
+    ] {
+        provider
+            .write_dataframe(name, dataframe)
+            .await
+            .expect("write Local table");
+    }
+    [
+        "entities",
+        "communities",
+        "community_reports",
+        "text_units",
+        "relationships",
+    ]
+    .iter()
+    .map(|name| root.join(format!("{name}.parquet")))
+    .collect()
 }
 
 async fn write_text_units(root: &Path, dataframe: DataFrame) -> std::path::PathBuf {
@@ -195,6 +340,14 @@ fn basic_options(root: &Path, query_text: &str) -> QueryOptions {
     )
 }
 
+fn local_options(root: &Path, query_text: &str) -> QueryOptions {
+    QueryOptions::new(
+        root.to_path_buf(),
+        query_text.to_owned(),
+        SearchMethod::Local,
+    )
+}
+
 #[tokio::test]
 async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
     let server = mount_query_stub().await;
@@ -287,6 +440,113 @@ async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
             .as_str()
             .is_some_and(|value| value.contains("0|first source\n1|second source"))
     );
+}
+
+#[tokio::test]
+async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors() {
+    let server = mount_query_stub().await;
+    let mut fixture = fixture(&server).await;
+    let paths = write_local_tables(&fixture.project.path().join("output")).await;
+    let before = futures_util::future::join_all(paths.iter().map(|path| async move {
+        (
+            file_hash(path).await,
+            tokio::fs::metadata(path)
+                .await
+                .expect("Local table metadata")
+                .modified()
+                .expect("Local table mtime"),
+        )
+    }))
+    .await;
+    fixture.config.local_search.top_k_entities = 1;
+    fixture.config.local_search.max_context_tokens = 4_000;
+    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("connect Local LanceDB");
+    let schema = fixture
+        .config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    store.ensure_index(&schema).await.expect("entity index");
+    store
+        .upsert_documents(
+            &schema,
+            &[VectorDocument {
+                id: "entity-a".to_owned(),
+                vector: vec![0.25, 0.75],
+            }],
+        )
+        .await
+        .expect("entity vector");
+    let vector_ids = store.ids(&schema).await.expect("entity ids");
+
+    let result = query(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("Local Query");
+    assert_eq!(result.response, "Basic answer.");
+    let QueryContextText::Text(context) = result.context.text else {
+        panic!("expected Local context");
+    };
+    assert!(context.contains("-----Reports-----"));
+    assert!(context.contains("-----Entities-----"));
+    assert!(context.contains("-----Relationships-----"));
+    assert!(context.contains("-----Sources-----"));
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 1);
+    assert_eq!(result.usage.categories["response"].llm_calls, 1);
+
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut stream_options = local_options(fixture.project.path(), "Who is Alice?");
+    stream_options.callbacks.push(callbacks.clone());
+    let mut events = query_stream(fixture.config.clone(), stream_options)
+        .await
+        .expect("Local stream");
+    let mut chunks = Vec::new();
+    while let Some(event) = events.next().await {
+        if let QueryEvent::Token(token) = event.expect("Local stream event") {
+            chunks.push(token);
+        }
+    }
+    assert_eq!(chunks, ["Basic ", "answer."]);
+    assert_eq!(
+        *callbacks.events.lock().expect("callback events"),
+        ["context", "token:Basic ", "token:answer."]
+    );
+
+    for (path, (hash, modified)) in paths.iter().zip(before) {
+        assert_eq!(file_hash(path).await, hash);
+        assert_eq!(
+            tokio::fs::metadata(path)
+                .await
+                .expect("metadata after Local Query")
+                .modified()
+                .expect("mtime after Local Query"),
+            modified
+        );
+    }
+    let reopened = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("reopen Local LanceDB");
+    assert_eq!(
+        reopened.ids(&schema).await.expect("entity ids after"),
+        vector_ids
+    );
+    assert!(!fixture.project.path().join("cache").exists());
+    let requests = server.received_requests().await.expect("Local requests");
+    let completions = requests
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .filter(|body| body.get("messages").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 2);
+    assert!(completions.iter().all(|request| request["stream"] == true));
+    assert!(completions.iter().all(|request| {
+        request["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("-----Entities-----"))
+    }));
 }
 
 #[tokio::test]

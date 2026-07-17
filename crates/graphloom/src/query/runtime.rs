@@ -11,7 +11,10 @@ use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore, create_vect
 
 use super::{
     QueryCallbackChain, QueryCallbacks, QueryError, QueryOptions, Result, SearchMethod, TextUnit,
-    basic::BasicContextBuilder, data_loader::QueryDataLoader, requirements::QueryRequirements,
+    basic::BasicContextBuilder,
+    data_loader::{LocalQueryData, QueryDataLoader},
+    local::LocalContextBuilder,
+    requirements::QueryRequirements,
 };
 use crate::{
     project::LoadedProject,
@@ -21,7 +24,7 @@ use crate::{
 
 /// Prepared resources for one Basic Search invocation.
 #[derive(Debug)]
-pub(crate) struct QueryRuntime {
+pub(crate) struct BasicQueryRuntime {
     pub(crate) basic_context: BasicContextBuilder,
     pub(crate) completion_model: Arc<dyn CompletionModel>,
     pub(crate) completion_model_id: String,
@@ -30,7 +33,18 @@ pub(crate) struct QueryRuntime {
     pub(crate) callbacks: Arc<dyn QueryCallbacks>,
 }
 
-struct BasicModelResources {
+/// Prepared resources for one Local Search invocation.
+#[derive(Debug)]
+pub(crate) struct LocalQueryRuntime {
+    pub(crate) local_context: LocalContextBuilder,
+    pub(crate) completion_model: Arc<dyn CompletionModel>,
+    pub(crate) completion_model_id: String,
+    pub(crate) completion_config: ModelConfig,
+    pub(crate) prompt: PromptTemplate,
+    pub(crate) callbacks: Arc<dyn QueryCallbacks>,
+}
+
+struct QueryModelResources {
     completion: Arc<dyn CompletionModel>,
     completion_id: String,
     completion_config: ModelConfig,
@@ -39,7 +53,7 @@ struct BasicModelResources {
     tokenizer: Arc<dyn Tokenizer>,
 }
 
-struct BasicVectorResources {
+struct QueryVectorResources {
     store: Arc<dyn VectorStore>,
     schema: VectorIndexSchema,
 }
@@ -52,7 +66,7 @@ impl QueryRuntimeFactory {
     pub(crate) async fn build_basic(
         project: &LoadedProject,
         options: &QueryOptions,
-    ) -> Result<QueryRuntime> {
+    ) -> Result<BasicQueryRuntime> {
         Self::build_basic_with_factory(project, options, &DefaultModelFactory).await
     }
 
@@ -60,7 +74,7 @@ impl QueryRuntimeFactory {
         project: &LoadedProject,
         options: &QueryOptions,
         model_factory: &dyn ModelFactory,
-    ) -> Result<QueryRuntime> {
+    ) -> Result<BasicQueryRuntime> {
         let method = SearchMethod::Basic;
         validate_basic_requirements(project, options)?;
         let text_units = load_basic_text_units(project, options).await?;
@@ -80,10 +94,63 @@ impl QueryRuntimeFactory {
             })?;
         let callbacks: Arc<dyn QueryCallbacks> =
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
-        Ok(QueryRuntime {
+        Ok(BasicQueryRuntime {
             basic_context: BasicContextBuilder {
                 config: project.config.basic_search.clone(),
                 text_units,
+                embedding_model: models.embedding,
+                embedding_model_id: models.embedding_id,
+                vector_store: vectors.store,
+                vector_schema: vectors.schema,
+                tokenizer: models.tokenizer,
+            },
+            completion_model: models.completion,
+            completion_model_id: models.completion_id,
+            completion_config: models.completion_config,
+            prompt,
+            callbacks,
+        })
+    }
+
+    pub(crate) async fn build_local(
+        project: &LoadedProject,
+        options: &QueryOptions,
+    ) -> Result<LocalQueryRuntime> {
+        Self::build_local_with_factory(project, options, &DefaultModelFactory).await
+    }
+
+    async fn build_local_with_factory(
+        project: &LoadedProject,
+        options: &QueryOptions,
+        model_factory: &dyn ModelFactory,
+    ) -> Result<LocalQueryRuntime> {
+        let method = SearchMethod::Local;
+        validate_local_requirements(project, options)?;
+        let data = load_local_data(project, options).await?;
+        let models = create_local_models(project, model_factory)?;
+        let vectors = open_local_vectors(project).await?;
+        let prompt = PromptRepository::new(&project.root)
+            .load_configured(
+                PromptKind::LocalSearch,
+                project.config.local_search.prompt.as_deref(),
+            )
+            .await
+            .map_err(|source| QueryError::QueryPrompt {
+                method,
+                operation: "load Local Search prompt",
+                prompt: "local_search_system_prompt.txt",
+                source: Box::new(source),
+            })?;
+        let callbacks: Arc<dyn QueryCallbacks> =
+            Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
+        Ok(LocalQueryRuntime {
+            local_context: LocalContextBuilder {
+                config: project.config.local_search.clone(),
+                entities: data.entities,
+                reports: data.reports,
+                text_units: data.text_units,
+                relationships: data.relationships,
+                covariates: data.covariates,
                 embedding_model: models.embedding,
                 embedding_model_id: models.embedding_id,
                 vector_store: vectors.store,
@@ -130,11 +197,120 @@ fn validate_basic_requirements(project: &LoadedProject, options: &QueryOptions) 
     })
 }
 
+fn validate_local_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+    let method = SearchMethod::Local;
+    if options.community_level < 0 {
+        return Err(QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate query options",
+            message: "community_level must be non-negative".to_owned(),
+        });
+    }
+    project
+        .config
+        .local_search
+        .validate()
+        .map_err(|message| QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate Local Search config",
+            message,
+        })?;
+    if let Some(history) = &options.conversation_history {
+        history
+            .validate()
+            .map_err(|message| QueryError::InvalidQueryConfig {
+                method,
+                operation: "validate Local Search conversation history",
+                message,
+            })?;
+    }
+    let requirements = QueryRequirements::for_method(method, &project.config);
+    if requirements.tables.len() == 5
+        && requirements.optional_tables.len() == 1
+        && requirements.embeddings.len() == 1
+    {
+        return Ok(());
+    }
+    Err(QueryError::QueryRuntime {
+        method,
+        operation: "resolve Local Search requirements",
+        source: Box::new(std::io::Error::other(
+            "Local Search requirements are internally inconsistent",
+        )),
+    })
+}
+
 async fn load_basic_text_units(
     project: &LoadedProject,
     options: &QueryOptions,
 ) -> Result<Vec<TextUnit>> {
-    let method = SearchMethod::Basic;
+    let table_provider = open_table_provider(project, options, SearchMethod::Basic, "text_units")?;
+    Ok(QueryDataLoader::new(table_provider)
+        .load_basic()
+        .await?
+        .text_units)
+}
+
+async fn load_local_data(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<LocalQueryData> {
+    let table_provider = open_table_provider(project, options, SearchMethod::Local, "entities")?;
+    QueryDataLoader::new(table_provider)
+        .load_local(options.community_level)
+        .await
+}
+
+fn create_basic_models(
+    project: &LoadedProject,
+    model_factory: &dyn ModelFactory,
+) -> Result<QueryModelResources> {
+    create_query_models(
+        project,
+        model_factory,
+        SearchMethod::Basic,
+        &project.config.basic_search.completion_model_id,
+        &project.config.basic_search.embedding_model_id,
+    )
+}
+
+fn create_local_models(
+    project: &LoadedProject,
+    model_factory: &dyn ModelFactory,
+) -> Result<QueryModelResources> {
+    create_query_models(
+        project,
+        model_factory,
+        SearchMethod::Local,
+        &project.config.local_search.completion_model_id,
+        &project.config.local_search.embedding_model_id,
+    )
+}
+
+async fn open_basic_vectors(project: &LoadedProject) -> Result<QueryVectorResources> {
+    open_query_vectors(
+        project,
+        SearchMethod::Basic,
+        crate::TEXT_UNIT_TEXT_EMBEDDING,
+    )
+    .await
+}
+
+async fn open_local_vectors(project: &LoadedProject) -> Result<QueryVectorResources> {
+    open_query_vectors(
+        project,
+        SearchMethod::Local,
+        crate::ENTITY_DESCRIPTION_EMBEDDING,
+    )
+    .await
+}
+
+fn open_table_provider(
+    project: &LoadedProject,
+    options: &QueryOptions,
+    method: SearchMethod,
+    representative_table: &'static str,
+) -> Result<Arc<dyn TableProvider>> {
     let table_root = resolve_data_root(
         &project.root,
         options.data_dir.as_deref(),
@@ -144,7 +320,7 @@ async fn load_basic_text_units(
         return Err(QueryError::MissingQueryTable {
             method,
             operation: "open Query table directory",
-            table: "text_units",
+            table: representative_table,
         });
     }
     let table_storage = Arc::new(FileStorage::existing(&table_root).map_err(|source| {
@@ -154,85 +330,97 @@ async fn load_basic_text_units(
             source: Box::new(source),
         }
     })?);
-    let table_provider: Arc<dyn TableProvider> =
-        Arc::new(ParquetTableProvider::from_storage(table_storage));
-    Ok(QueryDataLoader::new(table_provider)
-        .load_basic()
-        .await?
-        .text_units)
+    Ok(Arc::new(ParquetTableProvider::from_storage(table_storage)))
 }
 
-fn create_basic_models(
+fn create_query_models(
     project: &LoadedProject,
     model_factory: &dyn ModelFactory,
-) -> Result<BasicModelResources> {
-    let method = SearchMethod::Basic;
-    let completion_id = project.config.basic_search.completion_model_id.clone();
-    let embedding_id = project.config.basic_search.embedding_model_id.clone();
+    method: SearchMethod,
+    completion_id: &str,
+    embedding_id: &str,
+) -> Result<QueryModelResources> {
     let completion_config = required_model(
         &project.config.completion_models,
-        &completion_id,
+        completion_id,
         method,
         "completion",
     )?
     .clone();
     let embedding_config = required_model(
         &project.config.embedding_models,
-        &embedding_id,
+        embedding_id,
         method,
         "embedding",
     )?;
     let completion = model_factory
         .create_completion(
-            &completion_id,
+            completion_id,
             &completion_config,
             project.config.concurrent_requests,
         )
         .map_err(|source| QueryError::QueryRuntime {
             method,
-            operation: "create Basic completion model",
+            operation: match method {
+                SearchMethod::Basic => "create Basic completion model",
+                SearchMethod::Local => "create Local completion model",
+                _ => "create Query completion model",
+            },
             source: Box::new(source),
         })?;
     let embedding = model_factory
         .create_embedding(
-            &embedding_id,
+            embedding_id,
             embedding_config,
             project.config.concurrent_requests,
         )
         .map_err(|source| QueryError::QueryRuntime {
             method,
-            operation: "create Basic embedding model",
+            operation: match method {
+                SearchMethod::Basic => "create Basic embedding model",
+                SearchMethod::Local => "create Local embedding model",
+                _ => "create Query embedding model",
+            },
             source: Box::new(source),
         })?;
     let tokenizer: Arc<dyn Tokenizer> = Arc::new(
         TiktokenTokenizer::new(completion_config.effective_tokenizer_encoding()).map_err(
             |source| QueryError::QueryRuntime {
                 method,
-                operation: "create Basic tokenizer",
+                operation: match method {
+                    SearchMethod::Basic => "create Basic tokenizer",
+                    SearchMethod::Local => "create Local tokenizer",
+                    _ => "create Query tokenizer",
+                },
                 source: Box::new(source),
             },
         )?,
     );
-    Ok(BasicModelResources {
+    tracing::debug!(method = %method, "created method-specific Query models");
+    Ok(QueryModelResources {
         completion,
-        completion_id,
+        completion_id: completion_id.to_owned(),
         completion_config,
         embedding,
-        embedding_id,
+        embedding_id: embedding_id.to_owned(),
         tokenizer,
     })
 }
 
-async fn open_basic_vectors(project: &LoadedProject) -> Result<BasicVectorResources> {
-    let method = SearchMethod::Basic;
-    let schema = project
-        .config
-        .vector_store
-        .schema_for(crate::TEXT_UNIT_TEXT_EMBEDDING);
+async fn open_query_vectors(
+    project: &LoadedProject,
+    method: SearchMethod,
+    embedding_name: &str,
+) -> Result<QueryVectorResources> {
+    let schema = project.config.vector_store.schema_for(embedding_name);
     if !project.paths.vector_db_uri.is_dir() {
         return Err(QueryError::MissingVectorIndex {
             method,
-            operation: "open Basic Search vector database",
+            operation: match method {
+                SearchMethod::Basic => "open Basic Search vector database",
+                SearchMethod::Local => "open Local Search vector database",
+                _ => "open Query vector database",
+            },
             index: schema.index_name.clone(),
             source: Box::new(VectorError::MissingIndex {
                 index_name: schema.index_name.clone(),
@@ -249,18 +437,27 @@ async fn open_basic_vectors(project: &LoadedProject) -> Result<BasicVectorResour
     store.count(&schema).await.map_err(|source| match source {
         source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
             method,
-            operation: "validate Basic Search vector index",
+            operation: match method {
+                SearchMethod::Basic => "validate Basic Search vector index",
+                SearchMethod::Local => "validate Local Search vector index",
+                _ => "validate Query vector index",
+            },
             index: schema.index_name.clone(),
             source: Box::new(source),
         },
         source => QueryError::InvalidVectorIndex {
             method,
-            operation: "validate Basic Search vector index",
+            operation: match method {
+                SearchMethod::Basic => "validate Basic Search vector index",
+                SearchMethod::Local => "validate Local Search vector index",
+                _ => "validate Query vector index",
+            },
             index: schema.index_name.clone(),
             source: Box::new(source),
         },
     })?;
-    Ok(BasicVectorResources { store, schema })
+    tracing::debug!(method = %method, index = %schema.index_name, "opened Query vector index");
+    Ok(QueryVectorResources { store, schema })
 }
 
 fn resolve_data_root(root: &Path, override_path: Option<&Path>, configured: &Path) -> PathBuf {

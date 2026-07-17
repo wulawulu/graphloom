@@ -6,6 +6,7 @@ use crate::{
     query::{
         QueryError, QueryEventStream, QueryOptions, QueryResult, SearchMethod,
         basic::{basic_search as run_basic, basic_search_streaming as run_basic_streaming},
+        local::{local_search as run_local, local_search_streaming as run_local_streaming},
     },
 };
 
@@ -72,6 +73,17 @@ pub(crate) async fn query_loaded(
                 crate::query::QueryRuntimeFactory::build_basic(&project, &options).await?;
             Ok(run_basic(runtime, &options.query, &options.response_type).await?)
         }
+        SearchMethod::Local => {
+            let runtime =
+                crate::query::QueryRuntimeFactory::build_local(&project, &options).await?;
+            Ok(run_local(
+                runtime,
+                &options.query,
+                &options.response_type,
+                options.conversation_history.as_ref(),
+            )
+            .await?)
+        }
         method => Err(unimplemented_method(method).into()),
     }
 }
@@ -85,6 +97,17 @@ pub(crate) async fn query_loaded_stream(
             let runtime =
                 crate::query::QueryRuntimeFactory::build_basic(&project, &options).await?;
             Ok(run_basic_streaming(runtime, &options.query, &options.response_type).await?)
+        }
+        SearchMethod::Local => {
+            let runtime =
+                crate::query::QueryRuntimeFactory::build_local(&project, &options).await?;
+            Ok(run_local_streaming(
+                runtime,
+                &options.query,
+                &options.response_type,
+                options.conversation_history.as_ref(),
+            )
+            .await?)
         }
         method => Err(unimplemented_method(method).into()),
     }
