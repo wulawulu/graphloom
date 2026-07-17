@@ -57,6 +57,10 @@ pub(super) fn first_json_object(input: &str) -> Option<&str> {
     json_object_candidates(input).find(|object| serde_json::from_str::<Value>(object).is_ok())
 }
 
+pub(super) fn first_balanced_json_object(input: &str) -> Option<&str> {
+    json_object_candidates(input).next()
+}
+
 fn json_object_candidates(input: &str) -> impl Iterator<Item = &str> {
     let bytes = input.as_bytes();
     bytes
@@ -94,7 +98,7 @@ fn json_object_candidates(input: &str) -> impl Iterator<Item = &str> {
         })
 }
 
-fn python_int(value: &Value) -> Option<i64> {
+pub(super) fn python_int(value: &Value) -> Option<i64> {
     match value {
         Value::Bool(value) => Some(i64::from(*value)),
         Value::Number(value) => value.as_i64().or_else(|| {

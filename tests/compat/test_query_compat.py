@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import pandas as pd
 from graphrag.data_model.community_report import CommunityReport
+from graphrag.data_model.community import Community
 from graphrag.data_model.covariate import Covariate
 from graphrag.data_model.entity import Entity
 from graphrag.data_model.relationship import Relationship
@@ -36,6 +37,11 @@ from graphrag.query.context_builder.local_context import build_relationship_cont
 from graphrag.query.context_builder.community_context import (
     build_community_context,
 )
+from graphrag.query.context_builder.dynamic_community_selection import (
+    DynamicCommunitySelection,
+)
+from graphrag.query.context_builder.rate_prompt import RATE_QUERY
+from graphrag.query.context_builder.rate_relevancy import rate_relevancy
 from graphrag.query.input.retrieval.entities import get_entity_by_id
 from graphrag.query.structured_search.local_search.mixed_context import (
     LocalSearchMixedContext,
@@ -62,6 +68,9 @@ class ByteTokenizer:
 
     def num_tokens(self, text: str) -> int:
         return len(text.encode())
+
+    def num_prompt_tokens(self, messages: list[Any]) -> int:
+        return sum(len(message["content"].encode()) for message in messages)
 
 
 class RecordingEmbedding:
@@ -200,6 +209,35 @@ class RecordingGlobalCallbacks(RecordingCallbacks):
 
     def on_context(self, _context: Any) -> None:
         self.events.append("context")
+
+
+class RecordingDynamicCompletion:
+    """Script dynamic ratings by description marker and record every request."""
+
+    def __init__(self, scripts: dict[str, list[str]]) -> None:
+        self.scripts = {marker: list(values) for marker, values in scripts.items()}
+        self.requests: list[tuple[list[Any], dict[str, Any]]] = []
+
+    async def completion_async(
+        self,
+        messages: list[Any],
+        **kwargs: Any,
+    ) -> AsyncIterator[SimpleNamespace]:
+        self.requests.append((messages, kwargs))
+        system = messages[0]["content"]
+        marker = next(marker for marker in self.scripts if marker in system)
+        response = self.scripts[marker].pop(0)
+
+        async def response_chunks() -> AsyncIterator[SimpleNamespace]:
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=response),
+                    )
+                ]
+            )
+
+        return response_chunks()
 
 
 def _entity(
@@ -745,3 +783,236 @@ def test_graphrag_3_1_global_map_reduce_request_and_usage_golden() -> None:
         "map": 2,
         "reduce": 1,
     }
+
+
+def test_graphrag_3_1_dynamic_rate_prompt_parser_and_vote_golden() -> None:
+    """Lock built-in rate text, JSON fallback, repeats, and tie-smallest vote."""
+    expected_prompt = (
+        Path(__file__).parent / "fixtures" / "query" / "rate_prompt.txt"
+    ).read_text(encoding="utf-8")
+    assert (
+        RATE_QUERY.format(description="DESCRIPTION", question="QUESTION")
+        == expected_prompt
+    )
+    completion = RecordingDynamicCompletion(
+        {
+            "FULL-TIE": [
+                '{"rating":4}',
+                '{"rating":2}',
+            ],
+            "FULL-FALLBACK": [
+                "malformed",
+            ],
+            "FULL-TRAILING": [
+                '{"rating":4,}',
+            ],
+            "FULL-BARE-KEY": [
+                "{rating: 4}",
+            ],
+        }
+    )
+    tie = asyncio.run(
+        rate_relevancy(
+            query="QUESTION",
+            description="FULL-TIE",
+            model=completion,
+            tokenizer=ByteTokenizer(),
+            num_repeats=2,
+        )
+    )
+    fallback = asyncio.run(
+        rate_relevancy(
+            query="QUESTION",
+            description="FULL-FALLBACK",
+            model=completion,
+            tokenizer=ByteTokenizer(),
+            num_repeats=1,
+        )
+    )
+    repaired = [
+        asyncio.run(
+            rate_relevancy(
+                query="QUESTION",
+                description=description,
+                model=completion,
+                tokenizer=ByteTokenizer(),
+                num_repeats=1,
+            )
+        )
+        for description in ["FULL-TRAILING", "FULL-BARE-KEY"]
+    ]
+    assert tie["ratings"] == [4, 2]
+    assert tie["rating"] == 2
+    assert tie["llm_calls"] == 2
+    assert tie["prompt_tokens"] == 2 * (
+        len(
+            RATE_QUERY.format(
+                description="FULL-TIE",
+                question="QUESTION",
+            ).encode()
+        )
+        + len("QUESTION".encode())
+    )
+    assert fallback["ratings"] == [1]
+    assert fallback["rating"] == 1
+    assert [result["ratings"] for result in repaired] == [[4], [4]]
+    assert [result["rating"] for result in repaired] == [4, 4]
+    assert all(
+        kwargs == {"response_format_json_object": True}
+        for _, kwargs in completion.requests
+    )
+    illegal_completion = RecordingDynamicCompletion(
+        {"FULL-ILLEGAL": ['{"rating":null}']}
+    )
+    with pytest.raises(TypeError):
+        asyncio.run(
+            rate_relevancy(
+                query="QUESTION",
+                description="FULL-ILLEGAL",
+                model=illegal_completion,
+                tokenizer=ByteTokenizer(),
+            )
+        )
+
+
+def _community(
+    community_id: int,
+    level: int,
+    parent: int,
+    children: list[int],
+) -> Community:
+    return Community(
+        id=f"community-{community_id}",
+        short_id=str(community_id),
+        title=f"Community {community_id}",
+        level=str(level),
+        parent=str(parent),
+        children=children,
+    )
+
+
+def test_graphrag_3_1_dynamic_traversal_keep_parent_and_fallback_golden() -> None:
+    """Lock threshold equality, parent removal, child traversal, and fallback."""
+
+    async def select(keep_parent: bool) -> tuple[set[str], dict[str, Any]]:
+        completion = RecordingDynamicCompletion(
+            {
+                "FULL-ROOT": ['{"rating":3}'],
+                "FULL-CHILD": ['{"rating":4}'],
+            }
+        )
+        selector = DynamicCommunitySelection(
+            community_reports=[
+                _report("0", 1.0, "FULL-ROOT"),
+                _report("1", 1.0, "FULL-CHILD"),
+            ],
+            communities=[
+                _community(0, 0, -1, [1]),
+                _community(1, 1, 0, []),
+            ],
+            model=completion,
+            tokenizer=ByteTokenizer(),
+            threshold=3,
+            keep_parent=keep_parent,
+            num_repeats=1,
+            max_level=2,
+            concurrent_coroutines=2,
+        )
+        reports, info = await selector.select("QUESTION")
+        return {report.community_id for report in reports}, info
+
+    selected_keep, keep_info = asyncio.run(select(True))
+    selected_remove, remove_info = asyncio.run(select(False))
+    assert selected_keep == {"0", "1"}
+    assert selected_remove == {"1"}
+    assert keep_info["ratings"] == {"0": 3, "1": 4}
+    assert remove_info["llm_calls"] == 2
+
+    fallback_completion = RecordingDynamicCompletion(
+        {
+            "FULL-LEVEL0": ['{"rating":0}'],
+            "FULL-LEVEL1": ['{"rating":1}'],
+            "FULL-LEVEL2": ['{"rating":5}'],
+        }
+    )
+    fallback_selector = DynamicCommunitySelection(
+        community_reports=[
+            _report("0", 1.0, "FULL-LEVEL0"),
+            _report("1", 1.0, "FULL-LEVEL1"),
+            _report("2", 1.0, "FULL-LEVEL2"),
+        ],
+        communities=[
+            _community(0, 0, -1, []),
+            _community(1, 1, -1, []),
+            _community(2, 2, -1, []),
+        ],
+        model=fallback_completion,
+        tokenizer=ByteTokenizer(),
+        threshold=3,
+        max_level=2,
+    )
+    fallback_reports, fallback_info = asyncio.run(fallback_selector.select("QUESTION"))
+    assert {report.community_id for report in fallback_reports} == {"2"}
+    assert fallback_info["ratings"] == {"0": 0, "1": 1, "2": 5}
+
+
+def test_graphrag_3_1_dynamic_selection_feeds_fixed_global_batches_golden() -> None:
+    """Lock the stable-selection decision before shared map/reduce batches."""
+    reports = [
+        _report(str(index), float(index), f"Full content {index}") for index in range(4)
+    ]
+    completion = RecordingDynamicCompletion(
+        {f"Full content {index}": ['{"rating":5}'] for index in range(4)}
+    )
+    selector = DynamicCommunitySelection(
+        community_reports=reports,
+        communities=[_community(index, 0, -1, []) for index in range(4)],
+        model=completion,
+        tokenizer=ByteTokenizer(),
+        threshold=3,
+        max_level=0,
+        concurrent_coroutines=2,
+    )
+    selected, info = asyncio.run(selector.select("What are the themes?"))
+    selected_ids = {report.community_id for report in selected}
+    assert selected_ids == {"0", "1", "2", "3"}
+    assert info["ratings"] == {"0": 5, "1": 5, "2": 5, "3": 5}
+
+    # GraphRAG returns the selected collection from a set. GraphLoom deliberately
+    # stabilizes that boundary to traversal first-seen order, then applies the same
+    # seed-86 shuffle used by fixed Global context.
+    stable_selected = [
+        report for report in reports if report.community_id in selected_ids
+    ]
+    entities = [
+        _entity(
+            f"entity-{index}",
+            str(index),
+            f"Entity {index}",
+            index,
+            [str(index)],
+            ["shared"],
+        )
+        for index in range(4)
+    ]
+    header_tokens = len(
+        "-----Reports-----\nid|title|occurrence weight|content|rank\n".encode()
+    )
+    row_tokens = len("0|Report 0|1.0|Full content 0|0.0\n".encode())
+    batches, records = build_community_context(
+        community_reports=stable_selected,
+        entities=entities,
+        tokenizer=ByteTokenizer(),
+        use_community_summary=False,
+        shuffle_data=True,
+        include_community_rank=True,
+        min_community_rank=0,
+        community_weight_name="occurrence weight",
+        normalize_community_weight=True,
+        max_context_tokens=header_tokens + row_tokens * 2,
+        single_batch=False,
+        context_name="Reports",
+        random_state=86,
+    )
+    assert batches == GLOBAL_BATCHES
+    assert records["reports"]["id"].tolist() == ["3", "1", "2", "0"]

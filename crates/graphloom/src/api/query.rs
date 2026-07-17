@@ -85,7 +85,7 @@ pub(crate) async fn query_loaded(
             )
             .await?)
         }
-        SearchMethod::Global if !options.dynamic_community_selection => {
+        SearchMethod::Global => {
             let runtime =
                 crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
             Ok(run_global(runtime, &options.query, &options.response_type).await?)
@@ -115,7 +115,7 @@ pub(crate) async fn query_loaded_stream(
             )
             .await?)
         }
-        SearchMethod::Global if !options.dynamic_community_selection => {
+        SearchMethod::Global => {
             let runtime =
                 crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
             Ok(run_global_streaming(runtime, &options.query, &options.response_type).await?)

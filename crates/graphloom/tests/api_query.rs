@@ -11,8 +11,8 @@ use graphloom::{
     ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig, TEXT_UNIT_TEXT_EMBEDDING,
     api::{query, query_stream},
     query::{
-        MapSearchResult, QueryCallbacks, QueryContext, QueryContextText, QueryError, QueryEvent,
-        QueryOptions, SearchMethod,
+        MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
+        QueryError, QueryEvent, QueryOptions, SearchMethod,
     },
 };
 use graphloom_llm::ModelConfig;
@@ -356,6 +356,133 @@ async fn write_local_tables(root: &Path) -> Vec<std::path::PathBuf> {
     .iter()
     .map(|name| root.join(format!("{name}.parquet")))
     .collect()
+}
+
+async fn write_dynamic_global_tables(root: &Path) -> Vec<std::path::PathBuf> {
+    let provider = ParquetTableProvider::new(root).expect("Parquet provider");
+    let mut entities = DataFrame::new(
+        4,
+        vec![
+            Series::new(
+                "id".into(),
+                ["entity-0", "entity-1", "entity-2", "entity-3"],
+            )
+            .into(),
+            Series::new("human_readable_id".into(), [0_i64, 1, 2, 3]).into(),
+            Series::new(
+                "title".into(),
+                ["Entity 0", "Entity 1", "Entity 2", "Entity 3"],
+            )
+            .into(),
+            Series::new(
+                "description".into(),
+                [
+                    "Entity 0 description",
+                    "Entity 1 description",
+                    "Entity 2 description",
+                    "Entity 3 description",
+                ],
+            )
+            .into(),
+            Series::new("degree".into(), [1_i64, 1, 1, 1]).into(),
+        ],
+    )
+    .expect("Dynamic entities");
+    entities
+        .with_column(string_list_column(
+            "text_unit_ids",
+            &[
+                vec!["unit-0".to_owned()],
+                vec!["unit-1".to_owned()],
+                vec!["unit-2".to_owned()],
+                vec!["unit-3".to_owned()],
+            ],
+        ))
+        .expect("Dynamic entity text units");
+    let mut communities = DataFrame::new(
+        4,
+        vec![
+            Series::new(
+                "id".into(),
+                ["community-0", "community-1", "community-2", "community-3"],
+            )
+            .into(),
+            Series::new("community".into(), [0_i64, 1, 2, 3]).into(),
+            Series::new("level".into(), [0_i64, 0, 0, 0]).into(),
+            Series::new(
+                "title".into(),
+                ["Community 0", "Community 1", "Community 2", "Community 3"],
+            )
+            .into(),
+            Series::new("parent".into(), [-1_i64, -1, -1, -1]).into(),
+        ],
+    )
+    .expect("Dynamic communities");
+    communities
+        .with_column(string_list_column(
+            "entity_ids",
+            &[
+                vec!["entity-0".to_owned()],
+                vec!["entity-1".to_owned()],
+                vec!["entity-2".to_owned()],
+                vec!["entity-3".to_owned()],
+            ],
+        ))
+        .expect("Dynamic community entities");
+    communities
+        .with_column(i64_list_column(
+            "children",
+            &[Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+        ))
+        .expect("Dynamic community children");
+    let reports = DataFrame::new(
+        4,
+        vec![
+            Series::new(
+                "id".into(),
+                ["report-0", "report-1", "report-2", "report-3"],
+            )
+            .into(),
+            Series::new("community".into(), [0_i64, 1, 2, 3]).into(),
+            Series::new("level".into(), [0_i64, 0, 0, 0]).into(),
+            Series::new(
+                "title".into(),
+                ["Report 0", "Report 1", "Report 2", "Report 3"],
+            )
+            .into(),
+            Series::new(
+                "summary".into(),
+                ["Summary 0", "Summary 1", "Summary 2", "Summary 3"],
+            )
+            .into(),
+            Series::new(
+                "full_content".into(),
+                [
+                    "Full report 0",
+                    "Full report 1",
+                    "Full report 2",
+                    "Full report 3",
+                ],
+            )
+            .into(),
+            Series::new("rank".into(), [4.0_f64, 3.0, 2.0, 1.0]).into(),
+        ],
+    )
+    .expect("Dynamic reports");
+    for (name, dataframe) in [
+        ("entities", entities),
+        ("communities", communities),
+        ("community_reports", reports),
+    ] {
+        provider
+            .write_dataframe(name, dataframe)
+            .await
+            .expect("write Dynamic Global table");
+    }
+    ["entities", "communities", "community_reports"]
+        .iter()
+        .map(|name| root.join(format!("{name}.parquet")))
+        .collect()
 }
 
 async fn write_text_units(root: &Path, dataframe: DataFrame) -> std::path::PathBuf {
@@ -883,6 +1010,156 @@ async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
             .expect("no-data requests")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn test_should_run_dynamic_global_with_rating_metadata_and_shared_map_reduce() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    let table_paths = write_dynamic_global_tables(&project.path().join("output")).await;
+    let before = futures_util::future::join_all(table_paths.iter().map(|path| async move {
+        (
+            file_hash(path).await,
+            tokio::fs::metadata(path)
+                .await
+                .expect("Dynamic table metadata")
+                .modified()
+                .expect("Dynamic table mtime"),
+        )
+    }))
+    .await;
+    let mut config = GraphRagConfig::default();
+    config.global_search.max_context_tokens = 1;
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    config.embedding_models.insert(
+        "default_embedding_model".to_owned(),
+        serde_json::from_value(json!({
+            "model_provider": "unsupported",
+            "model": "must-not-be-created"
+        }))
+        .expect("invalid unused embedding"),
+    );
+    config.vector_store.db_uri = project
+        .path()
+        .join("must-not-open-dynamic-lancedb")
+        .display()
+        .to_string();
+    let mut options = global_options(project.path(), "What are the themes?");
+    options.dynamic_community_selection = true;
+
+    let result = query(config.clone(), options)
+        .await
+        .expect("Dynamic Global Query");
+    assert_eq!(result.response, "Global answer.");
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 4);
+    assert_eq!(result.usage.categories["map"].llm_calls, 4);
+    assert_eq!(result.usage.categories["reduce"].llm_calls, 1);
+    let QueryContextText::Composite(text) = &result.context.text else {
+        panic!("expected Dynamic Global composite context");
+    };
+    let QueryContextText::Named(dynamic_text) = &text["dynamic"] else {
+        panic!("expected Dynamic rating text");
+    };
+    assert_eq!(dynamic_text.len(), 4);
+    assert!(dynamic_text["0"].contains("rating=1"));
+    assert!(dynamic_text["0"].contains("selected=true"));
+    let QueryContextText::Batches(map_batches) = &text["map"] else {
+        panic!("expected Dynamic Global map batches");
+    };
+    assert_eq!(map_batches.len(), 4);
+    let QueryContextText::Text(reduce_context) = &text["reduce"] else {
+        panic!("expected Dynamic Global reduce context");
+    };
+    for analyst in 1..=4 {
+        assert!(reduce_context.contains(&format!("----Analyst {analyst}----")));
+    }
+    let QueryContextRecords::Named(records) = &result.context.records else {
+        panic!("expected named Dynamic records");
+    };
+    let QueryContextRecords::Batches(dynamic_records) = &records["dynamic"] else {
+        panic!("expected Dynamic rating records");
+    };
+    assert_eq!(dynamic_records[0].height(), 4);
+    assert_eq!(
+        dynamic_records[0]
+            .column("community_id")
+            .expect("community id")
+            .str()
+            .expect("string")
+            .get(0),
+        Some("0")
+    );
+
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut stream_options = global_options(project.path(), "What are the themes?");
+    stream_options.dynamic_community_selection = true;
+    stream_options.callbacks.push(callbacks.clone());
+    let mut events = query_stream(config, stream_options)
+        .await
+        .expect("Dynamic Global stream");
+    let mut chunks = Vec::new();
+    while let Some(event) = events.next().await {
+        if let QueryEvent::Token(token) = event.expect("Dynamic Global event") {
+            chunks.push(token);
+        }
+    }
+    assert_eq!(chunks, ["Global ", "answer."]);
+    assert_eq!(
+        *callbacks.events.lock().expect("Dynamic callbacks"),
+        [
+            "map_start:4",
+            "map_end:4",
+            "context",
+            "reduce_start",
+            "token:Global ",
+            "token:answer.",
+            "reduce_end:Global answer.",
+        ]
+    );
+    assert!(
+        !project
+            .path()
+            .join("must-not-open-dynamic-lancedb")
+            .exists()
+    );
+    assert!(!project.path().join("cache").exists());
+    for (path, (hash, modified)) in table_paths.iter().zip(before) {
+        assert_eq!(file_hash(path).await, hash);
+        assert_eq!(
+            tokio::fs::metadata(path)
+                .await
+                .expect("metadata after Dynamic Global Query")
+                .modified()
+                .expect("mtime after Dynamic Global Query"),
+            modified
+        );
+    }
+    let requests = server.received_requests().await.expect("Dynamic requests");
+    assert_eq!(requests.len(), 18);
+    let bodies = requests
+        .iter()
+        .map(|request| request.body_json::<Value>().expect("request JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| {
+                body["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("deciding whether"))
+            })
+            .count(),
+        8
+    );
+    assert!(
+        bodies
+            .iter()
+            .filter(|body| body["stream"] == false)
+            .all(|body| body["response_format"] == json!({"type": "json_object"}))
     );
 }
 

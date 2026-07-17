@@ -9,7 +9,7 @@ use std::{
 use graphloom_llm::Tokenizer;
 use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 
-use super::random::PythonRandom;
+use super::{DynamicRating, random::PythonRandom};
 use crate::{
     config::GlobalSearchConfig,
     query::{
@@ -27,6 +27,7 @@ pub(crate) struct GlobalContextResult {
     pub(crate) batches: Vec<String>,
     pub(crate) records: Vec<DataFrame>,
     pub(crate) usage: QueryUsageCategory,
+    pub(crate) dynamic_ratings: Vec<DynamicRating>,
 }
 
 impl GlobalContextResult {
@@ -41,9 +42,10 @@ impl GlobalContextResult {
 
 #[derive(Debug)]
 pub(crate) struct GlobalContextBuilder {
-    config: GlobalSearchConfig,
-    entities: Vec<crate::query::Entity>,
-    reports: Vec<CommunityReport>,
+    pub(super) config: GlobalSearchConfig,
+    pub(super) entities: Vec<crate::query::Entity>,
+    pub(super) communities: Vec<crate::query::Community>,
+    pub(super) reports: Vec<CommunityReport>,
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
 }
 
@@ -62,19 +64,36 @@ impl GlobalContextBuilder {
         Self {
             config,
             entities: data.entities,
+            communities: data.communities,
             reports: data.reports,
             tokenizer,
         }
     }
 
     pub(crate) fn build_fixed(&self) -> Result<GlobalContextResult> {
+        self.build_selected(
+            self.reports.clone(),
+            QueryUsageCategory::default(),
+            Vec::new(),
+        )
+    }
+
+    pub(crate) fn build_selected(
+        &self,
+        reports: Vec<CommunityReport>,
+        usage: QueryUsageCategory,
+        dynamic_ratings: Vec<DynamicRating>,
+    ) -> Result<GlobalContextResult> {
         let weights = self.community_weights();
-        let max_weight = weights.values().copied().max().unwrap_or(0);
-        let mut selected = self
-            .reports
+        let max_weight = reports
             .iter()
+            .filter_map(|report| weights.get(&report.community_id))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let mut selected = reports
+            .into_iter()
             .filter(|report| report.rank.is_some_and(|rank| rank >= 0.0))
-            .cloned()
             .map(|report| {
                 let raw = weights.get(&report.community_id).copied().unwrap_or(0);
                 let occurrence_weight = if max_weight == 0 {
@@ -91,7 +110,7 @@ impl GlobalContextBuilder {
             })
             .collect::<Vec<_>>();
         PythonRandom::new(86).shuffle(&mut selected);
-        self.batch(selected)
+        self.batch(selected, usage, dynamic_ratings)
     }
 
     pub(crate) const fn config(&self) -> &GlobalSearchConfig {
@@ -119,12 +138,18 @@ impl GlobalContextBuilder {
             .collect()
     }
 
-    fn batch(&self, reports: Vec<WeightedReport>) -> Result<GlobalContextResult> {
+    fn batch(
+        &self,
+        reports: Vec<WeightedReport>,
+        usage: QueryUsageCategory,
+        dynamic_ratings: Vec<DynamicRating>,
+    ) -> Result<GlobalContextResult> {
         if reports.is_empty() {
             return Ok(GlobalContextResult {
                 batches: Vec::new(),
                 records: Vec::new(),
-                usage: QueryUsageCategory::default(),
+                usage,
+                dynamic_ratings,
             });
         }
         let header = ["id", "title", WEIGHT_COLUMN, "content", RANK_COLUMN];
@@ -159,7 +184,8 @@ impl GlobalContextBuilder {
         Ok(GlobalContextResult {
             batches,
             records,
-            usage: QueryUsageCategory::default(),
+            usage,
+            dynamic_ratings,
         })
     }
 
@@ -297,14 +323,15 @@ pub(crate) fn global_context(
 ) -> Result<crate::query::QueryContext> {
     let reduce_records = ContextTable::new(["report_data"], vec![vec![reduce.clone()]])
         .to_dataframe(SearchMethod::Global, "build Global reduce context records")?;
+    let (dynamic_text, dynamic_records) = dynamic_context(&map.dynamic_ratings)?;
     Ok(crate::query::QueryContext {
         text: QueryContextText::Composite(BTreeMap::from([
-            ("dynamic".to_owned(), QueryContextText::Empty),
+            ("dynamic".to_owned(), dynamic_text),
             ("map".to_owned(), map.context_text()),
             ("reduce".to_owned(), QueryContextText::Text(reduce)),
         ])),
         records: QueryContextRecords::Named(BTreeMap::from([
-            ("dynamic".to_owned(), QueryContextRecords::Empty),
+            ("dynamic".to_owned(), dynamic_records),
             ("map".to_owned(), map.context_records()),
             (
                 "map_outputs".to_owned(),
@@ -316,6 +343,59 @@ pub(crate) fn global_context(
             ),
         ])),
     })
+}
+
+fn dynamic_context(ratings: &[DynamicRating]) -> Result<(QueryContextText, QueryContextRecords)> {
+    if ratings.is_empty() {
+        return Ok((QueryContextText::Empty, QueryContextRecords::Empty));
+    }
+    let rows = ratings
+        .iter()
+        .map(|rating| {
+            vec![
+                rating.community_id.clone(),
+                rating.selected_rating.to_string(),
+                rating
+                    .repeated_ratings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                rating.selected.to_string(),
+                rating.level.to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let records = ContextTable::new(
+        [
+            "community_id",
+            "selected_rating",
+            "repeated_ratings",
+            "selected",
+            "level",
+        ],
+        rows,
+    )
+    .to_dataframe(
+        SearchMethod::Global,
+        "build Dynamic Community Selection records",
+    )?;
+    let text = ratings
+        .iter()
+        .map(|rating| {
+            (
+                rating.community_id.clone(),
+                format!(
+                    "rating={}; repeats={:?}; selected={}; level={}",
+                    rating.selected_rating, rating.repeated_ratings, rating.selected, rating.level
+                ),
+            )
+        })
+        .collect();
+    Ok((
+        QueryContextText::Named(text),
+        QueryContextRecords::Batches(vec![records]),
+    ))
 }
 
 #[cfg(test)]

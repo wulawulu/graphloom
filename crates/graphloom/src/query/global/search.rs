@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::{
     context::{GlobalContextResult, global_context},
+    dynamic::DynamicCommunitySelection,
     parse::{MapSearchResult, parse_map_points},
 };
 use crate::{
@@ -86,7 +87,27 @@ pub(crate) async fn global_search_streaming(
     response_type: &str,
 ) -> Result<QueryEventStream> {
     let started = Instant::now();
-    let built = runtime.global_context.build_fixed()?;
+    let built = if runtime.dynamic_community_selection {
+        let selection = DynamicCommunitySelection::new(
+            runtime.global_context.config.clone(),
+            runtime.global_context.reports.clone(),
+            runtime.global_context.communities.clone(),
+            Arc::clone(&runtime.completion_model),
+            runtime.completion_model_id.clone(),
+            runtime.completion_config.clone(),
+            Arc::clone(&runtime.global_context.tokenizer),
+            runtime.concurrent_requests,
+        )
+        .select(query)
+        .await?;
+        runtime.global_context.build_selected(
+            selection.reports,
+            selection.usage,
+            selection.ratings,
+        )?
+    } else {
+        runtime.global_context.build_fixed()?
+    };
     runtime.callbacks.on_map_response_start(&built.batches);
     let map_outputs = run_map_calls(
         &built,
@@ -731,6 +752,7 @@ mod tests {
             batches: (0..4).map(|index| format!("batch-{index}")).collect(),
             records: Vec::new(),
             usage: QueryUsageCategory::default(),
+            dynamic_ratings: Vec::new(),
         };
         let prompt = PromptRepository::new(".")
             .load(PromptKind::GlobalSearchMap, None)
@@ -788,6 +810,7 @@ mod tests {
             batches: vec!["batch-0".to_owned()],
             records: Vec::new(),
             usage: QueryUsageCategory::default(),
+            dynamic_ratings: Vec::new(),
         };
         let prompt = PromptRepository::new(".")
             .load(PromptKind::GlobalSearchMap, None)

@@ -24,7 +24,7 @@ pub use data_loader::{
 };
 pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship, TextUnit};
 pub use error::{QueryError, QueryTableErrorDetails, Result};
-pub use global::{MapPoint, MapSearchResult};
+pub use global::{DynamicRating, MapPoint, MapSearchResult};
 pub use indexer_adapters::{
     read_indexer_communities, read_indexer_covariates, read_indexer_entities,
     read_indexer_relationships, read_indexer_report_embeddings, read_indexer_reports,

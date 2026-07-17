@@ -147,6 +147,27 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         .success()
         .stdout("Basic answer.\n")
         .stderr(predicate::str::is_empty());
+    for streaming in [false, true] {
+        let mut arguments = vec![
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "global",
+            "--dynamic-community-selection",
+        ];
+        if streaming {
+            arguments.push("--streaming");
+        }
+        arguments.push("What are the main themes?");
+        Command::cargo_bin("graphloom")
+            .expect("binary")
+            .args(arguments)
+            .assert()
+            .success()
+            .stdout("I am sorry but I am unable to answer this question given the provided data.\n")
+            .stderr(predicate::str::is_empty());
+    }
 
     assert_eq!(
         parquet_artifact_snapshot(tempdir.path()).await,

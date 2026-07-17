@@ -57,6 +57,7 @@ pub(crate) struct GlobalQueryRuntime {
     pub(crate) _knowledge_prompt: PromptTemplate,
     pub(crate) callbacks: Arc<dyn QueryCallbacks>,
     pub(crate) concurrent_requests: usize,
+    pub(crate) dynamic_community_selection: bool,
 }
 
 struct QueryCompletionResources {
@@ -243,6 +244,7 @@ impl QueryRuntimeFactory {
             _knowledge_prompt: knowledge_prompt,
             callbacks,
             concurrent_requests: project.config.concurrent_requests,
+            dynamic_community_selection: options.dynamic_community_selection,
         })
     }
 }
@@ -348,13 +350,6 @@ fn validate_global_requirements(project: &LoadedProject, options: &QueryOptions)
             message: "community_level must be non-negative".to_owned(),
         });
     }
-    if options.dynamic_community_selection {
-        return Err(QueryError::QueryMethod {
-            method: Some(method),
-            operation: "build fixed Global Search runtime",
-            message: "dynamic community selection is implemented in Phase 2 Step 9".to_owned(),
-        });
-    }
     project
         .config
         .global_search
@@ -414,7 +409,7 @@ async fn load_global_data(
 ) -> Result<GlobalQueryData> {
     let table_provider = open_table_provider(project, options, SearchMethod::Global, "entities")?;
     QueryDataLoader::new(table_provider)
-        .load_global(options.community_level, false)
+        .load_global(options.community_level, options.dynamic_community_selection)
         .await
 }
 
