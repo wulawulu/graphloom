@@ -55,10 +55,12 @@ impl CompletionModel for CachedCompletionModel {
         }
         let key = completion_request_cache_key(&request)?;
         if let Some(mut cached) = read_cached::<CompletionResponse>(&*self.cache, &key).await? {
+            tracing::debug!(key, "completion cache hit");
             cached.response.metadata.cache_status = CacheStatus::Hit;
             return Ok(cached.response);
         }
 
+        tracing::debug!(key, "completion cache miss");
         let mut response = self.inner.complete(request).await?;
         response.metadata.cache_status = CacheStatus::Miss;
         write_cached(&*self.cache, &key, &response).await?;
@@ -94,10 +96,12 @@ impl EmbeddingModel for CachedEmbeddingModel {
         }
         let key = embedding_request_cache_key(&request)?;
         if let Some(mut cached) = read_cached::<EmbeddingResponse>(&*self.cache, &key).await? {
+            tracing::debug!(key, "embedding cache hit");
             cached.response.metadata.cache_status = CacheStatus::Hit;
             return Ok(cached.response);
         }
 
+        tracing::debug!(key, "embedding cache miss");
         let mut response = self.inner.embed(request).await?;
         response.metadata.cache_status = CacheStatus::Miss;
         write_cached(&*self.cache, &key, &response).await?;

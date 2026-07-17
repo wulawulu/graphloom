@@ -238,7 +238,9 @@ Supported:
 - UTF-8 text input
 - file storage
 - JSON file cache
-- OpenAI-compatible completion and embedding models
+- OpenAI-compatible completion and embedding models configured with GraphRAG's
+  `openai`, `deepseek`, or `ollama` provider names; provider defaults normalize
+  DeepSeek and Ollama API bases without GraphLoom-only settings changes
 - LanceDB vector storage
 - Linux and Windows CI
 - tag releases published once by a dedicated Ubuntu release job after Linux and

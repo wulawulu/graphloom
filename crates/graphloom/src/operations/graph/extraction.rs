@@ -90,8 +90,10 @@ pub(crate) async fn extract_text_unit_graph(
     text_unit: &TextUnitInput,
     max_gleanings: usize,
 ) -> Result<(Vec<RawEntityRow>, Vec<RawRelationshipRow>)> {
+    // GraphRAG strips each text unit immediately before rendering the extraction prompt.
+    let input_text = text_unit.text.trim();
     let mut messages = vec![ChatMessage::user(
-        bind_extraction_prompt(extraction_template, &text_unit.text, entity_types)?.render()?,
+        bind_extraction_prompt(extraction_template, input_text, entity_types)?.render()?,
     )];
 
     let mut output = model
@@ -236,6 +238,34 @@ mod tests {
         let messages = model.last_user_messages();
         assert_eq!(messages[1], extract_graph::CONTINUE_PROMPT);
         assert_eq!(messages[2], extract_graph::LOOP_PROMPT);
+    }
+
+    #[tokio::test]
+    async fn test_should_strip_text_unit_before_rendering_extraction_prompt() {
+        let extraction_template = extraction_template().await;
+        let model = RecordingGraphModel::default();
+        let text_unit = TextUnitInput {
+            id: "tu-1".to_owned(),
+            text: "\n  Alice knows Bob.  \n".to_owned(),
+        };
+
+        extract_text_unit_graph(
+            &model,
+            &extraction_template,
+            &[String::from("person")],
+            &text_unit,
+            0,
+        )
+        .await
+        .expect("graph extraction should succeed");
+
+        let prompt = model
+            .last_user_messages()
+            .into_iter()
+            .next()
+            .expect("initial extraction prompt");
+        assert!(prompt.contains("Text: Alice knows Bob.\n######################"));
+        assert!(!prompt.contains("Text: \n  Alice knows Bob.  \n"));
     }
 
     #[tokio::test]

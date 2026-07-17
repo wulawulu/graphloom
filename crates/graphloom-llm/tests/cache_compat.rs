@@ -215,6 +215,20 @@ fn test_should_match_real_extract_graph_request_key() {
 }
 
 #[test]
+fn test_should_match_graphrag_gleaning_request_key() {
+    let request = CompletionRequest::new(vec![
+        graphloom_llm::ChatMessage::user("prompt"),
+        graphloom_llm::ChatMessage::assistant("response"),
+        graphloom_llm::ChatMessage::user("continue"),
+    ]);
+
+    assert_eq!(
+        graphloom_llm::completion_request_cache_key(&request).expect("cache key"),
+        "1055258b2a9780ad20a8e6e5a1d11921f2ee8feae6b66c764275919218586506_v4",
+    );
+}
+
+#[test]
 fn test_should_match_clean_multiline_ascii_scalars() {
     assert_cache_key_cases(&[
         "long-clean-multiline-ascii",
@@ -820,6 +834,17 @@ fn openai_test_config(api_base: String, model: &str) -> ModelConfig {
     .expect("test model config")
 }
 
+fn provider_test_config(provider: &str, api_base: String, model: &str) -> ModelConfig {
+    serde_json::from_value(serde_json::json!({
+        "model_provider": provider,
+        "model": model,
+        "api_key": "test-key",
+        "api_base": api_base,
+        "max_retries": 1
+    }))
+    .expect("test model config")
+}
+
 fn generated_cache_root(kind: &str) -> (Option<tempfile::TempDir>, std::path::PathBuf) {
     if let Some(root) = std::env::var_os("GRAPHLOOM_GENERATED_CACHE_ROOT") {
         let root = std::path::PathBuf::from(root);
@@ -967,6 +992,59 @@ async fn test_should_send_embedding_extra_fields_in_http_body() {
     );
 
     let response = model.embed(request).await.expect("embedding");
+    assert_eq!(response.data.len(), 1);
+}
+
+#[tokio::test]
+async fn test_should_use_deepseek_provider_with_openai_compatible_transport() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(CompletionResponse::text_for_test("deepseek-test", "answer")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let model = OpenAiCompletionModel::new(
+        "chat",
+        provider_test_config("deepseek", server.uri(), "deepseek-test"),
+        1,
+    )
+    .expect("model");
+
+    let response = model
+        .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+        .await
+        .expect("completion");
+
+    assert_eq!(response.content().expect("content"), "answer");
+}
+
+#[tokio::test]
+async fn test_should_append_openai_v1_path_for_ollama_provider() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            EmbeddingResponse::vectors_for_test("bge-m3", vec![vec![1.0, 2.0]]),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let model = OpenAiEmbeddingModel::new(
+        "embedding",
+        provider_test_config("ollama", server.uri(), "bge-m3"),
+        1,
+    )
+    .expect("model");
+
+    let response = model
+        .embed(EmbeddingRequest::new(vec!["hello".to_owned()]))
+        .await
+        .expect("embedding");
+
     assert_eq!(response.data.len(), 1);
 }
 

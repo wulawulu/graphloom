@@ -108,7 +108,11 @@ impl ChatMessage {
     /// Create an assistant message.
     #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::text(ChatRole::Assistant, content)
+        let mut message = Self::text(ChatRole::Assistant, content);
+        // GraphRAG's CompletionMessagesBuilder includes this nullable OpenAI field when it
+        // reconstructs assistant history. It is part of the v4 cache key for gleaning calls.
+        message.extra.insert("refusal".to_owned(), Value::Null);
+        message
     }
 
     fn text(role: ChatRole, content: impl Into<String>) -> Self {
@@ -267,4 +271,35 @@ fn validate_extra_fields(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ChatMessage;
+
+    #[test]
+    fn test_should_match_graphrag_assistant_message_shape() {
+        assert_eq!(
+            serde_json::to_value(ChatMessage::assistant("response"))
+                .expect("serialize assistant message"),
+            json!({
+                "role": "assistant",
+                "content": "response",
+                "refusal": null,
+            }),
+        );
+    }
+
+    #[test]
+    fn test_should_not_add_refusal_to_user_messages() {
+        assert_eq!(
+            serde_json::to_value(ChatMessage::user("prompt")).expect("serialize user message"),
+            json!({
+                "role": "user",
+                "content": "prompt",
+            }),
+        );
+    }
 }

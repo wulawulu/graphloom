@@ -16,6 +16,11 @@ fn default_provider_type() -> String {
     "openai".to_owned()
 }
 
+const DEFAULT_OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+const DEFAULT_DEEPSEEK_API_BASE: &str = "https://api.deepseek.com";
+const DEFAULT_OLLAMA_API_BASE: &str = "http://localhost:11434/v1";
+const GRAPHRAG_LITELLM_FALLBACK_ENCODING: &str = "cl100k_base";
+
 fn default_auth_method() -> String {
     "api_key".to_owned()
 }
@@ -145,6 +150,41 @@ impl ModelConfig {
         self.provider_type.as_str()
     }
 
+    /// Return the OpenAI-compatible API base resolved from `GraphRAG` provider semantics.
+    ///
+    /// `DeepSeek` and `Ollama` expose OpenAI-compatible APIs but use provider-specific defaults.
+    /// `Ollama`'s compatibility routes live below `/v1`, so a missing suffix is added here rather
+    /// than requiring a Graphloom-only configuration change.
+    #[must_use]
+    pub fn effective_api_base(&self) -> String {
+        match self.provider_type.to_ascii_lowercase().as_str() {
+            "deepseek" => self
+                .api_base
+                .clone()
+                .unwrap_or_else(|| DEFAULT_DEEPSEEK_API_BASE.to_owned()),
+            "ollama" => self.api_base.as_deref().map_or_else(
+                || DEFAULT_OLLAMA_API_BASE.to_owned(),
+                normalize_ollama_api_base,
+            ),
+            _ => self
+                .api_base
+                .clone()
+                .unwrap_or_else(|| DEFAULT_OPENAI_API_BASE.to_owned()),
+        }
+    }
+
+    /// Return the tokenizer encoding used for GraphRAG-compatible model input accounting.
+    ///
+    /// `GraphRAG`'s `LiteLLM` tokenizer currently falls back to `cl100k_base` when a model has no
+    /// registered Hugging Face tokenizer, including custom `DeepSeek` model names. An explicit
+    /// `encoding_model` always takes precedence.
+    #[must_use]
+    pub fn effective_tokenizer_encoding(&self) -> &str {
+        self.encoding_model
+            .as_deref()
+            .unwrap_or(GRAPHRAG_LITELLM_FALLBACK_ENCODING)
+    }
+
     /// Return the effective retry strategy.
     #[must_use]
     pub fn effective_retry_strategy(&self) -> &str {
@@ -168,13 +208,17 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error for unsupported Azure configuration or missing API key.
+    /// Returns an error for an unsupported provider or missing API key.
     pub fn validate_openai_compatible(&self, model_instance: &str) -> Result<()> {
-        if !self.provider_type.eq_ignore_ascii_case("openai") {
+        if !matches!(
+            self.provider_type.to_ascii_lowercase().as_str(),
+            "openai" | "deepseek" | "ollama"
+        ) {
             return Err(crate::LlmError::InvalidConfig {
                 model_instance: model_instance.to_owned(),
                 message: format!(
-                    "unsupported provider {}; only openai is supported",
+                    "unsupported provider {}; supported OpenAI-compatible providers are openai, \
+                     deepseek, and ollama",
                     self.provider_type
                 ),
             });
@@ -224,6 +268,15 @@ impl ModelConfig {
         }
 
         Ok(())
+    }
+}
+
+fn normalize_ollama_api_base(api_base: &str) -> String {
+    let trimmed = api_base.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}/v1")
     }
 }
 

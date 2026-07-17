@@ -139,7 +139,7 @@ pub(crate) async fn summarize_relationships(
         .map(|(index, row)| {
             let summarize_context = context;
             async move {
-                let id = serde_json::to_string(&[row.source.as_str(), row.target.as_str()])?;
+                let id = python_json_string_array([row.source.as_str(), row.target.as_str()])?;
                 let description =
                     summarize_description_list(&summarize_context, &id, &row.description).await?;
                 Ok::<(usize, SummarizedRelationshipRow), crate::GraphLoomError>((
@@ -177,10 +177,18 @@ fn render_summarization_prompt(
     template
         .bind(&SummarizePromptValues {
             entity_name: entity_name_json.to_owned(),
-            description_list: serde_json::to_string(descriptions)?,
+            description_list: python_json_string_array(descriptions.iter().map(String::as_str))?,
             max_length,
         })?
         .render()
+}
+
+fn python_json_string_array<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<String> {
+    let values = values
+        .into_iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(format!("[{}]", values.join(", ")))
 }
 
 async fn summarize_description_list(
@@ -336,6 +344,15 @@ mod tests {
         assert_eq!(summarized[0].title, "B");
         assert_eq!(summarized[1].title, "A");
         assert_eq!(progress.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_should_serialize_summary_lists_like_python_json_dumps() {
+        assert_eq!(
+            python_json_string_array(["西门庆", "quoted \"name\""])
+                .expect("serialize description list"),
+            "[\"西门庆\", \"quoted \\\"name\\\"\"]",
+        );
     }
 
     #[tokio::test]

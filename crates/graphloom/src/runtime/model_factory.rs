@@ -229,10 +229,7 @@ fn connectivity_error(
                 "embedding connectivity check"
             },
             provider: config.provider_type.clone(),
-            base_url: config
-                .api_base
-                .clone()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
+            base_url: config.effective_api_base(),
             source: Box::new(source),
         }),
     }

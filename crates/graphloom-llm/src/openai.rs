@@ -274,9 +274,7 @@ impl From<OpenAiModelConfig<'_>> for OpenAIConfig {
             .unwrap_or_default()
             .to_owned();
         let mut openai = OpenAIConfig::new().with_api_key(api_key);
-        if let Some(api_base) = &config.api_base {
-            openai = openai.with_api_base(api_base);
-        }
+        openai = openai.with_api_base(config.effective_api_base());
         if let Some(organization) = &config.organization {
             openai = openai.with_org_id(organization);
         }
@@ -378,5 +376,20 @@ mod tests {
         let provider: OpenAIConfig = OpenAiModelConfig(&model).into();
 
         assert_eq!(provider.api_key().expose_secret(), "provider-secret");
+    }
+
+    #[test]
+    fn test_should_apply_provider_specific_api_base_to_openai_transport() {
+        let model: ModelConfig = serde_json::from_value(serde_json::json!({
+            "model_provider": "ollama",
+            "model": "bge-m3",
+            "api_key": "ollama",
+            "api_base": "http://localhost:11434"
+        }))
+        .expect("model config");
+
+        let provider: OpenAIConfig = OpenAiModelConfig(&model).into();
+
+        assert_eq!(provider.api_base(), "http://localhost:11434/v1");
     }
 }

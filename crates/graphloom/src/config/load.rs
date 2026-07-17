@@ -760,16 +760,17 @@ mod tests {
             r"
 completion_models:
   default_completion_model:
-    model_provider: openai
-    model: gpt
+    model_provider: deepseek
+    model: deepseek-v4-flash
     auth_method: api_key
     api_key: $GRAPHRAG_API_KEY
 embedding_models:
   default_embedding_model:
-    model_provider: openai
-    model: emb
+    model_provider: ollama
+    model: bge-m3
     auth_method: api_key
     api_key: ${GRAPHRAG_API_KEY}
+    api_base: http://localhost:11434
 ",
         )
         .await
@@ -785,6 +786,14 @@ embedding_models:
                 .as_ref()
                 .map(ExposeSecret::expose_secret),
             Some("from-env")
+        );
+        assert_eq!(
+            yml.config.completion_models["default_completion_model"].effective_api_base(),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            yml.config.embedding_models["default_embedding_model"].effective_api_base(),
+            "http://localhost:11434/v1"
         );
 
         tokio::fs::remove_file(tempdir.path().join("settings.yml"))
@@ -1051,6 +1060,37 @@ embedding_models:
 
         assert!(error.to_string().contains("default_completion_model"));
         assert!(error.to_string().contains("definitely-not-an-encoding"));
+    }
+
+    #[tokio::test]
+    async fn test_should_use_graphrag_litellm_fallback_for_model_tokenizers() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut project = initialized_project(tempdir.path()).await;
+        project.config.chunking.encoding_model = "o200k_base".to_owned();
+        project
+            .config
+            .completion_models
+            .get_mut("default_completion_model")
+            .expect("completion model")
+            .encoding_model = None;
+        project
+            .config
+            .embedding_models
+            .get_mut("default_embedding_model")
+            .expect("embedding model")
+            .encoding_model = None;
+
+        assert_eq!(
+            crate::config::effective_completion_encoding(
+                &project.config,
+                "default_completion_model"
+            ),
+            "cl100k_base"
+        );
+        assert_eq!(
+            crate::config::effective_embedding_encoding(&project.config, "default_embedding_model"),
+            "cl100k_base"
+        );
     }
 
     #[tokio::test]

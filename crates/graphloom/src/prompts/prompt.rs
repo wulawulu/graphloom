@@ -42,7 +42,7 @@ impl PromptTemplate {
         content: impl Into<Arc<str>>,
         source: PromptSource,
     ) -> Result<Self> {
-        let content = content.into();
+        let content = normalize_python_newlines(content.into());
         let template_name: Arc<str> = kind.filename().into();
         let mut tera = Tera::default();
         tera.add_raw_template(template_name.as_ref(), content.as_ref())
@@ -159,6 +159,14 @@ impl Prompt {
     }
 }
 
+fn normalize_python_newlines(content: Arc<str>) -> Arc<str> {
+    if content.contains('\r') {
+        Arc::from(content.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        content
+    }
+}
+
 fn prompt_render_error(kind: PromptKind, source: &PromptSource, message: String) -> GraphLoomError {
     GraphLoomError::PromptRender {
         kind: kind.name(),
@@ -231,6 +239,17 @@ mod tests {
         let rendered = prompt.render().expect("prompt should render");
 
         assert_eq!(rendered, "Hello GraphLoom");
+    }
+
+    #[test]
+    fn test_should_normalize_prompt_newlines_like_python_text_mode() {
+        let rendered = template("Hello\r\n{{ name }}\rGoodbye\n")
+            .bind(&name_context("GraphLoom"))
+            .expect("context should bind")
+            .render()
+            .expect("prompt should render");
+
+        assert_eq!(rendered, "Hello\nGraphLoom\nGoodbye\n");
     }
 
     #[test]

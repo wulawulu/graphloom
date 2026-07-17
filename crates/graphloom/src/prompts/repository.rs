@@ -107,6 +107,12 @@ mod tests {
 
     use super::*;
 
+    fn normalized_default(kind: PromptKind) -> String {
+        kind.default_template()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+    }
+
     #[tokio::test]
     async fn test_should_load_explicit_prompt_with_source() {
         let project = TempDir::new().expect("project");
@@ -152,7 +158,7 @@ mod tests {
 
         assert_eq!(
             template.content(),
-            PromptKind::ExtractGraph.default_template()
+            normalized_default(PromptKind::ExtractGraph)
         );
         assert_eq!(template.source(), &PromptSource::BuiltIn);
     }
@@ -168,7 +174,7 @@ mod tests {
 
         assert_eq!(
             template.content(),
-            PromptKind::ExtractGraph.default_template()
+            normalized_default(PromptKind::ExtractGraph)
         );
         assert_eq!(template.source(), &PromptSource::BuiltIn);
     }
@@ -194,18 +200,16 @@ mod tests {
     #[tokio::test]
     async fn test_should_reject_invalid_tera_template_when_loading() {
         let project = TempDir::new().expect("project");
+        let configured_path = Path::new("prompts").join("extract_graph.txt");
         let prompts = project.path().join("prompts");
         tokio::fs::create_dir(&prompts).await.expect("prompts");
-        let path = prompts.join("extract_graph.txt");
+        let path = project.path().join(&configured_path);
         tokio::fs::write(&path, "{% if enabled %}")
             .await
             .expect("invalid project prompt");
 
         let error = PromptRepository::new(project.path())
-            .load(
-                PromptKind::ExtractGraph,
-                Some(Path::new("prompts/extract_graph.txt")),
-            )
+            .load(PromptKind::ExtractGraph, Some(&configured_path))
             .await
             .expect_err("invalid configured template should fail while loading");
 

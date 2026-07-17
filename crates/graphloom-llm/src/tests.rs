@@ -249,6 +249,60 @@ fn test_should_default_model_config_retries() {
 }
 
 #[test]
+fn test_should_resolve_graphrag_provider_defaults() {
+    let deepseek: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "api_key": "sk-test"
+    }))
+    .expect("deepseek config");
+    let ollama: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "ollama",
+        "model": "bge-m3",
+        "api_key": "ollama",
+        "api_base": "http://localhost:11434"
+    }))
+    .expect("ollama config");
+
+    deepseek
+        .validate_openai_compatible("completion")
+        .expect("DeepSeek should use the OpenAI-compatible transport");
+    ollama
+        .validate_openai_compatible("embedding")
+        .expect("Ollama should use the OpenAI-compatible transport");
+    assert_eq!(deepseek.effective_api_base(), "https://api.deepseek.com");
+    assert_eq!(ollama.effective_api_base(), "http://localhost:11434/v1");
+    assert_eq!(deepseek.effective_tokenizer_encoding(), "cl100k_base");
+    assert_eq!(ollama.effective_tokenizer_encoding(), "cl100k_base");
+}
+
+#[test]
+fn test_should_preserve_explicit_api_base_and_tokenizer_overrides() {
+    let deepseek: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "deepseek",
+        "model": "deepseek-chat",
+        "api_key": "sk-test",
+        "api_base": "https://gateway.example/deepseek/v1",
+        "encoding_model": "o200k_base"
+    }))
+    .expect("deepseek config");
+    let ollama: ModelConfig = serde_json::from_value(serde_json::json!({
+        "model_provider": "ollama",
+        "model": "bge-m3",
+        "api_key": "ollama",
+        "api_base": "http://localhost:11434/v1/"
+    }))
+    .expect("ollama config");
+
+    assert_eq!(
+        deepseek.effective_api_base(),
+        "https://gateway.example/deepseek/v1"
+    );
+    assert_eq!(deepseek.effective_tokenizer_encoding(), "o200k_base");
+    assert_eq!(ollama.effective_api_base(), "http://localhost:11434/v1");
+}
+
+#[test]
 fn test_should_reject_zero_model_config_retries() {
     let config: ModelConfig = serde_json::from_value(serde_json::json!({
         "type": "openai",
@@ -274,7 +328,7 @@ fn test_should_reject_unsupported_provider_auth_and_placeholder_key() {
             .validate_openai_compatible("chat")
             .expect_err("azure unsupported")
             .to_string()
-            .contains("only openai")
+            .contains("openai, deepseek, and ollama")
     );
 
     let unsupported_auth: ModelConfig = serde_json::from_value(serde_json::json!({
