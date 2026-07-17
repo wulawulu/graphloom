@@ -2684,7 +2684,8 @@ dependencies = [
  "network_partitions",
  "polars-core",
  "predicates",
- "rand 0.10.2",
+ "rand 0.8.6",
+ "rand_xorshift",
  "regex",
  "secrecy",
  "serde",
@@ -4523,10 +4524,10 @@ dependencies = [
 
 [[package]]
 name = "network_partitions"
-version = "0.3.0"
-source = "git+https://github.com/graspologic-org/graspologic-native.git?rev=773181488b4e5b81925e302b972b294fd51f61a4#773181488b4e5b81925e302b972b294fd51f61a4"
+version = "0.1.0"
+source = "git+https://github.com/graspologic-org/graspologic-native.git?rev=3c98966401effa0cbf766be4315ad956584bbdea#3c98966401effa0cbf766be4315ad956584bbdea"
 dependencies = [
- "rand 0.10.2",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -5723,6 +5724,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
+dependencies = [
+ "rand_core 0.6.4",
 ]
 
 [[package]]

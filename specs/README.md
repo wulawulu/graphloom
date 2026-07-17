@@ -1641,10 +1641,12 @@ embed_text
 
 # 20. Community Detection
 
-直接使用：
+直接使用与基准 GraphRAG 环境一致的版本：
 
 ```text
-graspologic-native
+graspologic-native 1.2.5
+git tag commit: 3c98966401effa0cbf766be4315ad956584bbdea
+RNG: XorShiftRng (rand 0.8 / rand_xorshift 0.3.0)
 ```
 
 如果 crates.io 没有满足要求的版本，可使用固定 Git commit 依赖，但必须锁定版本。
@@ -1995,7 +1997,8 @@ make test-compat
 
 * UUID；
 * period；
-  -无业务含义的行顺序；
+  -无业务含义的行顺序；`relationships.parquet` 在 `create_communities` 之前的顺序不属于此类，
+   因为重复无向边采用 keep-last，顺序会影响最终边权；
   -浮点精度；
 * LLM 自然语言空白。
 

@@ -7,6 +7,10 @@ Status: Done · Owner: graphloom · Date: 2026-07-12 · Source pin: `../graphrag
 GraphLoom needs provider-neutral completion and embedding types whose JSON representation, cache
 keys, namespaces, and invalidation behavior interoperate directly with current GraphRAG caches.
 
+本文研究缓存协议的互操作性，并不要求 GraphLoom 复刻 GraphRAG 在 LLM 调用之后执行的每一项 Pandas
+转换。实体摘要连接差异，以及 GraphLoom 保留更强输出语义的原因，详见
+[GraphRAG `extract_graph` 输出语义研究](study-graphrag-extract-graph-output.md)。
+
 ## Architecture map
 
 ```text

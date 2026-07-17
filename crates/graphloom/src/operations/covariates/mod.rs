@@ -52,7 +52,7 @@ pub(crate) struct ClaimExtractionConfig<'a> {
 #[derive(Debug, Serialize)]
 struct ClaimPromptValues<'a> {
     input_text: &'a str,
-    entity_specs: &'a [String],
+    entity_specs: &'a str,
     claim_description: &'a str,
 }
 
@@ -191,13 +191,22 @@ fn render_claim_prompt(
     entity_specs: &[String],
     claim_description: &str,
 ) -> Result<String> {
+    let entity_specs = python_string_list(entity_specs);
     template
         .bind(&ClaimPromptValues {
             input_text,
-            entity_specs,
+            entity_specs: &entity_specs,
             claim_description,
         })?
         .render()
+}
+
+fn python_string_list(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")))
+        .collect::<Vec<_>>();
+    format!("[{}]", values.join(", "))
 }
 
 pub(crate) fn covariates_dataframe(rows: &[CovariateRow]) -> Result<DataFrame> {
@@ -355,8 +364,24 @@ mod tests {
         .expect("claims should extract");
 
         let messages = model.last_user_messages();
+        assert!(
+            messages[0]
+                .contains("Entity specification: ['organization', 'person', 'geo', 'event']")
+        );
         assert_eq!(messages[1], extract_claims::CONTINUE_PROMPT);
         assert_eq!(messages[2], extract_claims::LOOP_PROMPT);
+    }
+
+    #[test]
+    fn test_should_render_claim_entity_specs_like_python_string_list() {
+        assert_eq!(
+            python_string_list(&default_claim_entity_types()),
+            "['organization', 'person', 'geo', 'event']"
+        );
+        assert_eq!(
+            python_string_list(&["back\\slash".to_owned(), "single'quote".to_owned()]),
+            "['back\\\\slash', 'single\\'quote']"
+        );
     }
 
     #[tokio::test]

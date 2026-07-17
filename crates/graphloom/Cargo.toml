@@ -31,6 +31,7 @@ html-escape.workspace = true
 network_partitions.workspace = true
 polars-core.workspace = true
 rand.workspace = true
+rand_xorshift.workspace = true
 regex.workspace = true
 secrecy.workspace = true
 serde.workspace = true

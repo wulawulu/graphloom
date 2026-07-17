@@ -8,7 +8,8 @@ use network_partitions::{
     leiden::{self, HierarchicalCluster},
     network::prelude::{CompactNetwork, Edge, LabeledNetwork, LabeledNetworkBuilder},
 };
-use rand::{SeedableRng, rngs::SmallRng};
+use rand::SeedableRng;
+use rand_xorshift::XorShiftRng;
 
 use crate::{GraphLoomError, Result};
 
@@ -39,7 +40,8 @@ pub(crate) fn cluster_graph(
     let mut builder = LabeledNetworkBuilder::new();
     let labeled_network: LabeledNetwork<String> = builder.build(edges.into_iter(), true);
     let compact_network: &CompactNetwork = labeled_network.compact();
-    let mut rng = SmallRng::seed_from_u64(seed);
+    // GraphRAG's graspologic-native 1.2.5 binding uses XorShiftRng.
+    let mut rng = XorShiftRng::seed_from_u64(seed);
     let internal = leiden::hierarchical_leiden(
         compact_network,
         None::<Clustering>,
@@ -49,7 +51,6 @@ pub(crate) fn cluster_graph(
         &mut rng,
         true,
         max_cluster_size,
-        None,
     )
     .map_err(|source| GraphLoomError::InvalidData {
         workflow: CREATE_COMMUNITIES_CONTEXT,
@@ -309,9 +310,8 @@ mod tests {
 
     #[test]
     fn test_should_match_fixed_community_fixture_by_normalized_hierarchy() {
-        // `network_partitions` and Microsoft GraphRAG's `graspologic_native`
-        // may assign different raw community ids. This fixture locks the
-        // normalized hierarchy shape that GraphLoom emits for a fixed graph.
+        // The dependency revision and XorShift RNG match Microsoft GraphRAG's
+        // graspologic-native 1.2.5 runtime. Normalize only opaque cluster ids.
         let relationships = vec![
             relationship("A", "B", 1.0),
             relationship("B", "C", 1.0),

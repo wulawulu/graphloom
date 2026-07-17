@@ -1,43 +1,57 @@
 //! Entity and relationship merge operations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 
 use super::{EntityRow, RawEntityRow, RawRelationshipRow, RelationshipRow};
 
 pub(crate) fn merge_entities(rows: &[RawEntityRow]) -> Vec<EntityRow> {
-    let mut grouped: BTreeMap<(String, String), EntityRow> = BTreeMap::new();
+    let mut indexes = HashMap::<(String, String), usize>::new();
+    let mut grouped = Vec::<EntityRow>::new();
     for row in rows {
         let key = (row.title.clone(), row.entity_type.clone());
-        let entry = grouped.entry(key).or_insert_with(|| EntityRow {
-            title: row.title.clone(),
-            entity_type: row.entity_type.clone(),
-            description: Vec::new(),
-            text_unit_ids: Vec::new(),
-            frequency: 0,
-        });
-        entry.description.push(row.description.clone());
-        entry.text_unit_ids.push(row.source_id.clone());
-        entry.frequency = entry.frequency.saturating_add(1);
+        if let Some(index) = indexes.get(&key).copied() {
+            if let Some(entry) = grouped.get_mut(index) {
+                entry.description.push(row.description.clone());
+                entry.text_unit_ids.push(row.source_id.clone());
+                entry.frequency = entry.frequency.saturating_add(1);
+            }
+        } else {
+            indexes.insert(key, grouped.len());
+            grouped.push(EntityRow {
+                title: row.title.clone(),
+                entity_type: row.entity_type.clone(),
+                description: vec![row.description.clone()],
+                text_unit_ids: vec![row.source_id.clone()],
+                frequency: 1,
+            });
+        }
     }
-    grouped.into_values().collect()
+    grouped
 }
 
 pub(crate) fn merge_relationships(rows: &[RawRelationshipRow]) -> Vec<RelationshipRow> {
-    let mut grouped: BTreeMap<(String, String), RelationshipRow> = BTreeMap::new();
+    let mut indexes = HashMap::<(String, String), usize>::new();
+    let mut grouped = Vec::<RelationshipRow>::new();
     for row in rows {
         let key = (row.source.clone(), row.target.clone());
-        let entry = grouped.entry(key).or_insert_with(|| RelationshipRow {
-            source: row.source.clone(),
-            target: row.target.clone(),
-            description: Vec::new(),
-            text_unit_ids: Vec::new(),
-            weight: 0.0,
-        });
-        entry.description.push(row.description.clone());
-        entry.text_unit_ids.push(row.source_id.clone());
-        entry.weight += row.weight;
+        if let Some(index) = indexes.get(&key).copied() {
+            if let Some(entry) = grouped.get_mut(index) {
+                entry.description.push(row.description.clone());
+                entry.text_unit_ids.push(row.source_id.clone());
+                entry.weight += row.weight;
+            }
+        } else {
+            indexes.insert(key, grouped.len());
+            grouped.push(RelationshipRow {
+                source: row.source.clone(),
+                target: row.target.clone(),
+                description: vec![row.description.clone()],
+                text_unit_ids: vec![row.source_id.clone()],
+                weight: row.weight,
+            });
+        }
     }
-    grouped.into_values().collect()
+    grouped
 }
 
 pub(crate) fn filter_orphan_relationships(
@@ -110,5 +124,57 @@ mod tests {
         assert_eq!(relationships.len(), 1);
         assert_eq!(relationships[0].source, "ALICE");
         assert_eq!(relationships[0].target, "BOB");
+    }
+
+    #[test]
+    fn test_should_preserve_first_seen_group_order_like_graphrag() {
+        let entities = merge_entities(&[
+            raw_entity("ZED", "first"),
+            raw_entity("ALICE", "second"),
+            raw_entity("ZED", "third"),
+        ]);
+        assert_eq!(
+            entities
+                .iter()
+                .map(|entity| entity.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ZED", "ALICE"]
+        );
+
+        let relationships = merge_relationships(&[
+            raw_relationship("ZED", "ALICE", 2.0),
+            raw_relationship("ALICE", "ZED", 3.0),
+            raw_relationship("ZED", "ALICE", 5.0),
+        ]);
+        assert_eq!(
+            relationships
+                .iter()
+                .map(|relationship| (
+                    relationship.source.as_str(),
+                    relationship.target.as_str(),
+                    relationship.weight,
+                ))
+                .collect::<Vec<_>>(),
+            vec![("ZED", "ALICE", 7.0), ("ALICE", "ZED", 3.0)]
+        );
+    }
+
+    fn raw_entity(title: &str, description: &str) -> RawEntityRow {
+        RawEntityRow {
+            title: title.to_owned(),
+            entity_type: "person".to_owned(),
+            description: description.to_owned(),
+            source_id: "tu-1".to_owned(),
+        }
+    }
+
+    fn raw_relationship(source: &str, target: &str, weight: f64) -> RawRelationshipRow {
+        RawRelationshipRow {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            description: format!("{source} -> {target}"),
+            source_id: "tu-1".to_owned(),
+            weight,
+        }
     }
 }
