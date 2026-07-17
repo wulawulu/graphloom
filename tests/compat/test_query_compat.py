@@ -5,7 +5,12 @@ tests use the same identifiers, ordering, and exact context snapshot.
 """
 
 import asyncio
+import importlib.metadata
+import inspect
 import json
+import site
+import sys
+import sysconfig
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +18,7 @@ from typing import Any
 
 import pytest
 import pandas as pd
+import graphrag
 from graphrag.data_model.community_report import CommunityReport
 from graphrag.data_model.community import Community
 from graphrag.data_model.covariate import Covariate
@@ -33,7 +39,11 @@ from graphrag.query.context_builder.conversation_history import (
     ConversationHistory,
     ConversationRole,
 )
-from graphrag.query.context_builder.local_context import build_relationship_context
+from graphrag.query.context_builder.local_context import (
+    build_covariates_context,
+    build_entity_context,
+    build_relationship_context,
+)
 from graphrag.query.context_builder.community_context import (
     build_community_context,
 )
@@ -42,6 +52,7 @@ from graphrag.query.context_builder.dynamic_community_selection import (
 )
 from graphrag.query.context_builder.rate_prompt import RATE_QUERY
 from graphrag.query.context_builder.rate_relevancy import rate_relevancy
+from graphrag.query.context_builder.source_context import build_text_unit_context
 from graphrag.query.input.retrieval.entities import get_entity_by_id
 from graphrag.query.structured_search.local_search.mixed_context import (
     LocalSearchMixedContext,
@@ -58,6 +69,69 @@ GLOBAL_BATCHES = json.loads(
         encoding="utf-8"
     )
 )
+LOCAL_SPECIAL_CHARACTERS = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "query" / "local_special_characters.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.fixture(scope="session", autouse=True)
+def require_isolated_graphrag_distribution() -> None:
+    """Reject editable or neighboring source-tree GraphRAG imports."""
+    version = importlib.metadata.version("graphrag")
+    distribution = importlib.metadata.distribution("graphrag")
+    package_path = Path(inspect.getfile(graphrag)).resolve()
+    local_path = Path(inspect.getfile(LocalSearchMixedContext)).resolve()
+    dynamic_path = Path(inspect.getfile(DynamicCommunitySelection)).resolve()
+    module_paths = [package_path, local_path, dynamic_path]
+    configured_roots = {
+        Path(value).resolve()
+        for value in [
+            *site.getsitepackages(),
+            site.getusersitepackages(),
+            sysconfig.get_paths().get("purelib"),
+            sysconfig.get_paths().get("platlib"),
+        ]
+        if value
+    }
+    installed_package = Path(distribution.locate_file("graphrag")).resolve()
+    direct_url_text = distribution.read_text("direct_url.json")
+    direct_url = json.loads(direct_url_text) if direct_url_text else {}
+    editable = direct_url.get("dir_info", {}).get("editable", False)
+    local_direct_url = str(direct_url.get("url", "")).startswith("file:")
+    repository_root = Path(__file__).resolve().parents[2]
+    neighboring_source_root = repository_root.parent
+    from_neighboring_source = any(
+        _is_relative_to(path, neighboring_source_root)
+        and not any(_is_relative_to(path, root) for root in configured_roots)
+        for path in module_paths
+    )
+    modules_match_distribution = all(
+        _is_relative_to(path, installed_package) for path in module_paths
+    )
+    diagnostic = (
+        f"graphrag version: {version}\n"
+        f"graphrag package path: {package_path}\n"
+        f"LocalSearchMixedContext path: {local_path}\n"
+        f"DynamicCommunitySelection path: {dynamic_path}\n"
+        f"distribution package path: {installed_package}\n"
+        f"direct_url.json: {direct_url}\n"
+        f"site-package roots: {sorted(map(str, configured_roots))}\n"
+        f"sys.path: {sys.path}"
+    )
+    assert version == "3.1.0", diagnostic
+    assert not editable and not local_direct_url, diagnostic
+    assert not from_neighboring_source, diagnostic
+    assert modules_match_distribution, diagnostic
 
 
 class ByteTokenizer:
@@ -71,6 +145,11 @@ class ByteTokenizer:
 
     def num_prompt_tokens(self, messages: list[Any]) -> int:
         return sum(len(message["content"].encode()) for message in messages)
+
+
+def test_should_load_pypi_graphrag_3_1_0_from_isolated_environment() -> None:
+    """Expose the distribution assertion as an explicit compatibility test."""
+    assert importlib.metadata.version("graphrag") == "3.1.0"
 
 
 class RecordingEmbedding:
@@ -476,6 +555,9 @@ def test_graphrag_3_1_local_context_golden() -> None:
         "entities",
         "sources",
     ]
+    # PyPI 3.1.0's mixed builder adds this marker even when candidate context is
+    # disabled. The lower-level Local helpers do not; the dedicated raw-helper
+    # golden below locks those unmodified standard tables for GraphLoom.
     assert {
         key: list(frame.columns) for key, frame in result.context_records.items()
     } == {
@@ -519,6 +601,101 @@ def test_graphrag_3_1_local_context_golden() -> None:
         ],
         "sources": ["id", "text"],
     }
+
+
+def test_graphrag_3_1_local_raw_special_character_helpers_golden() -> None:
+    """Lock raw delimiter joins, records, and token fitting in Local helpers."""
+    entity = _entity("entity-a", "0", "Alice", 5, [], ["tu-a"])
+    entity.description = 'Alice|Bob "quoted" \\path\nsecond line'
+    relationship = _relationship(
+        "rel-ab",
+        "0",
+        "Alice",
+        "Bob",
+        9,
+        1.5,
+        ["tu-a"],
+    )
+    relationship.description = 'A|B "rel" \\edge\r\nnext'
+    covariate = _covariate(
+        "claim-1",
+        "10",
+        "Alice",
+        'claim|text "quoted" \\claim\nnext',
+    )
+    source = _text_unit(
+        "tu-a",
+        "0",
+        'source|text "quoted" \\source\r\nnext',
+        ["rel-ab"],
+    )
+    tokenizer = ByteTokenizer()
+
+    entity_text, entity_records = build_entity_context(
+        selected_entities=[entity],
+        tokenizer=tokenizer,
+        max_context_tokens=20_000,
+        include_entity_rank=True,
+        rank_description="number of relationships",
+    )
+    relationship_text, relationship_records = build_relationship_context(
+        selected_entities=[entity],
+        relationships=[relationship],
+        tokenizer=tokenizer,
+        include_relationship_weight=True,
+        max_context_tokens=20_000,
+        top_k_relationships=1,
+        relationship_ranking_attribute="rank",
+    )
+    claim_text, claim_records = build_covariates_context(
+        selected_entities=[entity],
+        covariates=[covariate],
+        tokenizer=tokenizer,
+        max_context_tokens=20_000,
+        context_name="claims",
+    )
+    source_text, source_record_map = build_text_unit_context(
+        text_units=[source],
+        tokenizer=tokenizer,
+        shuffle_data=False,
+        max_context_tokens=20_000,
+    )
+    frames = {
+        "entities": entity_records,
+        "relationships": relationship_records,
+        "claims": claim_records,
+        "sources": source_record_map["sources"],
+    }
+    context = "\n\n".join([entity_text, relationship_text, claim_text, source_text])
+    records = {
+        name: {
+            "columns": list(frame.columns),
+            "rows": (frame.astype(object).where(frame.notna(), None).values.tolist()),
+        }
+        for name, frame in frames.items()
+    }
+
+    assert context == LOCAL_SPECIAL_CHARACTERS["context"]
+    assert records == LOCAL_SPECIAL_CHARACTERS["records"]
+    assert all("in_context" not in frame.columns for frame in frames.values())
+
+    second_source = _text_unit("tu-b", "1", "second source", [])
+    expected_source = (
+        '-----Sources-----\nid|text\n0|source|text "quoted" \\source\r\nnext\n'
+    )
+    cutoff_text, cutoff_records = build_text_unit_context(
+        text_units=[source, second_source],
+        tokenizer=tokenizer,
+        shuffle_data=False,
+        max_context_tokens=len(expected_source.encode()),
+    )
+    assert cutoff_text == expected_source
+    assert cutoff_records["sources"].to_dict(orient="records") == [
+        {
+            "id": "0",
+            "text": 'source|text "quoted" \\source\r\nnext',
+        }
+    ]
 
 
 def test_graphrag_3_1_local_uuid_and_empty_frame_boundaries() -> None:
@@ -954,6 +1131,97 @@ def test_graphrag_3_1_dynamic_traversal_keep_parent_and_fallback_golden() -> Non
     fallback_reports, fallback_info = asyncio.run(fallback_selector.select("QUESTION"))
     assert {report.community_id for report in fallback_reports} == {"2"}
     assert fallback_info["ratings"] == {"0": 0, "1": 1, "2": 5}
+
+
+def test_graphrag_3_1_dynamic_max_level_only_limits_fallback_golden() -> None:
+    """Distinguish relevant child traversal from whole-level fallback."""
+    traversal_completion = RecordingDynamicCompletion(
+        {
+            "FULL-ROOT": ['{"rating":5}'],
+            "FULL-MIDDLE": ['{"rating":4}'],
+            "FULL-LEAF": ['{"rating":3}'],
+        }
+    )
+    traversal_selector = DynamicCommunitySelection(
+        community_reports=[
+            _report("0", 1.0, "FULL-ROOT"),
+            _report("1", 1.0, "FULL-MIDDLE"),
+            _report("2", 1.0, "FULL-LEAF"),
+        ],
+        communities=[
+            _community(0, 0, -1, [1]),
+            _community(1, 1, 0, [2]),
+            _community(2, 2, 1, []),
+        ],
+        model=traversal_completion,
+        tokenizer=ByteTokenizer(),
+        threshold=3,
+        keep_parent=True,
+        max_level=1,
+    )
+    traversal_reports, traversal_info = asyncio.run(
+        traversal_selector.select("QUESTION")
+    )
+    assert {report.community_id for report in traversal_reports} == {
+        "0",
+        "1",
+        "2",
+    }
+    assert traversal_info["ratings"] == {"0": 5, "1": 4, "2": 3}
+    assert traversal_info["llm_calls"] == 3
+
+    fallback_completion = RecordingDynamicCompletion(
+        {
+            "FULL-LEVEL0": ['{"rating":0}'],
+            "FULL-LEVEL1": ['{"rating":1}'],
+            "FULL-LEVEL2": ['{"rating":5}'],
+        }
+    )
+    fallback_selector = DynamicCommunitySelection(
+        community_reports=[
+            _report("0", 1.0, "FULL-LEVEL0"),
+            _report("1", 1.0, "FULL-LEVEL1"),
+            _report("2", 1.0, "FULL-LEVEL2"),
+        ],
+        communities=[
+            _community(0, 0, -1, []),
+            _community(1, 1, -1, []),
+            _community(2, 2, -1, []),
+        ],
+        model=fallback_completion,
+        tokenizer=ByteTokenizer(),
+        threshold=3,
+        max_level=1,
+    )
+    fallback_reports, fallback_info = asyncio.run(fallback_selector.select("QUESTION"))
+    assert fallback_reports == []
+    assert fallback_info["ratings"] == {"0": 0, "1": 1}
+    assert fallback_info["llm_calls"] == 2
+
+    relevant_completion = RecordingDynamicCompletion(
+        {
+            "FULL-ROOT": ['{"rating":5}'],
+            "FULL-UNRELATED": ['{"rating":0}'],
+        }
+    )
+    relevant_selector = DynamicCommunitySelection(
+        community_reports=[
+            _report("0", 1.0, "FULL-ROOT"),
+            _report("1", 1.0, "FULL-UNRELATED"),
+        ],
+        communities=[
+            _community(0, 0, -1, []),
+            _community(1, 1, -1, []),
+        ],
+        model=relevant_completion,
+        tokenizer=ByteTokenizer(),
+        threshold=3,
+        max_level=2,
+    )
+    relevant_reports, relevant_info = asyncio.run(relevant_selector.select("QUESTION"))
+    assert {report.community_id for report in relevant_reports} == {"0"}
+    assert relevant_info["ratings"] == {"0": 5}
+    assert relevant_info["llm_calls"] == 1
 
 
 def test_graphrag_3_1_dynamic_selection_feeds_fixed_global_batches_golden() -> None:

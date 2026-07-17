@@ -1,0 +1,39 @@
+{
+  "context": "-----Entities-----\nid|entity|description|number of relationships\n0|Alice|Alice|Bob \"quoted\" \\path\nsecond line|5\n\n\n-----Relationships-----\nid|source|target|description|weight\n0|Alice|Bob|A|B \"rel\" \\edge\r\nnext|1.5\n\n\n-----claims-----\nid|entity|object_id|status|start_date|end_date|description\n10|Alice||TRUE|||claim|text \"quoted\" \\claim\nnext\n\n\n-----Sources-----\nid|text\n0|source|text \"quoted\" \\source\r\nnext\n",
+  "records": {
+    "entities": {
+      "columns": ["id", "entity", "description", "number of relationships"],
+      "rows": [["0", "Alice", "Alice|Bob \"quoted\" \\path\nsecond line", "5"]]
+    },
+    "relationships": {
+      "columns": ["id", "source", "target", "description", "weight"],
+      "rows": [["0", "Alice", "Bob", "A|B \"rel\" \\edge\r\nnext", "1.5"]]
+    },
+    "claims": {
+      "columns": [
+        "id",
+        "entity",
+        "object_id",
+        "status",
+        "start_date",
+        "end_date",
+        "description"
+      ],
+      "rows": [
+        [
+          "10",
+          "Alice",
+          "",
+          "TRUE",
+          "",
+          "",
+          "claim|text \"quoted\" \\claim\nnext"
+        ]
+      ]
+    },
+    "sources": {
+      "columns": ["id", "text"],
+      "rows": [["0", "source|text \"quoted\" \\source\r\nnext"]]
+    }
+  }
+}

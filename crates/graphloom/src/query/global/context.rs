@@ -154,7 +154,7 @@ impl GlobalContextBuilder {
         }
         let header = ["id", "title", WEIGHT_COLUMN, "content", RANK_COLUMN];
         let header_table = ContextTable::new(header, Vec::new());
-        let initial = header_table.render_header(
+        let initial = header_table.render_csv_header(
             CONTEXT_NAME,
             SearchMethod::Global,
             "render Global community header",
@@ -167,7 +167,7 @@ impl GlobalContextBuilder {
 
         for report in reports {
             let row = report_row(&report);
-            let row_text = ContextTable::render_row(
+            let row_text = header_table.render_csv_row(
                 &row,
                 SearchMethod::Global,
                 "render Global community row",

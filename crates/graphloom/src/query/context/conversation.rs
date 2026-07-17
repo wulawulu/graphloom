@@ -143,7 +143,7 @@ impl ConversationHistory {
             ];
             let mut trial = table.clone();
             trial.push(row);
-            let trial_text = trial.render_section(
+            let trial_text = trial.render_csv_section(
                 "Conversation History",
                 SearchMethod::Local,
                 "render conversation history candidate",
@@ -161,7 +161,7 @@ impl ConversationHistory {
         let text = if table.is_empty() {
             "-----Conversation History-----\n\n".to_owned()
         } else {
-            table.render_section(
+            table.render_csv_section(
                 "Conversation History",
                 SearchMethod::Local,
                 "render conversation history",

@@ -8,7 +8,6 @@ use std::{
 
 use graphloom_llm::{EmbeddingModel, EmbeddingRequest, Tokenizer};
 use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore};
-use polars_core::prelude::{NamedFrom, Series};
 
 use super::super::{
     CommunityReport, ConversationHistory, Covariate, Entity, QueryContext, QueryContextRecords,
@@ -126,27 +125,7 @@ impl LocalContextBuilder {
             .map(|(name, table)| {
                 table
                     .to_dataframe(SearchMethod::Local, "build Local context records")
-                    .and_then(|mut dataframe| {
-                        if !matches!(
-                            name.as_str(),
-                            "conversation history" | "reports" | "sources"
-                        ) {
-                            dataframe
-                                .with_column(
-                                    Series::new(
-                                        "in_context".into(),
-                                        vec![true; dataframe.height()],
-                                    )
-                                    .into(),
-                                )
-                                .map_err(|source| QueryError::QueryContext {
-                                    method: SearchMethod::Local,
-                                    operation: "mark Local context records",
-                                    message: source.to_string(),
-                                })?;
-                        }
-                        Ok((name, dataframe))
-                    })
+                    .map(|dataframe| (name, dataframe))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(LocalContextBuild {
@@ -340,7 +319,7 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        let table = self.fit_rows(
+        let table = self.fit_csv_rows(
             ContextTable::new(["id", "title", "content"], Vec::new()),
             candidates,
             "Reports",
@@ -351,7 +330,7 @@ impl LocalContextBuilder {
             return Ok(None);
         }
         Ok(Some(Section {
-            text: table.render_section(
+            text: table.render_csv_section(
                 "Reports",
                 SearchMethod::Local,
                 "render Local Reports context",
@@ -382,7 +361,7 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        let entity_table = self.fit_rows(
+        let entity_table = self.fit_delimited_rows(
             ContextTable::new(
                 ["id", "entity", "description", "number of relationships"],
                 Vec::new(),
@@ -392,7 +371,7 @@ impl LocalContextBuilder {
             max_tokens,
             "build Local Entities context",
         )?;
-        let entity_text = entity_table.render_section(
+        let entity_text = entity_table.render_delimited_section(
             "Entities",
             SearchMethod::Local,
             "render Local Entities context",
@@ -508,7 +487,7 @@ impl LocalContextBuilder {
                 row
             })
             .collect::<Vec<_>>();
-        let table = self.fit_rows(
+        let table = self.fit_delimited_rows(
             ContextTable::new(columns, Vec::new()),
             candidates,
             "Relationships",
@@ -516,7 +495,7 @@ impl LocalContextBuilder {
             "build Local Relationships context",
         )?;
         Ok(Some(Section {
-            text: table.render_section(
+            text: table.render_delimited_section(
                 "Relationships",
                 SearchMethod::Local,
                 "render Local Relationships context",
@@ -552,7 +531,7 @@ impl LocalContextBuilder {
         if candidates.is_empty() {
             return Ok(None);
         }
-        let table = self.fit_rows(
+        let table = self.fit_delimited_rows(
             ContextTable::new(covariate_columns(), Vec::new()),
             candidates,
             name,
@@ -560,7 +539,7 @@ impl LocalContextBuilder {
             "build Local covariate context",
         )?;
         Ok(Some(Section {
-            text: table.render_section(
+            text: table.render_delimited_section(
                 name,
                 SearchMethod::Local,
                 "render Local covariate context",
@@ -625,7 +604,7 @@ impl LocalContextBuilder {
             .into_iter()
             .map(|(unit, _, _)| vec![unit.short_id.clone(), unit.text.clone()])
             .collect::<Vec<_>>();
-        let table = self.fit_rows(
+        let table = self.fit_delimited_rows(
             ContextTable::new(["id", "text"], Vec::new()),
             candidates,
             "Sources",
@@ -633,7 +612,7 @@ impl LocalContextBuilder {
             "build Local Sources context",
         )?;
         Ok(Some(Section {
-            text: table.render_section(
+            text: table.render_delimited_section(
                 "Sources",
                 SearchMethod::Local,
                 "render Local Sources context",
@@ -642,7 +621,7 @@ impl LocalContextBuilder {
         }))
     }
 
-    fn fit_rows(
+    fn fit_delimited_rows(
         &self,
         mut table: ContextTable,
         candidates: Vec<Vec<String>>,
@@ -650,10 +629,32 @@ impl LocalContextBuilder {
         max_tokens: usize,
         operation: &'static str,
     ) -> Result<ContextTable> {
-        let header = table.render_header(context_name, SearchMethod::Local, operation)?;
+        let header = table.render_delimited_header(context_name, SearchMethod::Local, operation)?;
         let mut tokens = self.count(&header, operation)?;
         for row in candidates {
-            let row_text = ContextTable::render_row(&row, SearchMethod::Local, operation)?;
+            let row_text = table.render_delimited_row(&row, SearchMethod::Local, operation)?;
+            let row_tokens = self.count(&row_text, operation)?;
+            if tokens.saturating_add(row_tokens) > max_tokens {
+                break;
+            }
+            tokens = tokens.saturating_add(row_tokens);
+            table.push(row);
+        }
+        Ok(table)
+    }
+
+    fn fit_csv_rows(
+        &self,
+        mut table: ContextTable,
+        candidates: Vec<Vec<String>>,
+        context_name: &str,
+        max_tokens: usize,
+        operation: &'static str,
+    ) -> Result<ContextTable> {
+        let header = table.render_csv_header(context_name, SearchMethod::Local, operation)?;
+        let mut tokens = self.count(&header, operation)?;
+        for row in candidates {
+            let row_text = table.render_csv_row(&row, SearchMethod::Local, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
             if tokens.saturating_add(row_tokens) > max_tokens {
                 break;
@@ -891,6 +892,8 @@ mod tests {
     type RecordedSearches = Arc<Mutex<Vec<(Vec<f32>, usize, bool)>>>;
     const LOCAL_CONTEXT_GOLDEN: &str =
         include_str!("../../../../../tests/compat/fixtures/query/local_context.txt");
+    const LOCAL_SPECIAL_CHARACTERS_GOLDEN: &str =
+        include_str!("../../../../../tests/compat/fixtures/query/local_special_characters.json");
 
     #[derive(Debug, Default)]
     struct ByteTokenizer;
@@ -1420,6 +1423,106 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_should_render_raw_local_special_characters_from_shared_golden() {
+        let mut fixture = fixture(20_000, &["entity-a"]);
+        fixture.builder.reports.clear();
+        fixture.builder.entities[0].description =
+            Some("Alice|Bob \"quoted\" \\path\nsecond line".to_owned());
+        fixture.builder.entities[0].community_ids.clear();
+        fixture.builder.entities[0].text_unit_ids = vec!["tu-a".to_owned()];
+        fixture.builder.relationships.truncate(1);
+        fixture.builder.relationships[0].description =
+            Some("A|B \"rel\" \\edge\r\nnext".to_owned());
+        fixture.builder.relationships[0].text_unit_ids = vec!["tu-a".to_owned()];
+        fixture.builder.covariates.truncate(1);
+        fixture.builder.covariates[0].description =
+            Some("claim|text \"quoted\" \\claim\nnext".to_owned());
+        fixture.builder.text_units.truncate(1);
+        fixture.builder.text_units[0].text = "source|text \"quoted\" \\source\r\nnext".to_owned();
+        fixture.builder.text_units[0].relationship_ids = vec!["rel-ab".to_owned()];
+
+        let built = fixture
+            .builder
+            .build("question", None)
+            .await
+            .expect("special-character Local context");
+        let QueryContextText::Text(text) = &built.context.text else {
+            panic!("expected special-character text");
+        };
+        let golden = serde_json::from_str::<serde_json::Value>(LOCAL_SPECIAL_CHARACTERS_GOLDEN)
+            .expect("special-character golden JSON");
+        assert_eq!(text, golden["context"].as_str().expect("golden context"));
+        let QueryContextRecords::Tables(records) = &built.context.records else {
+            panic!("expected special-character records");
+        };
+        let golden_records = golden
+            .get("records")
+            .and_then(serde_json::Value::as_object)
+            .expect("golden records");
+        assert_eq!(records.len(), golden_records.len());
+        for (name, snapshot) in golden_records {
+            let frame = records.get(name).expect("golden record table");
+            let columns = snapshot
+                .get("columns")
+                .and_then(serde_json::Value::as_array)
+                .expect("golden columns")
+                .iter()
+                .map(|column| column.as_str().expect("golden column"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                frame
+                    .get_column_names()
+                    .iter()
+                    .map(|column| column.as_str())
+                    .collect::<Vec<_>>(),
+                columns
+            );
+            let rows = snapshot
+                .get("rows")
+                .and_then(serde_json::Value::as_array)
+                .expect("golden rows");
+            assert_eq!(frame.height(), rows.len());
+            for (row_index, row) in rows.iter().enumerate() {
+                let fields = row.as_array().expect("golden row");
+                for (column, expected) in columns.iter().zip(fields) {
+                    assert_eq!(
+                        frame
+                            .column(column)
+                            .expect("record column")
+                            .str()
+                            .expect("record string column")
+                            .get(row_index),
+                        expected.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_not_add_in_context_to_standard_local_records() {
+        let fixture = fixture(20_000, &["entity-a", "entity-b"]);
+        let built = fixture
+            .builder
+            .build("question", None)
+            .await
+            .expect("standard Local context");
+        let QueryContextRecords::Tables(records) = built.context.records else {
+            panic!("expected standard Local records");
+        };
+
+        for (name, frame) in records {
+            assert!(
+                !frame
+                    .get_column_names()
+                    .iter()
+                    .any(|column| column.as_str() == "in_context"),
+                "{name} unexpectedly contains in_context",
+            );
+        }
+    }
+
     #[test]
     fn test_should_rank_in_network_before_mutual_out_network_and_keep_stable_ties() {
         let fixture = fixture(20_000, &[]);
@@ -1460,7 +1563,7 @@ mod tests {
             .collect();
         let entity_table = fixture
             .builder
-            .fit_rows(
+            .fit_delimited_rows(
                 ContextTable::new(
                     ["id", "entity", "description", "number of relationships"],
                     Vec::new(),
@@ -1472,7 +1575,7 @@ mod tests {
             )
             .expect("entity table");
         let entity_text = entity_table
-            .render_section("Entities", SearchMethod::Local, "test entities")
+            .render_delimited_section("Entities", SearchMethod::Local, "test entities")
             .expect("entity text");
         let relationship = fixture
             .builder
@@ -1540,6 +1643,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_should_fit_special_character_source_using_raw_rendered_tokens() {
+        let mut fixture = fixture(20_000, &[]);
+        fixture.builder.entities[0].text_unit_ids = vec!["tu-a".to_owned(), "tu-b".to_owned()];
+        fixture.builder.text_units[0].text = "source|text \"quoted\" \\source\r\nnext".to_owned();
+        let selected = vec![&fixture.builder.entities[0]];
+        let expected = concat!(
+            "-----Sources-----\n",
+            "id|text\n",
+            "0|source|text \"quoted\" \\source\r\nnext\n",
+        );
+
+        let section = fixture
+            .builder
+            .build_source_context(&selected, expected.len())
+            .expect("special-character sources")
+            .expect("one special-character source");
+
+        assert_eq!(section.text, expected);
+        assert_eq!(
+            section
+                .table
+                .to_dataframe(SearchMethod::Local, "test special Sources records")
+                .expect("special source dataframe")
+                .height(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn test_should_match_upstream_empty_frame_columns() {
         let mut fixture = fixture(20_000, &["entity-a"]);
@@ -1554,7 +1686,7 @@ mod tests {
         let QueryContextRecords::Tables(records) = built.context.records else {
             panic!("expected records");
         };
-        assert_eq!(records["relationships"].get_column_names(), ["in_context"]);
+        assert!(records["relationships"].get_column_names().is_empty());
 
         let history = ConversationHistory {
             turns: vec![ConversationTurn {

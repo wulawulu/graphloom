@@ -159,7 +159,7 @@ impl DynamicCommunitySelection {
         let mut ratings = Vec::<DynamicRating>::new();
         let mut usage = QueryUsageCategory::default();
 
-        while !queue.is_empty() && traversal_level <= self.config.dynamic_search_max_level {
+        while !queue.is_empty() {
             let votes = self.rate_queue(&queue, &reports_by_id, query).await?;
             let mut next_queue = Vec::<String>::new();
             for (community_id, vote) in queue.iter().zip(votes) {
@@ -175,26 +175,24 @@ impl DynamicCommunitySelection {
                         if !self.config.dynamic_search_keep_parent {
                             relevant.remove(&community.parent.to_string());
                         }
-                        if traversal_level < self.config.dynamic_search_max_level {
-                            for child in &community.children {
-                                let child_id = child.to_string();
-                                if !reports_by_id.contains_key(&child_id) {
-                                    tracing::debug!(
-                                        method = %SearchMethod::Global,
-                                        community = %community_id,
-                                        child = %child_id,
-                                        "dynamic child has no report and was skipped"
-                                    );
-                                } else if queued_or_visited.insert(child_id.clone()) {
-                                    next_queue.push(child_id);
-                                } else {
-                                    tracing::warn!(
-                                        method = %SearchMethod::Global,
-                                        community = %community_id,
-                                        child = %child_id,
-                                        "dynamic hierarchy duplicate or cycle was skipped"
-                                    );
-                                }
+                        for child in &community.children {
+                            let child_id = child.to_string();
+                            if !reports_by_id.contains_key(&child_id) {
+                                tracing::debug!(
+                                    method = %SearchMethod::Global,
+                                    community = %community_id,
+                                    child = %child_id,
+                                    "dynamic child has no report and was skipped"
+                                );
+                            } else if queued_or_visited.insert(child_id.clone()) {
+                                next_queue.push(child_id);
+                            } else {
+                                tracing::warn!(
+                                    method = %SearchMethod::Global,
+                                    community = %community_id,
+                                    child = %child_id,
+                                    "dynamic hierarchy duplicate or cycle was skipped"
+                                );
                             }
                         }
                     } else {
@@ -921,6 +919,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_traverse_relevant_children_beyond_fallback_max_level() {
+        let model = Arc::new(ScriptedRatingModel::new([
+            ("ROOT", vec![r#"{"rating":5}"#]),
+            ("MIDDLE", vec![r#"{"rating":4}"#]),
+            ("LEAF", vec![r#"{"rating":3}"#]),
+        ]));
+        let result = selector(
+            config(3, true, 1, 1),
+            vec![report(0, "ROOT"), report(1, "MIDDLE"), report(2, "LEAF")],
+            vec![
+                community(0, 0, -1, &[1]),
+                community(1, 1, 0, &[2]),
+                community(2, 2, 1, &[]),
+            ],
+            Arc::clone(&model),
+            2,
+        )
+        .select("question")
+        .await
+        .expect("deep relevant traversal");
+
+        assert_eq!(
+            result
+                .reports
+                .iter()
+                .map(|report| report.community_id.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+        assert_eq!(result.ratings.len(), 3);
+        assert_eq!(result.usage.llm_calls, 3);
+        assert_eq!(model.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_should_apply_max_level_only_to_whole_level_fallback() {
+        let model = Arc::new(ScriptedRatingModel::new([
+            ("LEVEL0", vec![r#"{"rating":0}"#]),
+            ("LEVEL1", vec![r#"{"rating":1}"#]),
+            ("LEVEL2", vec![r#"{"rating":5}"#]),
+        ]));
+        let result = selector(
+            config(3, true, 1, 1),
+            vec![
+                report(0, "LEVEL0"),
+                report(1, "LEVEL1"),
+                report(2, "LEVEL2"),
+            ],
+            vec![
+                community(0, 0, -1, &[]),
+                community(1, 1, -1, &[]),
+                community(2, 2, -1, &[]),
+            ],
+            Arc::clone(&model),
+            2,
+        )
+        .select("question")
+        .await
+        .expect("bounded fallback");
+
+        assert!(result.reports.is_empty());
+        assert_eq!(
+            result
+                .ratings
+                .iter()
+                .map(|rating| rating.community_id.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "1"]
+        );
+        assert_eq!(result.usage.llm_calls, 2);
+        assert_eq!(model.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_not_fallback_after_relevant_leaf() {
+        let model = Arc::new(ScriptedRatingModel::new([
+            ("ROOT", vec![r#"{"rating":5}"#]),
+            ("UNRELATED", vec![r#"{"rating":0}"#]),
+        ]));
+        let result = selector(
+            config(3, true, 1, 2),
+            vec![report(0, "ROOT"), report(1, "UNRELATED")],
+            vec![community(0, 0, -1, &[]), community(1, 1, -1, &[])],
+            Arc::clone(&model),
+            1,
+        )
+        .select("question")
+        .await
+        .expect("relevant leaf");
+
+        assert_eq!(result.reports[0].community_id, "0");
+        assert_eq!(result.ratings.len(), 1);
+        assert_eq!(result.usage.llm_calls, 1);
+        assert_eq!(model.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_should_not_jump_missing_level_or_fallback_after_relevant_result() {
         let missing_model = Arc::new(ScriptedRatingModel::new([(
             "LEVEL0",
@@ -1000,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_skip_missing_child_report_and_stop_at_max_level() {
+    async fn test_should_skip_missing_child_report() {
         let model = Arc::new(ScriptedRatingModel::new([(
             "ROOT",
             vec![r#"{"rating":5}"#],
@@ -1014,7 +1109,7 @@ mod tests {
         )
         .select("question")
         .await
-        .expect("max-level selection");
+        .expect("missing-child selection");
         assert_eq!(result.reports[0].community_id, "0");
         assert_eq!(result.usage.llm_calls, 1);
         assert_eq!(model.requests.lock().expect("requests").len(), 1);
