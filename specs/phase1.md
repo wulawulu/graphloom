@@ -1,4 +1,4 @@
-# GraphLoom 实现规范
+# GraphLoom Phase 1 实现规范
 
 ## 0. 文档信息
 
