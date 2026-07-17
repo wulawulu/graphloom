@@ -11,8 +11,8 @@ use graphloom::{
     ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig, TEXT_UNIT_TEXT_EMBEDDING,
     api::{query, query_stream},
     query::{
-        QueryCallbacks, QueryContext, QueryContextText, QueryError, QueryEvent, QueryOptions,
-        SearchMethod,
+        MapSearchResult, QueryCallbacks, QueryContext, QueryContextText, QueryError, QueryEvent,
+        QueryOptions, SearchMethod,
     },
 };
 use graphloom_llm::ModelConfig;
@@ -54,6 +54,34 @@ impl QueryCallbacks for RecordingQueryCallbacks {
             .expect("callback mutex")
             .push(format!("token:{token}"));
     }
+
+    fn on_map_response_start(&self, contexts: &[String]) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push(format!("map_start:{}", contexts.len()));
+    }
+
+    fn on_map_response_end(&self, outputs: &[MapSearchResult]) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push(format!("map_end:{}", outputs.len()));
+    }
+
+    fn on_reduce_response_start(&self, _context: &str) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push("reduce_start".to_owned());
+    }
+
+    fn on_reduce_response_end(&self, output: &str) {
+        self.events
+            .lock()
+            .expect("callback mutex")
+            .push(format!("reduce_end:{output}"));
+    }
 }
 
 async fn mount_query_stub() -> MockServer {
@@ -89,6 +117,93 @@ async fn mount_query_stub() -> MockServer {
     server
 }
 
+async fn mount_global_query_stub() -> MockServer {
+    use wiremock::matchers::body_partial_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": false})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "map-response",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "chat-test",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"points\":[{\"description\":\"Mapped fact\",\"score\":8}]}",
+                    "refusal": null
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let stream = concat!(
+        r#"data: {"id":"reduce-1","model":"chat-test","choices":[{"index":0,"delta":{"content":"Global "},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"id":"reduce-2","model":"chat-test","choices":[{"index":0,"delta":{"content":"answer."},"finish_reason":"stop"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": true})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(stream),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_global_no_data_stub() -> MockServer {
+    use wiremock::matchers::body_partial_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": false})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "map-no-data",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "chat-test",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"points\":[{\"description\":\"Irrelevant\",\"score\":0}]}",
+                    "refusal": null
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_global_map_failure_stub() -> MockServer {
+    use wiremock::matchers::body_partial_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": false})))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"error": {"message": "invalid API key"}})),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
 fn model_config(server: &MockServer, model: &str) -> ModelConfig {
     serde_json::from_value(json!({
         "model_provider": "openai",
@@ -99,12 +214,14 @@ fn model_config(server: &MockServer, model: &str) -> ModelConfig {
         "call_args": {
             "temperature": 0.0,
             "top_p": 1.0,
+            "max_tokens": 64,
             "max_completion_tokens": 128,
             "seed": 42,
             "stop": ["END"],
             "presence_penalty": 0.1,
             "frequency_penalty": 0.2,
-            "stream": false
+            "stream": false,
+            "custom_query_arg": {"enabled": true}
         }
     }))
     .expect("model config")
@@ -348,6 +465,14 @@ fn local_options(root: &Path, query_text: &str) -> QueryOptions {
     )
 }
 
+fn global_options(root: &Path, query_text: &str) -> QueryOptions {
+    QueryOptions::new(
+        root.to_path_buf(),
+        query_text.to_owned(),
+        SearchMethod::Global,
+    )
+}
+
 #[tokio::test]
 async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
     let server = mount_query_stub().await;
@@ -573,6 +698,230 @@ async fn test_should_use_data_override_only_for_parquet_tables() {
 }
 
 #[tokio::test]
+async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutation() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    let output = project.path().join("output");
+    let table_paths = write_local_tables(&output).await;
+    let before = futures_util::future::join_all(table_paths.iter().map(|path| async move {
+        (
+            file_hash(path).await,
+            tokio::fs::metadata(path)
+                .await
+                .expect("Global table metadata")
+                .modified()
+                .expect("Global table mtime"),
+        )
+    }))
+    .await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    config.embedding_models.insert(
+        "default_embedding_model".to_owned(),
+        serde_json::from_value(json!({
+            "model_provider": "unsupported",
+            "model": "must-not-be-created",
+            "api_key": "unused-secret"
+        }))
+        .expect("invalid unused embedding"),
+    );
+    config.vector_store.db_uri = project
+        .path()
+        .join("must-not-open-lancedb")
+        .display()
+        .to_string();
+
+    let result = query(
+        config.clone(),
+        global_options(project.path(), "What are the themes?"),
+    )
+    .await
+    .expect("Global Query");
+    assert_eq!(result.response, "Global answer.");
+    let QueryContextText::Composite(text) = &result.context.text else {
+        panic!("expected composite Global context");
+    };
+    let QueryContextText::Batches(map_batches) = &text["map"] else {
+        panic!("expected Global map batches");
+    };
+    assert!(matches!(text["dynamic"], QueryContextText::Empty));
+    assert_eq!(map_batches.len(), 1);
+    assert!(map_batches[0].contains("Alice full report"));
+    let QueryContextText::Text(reduce_context) = &text["reduce"] else {
+        panic!("expected Global reduce context");
+    };
+    assert_eq!(
+        reduce_context,
+        "----Analyst 1----\nImportance Score: 8\nMapped fact"
+    );
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 0);
+    assert_eq!(result.usage.categories["map"].llm_calls, 1);
+    assert_eq!(result.usage.categories["reduce"].llm_calls, 1);
+
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut stream_options = global_options(project.path(), "What are the themes?");
+    stream_options.callbacks.push(callbacks.clone());
+    let mut events = query_stream(config, stream_options)
+        .await
+        .expect("Global stream");
+    let mut chunks = Vec::new();
+    while let Some(event) = events.next().await {
+        if let QueryEvent::Token(token) = event.expect("Global stream event") {
+            chunks.push(token);
+        }
+    }
+    assert_eq!(chunks, ["Global ", "answer."]);
+    assert_eq!(
+        *callbacks.events.lock().expect("Global callback events"),
+        [
+            "map_start:1",
+            "map_end:1",
+            "context",
+            "reduce_start",
+            "token:Global ",
+            "token:answer.",
+            "reduce_end:Global answer.",
+        ]
+    );
+
+    for (path, (hash, modified)) in table_paths.iter().zip(before) {
+        assert_eq!(file_hash(path).await, hash);
+        assert_eq!(
+            tokio::fs::metadata(path)
+                .await
+                .expect("metadata after Global Query")
+                .modified()
+                .expect("mtime after Global Query"),
+            modified
+        );
+    }
+    assert!(!project.path().join("must-not-open-lancedb").exists());
+    assert!(!project.path().join("cache").exists());
+    let requests = server.received_requests().await.expect("Global requests");
+    assert_eq!(requests.len(), 4);
+    let bodies = requests
+        .iter()
+        .map(|request| request.body_json::<Value>().expect("request JSON"))
+        .collect::<Vec<_>>();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().contains("embeddings"))
+    );
+    assert_eq!(
+        bodies.iter().filter(|body| body["stream"] == false).count(),
+        2
+    );
+    assert!(
+        bodies
+            .iter()
+            .filter(|body| body["stream"] == false)
+            .all(|body| body["response_format"] == json!({"type": "json_object"}))
+    );
+    assert_eq!(
+        bodies.iter().filter(|body| body["stream"] == true).count(),
+        2
+    );
+    assert!(bodies.iter().all(|body| {
+        body["temperature"] == 0.0
+            && body["top_p"] == 1.0
+            && body["max_tokens"] == 64
+            && body["max_completion_tokens"] == 128
+            && body["seed"] == 42
+            && body["stop"] == json!(["END"])
+            && body["presence_penalty"] == 0.1
+            && body["frequency_penalty"] == 0.2
+            && body["custom_query_arg"] == json!({"enabled": true})
+            && body["messages"][1]["content"] == "What are the themes?"
+    }));
+}
+
+#[tokio::test]
+async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
+    let server = mount_global_no_data_stub().await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut options = global_options(project.path(), "Unknown?");
+    options.callbacks.push(callbacks.clone());
+
+    let mut events = query_stream(config, options)
+        .await
+        .expect("no-data Global stream");
+    let mut chunks = Vec::new();
+    let mut completed = None;
+    while let Some(event) = events.next().await {
+        match event.expect("no-data event") {
+            QueryEvent::Token(token) => chunks.push(token),
+            QueryEvent::Completed(result) => completed = Some(result),
+            QueryEvent::Context(_) => {}
+            _ => panic!("unexpected future Query event"),
+        }
+    }
+    let answer = "I am sorry but I am unable to answer this question given the provided data.";
+    assert_eq!(chunks, [answer]);
+    let result = completed.expect("completed result");
+    assert_eq!(result.response, answer);
+    assert_eq!(result.usage.categories["map"].llm_calls, 1);
+    assert_eq!(result.usage.categories["reduce"].llm_calls, 0);
+    assert_eq!(
+        *callbacks.events.lock().expect("no-data callback events"),
+        ["map_start:1", "map_end:1", "context"]
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("no-data requests")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_should_not_emit_map_end_callback_after_provider_failure() {
+    let server = mount_global_map_failure_stub().await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut options = global_options(project.path(), "Question?");
+    options.callbacks.push(callbacks.clone());
+
+    let error = match query_stream(config, options).await {
+        Ok(_) => panic!("map provider failure must fail Query construction"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                source.as_ref(),
+                QueryError::QueryCompletion {
+                    operation: "complete Global Search map call",
+                    ..
+                }
+            )
+    ));
+    assert_eq!(
+        *callbacks.events.lock().expect("map failure callbacks"),
+        ["map_start:1"]
+    );
+}
+
+#[tokio::test]
 async fn test_should_return_typed_errors_for_missing_resources_and_later_methods() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
@@ -582,15 +931,15 @@ async fn test_should_return_typed_errors_for_missing_resources_and_later_methods
         QueryOptions::new(
             fixture.project.path().to_path_buf(),
             "facts".to_owned(),
-            SearchMethod::Global,
+            SearchMethod::Drift,
         ),
     )
     .await
-    .expect_err("Global is intentionally unavailable");
+    .expect_err("DRIFT is intentionally unavailable");
     assert!(matches!(
         method_error,
         GraphLoomError::Query(source) if matches!(source.as_ref(), QueryError::QueryMethod {
-            method: Some(SearchMethod::Global),
+            method: Some(SearchMethod::Drift),
             ..
         })
     ));

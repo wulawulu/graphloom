@@ -5,11 +5,14 @@ tests use the same identifiers, ordering, and exact context snapshot.
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+import pandas as pd
 from graphrag.data_model.community_report import CommunityReport
 from graphrag.data_model.covariate import Covariate
 from graphrag.data_model.entity import Entity
@@ -18,21 +21,37 @@ from graphrag.data_model.text_unit import TextUnit
 from graphrag.prompts.query.local_search_system_prompt import (
     LOCAL_SEARCH_SYSTEM_PROMPT,
 )
+from graphrag.prompts.query.global_search_map_system_prompt import (
+    MAP_SYSTEM_PROMPT,
+)
+from graphrag.prompts.query.global_search_reduce_system_prompt import (
+    REDUCE_SYSTEM_PROMPT,
+)
+from graphrag.query.context_builder.builders import ContextBuilderResult
 from graphrag.query.context_builder.conversation_history import (
     ConversationHistory,
     ConversationRole,
 )
 from graphrag.query.context_builder.local_context import build_relationship_context
+from graphrag.query.context_builder.community_context import (
+    build_community_context,
+)
 from graphrag.query.input.retrieval.entities import get_entity_by_id
 from graphrag.query.structured_search.local_search.mixed_context import (
     LocalSearchMixedContext,
 )
 from graphrag.query.structured_search.local_search.search import LocalSearch
+from graphrag.query.structured_search.global_search.search import GlobalSearch
 
 
 LOCAL_CONTEXT = (
     Path(__file__).parent / "fixtures" / "query" / "local_context.txt"
 ).read_text(encoding="utf-8")
+GLOBAL_BATCHES = json.loads(
+    (Path(__file__).parent / "fixtures" / "query" / "global_batches.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 class ByteTokenizer:
@@ -113,6 +132,74 @@ class RecordingCallbacks:
 
     def on_llm_new_token(self, token: str) -> None:
         self.events.append(f"token:{token}")
+
+
+class FixedGlobalContext:
+    """Two fixed map batches shared with the Rust Global golden."""
+
+    async def build_context(
+        self,
+        query: str,
+        conversation_history: Any = None,
+        **kwargs: Any,
+    ) -> ContextBuilderResult:
+        del query, conversation_history, kwargs
+        return ContextBuilderResult(
+            context_chunks=GLOBAL_BATCHES,
+            context_records={"reports": pd.DataFrame({"id": ["3", "1", "2", "0"]})},
+        )
+
+
+class RecordingGlobalCompletion:
+    """Scripted map/reduce completion facade with canonical request capture."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[list[Any], dict[str, Any]]] = []
+
+    async def completion_async(
+        self,
+        messages: list[Any],
+        **kwargs: Any,
+    ) -> AsyncIterator[SimpleNamespace]:
+        self.requests.append((messages, kwargs))
+        if kwargs.get("response_format_json_object"):
+            context = messages[0]["content"]
+            response = (
+                '{"points":[{"description":"first tie","score":5}]}'
+                if "Report 3" in context
+                else (
+                    '{"points":[{"description":"best","score":9},'
+                    '{"description":"second tie","score":5}]}'
+                )
+            )
+            chunks = (response,)
+        else:
+            chunks = ("Global ", "answer.")
+
+        async def response_chunks() -> AsyncIterator[SimpleNamespace]:
+            for text in chunks:
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content=text),
+                        )
+                    ]
+                )
+
+        return response_chunks()
+
+
+class RecordingGlobalCallbacks(RecordingCallbacks):
+    """Capture map/context lifecycle in addition to provider tokens."""
+
+    def on_map_response_start(self, contexts: list[str]) -> None:
+        self.events.append(f"map_start:{len(contexts)}")
+
+    def on_map_response_end(self, outputs: list[Any]) -> None:
+        self.events.append(f"map_end:{len(outputs)}")
+
+    def on_context(self, _context: Any) -> None:
+        self.events.append("context")
 
 
 def _entity(
@@ -500,4 +587,161 @@ def test_graphrag_3_1_local_request_stream_and_usage_golden() -> None:
     assert result.output_tokens_categories == {
         "build_context": 0,
         "response": len("Local answer.".encode()),
+    }
+
+
+def test_graphrag_3_1_global_weight_shuffle_and_batch_golden() -> None:
+    """Lock occurrence weights, seed-86 membership, and within-batch sort."""
+    reports = [
+        _report(str(index), float(index), f"Full content {index}") for index in range(4)
+    ]
+    entities = [
+        _entity(
+            f"entity-{index}",
+            str(index),
+            f"Entity {index}",
+            index,
+            [str(index)],
+            ["shared"],
+        )
+        for index in range(4)
+    ]
+    header_tokens = len(
+        "-----Reports-----\nid|title|occurrence weight|content|rank\n".encode()
+    )
+    row_tokens = len("0|Report 0|1.0|Full content 0|0.0\n".encode())
+    batches, records = build_community_context(
+        community_reports=reports,
+        entities=entities,
+        tokenizer=ByteTokenizer(),
+        use_community_summary=False,
+        shuffle_data=True,
+        include_community_rank=True,
+        min_community_rank=0,
+        community_weight_name="occurrence weight",
+        normalize_community_weight=True,
+        max_context_tokens=header_tokens + row_tokens * 2,
+        single_batch=False,
+        context_name="Reports",
+        random_state=86,
+    )
+
+    assert batches == GLOBAL_BATCHES
+    assert list(records) == ["reports"]
+    assert list(records["reports"].columns) == [
+        "id",
+        "title",
+        "occurrence weight",
+        "content",
+        "rank",
+    ]
+    assert records["reports"]["id"].tolist() == ["3", "1", "2", "0"]
+
+
+def test_graphrag_3_1_global_zero_max_weight_boundary() -> None:
+    """Record the upstream division-by-zero edge GraphLoom handles finitely."""
+    with pytest.raises(ZeroDivisionError):
+        build_community_context(
+            community_reports=[_report("0", 1.0, "No occurrences")],
+            entities=[
+                _entity(
+                    "entity-other",
+                    "0",
+                    "Other",
+                    0,
+                    ["other-community"],
+                    [],
+                )
+            ],
+            tokenizer=ByteTokenizer(),
+            use_community_summary=False,
+            include_community_rank=True,
+            include_community_weight=True,
+            normalize_community_weight=True,
+            single_batch=False,
+        )
+
+
+def test_graphrag_3_1_global_map_reduce_request_and_usage_golden() -> None:
+    """Lock map order, parsing, reduce data/messages, chunks, and usage."""
+    completion = RecordingGlobalCompletion()
+    callbacks = RecordingGlobalCallbacks()
+    search = GlobalSearch(
+        model=completion,
+        context_builder=FixedGlobalContext(),
+        tokenizer=ByteTokenizer(),
+        response_type="Multiple Paragraphs",
+        callbacks=[callbacks],
+        max_data_tokens=20_000,
+        map_max_length=1_000,
+        reduce_max_length=2_000,
+        concurrent_coroutines=2,
+        json_mode=False,
+    )
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in search.stream_search(
+                query="What are the themes?",
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+    reduce_data = (
+        "----Analyst 2----\nImportance Score: 9\nbest\n\n"
+        "----Analyst 1----\nImportance Score: 5\nfirst tie\n\n"
+        "----Analyst 2----\nImportance Score: 5\nsecond tie"
+    )
+    assert chunks == ["Global ", "answer."]
+    assert callbacks.events == [
+        "map_start:2",
+        "map_end:2",
+        "context",
+        "token:Global ",
+        "token:answer.",
+    ]
+    assert len(completion.requests) == 3
+    for index, (messages, kwargs) in enumerate(completion.requests[:2]):
+        assert messages[0]["content"] == MAP_SYSTEM_PROMPT.format(
+            context_data=GLOBAL_BATCHES[index],
+            max_length=1_000,
+        )
+        assert messages[1]["content"] == "What are the themes?"
+        assert kwargs == {"response_format_json_object": True}
+    reduce_messages, reduce_kwargs = completion.requests[2]
+    assert reduce_messages[0]["content"] == REDUCE_SYSTEM_PROMPT.format(
+        report_data=reduce_data,
+        response_type="Multiple Paragraphs",
+        max_length=2_000,
+    )
+    assert reduce_messages[1]["content"] == "What are the themes?"
+    assert reduce_kwargs == {"stream": True}
+
+    usage_completion = RecordingGlobalCompletion()
+    usage_search = GlobalSearch(
+        model=usage_completion,
+        context_builder=FixedGlobalContext(),
+        tokenizer=ByteTokenizer(),
+        response_type="Multiple Paragraphs",
+        max_data_tokens=20_000,
+        map_max_length=1_000,
+        reduce_max_length=2_000,
+        concurrent_coroutines=2,
+        json_mode=False,
+    )
+    result = asyncio.run(usage_search.search(query="What are the themes?"))
+    assert result.response == "Global answer."
+    assert result.reduce_context_text == reduce_data
+    assert [point.response for point in result.map_responses] == [
+        [{"answer": "first tie", "score": 5}],
+        [
+            {"answer": "best", "score": 9},
+            {"answer": "second tie", "score": 5},
+        ],
+    ]
+    assert result.llm_calls_categories == {
+        "build_context": 0,
+        "map": 2,
+        "reduce": 1,
     }

@@ -230,12 +230,14 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
             "query",
             "--root",
             tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "drift",
             "facts",
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "global search is recognized but is not provided",
+            "drift search is recognized but is not provided",
         ));
 
     let table_path = tempdir.path().join("output").join("text_units.parquet");

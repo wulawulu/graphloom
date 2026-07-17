@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::QueryContext;
+use super::{MapSearchResult, QueryContext};
 
 /// Callbacks invoked during Query orchestration.
 ///
@@ -14,7 +14,7 @@ pub trait QueryCallbacks: Send + Sync + std::fmt::Debug {
     /// Global map calls are about to start.
     fn on_map_response_start(&self, _contexts: &[String]) {}
     /// Global map calls completed.
-    fn on_map_response_end(&self, _outputs: &[String]) {}
+    fn on_map_response_end(&self, _outputs: &[MapSearchResult]) {}
     /// A reduce completion is about to start.
     fn on_reduce_response_start(&self, _context: &str) {}
     /// A reduce completion completed.
@@ -58,7 +58,7 @@ impl QueryCallbacks for QueryCallbackChain {
         }
     }
 
-    fn on_map_response_end(&self, outputs: &[String]) {
+    fn on_map_response_end(&self, outputs: &[MapSearchResult]) {
         for callback in &self.callbacks {
             callback.on_map_response_end(outputs);
         }
@@ -80,5 +80,68 @@ impl QueryCallbacks for QueryCallbackChain {
         for callback in &self.callbacks {
             callback.on_llm_new_token(token);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{QueryCallbackChain, QueryCallbacks};
+    use crate::query::{MapSearchResult, QueryUsageCategory};
+
+    #[derive(Debug)]
+    struct RecordingCallback {
+        name: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl QueryCallbacks for RecordingCallback {
+        fn on_map_response_start(&self, _contexts: &[String]) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("{}:map_start", self.name));
+        }
+
+        fn on_map_response_end(&self, _outputs: &[MapSearchResult]) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("{}:map_end", self.name));
+        }
+    }
+
+    #[test]
+    fn test_should_fan_out_global_callbacks_in_chain_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let chain = QueryCallbackChain::new(vec![
+            Arc::new(RecordingCallback {
+                name: "first",
+                events: Arc::clone(&events),
+            }),
+            Arc::new(RecordingCallback {
+                name: "second",
+                events: Arc::clone(&events),
+            }),
+        ]);
+        let output = MapSearchResult {
+            batch_index: 0,
+            raw_response: String::new(),
+            points: Vec::new(),
+            context: String::new(),
+            usage: QueryUsageCategory::default(),
+        };
+        chain.on_map_response_start(&["context".to_owned()]);
+        chain.on_map_response_end(&[output]);
+        assert_eq!(
+            *events.lock().expect("events"),
+            [
+                "first:map_start",
+                "second:map_start",
+                "first:map_end",
+                "second:map_end",
+            ]
+        );
     }
 }

@@ -20,6 +20,8 @@ pub enum QueryContextText {
     Batches(Vec<String>),
     /// Named context strings.
     Named(BTreeMap<String, String>),
+    /// Named nested context values.
+    Composite(BTreeMap<String, QueryContextText>),
 }
 
 /// Query context records used to construct text.

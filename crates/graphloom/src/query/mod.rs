@@ -11,6 +11,7 @@ mod result;
 mod runtime;
 
 pub(crate) mod basic;
+pub(crate) mod global;
 pub(crate) mod local;
 
 use std::{path::PathBuf, str::FromStr, sync::Arc};
@@ -23,6 +24,7 @@ pub use data_loader::{
 };
 pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship, TextUnit};
 pub use error::{QueryError, QueryTableErrorDetails, Result};
+pub use global::{MapPoint, MapSearchResult};
 pub use indexer_adapters::{
     read_indexer_communities, read_indexer_covariates, read_indexer_entities,
     read_indexer_relationships, read_indexer_report_embeddings, read_indexer_reports,
@@ -33,7 +35,9 @@ pub use result::{
     QueryContext, QueryContextRecords, QueryContextText, QueryEvent, QueryEventStream, QueryResult,
     QueryUsage, QueryUsageCategory,
 };
-pub(crate) use runtime::{BasicQueryRuntime, LocalQueryRuntime, QueryRuntimeFactory};
+pub(crate) use runtime::{
+    BasicQueryRuntime, GlobalQueryRuntime, LocalQueryRuntime, QueryRuntimeFactory,
+};
 
 /// Public `GraphRAG` query method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]

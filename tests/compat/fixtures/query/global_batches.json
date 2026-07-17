@@ -1,0 +1,4 @@
+[
+  "id|title|occurrence weight|content|rank\n3|Report 3|1.0|Full content 3|3.0\n1|Report 1|1.0|Full content 1|1.0\n",
+  "id|title|occurrence weight|content|rank\n2|Report 2|1.0|Full content 2|2.0\n0|Report 0|1.0|Full content 0|0.0\n"
+]

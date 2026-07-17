@@ -12,7 +12,8 @@ use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore, create_vect
 use super::{
     QueryCallbackChain, QueryCallbacks, QueryError, QueryOptions, Result, SearchMethod, TextUnit,
     basic::BasicContextBuilder,
-    data_loader::{LocalQueryData, QueryDataLoader},
+    data_loader::{GlobalQueryData, LocalQueryData, QueryDataLoader},
+    global::GlobalContextBuilder,
     local::LocalContextBuilder,
     requirements::QueryRequirements,
 };
@@ -42,6 +43,27 @@ pub(crate) struct LocalQueryRuntime {
     pub(crate) completion_config: ModelConfig,
     pub(crate) prompt: PromptTemplate,
     pub(crate) callbacks: Arc<dyn QueryCallbacks>,
+}
+
+/// Prepared resources for one Global Search invocation.
+#[derive(Debug)]
+pub(crate) struct GlobalQueryRuntime {
+    pub(crate) global_context: GlobalContextBuilder,
+    pub(crate) completion_model: Arc<dyn CompletionModel>,
+    pub(crate) completion_model_id: String,
+    pub(crate) completion_config: ModelConfig,
+    pub(crate) map_prompt: PromptTemplate,
+    pub(crate) reduce_prompt: PromptTemplate,
+    pub(crate) _knowledge_prompt: PromptTemplate,
+    pub(crate) callbacks: Arc<dyn QueryCallbacks>,
+    pub(crate) concurrent_requests: usize,
+}
+
+struct QueryCompletionResources {
+    completion: Arc<dyn CompletionModel>,
+    completion_id: String,
+    completion_config: ModelConfig,
+    tokenizer: Arc<dyn Tokenizer>,
 }
 
 struct QueryModelResources {
@@ -164,6 +186,83 @@ impl QueryRuntimeFactory {
             callbacks,
         })
     }
+
+    pub(crate) async fn build_global(
+        project: &LoadedProject,
+        options: &QueryOptions,
+    ) -> Result<GlobalQueryRuntime> {
+        Self::build_global_with_factory(project, options, &DefaultModelFactory).await
+    }
+
+    async fn build_global_with_factory(
+        project: &LoadedProject,
+        options: &QueryOptions,
+        model_factory: &dyn ModelFactory,
+    ) -> Result<GlobalQueryRuntime> {
+        validate_global_requirements(project, options)?;
+        let data = load_global_data(project, options).await?;
+        let models = create_global_models(project, model_factory)?;
+        let repository = PromptRepository::new(&project.root);
+        let map_prompt = load_global_prompt(
+            &repository,
+            PromptKind::GlobalSearchMap,
+            project.config.global_search.map_prompt.as_deref(),
+            "load Global Search map prompt",
+            "global_search_map_system_prompt.txt",
+        )
+        .await?;
+        let reduce_prompt = load_global_prompt(
+            &repository,
+            PromptKind::GlobalSearchReduce,
+            project.config.global_search.reduce_prompt.as_deref(),
+            "load Global Search reduce prompt",
+            "global_search_reduce_system_prompt.txt",
+        )
+        .await?;
+        let knowledge_prompt = load_global_prompt(
+            &repository,
+            PromptKind::GlobalSearchKnowledge,
+            project.config.global_search.knowledge_prompt.as_deref(),
+            "load Global Search knowledge prompt",
+            "global_search_knowledge_system_prompt.txt",
+        )
+        .await?;
+        let callbacks: Arc<dyn QueryCallbacks> =
+            Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
+        Ok(GlobalQueryRuntime {
+            global_context: GlobalContextBuilder::new(
+                project.config.global_search.clone(),
+                data,
+                models.tokenizer,
+            ),
+            completion_model: models.completion,
+            completion_model_id: models.completion_id,
+            completion_config: models.completion_config,
+            map_prompt,
+            reduce_prompt,
+            _knowledge_prompt: knowledge_prompt,
+            callbacks,
+            concurrent_requests: project.config.concurrent_requests,
+        })
+    }
+}
+
+async fn load_global_prompt(
+    repository: &PromptRepository,
+    kind: PromptKind,
+    configured: Option<&str>,
+    operation: &'static str,
+    prompt: &'static str,
+) -> Result<PromptTemplate> {
+    repository
+        .load_configured(kind, configured)
+        .await
+        .map_err(|source| QueryError::QueryPrompt {
+            method: SearchMethod::Global,
+            operation,
+            prompt,
+            source: Box::new(source),
+        })
 }
 
 fn validate_basic_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
@@ -240,6 +339,54 @@ fn validate_local_requirements(project: &LoadedProject, options: &QueryOptions) 
     })
 }
 
+fn validate_global_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+    let method = SearchMethod::Global;
+    if options.community_level < 0 {
+        return Err(QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate query options",
+            message: "community_level must be non-negative".to_owned(),
+        });
+    }
+    if options.dynamic_community_selection {
+        return Err(QueryError::QueryMethod {
+            method: Some(method),
+            operation: "build fixed Global Search runtime",
+            message: "dynamic community selection is implemented in Phase 2 Step 9".to_owned(),
+        });
+    }
+    project
+        .config
+        .global_search
+        .validate()
+        .map_err(|message| QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate Global Search config",
+            message,
+        })?;
+    if project.config.concurrent_requests == 0 {
+        return Err(QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate Global Search config",
+            message: "concurrent_requests must be greater than zero".to_owned(),
+        });
+    }
+    let requirements = QueryRequirements::for_method(method, &project.config);
+    if requirements.tables.len() == 3
+        && requirements.optional_tables.is_empty()
+        && requirements.embeddings.is_empty()
+    {
+        return Ok(());
+    }
+    Err(QueryError::QueryRuntime {
+        method,
+        operation: "resolve Global Search requirements",
+        source: Box::new(std::io::Error::other(
+            "Global Search requirements are internally inconsistent",
+        )),
+    })
+}
+
 async fn load_basic_text_units(
     project: &LoadedProject,
     options: &QueryOptions,
@@ -258,6 +405,16 @@ async fn load_local_data(
     let table_provider = open_table_provider(project, options, SearchMethod::Local, "entities")?;
     QueryDataLoader::new(table_provider)
         .load_local(options.community_level)
+        .await
+}
+
+async fn load_global_data(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<GlobalQueryData> {
+    let table_provider = open_table_provider(project, options, SearchMethod::Global, "entities")?;
+    QueryDataLoader::new(table_provider)
+        .load_global(options.community_level, false)
         .await
 }
 
@@ -285,6 +442,47 @@ fn create_local_models(
         &project.config.local_search.completion_model_id,
         &project.config.local_search.embedding_model_id,
     )
+}
+
+fn create_global_models(
+    project: &LoadedProject,
+    model_factory: &dyn ModelFactory,
+) -> Result<QueryCompletionResources> {
+    let method = SearchMethod::Global;
+    let completion_id = &project.config.global_search.completion_model_id;
+    let completion_config = required_model(
+        &project.config.completion_models,
+        completion_id,
+        method,
+        "completion",
+    )?
+    .clone();
+    let completion = model_factory
+        .create_completion(
+            completion_id,
+            &completion_config,
+            project.config.concurrent_requests,
+        )
+        .map_err(|source| QueryError::QueryRuntime {
+            method,
+            operation: "create Global completion model",
+            source: Box::new(source),
+        })?;
+    let tokenizer: Arc<dyn Tokenizer> = Arc::new(
+        TiktokenTokenizer::new(completion_config.effective_tokenizer_encoding()).map_err(
+            |source| QueryError::QueryRuntime {
+                method,
+                operation: "create Global tokenizer",
+                source: Box::new(source),
+            },
+        )?,
+    );
+    Ok(QueryCompletionResources {
+        completion,
+        completion_id: completion_id.clone(),
+        completion_config,
+        tokenizer,
+    })
 }
 
 async fn open_basic_vectors(project: &LoadedProject) -> Result<QueryVectorResources> {
