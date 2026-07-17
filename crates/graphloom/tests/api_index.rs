@@ -241,6 +241,11 @@ async fn test_should_keep_completed_workflow_output_after_later_failure() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the public API end-to-end scenario keeps index setup and artifact assertions \
+              together"
+)]
 async fn test_should_build_standard_index_via_public_api() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -39,14 +39,14 @@ pub struct BuildIndexOptions {
     pub method: IndexingMethod,
     /// Cache mode.
     pub cache_mode: CacheMode,
-    /// IndexWorkflow callbacks.
+    /// `IndexWorkflow` callbacks.
     pub callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
 }
 
 /// Successful index run result.
 #[derive(Debug, Clone)]
 pub struct IndexRunResult {
-    /// IndexWorkflow outputs.
+    /// `IndexWorkflow` outputs.
     pub workflow_outputs: Vec<IndexWorkflowOutput>,
     /// Final stats.
     pub stats: IndexRunStats,

@@ -28,7 +28,7 @@ use crate::{
 pub struct IndexRuntime {
     /// Resolved config.
     pub config: GraphRagConfig,
-    /// IndexPipeline context.
+    /// `IndexPipeline` context.
     pub context: IndexPipelineContext,
     /// Built pipeline.
     pub pipeline: IndexPipeline,
@@ -153,7 +153,8 @@ mod runtime_factory_tests {
         MemoryStorage, MemoryTableProvider, Result as StorageResult, Storage, TableProvider,
     };
     use graphloom_vectors::{
-        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorStore, VectorStoreConfig,
+        Result as VectorResult, VectorDocument, VectorIndexSchema, VectorSearchResult, VectorStore,
+        VectorStoreConfig,
     };
     use tempfile::TempDir;
 
@@ -225,6 +226,15 @@ mod runtime_factory_tests {
         ) -> VectorResult<Option<VectorDocument>> {
             Ok(None)
         }
+        async fn similarity_search_by_vector(
+            &self,
+            _schema: &VectorIndexSchema,
+            _query_vector: &[f32],
+            _k: usize,
+            _include_vectors: bool,
+        ) -> VectorResult<Vec<VectorSearchResult>> {
+            Ok(Vec::new())
+        }
     }
 
     #[derive(Debug)]
@@ -292,7 +302,7 @@ mod runtime_factory_tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.call_factory_ids
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(self.factory_id);
             Ok(Arc::new(EmptyVectorStore {
                 resets: self.resets.clone(),
@@ -384,7 +394,7 @@ mod runtime_factory_tests {
                 .vector_factory
                 .call_factory_ids
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![41]
         );
         assert_eq!(factory.output_storage.clear_calls.load(Ordering::SeqCst), 0);

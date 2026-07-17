@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const FINALIZE_GRAPH_WORKFLOW: &str = "finalize_graph";
 
 /// Finalize extracted graph rows.

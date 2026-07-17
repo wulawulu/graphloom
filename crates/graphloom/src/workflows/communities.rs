@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const CREATE_COMMUNITIES_WORKFLOW: &str = "create_communities";
 
 /// Cluster graph entities and relationships into communities.

@@ -1,4 +1,4 @@
-//! GraphRAG indexing pipeline contracts.
+//! `GraphRAG` indexing pipeline contracts.
 //!
 //! Query execution uses a separate runtime and does not share these pipeline,
 //! workflow, context, callback, or statistics abstractions.

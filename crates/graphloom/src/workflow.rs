@@ -1,4 +1,4 @@
-//! GraphRAG indexing workflow contracts and registry.
+//! `GraphRAG` indexing workflow contracts and registry.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -112,7 +112,7 @@ impl IndexWorkflowRequirements {
     }
 }
 
-/// Result returned by a GraphRAG indexing workflow.
+/// Result returned by a `GraphRAG` indexing workflow.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct IndexWorkflowOutput {
@@ -126,7 +126,7 @@ pub struct IndexWorkflowOutput {
     pub output_rows: usize,
 }
 
-/// One executable step in the GraphRAG indexing pipeline.
+/// One executable step in the `GraphRAG` indexing pipeline.
 #[async_trait]
 pub trait IndexWorkflow: Send + Sync + std::fmt::Debug {
     /// Stable indexing workflow name.
@@ -153,7 +153,7 @@ pub trait IndexWorkflow: Send + Sync + std::fmt::Debug {
     ) -> Result<IndexWorkflowOutput>;
 }
 
-/// Registry used while compiling a GraphRAG indexing pipeline.
+/// Registry used while compiling a `GraphRAG` indexing pipeline.
 #[derive(Debug, Clone, Default)]
 pub struct IndexWorkflowRegistry {
     workflows: BTreeMap<String, Arc<dyn IndexWorkflow>>,

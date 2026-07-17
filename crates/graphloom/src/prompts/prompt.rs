@@ -15,6 +15,10 @@ pub(crate) enum PromptSource {
     BuiltIn,
     /// Override selected explicitly by configuration.
     Explicit(PathBuf),
+    /// Canonical project prompt discovered under `prompts/`.
+    Project(PathBuf),
+    /// Prompt content supplied directly in configuration.
+    Inline,
 }
 
 impl fmt::Display for PromptSource {
@@ -22,6 +26,8 @@ impl fmt::Display for PromptSource {
         match self {
             Self::BuiltIn => formatter.write_str("built-in defaults"),
             Self::Explicit(path) => write!(formatter, "explicit path {}", path.display()),
+            Self::Project(path) => write!(formatter, "project path {}", path.display()),
+            Self::Inline => formatter.write_str("inline configuration"),
         }
     }
 }
@@ -393,6 +399,34 @@ mod tests {
                         "max_report_length": 2_000,
                     })
                 }
+                PromptKind::BasicSearch | PromptKind::LocalSearch => serde_json::json!({
+                    "context_data": "id|text\n0|Alice met Bob.\n",
+                    "response_type": "Multiple Paragraphs",
+                }),
+                PromptKind::DriftSearch => serde_json::json!({
+                    "context_data": "Community context",
+                    "response_type": "Multiple Paragraphs",
+                    "global_query": "What happened?",
+                    "followups": "Who was involved?",
+                }),
+                PromptKind::DriftReduce => serde_json::json!({
+                    "context_data": "Partial answers",
+                    "response_type": "Multiple Paragraphs",
+                }),
+                PromptKind::GlobalSearchMap => serde_json::json!({
+                    "context_data": "Community reports",
+                    "max_length": 2_000,
+                }),
+                PromptKind::GlobalSearchReduce => serde_json::json!({
+                    "report_data": "Analyst reports",
+                    "response_type": "Multiple Paragraphs",
+                    "max_length": 2_000,
+                }),
+                PromptKind::GlobalSearchKnowledge => serde_json::json!({}),
+                PromptKind::QuestionGeneration => serde_json::json!({
+                    "question_count": 5,
+                    "context_data": "Conversation history",
+                }),
             };
 
             let rendered = template

@@ -1,9 +1,14 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
+    time::{Duration, SystemTime},
 };
 
 use assert_cmd::Command;
@@ -19,6 +24,7 @@ use predicates::prelude::*;
 use serde_json::{Value, json};
 use serde_yaml::Mapping;
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
@@ -27,6 +33,273 @@ use wiremock::{
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test]
+async fn test_should_flush_first_cli_stream_chunk_before_provider_finishes() {
+    let (server_uri, first_chunk_sent, release_completion, server_thread) = delayed_query_server();
+    let tempdir = TempDir::new().expect("tempdir");
+    init_project(tempdir.path());
+    tokio::fs::write(
+        tempdir.path().join(".env"),
+        "GRAPHRAG_API_KEY=query-secret\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(tempdir.path(), &server_uri).await;
+    write_minimal_query_index(tempdir.path()).await;
+
+    let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("graphloom"))
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "--streaming",
+            "facts",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn graphloom query");
+    let mut stdout = child.stdout.take().expect("child stdout");
+    let mut stderr = child.stderr.take().expect("child stderr");
+    tokio::task::spawn_blocking(move || first_chunk_sent.recv_timeout(Duration::from_secs(10)))
+        .await
+        .expect("provider signal waiter")
+        .expect("provider should send its first chunk");
+    let mut first_stdout = vec![0_u8; "Basic ".len()];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut first_stdout))
+        .await
+        .expect("CLI should flush before completion ends")
+        .expect("read first stdout chunk");
+    assert_eq!(first_stdout, b"Basic ");
+    release_completion
+        .send(())
+        .expect("release provider completion");
+
+    let mut stdout_rest = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let (stdout_result, stderr_result, status) = tokio::join!(
+        stdout.read_to_end(&mut stdout_rest),
+        stderr.read_to_end(&mut stderr_bytes),
+        child.wait(),
+    );
+    stdout_result.expect("remaining stdout");
+    stderr_result.expect("stderr");
+    let status = status.expect("child status");
+    server_thread.join().expect("server thread");
+    assert!(status.success());
+    first_stdout.extend(stdout_rest);
+    assert_eq!(first_stdout, b"Basic answer.\n");
+    assert!(stderr_bytes.is_empty());
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Basic Query CLI scenario keeps stdout, read-only, and data-override assertions \
+              together"
+)]
+async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    run_minimal_standard_index(tempdir.path(), &server.uri()).await;
+    let parquet_before = parquet_artifact_snapshot(tempdir.path()).await;
+    let vector_ids_before = managed_vector_ids(tempdir.path()).await;
+    let cache = FileStorage::existing(tempdir.path().join("cache")).expect("cache");
+    let cache_before = cache.list("").await.expect("cache before");
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "What are the main facts?",
+        ])
+        .assert()
+        .success()
+        .stdout("Basic answer.\n")
+        .stderr(predicate::str::is_empty());
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "--streaming",
+            "What are the main facts?",
+        ])
+        .assert()
+        .success()
+        .stdout("Basic answer.\n")
+        .stderr(predicate::str::is_empty());
+
+    assert_eq!(
+        parquet_artifact_snapshot(tempdir.path()).await,
+        parquet_before
+    );
+    assert_eq!(managed_vector_ids(tempdir.path()).await, vector_ids_before);
+    assert_eq!(cache.list("").await.expect("cache after"), cache_before);
+    assert!(tempdir.path().join("logs").join("query.log").is_file());
+
+    let provider = ParquetTableProvider::new(tempdir.path().join("output")).expect("provider");
+    let mut overridden = provider
+        .read_dataframe("text_units")
+        .await
+        .expect("text units");
+    overridden
+        .replace(
+            "text",
+            Series::new(
+                "text".into(),
+                vec!["DATA_OVERRIDE_MARKER"; overridden.height()],
+            )
+            .into(),
+        )
+        .expect("replace text");
+    let override_root = tempdir.path().join("alternate_tables");
+    let override_provider = ParquetTableProvider::new(&override_root).expect("override provider");
+    override_provider
+        .write_dataframe("text_units", overridden)
+        .await
+        .expect("override text units");
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "--data",
+            override_root.to_str().expect("utf8 data root"),
+            "facts",
+        ])
+        .assert()
+        .success()
+        .stdout("Basic answer.\n");
+    let requests = server.received_requests().await.expect("requests");
+    assert!(requests.iter().any(|request| {
+        request
+            .body_json::<Value>()
+            .ok()
+            .and_then(|body| body["messages"].as_array().cloned())
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("DATA_OVERRIDE_MARKER"))
+                })
+            })
+    }));
+}
+
+#[tokio::test]
+async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    run_minimal_standard_index(tempdir.path(), &server.uri()).await;
+
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "facts",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "global search is recognized but is not provided",
+        ));
+
+    let table_path = tempdir.path().join("output").join("text_units.parquet");
+    let table_bytes = tokio::fs::read(&table_path).await.expect("table bytes");
+    tokio::fs::remove_file(&table_path)
+        .await
+        .expect("remove text units");
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "facts",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires table text_units"));
+    tokio::fs::write(&table_path, table_bytes)
+        .await
+        .expect("restore text units");
+
+    let settings_path = tempdir.path().join("settings.yaml");
+    let settings = tokio::fs::read_to_string(&settings_path)
+        .await
+        .expect("settings");
+    let settings = settings.replace(
+        "  vector_size: 4",
+        concat!(
+            "  vector_size: 4\n",
+            "  index_schema:\n",
+            "    text_unit_text:\n",
+            "      index_name: missing_text_unit_text\n",
+            "      vector_size: 4"
+        ),
+    );
+    tokio::fs::write(settings_path, settings)
+        .await
+        .expect("settings with missing index");
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "facts",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires vector index missing_text_unit_text",
+        ));
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CLI index end-to-end scenario keeps initialization, dry-run, and rerun \
+              assertions together"
+)]
 async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1584,6 +1857,34 @@ async fn entity_titles(root: &std::path::Path) -> BTreeSet<String> {
         .collect()
 }
 
+async fn parquet_artifact_snapshot(
+    root: &std::path::Path,
+) -> BTreeMap<std::path::PathBuf, (Vec<u8>, SystemTime)> {
+    let mut entries = tokio::fs::read_dir(root.join("output"))
+        .await
+        .expect("output directory");
+    let mut snapshot = BTreeMap::new();
+    while let Some(entry) = entries.next_entry().await.expect("output entry") {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "parquet")
+        {
+            continue;
+        }
+        let bytes = tokio::fs::read(&path).await.expect("Parquet artifact");
+        let modified = entry
+            .metadata()
+            .await
+            .expect("Parquet metadata")
+            .modified()
+            .expect("Parquet modified time");
+        snapshot.insert(path, (bytes, modified));
+    }
+    assert!(!snapshot.is_empty(), "index must produce Parquet artifacts");
+    snapshot
+}
+
 async fn managed_vector_ids(
     root: &std::path::Path,
 ) -> std::collections::BTreeMap<String, BTreeSet<String>> {
@@ -1622,7 +1923,7 @@ async fn write_matching_validation_cache(root: &std::path::Path) {
         completion_request_cache_key(&completion_request).expect("completion cache key");
     let completion = CachedModelResult {
         response: CompletionResponse::text_for_test("cached", "cached hello"),
-        metrics: Default::default(),
+        metrics: std::collections::BTreeMap::default(),
     };
     for namespace in [
         "default_completion_model",
@@ -1648,7 +1949,7 @@ async fn write_matching_validation_cache(root: &std::path::Path) {
         embedding_request_cache_key(&embedding_request).expect("embedding cache key");
     let embedding = CachedModelResult {
         response: EmbeddingResponse::vectors_for_test("cached", vec![vec![9.0; 4]]),
-        metrics: Default::default(),
+        metrics: std::collections::BTreeMap::default(),
     };
     for namespace in ["default_embedding_model", "text_embedding"] {
         let directory = root.join("cache").join(namespace);
@@ -1826,6 +2127,9 @@ fn run_index(root: &std::path::Path, extra_args: &[&str]) {
 
 fn chat_responder(request: &Request) -> ResponseTemplate {
     let body = request.body_json::<Value>().expect("chat request json");
+    if body["stream"].as_bool() == Some(true) {
+        return query_stream_response();
+    }
     let messages = body["messages"].as_array().expect("messages");
     let last = messages
         .last()
@@ -1849,6 +2153,19 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
         chat_content_for_non_extraction(last)
     };
     chat_response(&content)
+}
+
+fn query_stream_response() -> ResponseTemplate {
+    let body = concat!(
+        "data: {\"id\":\"query-1\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"\
+         content\":\"Basic \"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"query-2\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"\
+         content\":\"answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(body)
 }
 
 fn chat_content_for_non_extraction(last: &str) -> String {
@@ -2042,4 +2359,181 @@ fn embedding_cardinality_mismatch_responder(request: &Request) -> ResponseTempla
         "model": "embed-test",
         "usage": {"prompt_tokens": inputs.len(), "total_tokens": inputs.len()}
     }))
+}
+
+type DelayedServer = (
+    String,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+);
+
+fn delayed_query_server() -> DelayedServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed query server");
+    let address = listener.local_addr().expect("server address");
+    let (first_chunk_tx, first_chunk_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept query request");
+            let path = read_http_request_path(&mut stream).expect("read query request");
+            if path == "/v1/embeddings" {
+                let body = json!({
+                    "object": "list",
+                    "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0, 0.0, 0.0]}],
+                    "model": "embed-test",
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1}
+                })
+                .to_string();
+                write_http_headers(&mut stream, "application/json", body.len())
+                    .expect("embedding headers");
+                stream
+                    .write_all(body.as_bytes())
+                    .expect("embedding response");
+                stream.flush().expect("embedding flush");
+                continue;
+            }
+            assert_eq!(path, "/v1/chat/completions");
+            let first = concat!(
+                "data: {\"id\":\"delayed-1\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,",
+                "\"delta\":{\"content\":\"Basic \"},\"finish_reason\":null}]}\n\n"
+            );
+            let rest = concat!(
+                "data: {\"id\":\"delayed-2\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"\
+                 delta\":{\"content\":\"answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            write_http_headers(
+                &mut stream,
+                "text/event-stream",
+                first.len().saturating_add(rest.len()),
+            )
+            .expect("completion headers");
+            stream
+                .write_all(first.as_bytes())
+                .expect("first completion chunk");
+            stream.flush().expect("first completion flush");
+            first_chunk_tx.send(()).expect("first chunk signal");
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("completion release");
+            stream
+                .write_all(rest.as_bytes())
+                .expect("remaining completion chunks");
+            stream.flush().expect("completion flush");
+        }
+    });
+    (
+        format!("http://{address}"),
+        first_chunk_rx,
+        release_tx,
+        thread,
+    )
+}
+
+fn read_http_request_path(stream: &mut TcpStream) -> std::io::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4_096];
+    let header_end = loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "HTTP request ended before headers",
+            ));
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index.saturating_add(4);
+        }
+    };
+    let headers = std::str::from_utf8(&request[..header_end])
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or_default();
+    let path = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP request line")
+        })?;
+    let target_length = header_end.saturating_add(content_length);
+    while request.len() < target_length {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "HTTP request ended before body",
+            ));
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    Ok(path)
+}
+
+fn write_http_headers(
+    stream: &mut TcpStream,
+    content_type: &str,
+    content_length: usize,
+) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: \
+         {content_length}\r\nConnection: close\r\n\r\n"
+    )
+}
+
+async fn write_minimal_query_index(root: &std::path::Path) {
+    let output = root.join("output");
+    let provider = ParquetTableProvider::new(&output).expect("query table provider");
+    let dataframe = DataFrame::new(
+        1,
+        vec![
+            Series::new("id".into(), ["tu-1"]).into(),
+            Series::new("text".into(), ["A source"]).into(),
+            Series::new("n_tokens".into(), [2_u32]).into(),
+            Series::new("document_id".into(), ["doc-1"]).into(),
+            string_list_column("entity_ids", &[&[]]),
+            string_list_column("relationship_ids", &[&[]]),
+            string_list_column("covariate_ids", &[&[]]),
+        ],
+    )
+    .expect("query text units");
+    provider
+        .write_dataframe("text_units", dataframe)
+        .await
+        .expect("write query text units");
+    let settings = tokio::fs::read_to_string(root.join("settings.yaml"))
+        .await
+        .expect("settings");
+    let mut config: GraphRagConfig = serde_yaml::from_str(&settings).expect("config");
+    config.vector_store.db_uri = output.join("lancedb").display().to_string();
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("query LanceDB");
+    let schema = config.vector_store.schema_for("text_unit_text");
+    store
+        .ensure_index(&schema)
+        .await
+        .expect("query vector index");
+    store
+        .upsert_documents(
+            &schema,
+            &[graphloom_vectors::VectorDocument {
+                id: "tu-1".to_owned(),
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }],
+        )
+        .await
+        .expect("query vector");
 }

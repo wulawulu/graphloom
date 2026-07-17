@@ -8,10 +8,10 @@ test-cli:
 	@cargo nextest run -p graphloom --test cli_integration
 
 test-api:
-	@cargo nextest run -p graphloom --test api_index
+	@cargo nextest run -p graphloom --test api_index --test api_query
 
 test-integration:
-	@cargo nextest run -p graphloom --test cli_integration --test api_index
+	@cargo nextest run -p graphloom --test cli_integration --test api_index --test api_query
 
 test-compat:
 	@cargo build -p graphloom

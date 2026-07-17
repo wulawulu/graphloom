@@ -15,7 +15,7 @@ use crate::{
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const CREATE_BASE_TEXT_UNITS_WORKFLOW: &str = "create_base_text_units";
 
 /// Create base text units from documents.
@@ -232,7 +232,7 @@ mod tests {
             if workflow_name == CREATE_BASE_TEXT_UNITS_WORKFLOW {
                 self.calls
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push((completed, total));
             }
         }
@@ -288,7 +288,7 @@ mod tests {
             *callbacks
                 .calls
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![(1, Some(2)), (2, Some(2))]
         );
     }

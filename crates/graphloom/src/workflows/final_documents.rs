@@ -11,7 +11,7 @@ use crate::{
     dataframe::{optional_string_at, row_to_static, string_value, usize_to_i64},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const CREATE_FINAL_DOCUMENTS_WORKFLOW: &str = "create_final_documents";
 
 /// Populate final `documents.text_unit_ids`.

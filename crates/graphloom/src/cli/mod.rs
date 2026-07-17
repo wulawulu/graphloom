@@ -5,11 +5,13 @@ pub mod callbacks;
 pub mod error;
 pub mod index;
 pub mod init;
+pub mod query;
 
-pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs};
+pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs, QueryArgs};
 pub use error::{CliError, Result};
 pub use index::run as run_index;
 pub use init::init_project;
+pub use query::run as run_query;
 
 /// Run a parsed CLI command.
 ///
@@ -23,5 +25,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             run_index(&args).await?;
             Ok(())
         }
+        Command::Query(args) => run_query(&args).await,
     }
 }

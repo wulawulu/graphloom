@@ -1,4 +1,4 @@
-//! Compiled GraphRAG indexing pipeline and factory.
+//! Compiled `GraphRAG` indexing pipeline and factory.
 
 use std::{sync::Arc, time::Instant};
 
@@ -16,7 +16,7 @@ pub struct IndexPipelineStep {
     workflow: Arc<dyn IndexWorkflow>,
 }
 
-/// Compiled GraphRAG indexing pipeline.
+/// Compiled `GraphRAG` indexing pipeline.
 #[derive(Debug, Clone)]
 pub struct IndexPipeline {
     workflows: Vec<IndexPipelineStep>,

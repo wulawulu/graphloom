@@ -288,6 +288,12 @@ fn validate_response(
                 config.embedding_name
             )));
         }
+        if vector.iter().any(|value| value.abs() > f64::from(f32::MAX)) {
+            return Err(invalid_data(format!(
+                "{} batch {batch_index} vector {index} contains a value outside the f32 range",
+                config.embedding_name
+            )));
+        }
         match response_dimension {
             Some(dimension) if dimension != vector.len() => {
                 return Err(invalid_data(format!(
@@ -308,10 +314,15 @@ fn validate_response(
             )));
         }
     }
-    Ok(response
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "provider embeddings are range-checked for finiteness and stored as f32 vectors"
+    )]
+    let embeddings = response
         .embeddings()
         .map(|embedding| embedding.iter().map(|value| *value as f32).collect())
-        .collect())
+        .collect();
+    Ok(embeddings)
 }
 
 fn collect_row_vectors(row_count: usize, results: &[ApiBatchResult]) -> Result<Vec<Vec<Vec<f32>>>> {
@@ -766,5 +777,16 @@ mod tests {
         )
         .expect_err("nan should fail");
         assert!(finite_error.to_string().contains("non-finite"));
+
+        let range_response: EmbeddingResponse = serde_json::from_value(serde_json::json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [f64::MAX, 0.0]}],
+            "model": "test",
+            "usage": {"prompt_tokens": 0, "total_tokens": 0}
+        }))
+        .expect("f64 embedding response");
+        let range_error = validate_response(&config, 7, 1, &range_response)
+            .expect_err("out-of-range f64 should fail");
+        assert!(range_error.to_string().contains("outside the f32 range"));
     }
 }

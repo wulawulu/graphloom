@@ -13,7 +13,7 @@ use crate::{
     operations::text_units::{TextUnitRow, text_units_dataframe},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const CREATE_FINAL_TEXT_UNITS_WORKFLOW: &str = "create_final_text_units";
 
 /// Fill final text-unit entity, relationship, and covariate references.

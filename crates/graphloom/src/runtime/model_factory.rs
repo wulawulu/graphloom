@@ -32,7 +32,7 @@ pub trait ModelFactory: Send + Sync + std::fmt::Debug {
     ) -> Result<Arc<dyn EmbeddingModel>>;
 }
 
-/// Default model factory using the currently supported OpenAI adapters.
+/// Default model factory using the currently supported `OpenAI` adapters.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultModelFactory;
 

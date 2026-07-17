@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod load;
+mod query;
+
+pub use query::{BasicSearchConfig, DriftSearchConfig, GlobalSearchConfig, LocalSearchConfig};
 
 const DEFAULT_CONCURRENT_REQUESTS: usize = 25;
 const DEFAULT_COMPLETION_MODEL_ID: &str = "default_completion_model";
@@ -487,7 +490,7 @@ pub struct SnapshotsConfig {
     pub raw_graph: bool,
 }
 
-/// Phase-1 `GraphRAG` configuration surface.
+/// `GraphRAG` configuration surface shared by indexing and query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
@@ -540,6 +543,18 @@ pub struct GraphRagConfig {
     pub vector_store: VectorStoreConfig,
     /// Snapshot config.
     pub snapshots: SnapshotsConfig,
+    /// Local Search config.
+    #[serde(rename = "local_search", alias = "localSearch")]
+    pub local_search: LocalSearchConfig,
+    /// Global Search config.
+    #[serde(rename = "global_search", alias = "globalSearch")]
+    pub global_search: GlobalSearchConfig,
+    /// DRIFT Search config.
+    #[serde(rename = "drift_search", alias = "driftSearch")]
+    pub drift_search: DriftSearchConfig,
+    /// Basic Search config.
+    #[serde(rename = "basic_search", alias = "basicSearch")]
+    pub basic_search: BasicSearchConfig,
     /// Future-compatible sections retained as dynamic values.
     #[serde(flatten)]
     pub sections: BTreeMap<String, Value>,
@@ -566,6 +581,10 @@ impl Default for GraphRagConfig {
             embed_text: EmbedTextConfig::default(),
             vector_store: VectorStoreConfig::default(),
             snapshots: SnapshotsConfig::default(),
+            local_search: LocalSearchConfig::default(),
+            global_search: GlobalSearchConfig::default(),
+            drift_search: DriftSearchConfig::default(),
+            basic_search: BasicSearchConfig::default(),
             sections: BTreeMap::new(),
         }
     }

@@ -63,9 +63,9 @@ pub(crate) fn explode_communities(
         .collect()
 }
 
-/// Build the exact graph-context strings used by GraphRAG's standard community-report workflow.
+/// Build the exact graph-context strings used by `GraphRAG`'s standard community-report workflow.
 ///
-/// GraphRAG currently prepares claims as scalar merge values while its context sorter only
+/// `GraphRAG` currently prepares claims as scalar merge values while its context sorter only
 /// accepts claim lists. Consequently claims are absent from the rendered graph context. The
 /// unused argument is retained because it remains part of the public workflow input contract.
 pub(crate) fn build_local_contexts(

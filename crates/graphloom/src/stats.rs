@@ -1,4 +1,4 @@
-//! IndexPipeline run statistics.
+//! `IndexPipeline` run statistics.
 
 use std::{collections::BTreeMap, time::Duration};
 

@@ -35,6 +35,9 @@ pub(crate) struct ModelConnectivityError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GraphLoomError {
+    /// Query operation failed.
+    #[error(transparent)]
+    Query(Box<crate::query::QueryError>),
     /// Storage operation failed.
     #[error(transparent)]
     Storage(#[from] graphloom_storage::StorageError),
@@ -70,7 +73,7 @@ pub enum GraphLoomError {
     /// An indexing workflow name is not registered.
     #[error("index workflow `{name}` is not registered")]
     UnknownIndexWorkflow {
-        /// IndexWorkflow name.
+        /// `IndexWorkflow` name.
         name: String,
     },
 
@@ -107,7 +110,7 @@ pub enum GraphLoomError {
     /// An indexing workflow failed.
     #[error("index workflow `{name}` failed: {source}")]
     IndexWorkflowFailed {
-        /// IndexWorkflow name.
+        /// `IndexWorkflow` name.
         name: String,
         /// Underlying failure.
         #[source]
@@ -124,7 +127,7 @@ pub enum GraphLoomError {
     /// A workflow encountered invalid data.
     #[error("invalid data in workflow {workflow}: {message}")]
     InvalidData {
-        /// IndexWorkflow name.
+        /// `IndexWorkflow` name.
         workflow: &'static str,
         /// Failure details.
         message: String,
@@ -315,6 +318,12 @@ pub enum GraphLoomError {
         #[source]
         source: io::Error,
     },
+}
+
+impl From<crate::query::QueryError> for GraphLoomError {
+    fn from(source: crate::query::QueryError) -> Self {
+        Self::Query(Box::new(source))
+    }
 }
 
 /// Redact sensitive key/value pairs in a JSON value.

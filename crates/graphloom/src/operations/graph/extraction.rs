@@ -505,15 +505,23 @@ mod tests {
     }
 
     fn graph_records(entities: &[(&str, &str)], relationships: &[(&str, &str, &str)]) -> String {
-        let mut records = entities
-            .iter()
-            .map(|(title, description)| {
-                format!("(\"entity\"<|>{title}<|>person<|>{description})##")
-            })
-            .collect::<String>();
-        records.extend(relationships.iter().map(|(source, target, description)| {
-            format!("(\"relationship\"<|>{source}<|>{target}<|>{description}<|>1)##")
-        }));
+        let mut records = String::new();
+        for (title, description) in entities {
+            records.push_str("(\"entity\"<|>");
+            records.push_str(title);
+            records.push_str("<|>person<|>");
+            records.push_str(description);
+            records.push_str(")##");
+        }
+        for (source, target, description) in relationships {
+            records.push_str("(\"relationship\"<|>");
+            records.push_str(source);
+            records.push_str("<|>");
+            records.push_str(target);
+            records.push_str("<|>");
+            records.push_str(description);
+            records.push_str("<|>1)##");
+        }
         records.push_str("<|COMPLETE|>");
         records
     }

@@ -23,15 +23,17 @@ mod path_safety;
 mod pipeline;
 mod project;
 pub(crate) mod prompts;
+pub mod query;
 mod runtime;
 mod stats;
 mod workflow;
 pub(crate) mod workflows;
 
 pub use config::{
-    ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig, CacheStorageConfig,
-    ClusterGraphConfig, CommunityReportsConfig, DEFAULT_EMBEDDINGS, ENTITY_DESCRIPTION_EMBEDDING,
-    EmbedTextConfig, ExtractClaimsConfig, ExtractGraphConfig, GraphRagConfig, InputConfig,
+    ALL_EMBEDDINGS, BasicSearchConfig, COMMUNITY_FULL_CONTENT_EMBEDDING, CacheConfig,
+    CacheStorageConfig, ClusterGraphConfig, CommunityReportsConfig, DEFAULT_EMBEDDINGS,
+    DriftSearchConfig, ENTITY_DESCRIPTION_EMBEDDING, EmbedTextConfig, ExtractClaimsConfig,
+    ExtractGraphConfig, GlobalSearchConfig, GraphRagConfig, InputConfig, LocalSearchConfig,
     ReportingConfig, SnapshotsConfig, StorageConfig, SummarizeDescriptionsConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
 };

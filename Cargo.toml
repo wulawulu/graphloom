@@ -45,7 +45,7 @@ tempfile = "3.23.0"
 text-splitter = { version = "0.32.0", features = ["tiktoken-rs"] }
 thiserror = "2.0.18"
 tiktoken-rs = "0.12.0"
-tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread"] }
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.5"

@@ -22,7 +22,7 @@ use crate::{
     operations::embeddings::{EmbeddingOperationConfig, EmbeddingSourceRow, embed_text_rows},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const GENERATE_TEXT_EMBEDDINGS_WORKFLOW: &str = "generate_text_embeddings";
 const CHUNK_OVERLAP: usize = 100;
 

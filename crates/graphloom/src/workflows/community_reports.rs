@@ -16,7 +16,7 @@ use crate::{
     prompts::{PromptKind, PromptRepository},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const CREATE_COMMUNITY_REPORTS_WORKFLOW: &str = "create_community_reports";
 
 /// Create graph-context community reports.

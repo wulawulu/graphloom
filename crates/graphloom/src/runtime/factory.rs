@@ -31,7 +31,7 @@ pub(crate) trait IndexRuntimeFactory: Send + Sync + std::fmt::Debug {
     fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory>;
 }
 
-/// Default factory preserving the existing file, Parquet, JSON, LanceDB, and OpenAI providers.
+/// Default factory preserving the existing file, Parquet, JSON, `LanceDB`, and `OpenAI` providers.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DefaultIndexRuntimeFactory;
 
@@ -51,7 +51,6 @@ impl IndexRuntimeFactory for DefaultIndexRuntimeFactory {
             requirements,
             &DefaultModelFactory,
         )
-        .await
     }
 
     fn vector_store_factory(&self) -> Arc<dyn IndexVectorStoreFactory> {
@@ -59,7 +58,7 @@ impl IndexRuntimeFactory for DefaultIndexRuntimeFactory {
     }
 }
 
-async fn create_default_services(
+fn create_default_services(
     project: &LoadedProject,
     project_root: &std::path::Path,
     cache_enabled: bool,

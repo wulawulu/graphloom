@@ -724,10 +724,23 @@ mod tests {
         assert_eq!(project.config.cache.storage.base_dir, "cache");
         assert_eq!(project.config.reporting.base_dir, "logs");
         assert_eq!(project.config.vector_store.vector_size, 3_072);
-        assert!(project.config.sections.contains_key("local_search"));
-        assert!(project.config.sections.contains_key("global_search"));
-        assert!(project.config.sections.contains_key("drift_search"));
-        assert!(project.config.sections.contains_key("basic_search"));
+        assert_eq!(
+            project.config.local_search.completion_model_id,
+            "default_completion_model"
+        );
+        assert_eq!(
+            project.config.global_search.completion_model_id,
+            "default_completion_model"
+        );
+        assert_eq!(
+            project.config.drift_search.embedding_model_id,
+            "default_embedding_model"
+        );
+        assert_eq!(project.config.basic_search.k, 10);
+        assert!(!project.config.sections.contains_key("local_search"));
+        assert!(!project.config.sections.contains_key("global_search"));
+        assert!(!project.config.sections.contains_key("drift_search"));
+        assert!(!project.config.sections.contains_key("basic_search"));
         validate_project(&project, false).await.expect("validate");
 
         let mut project = project;

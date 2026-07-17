@@ -18,7 +18,7 @@ use crate::{
     prompts::{PromptKind, PromptRepository},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const EXTRACT_GRAPH_WORKFLOW: &str = "extract_graph";
 
 /// Extract entity and relationship graph rows from text units.

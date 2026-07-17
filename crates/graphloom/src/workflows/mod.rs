@@ -27,7 +27,7 @@ pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkf
 
 use crate::{IndexWorkflowRegistry, Result};
 
-/// IndexWorkflow prefix used by focused pipeline tests.
+/// `IndexWorkflow` prefix used by focused pipeline tests.
 #[cfg(test)]
 pub(crate) const STEP5_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
@@ -35,7 +35,7 @@ pub(crate) const STEP5_WORKFLOWS: &[&str] = &[
     CREATE_FINAL_DOCUMENTS_WORKFLOW,
 ];
 
-/// IndexWorkflow prefix used by focused validation tests.
+/// `IndexWorkflow` prefix used by focused validation tests.
 #[cfg(test)]
 pub(crate) const STEP8_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
@@ -49,7 +49,7 @@ pub(crate) const STEP8_WORKFLOWS: &[&str] = &[
     CREATE_COMMUNITY_REPORTS_WORKFLOW,
 ];
 
-/// IndexWorkflow names for the standard indexing pipeline.
+/// `IndexWorkflow` names for the standard indexing pipeline.
 pub const STANDARD_WORKFLOWS: &[&str] = &[
     LOAD_INPUT_DOCUMENTS_WORKFLOW,
     CREATE_BASE_TEXT_UNITS_WORKFLOW,

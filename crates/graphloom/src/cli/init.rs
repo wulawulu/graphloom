@@ -325,7 +325,7 @@ mod tests {
         }
 
         assert_eq!(actual, expected);
-        assert_eq!(actual.len(), 5);
+        assert_eq!(actual.len(), 13);
         for obsolete in [
             "extract_graph_continue.txt",
             "extract_graph_loop.txt",
@@ -410,10 +410,26 @@ mod tests {
             config.community_reports.text_prompt.as_deref(),
             Some("prompts/community_report_text.txt")
         );
-        assert!(config.sections.contains_key("local_search"));
-        assert!(config.sections.contains_key("global_search"));
-        assert!(config.sections.contains_key("drift_search"));
-        assert!(config.sections.contains_key("basic_search"));
+        assert_eq!(
+            config.local_search.prompt.as_deref(),
+            Some("prompts/local_search_system_prompt.txt")
+        );
+        assert_eq!(
+            config.global_search.map_prompt.as_deref(),
+            Some("prompts/global_search_map_system_prompt.txt")
+        );
+        assert_eq!(
+            config.drift_search.prompt.as_deref(),
+            Some("prompts/drift_search_system_prompt.txt")
+        );
+        assert_eq!(
+            config.basic_search.prompt.as_deref(),
+            Some("prompts/basic_search_system_prompt.txt")
+        );
+        assert!(!config.sections.contains_key("local_search"));
+        assert!(!config.sections.contains_key("global_search"));
+        assert!(!config.sections.contains_key("drift_search"));
+        assert!(!config.sections.contains_key("basic_search"));
     }
 
     #[tokio::test]

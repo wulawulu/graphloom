@@ -11,7 +11,7 @@ use crate::{
     dataframe::{list_column, usize_to_i64},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const LOAD_INPUT_DOCUMENTS_WORKFLOW: &str = "load_input_documents";
 
 /// Load input documents into the `documents` table.

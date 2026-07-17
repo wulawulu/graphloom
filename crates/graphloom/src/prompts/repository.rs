@@ -30,7 +30,48 @@ impl PromptRepository {
             return load_file(kind, path, PromptSource::Explicit).await;
         }
 
+        let project_path = self.project_root.join("prompts").join(kind.filename());
+        if tokio::fs::try_exists(&project_path)
+            .await
+            .map_err(|source| GraphLoomError::PromptLoad {
+                kind: kind.name(),
+                name: kind.filename(),
+                path: project_path.clone(),
+                source,
+            })?
+        {
+            return load_file(kind, project_path, PromptSource::Project).await;
+        }
+
         build_template(kind, kind.default_template(), PromptSource::BuiltIn)
+    }
+
+    /// Load a configured path or inline template, then project/default fallbacks.
+    pub(crate) async fn load_configured(
+        &self,
+        kind: PromptKind,
+        configured: Option<&str>,
+    ) -> Result<PromptTemplate> {
+        let Some(configured) = configured else {
+            return self.load(kind, None).await;
+        };
+        let path = Path::new(configured);
+        let resolved = self.resolve(path);
+        if tokio::fs::try_exists(&resolved)
+            .await
+            .map_err(|source| GraphLoomError::PromptLoad {
+                kind: kind.name(),
+                name: kind.filename(),
+                path: resolved.clone(),
+                source,
+            })?
+        {
+            return load_file(kind, resolved, PromptSource::Explicit).await;
+        }
+        if configured.contains('\n') || configured.contains("{{") || configured.contains("{%") {
+            return build_template(kind, configured, PromptSource::Inline);
+        }
+        load_file(kind, resolved, PromptSource::Explicit).await
     }
 
     fn resolve(&self, path: &Path) -> PathBuf {
@@ -140,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_ignore_canonical_project_file_without_configured_path() {
+    async fn test_should_load_canonical_project_file_without_configured_path() {
         let project = TempDir::new().expect("project");
         let prompts = project.path().join("prompts");
         tokio::fs::create_dir(&prompts).await.expect("prompts");
@@ -154,13 +195,31 @@ mod tests {
         let template = PromptRepository::new(project.path())
             .load(PromptKind::ExtractGraph, None)
             .await
-            .expect("built-in prompt should load");
+            .expect("project prompt should load");
 
+        assert_eq!(template.content(), "Project {{ input_text }}");
+        assert_eq!(
+            template.source(),
+            &PromptSource::Project(prompts.join("extract_graph.txt"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_load_inline_configured_prompt_without_treating_it_as_a_path() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::BasicSearch,
+                Some("Inline {{ context_data }} / {{ response_type }}"),
+            )
+            .await
+            .expect("inline prompt");
+
+        assert_eq!(template.source(), &PromptSource::Inline);
         assert_eq!(
             template.content(),
-            normalized_default(PromptKind::ExtractGraph)
+            "Inline {{ context_data }} / {{ response_type }}"
         );
-        assert_eq!(template.source(), &PromptSource::BuiltIn);
     }
 
     #[tokio::test]

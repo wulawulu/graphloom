@@ -235,12 +235,12 @@ async fn summarize_description_list(
                 &collected,
                 context.max_length,
             )?;
-            result = context
+            context
                 .model
                 .complete(CompletionRequest::new(vec![ChatMessage::user(prompt)]))
                 .await?
                 .content()?
-                .to_owned();
+                .clone_into(&mut result);
             if index != descriptions.len().saturating_sub(1) {
                 collected = vec![result.clone()];
                 usable_tokens = context

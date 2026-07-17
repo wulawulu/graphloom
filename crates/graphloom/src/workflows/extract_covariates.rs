@@ -13,7 +13,7 @@ use crate::{
     prompts::{PromptKind, PromptRepository},
 };
 
-/// IndexWorkflow name.
+/// `IndexWorkflow` name.
 pub const EXTRACT_COVARIATES_WORKFLOW: &str = "extract_covariates";
 
 /// Extract claim covariates from text units.

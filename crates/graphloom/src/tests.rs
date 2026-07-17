@@ -28,7 +28,7 @@ use crate::{
     CREATE_COMMUNITIES_WORKFLOW, CREATE_COMMUNITY_REPORTS_WORKFLOW,
     CREATE_FINAL_TEXT_UNITS_WORKFLOW, EXTRACT_COVARIATES_WORKFLOW, EXTRACT_GRAPH_WORKFLOW,
     FINALIZE_GRAPH_WORKFLOW, GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GraphRagConfig,
-    IndexPipelineContext, IndexPipelineFactory, IndexWorkflowRegistry,
+    IndexPipelineContext, IndexPipelineFactory, IndexWorkflowRegistry, LocalSearchConfig,
     register_standard_index_workflows, register_step5_workflows, register_step6_workflows,
     register_step7_workflows, register_step8_workflows,
 };
@@ -89,7 +89,8 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.community_reports.max_length, 2_000);
     assert_eq!(config.community_reports.max_input_length, 8_000);
     assert_eq!(config.sections["async_mode"], "asyncio");
-    assert_eq!(config.sections["local_search"]["enabled"], true);
+    assert_eq!(config.local_search, LocalSearchConfig::default());
+    assert!(!config.sections.contains_key("local_search"));
 }
 
 #[test]
@@ -150,9 +151,10 @@ local_search:
     assert_eq!(config.cache.cache_type, "none");
     assert_eq!(config.cache.storage.base_dir, "cache_data");
     assert_eq!(
-        config.sections["local_search"]["prompt"],
-        "prompts/custom_query.txt"
+        config.local_search.prompt.as_deref(),
+        Some("prompts/custom_query.txt")
     );
+    assert!(!config.sections.contains_key("local_search"));
 }
 
 #[test]

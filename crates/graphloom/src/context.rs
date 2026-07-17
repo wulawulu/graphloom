@@ -1,4 +1,4 @@
-//! Runtime context for GraphRAG indexing workflows.
+//! Runtime context for `GraphRAG` indexing workflows.
 
 use std::{path::Path, sync::Arc};
 
@@ -9,9 +9,9 @@ use graphloom_vectors::VectorStore;
 
 use crate::{IndexRunStats, IndexRuntimeServices, IndexWorkflowCallbacks, ModelRegistry};
 
-/// Runtime context for GraphLoom indexing workflows.
+/// Runtime context for `GraphLoom` indexing workflows.
 ///
-/// This type is specific to the GraphRAG indexing pipeline. Query execution
+/// This type is specific to the `GraphRAG` indexing pipeline. Query execution
 /// uses a separate runtime and does not share this pipeline abstraction.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -19,7 +19,7 @@ pub struct IndexPipelineContext {
     services: IndexRuntimeServices,
     /// Current run statistics.
     pub stats: IndexRunStats,
-    /// IndexWorkflow callbacks.
+    /// `IndexWorkflow` callbacks.
     pub callbacks: Arc<dyn IndexWorkflowCallbacks>,
 }
 
