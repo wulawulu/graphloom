@@ -8,6 +8,7 @@ use std::{
 
 use graphloom_llm::{EmbeddingModel, EmbeddingRequest, Tokenizer};
 use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore};
+use polars_core::prelude::{NamedFrom, Series};
 
 use super::super::{
     CommunityReport, ConversationHistory, Covariate, Entity, QueryContext, QueryContextRecords,
@@ -125,7 +126,24 @@ impl LocalContextBuilder {
             .map(|(name, table)| {
                 table
                     .to_dataframe(SearchMethod::Local, "build Local context records")
-                    .map(|dataframe| (name, dataframe))
+                    .and_then(|mut dataframe| {
+                        if local_table_requires_in_context(&name) {
+                            dataframe
+                                .with_column(
+                                    Series::new(
+                                        "in_context".into(),
+                                        vec![true; dataframe.height()],
+                                    )
+                                    .into(),
+                                )
+                                .map_err(|source| QueryError::QueryContext {
+                                    method: SearchMethod::Local,
+                                    operation: "mark standard Local context records",
+                                    message: source.to_string(),
+                                })?;
+                        }
+                        Ok((name, dataframe))
+                    })
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(LocalContextBuild {
@@ -319,7 +337,7 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        let table = self.fit_csv_rows(
+        let table = self.fit_report_rows(
             ContextTable::new(["id", "title", "content"], Vec::new()),
             candidates,
             "Reports",
@@ -643,7 +661,7 @@ impl LocalContextBuilder {
         Ok(table)
     }
 
-    fn fit_csv_rows(
+    fn fit_report_rows(
         &self,
         mut table: ContextTable,
         candidates: Vec<Vec<String>>,
@@ -651,10 +669,10 @@ impl LocalContextBuilder {
         max_tokens: usize,
         operation: &'static str,
     ) -> Result<ContextTable> {
-        let header = table.render_csv_header(context_name, SearchMethod::Local, operation)?;
+        let header = table.render_delimited_header(context_name, SearchMethod::Local, operation)?;
         let mut tokens = self.count(&header, operation)?;
         for row in candidates {
-            let row_text = table.render_csv_row(&row, SearchMethod::Local, operation)?;
+            let row_text = table.render_delimited_row(&row, SearchMethod::Local, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
             if tokens.saturating_add(row_tokens) > max_tokens {
                 break;
@@ -674,6 +692,10 @@ impl LocalContextBuilder {
                 message: source.to_string(),
             })
     }
+}
+
+fn local_table_requires_in_context(name: &str) -> bool {
+    !matches!(name, "conversation history" | "reports" | "sources")
 }
 
 fn add_entity_filters<'a>(
@@ -885,6 +907,7 @@ mod tests {
     use async_trait::async_trait;
     use graphloom_llm::{EmbeddingResponse, EmbeddingUsage, LlmError};
     use graphloom_vectors::{VectorDocument, VectorSearchResult};
+    use polars_core::prelude::DataType;
 
     use super::*;
     use crate::query::{ConversationRole, ConversationTurn};
@@ -894,6 +917,9 @@ mod tests {
         include_str!("../../../../../tests/compat/fixtures/query/local_context.txt");
     const LOCAL_SPECIAL_CHARACTERS_GOLDEN: &str =
         include_str!("../../../../../tests/compat/fixtures/query/local_special_characters.json");
+    const REPORT_CSV_GOLDEN: &str = include_str!(
+        "../../../../../tests/compat/fixtures/query/report_csv_special_characters.json"
+    );
 
     #[derive(Debug, Default)]
     struct ByteTokenizer;
@@ -1371,6 +1397,60 @@ mod tests {
         assert_eq!(section.text, format!("{header}{first}"));
     }
 
+    #[test]
+    fn test_should_fit_local_reports_with_raw_rows_and_render_final_csv() {
+        let mut fixture = fixture(20_000, &[]);
+        let mut first = report("1", 4.0, "alpha|beta \"quoted\" \\path\nsecond line");
+        first.short_id = "0".to_owned();
+        first.title = "Report 0".to_owned();
+        let mut second = report("2", 3.0, "plain second");
+        second.short_id = "1".to_owned();
+        second.title = "Report 1".to_owned();
+        fixture.builder.reports = vec![first, second];
+        let selected = vec![&fixture.builder.entities[0]];
+        let golden = serde_json::from_str::<serde_json::Value>(REPORT_CSV_GOLDEN)
+            .expect("report CSV golden");
+        let budget = golden["local_report_budget"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .expect("Local report budget");
+
+        let section = fixture
+            .builder
+            .build_community_context(&selected, budget)
+            .expect("Local Reports")
+            .expect("one fitted report");
+        assert_eq!(
+            section.text,
+            golden["local_reports_context"]
+                .as_str()
+                .expect("Local Reports golden")
+        );
+        assert!(section.text.contains("\\path"));
+        assert!(!section.text.contains("\\\\path"));
+        let records = section
+            .table
+            .to_dataframe(SearchMethod::Local, "build Local Reports golden records")
+            .expect("Local Reports records");
+        assert_eq!(records.height(), 1);
+        assert_eq!(
+            records
+                .column("id")
+                .expect("Local report id")
+                .str()
+                .expect("Local report id strings")
+                .get(0),
+            Some("0")
+        );
+        assert!(
+            fixture
+                .builder
+                .build_community_context(&selected, budget - 1)
+                .expect("under-budget Local Reports")
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_should_render_exact_mixed_context_order_headers_and_records() {
         let fixture = fixture(20_000, &["entity-a", "entity-b"]);
@@ -1470,13 +1550,17 @@ mod tests {
                 .iter()
                 .map(|column| column.as_str().expect("golden column"))
                 .collect::<Vec<_>>();
+            let mut expected_columns = columns.clone();
+            if local_table_requires_in_context(name) {
+                expected_columns.push("in_context");
+            }
             assert_eq!(
                 frame
                     .get_column_names()
                     .iter()
                     .map(|column| column.as_str())
                     .collect::<Vec<_>>(),
-                columns
+                expected_columns
             );
             let rows = snapshot
                 .get("rows")
@@ -1497,29 +1581,49 @@ mod tests {
                     );
                 }
             }
+            if local_table_requires_in_context(name) {
+                let in_context = frame
+                    .column("in_context")
+                    .expect("in_context metadata")
+                    .bool()
+                    .expect("Boolean in_context");
+                assert_eq!(in_context.len(), frame.height());
+                assert!((0..in_context.len()).all(|index| in_context.get(index) == Some(true)));
+            }
         }
     }
 
     #[tokio::test]
-    async fn test_should_not_add_in_context_to_standard_local_records() {
+    async fn test_should_add_true_in_context_to_standard_local_metadata() {
         let fixture = fixture(20_000, &["entity-a", "entity-b"]);
         let built = fixture
             .builder
-            .build("question", None)
+            .build("question", Some(&history()))
             .await
             .expect("standard Local context");
+        let QueryContextText::Text(text) = &built.context.text else {
+            panic!("expected standard Local text");
+        };
+        assert!(!text.contains("in_context"));
         let QueryContextRecords::Tables(records) = built.context.records else {
             panic!("expected standard Local records");
         };
 
-        for (name, frame) in records {
-            assert!(
-                !frame
-                    .get_column_names()
-                    .iter()
-                    .any(|column| column.as_str() == "in_context"),
-                "{name} unexpectedly contains in_context",
-            );
+        for (name, frame) in &records {
+            let has_in_context = frame
+                .get_column_names()
+                .iter()
+                .any(|column| column.as_str() == "in_context");
+            if local_table_requires_in_context(name) {
+                assert!(has_in_context, "{name} is missing in_context");
+                let in_context = frame.column("in_context").expect("in_context column");
+                assert_eq!(in_context.dtype(), &DataType::Boolean);
+                let values = in_context.bool().expect("Boolean in_context");
+                assert_eq!(values.len(), frame.height());
+                assert!((0..values.len()).all(|index| values.get(index) == Some(true)));
+            } else {
+                assert!(!has_in_context, "{name} unexpectedly has in_context");
+            }
         }
     }
 
@@ -1686,7 +1790,14 @@ mod tests {
         let QueryContextRecords::Tables(records) = built.context.records else {
             panic!("expected records");
         };
-        assert!(records["relationships"].get_column_names().is_empty());
+        assert_eq!(records["relationships"].get_column_names(), ["in_context"]);
+        assert_eq!(
+            records["relationships"]
+                .column("in_context")
+                .expect("empty relationship metadata")
+                .dtype(),
+            &DataType::Boolean
+        );
 
         let history = ConversationHistory {
             turns: vec![ConversationTurn {

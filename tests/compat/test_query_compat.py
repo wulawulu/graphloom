@@ -12,6 +12,7 @@ import site
 import sys
 import sysconfig
 from collections.abc import AsyncIterator
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -72,6 +73,14 @@ GLOBAL_BATCHES = json.loads(
 LOCAL_SPECIAL_CHARACTERS = json.loads(
     (
         Path(__file__).parent / "fixtures" / "query" / "local_special_characters.json"
+    ).read_text(encoding="utf-8")
+)
+REPORT_CSV_SPECIAL_CHARACTERS = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "query"
+        / "report_csv_special_characters.json"
     ).read_text(encoding="utf-8")
 )
 
@@ -601,10 +610,16 @@ def test_graphrag_3_1_local_context_golden() -> None:
         ],
         "sources": ["id", "text"],
     }
+    for key in ("entities", "relationships", "claims", "facts"):
+        values = result.context_records[key]["in_context"]
+        assert str(values.dtype) == "bool"
+        assert values.tolist() == [True] * len(values)
+    for key in ("conversation history", "reports", "sources"):
+        assert "in_context" not in result.context_records[key].columns
 
 
 def test_graphrag_3_1_local_raw_special_character_helpers_golden() -> None:
-    """Lock raw delimiter joins, records, and token fitting in Local helpers."""
+    """Lock raw helper text/records before mixed metadata adds in_context."""
     entity = _entity("entity-a", "0", "Alice", 5, [], ["tu-a"])
     entity.description = 'Alice|Bob "quoted" \\path\nsecond line'
     relationship = _relationship(
@@ -696,6 +711,118 @@ def test_graphrag_3_1_local_raw_special_character_helpers_golden() -> None:
             "text": 'source|text "quoted" \\source\r\nnext',
         }
     ]
+
+
+def test_graphrag_3_1_history_and_report_csv_semantics_golden() -> None:
+    """Lock pandas CSV output while Reports account tokens with raw rows."""
+    tokenizer = ByteTokenizer()
+    csv_values = [
+        "plain",
+        "a|b",
+        'a"b',
+        "a\\b",
+        "a\nb",
+        "a\r\nb",
+        'a\\b|c"d',
+    ]
+    assert (
+        pd.DataFrame({"value": csv_values}).to_csv(sep="|", index=False)
+        == REPORT_CSV_SPECIAL_CHARACTERS["csv_values"]
+    )
+
+    history = ConversationHistory()
+    special_history = 'history|value "quoted" \\path\nsecond line'
+    history.add_turn(ConversationRole.USER, special_history)
+    history.add_turn(ConversationRole.USER, "second history")
+    history_text, history_records = history.build_context(
+        tokenizer=tokenizer,
+        include_user_turns_only=True,
+        max_qa_turns=5,
+        max_context_tokens=REPORT_CSV_SPECIAL_CHARACTERS["history_budget"],
+        recency_bias=False,
+    )
+    assert history_text == REPORT_CSV_SPECIAL_CHARACTERS["history_context"]
+    assert {
+        "columns": list(history_records["conversation history"].columns),
+        "rows": history_records["conversation history"].values.tolist(),
+    } == REPORT_CSV_SPECIAL_CHARACTERS["history_records"]
+
+    special_report = 'alpha|beta "quoted" \\path\nsecond line'
+    local_reports = [
+        _report("0", 4.0, special_report),
+        _report("1", 3.0, "plain second"),
+    ]
+    local_contexts, local_records = build_community_context(
+        community_reports=local_reports,
+        tokenizer=tokenizer,
+        use_community_summary=False,
+        shuffle_data=False,
+        include_community_rank=False,
+        include_community_weight=False,
+        max_context_tokens=REPORT_CSV_SPECIAL_CHARACTERS["local_report_budget"],
+        single_batch=True,
+        context_name="Reports",
+    )
+    assert local_contexts == [REPORT_CSV_SPECIAL_CHARACTERS["local_reports_context"]]
+    local_report_ids = REPORT_CSV_SPECIAL_CHARACTERS["local_report_ids"]
+    assert local_records["reports"]["id"].tolist() == local_report_ids
+    under_contexts, under_records = build_community_context(
+        community_reports=local_reports,
+        tokenizer=tokenizer,
+        use_community_summary=False,
+        shuffle_data=False,
+        include_community_rank=False,
+        include_community_weight=False,
+        max_context_tokens=(REPORT_CSV_SPECIAL_CHARACTERS["local_report_budget"] - 1),
+        single_batch=True,
+        context_name="Reports",
+    )
+    under_budget_context = REPORT_CSV_SPECIAL_CHARACTERS[
+        "local_reports_under_budget_context"
+    ]
+    assert under_contexts == under_budget_context
+    assert under_records == {}
+
+    global_reports = [
+        _report(
+            str(index),
+            float(index),
+            special_report if index == 1 else f"Full content {index}",
+        )
+        for index in range(4)
+    ]
+    global_entities = [
+        _entity(
+            f"entity-{index}",
+            str(index),
+            f"Entity {index}",
+            index,
+            [str(index)],
+            ["unit"],
+        )
+        for index in range(4)
+    ]
+    global_batches, global_records = build_community_context(
+        community_reports=global_reports,
+        entities=global_entities,
+        tokenizer=tokenizer,
+        use_community_summary=False,
+        shuffle_data=True,
+        include_community_rank=True,
+        include_community_weight=True,
+        normalize_community_weight=True,
+        max_context_tokens=REPORT_CSV_SPECIAL_CHARACTERS["global_budget"],
+        single_batch=False,
+        context_name="Reports",
+        random_state=86,
+    )
+    assert global_batches == REPORT_CSV_SPECIAL_CHARACTERS["global_batches"]
+    assert [
+        pd.read_csv(StringIO(batch), sep="|", dtype=str)["id"].tolist()
+        for batch in global_batches
+    ] == REPORT_CSV_SPECIAL_CHARACTERS["global_batch_ids"]
+    global_record_ids = REPORT_CSV_SPECIAL_CHARACTERS["global_records_ids"]
+    assert global_records["reports"]["id"].tolist() == global_record_ids
 
 
 def test_graphrag_3_1_local_uuid_and_empty_frame_boundaries() -> None:

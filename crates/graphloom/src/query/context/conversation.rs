@@ -183,7 +183,29 @@ fn count(tokenizer: &Arc<dyn Tokenizer>, text: &str, operation: &'static str) ->
 
 #[cfg(test)]
 mod tests {
+    use graphloom_llm::LlmError;
+
     use super::*;
+
+    const REPORT_CSV_GOLDEN: &str = include_str!(
+        "../../../../../tests/compat/fixtures/query/report_csv_special_characters.json"
+    );
+
+    #[derive(Debug)]
+    struct ByteTokenizer;
+
+    impl Tokenizer for ByteTokenizer {
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            Ok(text.bytes().map(u32::from).collect())
+        }
+
+        fn decode(&self, _tokens: &[u32]) -> graphloom_llm::Result<String> {
+            Err(LlmError::Tokenizer {
+                encoding_model: "byte-test".to_owned(),
+                message: "unused".to_owned(),
+            })
+        }
+    }
 
     #[test]
     fn test_should_reject_unbounded_history_collection_and_content() {
@@ -214,5 +236,80 @@ mod tests {
                 .expect_err("turn too long")
                 .contains("content bytes")
         );
+    }
+
+    #[test]
+    fn test_should_match_pandas_history_csv_and_token_cutoff_golden() {
+        let golden =
+            serde_json::from_str::<serde_json::Value>(REPORT_CSV_GOLDEN).expect("CSV golden");
+        let history = ConversationHistory {
+            turns: vec![
+                ConversationTurn {
+                    role: ConversationRole::User,
+                    content: "history|value \"quoted\" \\path\nsecond line".to_owned(),
+                },
+                ConversationTurn {
+                    role: ConversationRole::User,
+                    content: "second history".to_owned(),
+                },
+            ],
+        };
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(ByteTokenizer);
+        let built = history
+            .build_user_context(
+                &tokenizer,
+                5,
+                golden["history_budget"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .expect("history budget"),
+            )
+            .expect("history context");
+
+        assert_eq!(
+            built.text,
+            golden["history_context"]
+                .as_str()
+                .expect("history context golden")
+        );
+        let frame = built
+            .table
+            .to_dataframe(SearchMethod::Local, "build history golden records")
+            .expect("history records");
+        let expected = &golden["history_records"];
+        assert_eq!(
+            frame
+                .get_column_names()
+                .iter()
+                .map(|column| column.as_str())
+                .collect::<Vec<_>>(),
+            expected["columns"]
+                .as_array()
+                .expect("history columns")
+                .iter()
+                .map(|column| column.as_str().expect("history column"))
+                .collect::<Vec<_>>()
+        );
+        let expected_rows = expected["rows"].as_array().expect("history rows");
+        assert_eq!(frame.height(), expected_rows.len());
+        for (row_index, row) in expected_rows.iter().enumerate() {
+            for (column, value) in expected["columns"]
+                .as_array()
+                .expect("history columns")
+                .iter()
+                .zip(row.as_array().expect("history row"))
+            {
+                let column = column.as_str().expect("history column");
+                assert_eq!(
+                    frame
+                        .column(column)
+                        .expect("history value column")
+                        .str()
+                        .expect("history strings")
+                        .get(row_index),
+                    value.as_str()
+                );
+            }
+        }
     }
 }

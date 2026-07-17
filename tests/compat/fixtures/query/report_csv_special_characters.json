@@ -1,0 +1,22 @@
+{
+  "csv_values": "value\nplain\n\"a|b\"\n\"a\"\"b\"\na\\b\n\"a\nb\"\n\"a\r\nb\"\n\"a\\b|c\"\"d\"\n",
+  "history_context": "-----Conversation History-----\nturn|content\nuser|\"history|value \"\"quoted\"\" \\path\nsecond line\"\n",
+  "history_records": {
+    "columns": ["turn", "content"],
+    "rows": [
+      ["user", "history|value \"quoted\" \\path\nsecond line"]
+    ]
+  },
+  "history_budget": 94,
+  "local_reports_context": "-----Reports-----\nid|title|content\n0|Report 0|\"alpha|beta \"\"quoted\"\" \\path\nsecond line\"\n",
+  "local_report_ids": ["0"],
+  "local_report_budget": 84,
+  "local_reports_under_budget_context": [],
+  "global_batches": [
+    "id|title|occurrence weight|content|rank\n3|Report 3|1.0|Full content 3|3.0\n1|Report 1|1.0|\"alpha|beta \"\"quoted\"\" \\path\nsecond line\"|1.0\n",
+    "id|title|occurrence weight|content|rank\n2|Report 2|1.0|Full content 2|2.0\n0|Report 0|1.0|Full content 0|0.0\n"
+  ],
+  "global_batch_ids": [["3", "1"], ["2", "0"]],
+  "global_records_ids": ["3", "1", "2", "0"],
+  "global_budget": 149
+}

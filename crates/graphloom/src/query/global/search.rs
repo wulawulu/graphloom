@@ -622,6 +622,32 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct RequestRecordingModel {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl CompletionModel for RequestRecordingModel {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> graphloom_llm::Result<CompletionResponse> {
+            self.requests
+                .lock()
+                .map_err(|source| LlmError::InvalidResponse {
+                    model_instance: "request-recording".to_owned(),
+                    operation: "record request",
+                    message: source.to_string(),
+                })?
+                .push(request);
+            Ok(CompletionResponse::text_for_test(
+                "request-recording",
+                r#"{"points":[{"description":"answer","score":1}]}"#,
+            ))
+        }
+    }
+
     #[derive(Debug)]
     struct FailingModel;
 
@@ -802,6 +828,68 @@ mod tests {
         assert!(requests.iter().all(|request| {
             request.response_format == Some(serde_json::json!({"type": "json_object"}))
         }));
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_special_report_csv_in_map_requests() {
+        let golden = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../../../tests/compat/fixtures/query/report_csv_special_characters.json"
+        ))
+        .expect("report CSV golden");
+        let batches = golden["global_batches"]
+            .as_array()
+            .expect("Global batches")
+            .iter()
+            .map(|batch| batch.as_str().expect("Global batch").to_owned())
+            .collect::<Vec<_>>();
+        let built = GlobalContextResult {
+            batches: batches.clone(),
+            records: Vec::new(),
+            usage: QueryUsageCategory::default(),
+            dynamic_ratings: Vec::new(),
+        };
+        let prompt = PromptRepository::new(".")
+            .load(PromptKind::GlobalSearchMap, None)
+            .await
+            .expect("map prompt");
+        let config: ModelConfig = serde_json::from_value(serde_json::json!({
+            "model_provider": "mock",
+            "model": "request-recording"
+        }))
+        .expect("model config");
+        let model = Arc::new(RequestRecordingModel::default());
+
+        let outputs = run_map_calls(
+            &built,
+            "question",
+            model.clone(),
+            "request-recording",
+            &config,
+            &prompt,
+            Arc::new(WordTokenizer),
+            2,
+            100,
+        )
+        .await
+        .expect("special report map calls");
+
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.context.as_str())
+                .collect::<Vec<_>>(),
+            batches.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let requests = model.requests.lock().expect("map requests");
+        assert_eq!(requests.len(), batches.len());
+        for batch in &batches {
+            assert!(requests.iter().any(|request| {
+                request
+                    .messages
+                    .first()
+                    .is_some_and(|message| message.content.contains(batch))
+            }));
+        }
     }
 
     #[tokio::test]

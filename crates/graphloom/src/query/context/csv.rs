@@ -1,7 +1,5 @@
 //! Deterministic pandas-compatible context table rendering.
 
-use std::borrow::Cow;
-
 use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 
 use super::super::{QueryError, Result, SearchMethod};
@@ -56,29 +54,6 @@ impl ContextTable {
             "-----{context_name}-----\n{}",
             self.render_csv(method, operation)?
         ))
-    }
-
-    pub(crate) fn render_csv_header(
-        &self,
-        context_name: &str,
-        method: SearchMethod,
-        operation: &'static str,
-    ) -> Result<String> {
-        self.validate_rows(method, operation)?;
-        Ok(format!(
-            "-----{context_name}-----\n{}",
-            render_record(self.columns.iter().map(String::as_str), method, operation,)?
-        ))
-    }
-
-    pub(crate) fn render_csv_row(
-        &self,
-        row: &[String],
-        method: SearchMethod,
-        operation: &'static str,
-    ) -> Result<String> {
-        self.validate_row(row, method, operation)?;
-        render_record(row.iter().map(String::as_str), method, operation)
     }
 
     pub(crate) fn render_delimited(
@@ -219,35 +194,20 @@ where
     finish(writer, method, operation)
 }
 
-fn render_record<'a>(
-    fields: impl IntoIterator<Item = &'a str>,
-    method: SearchMethod,
-    operation: &'static str,
-) -> Result<String> {
-    let mut writer = writer();
-    write_record(&mut writer, fields, method, operation)?;
-    finish(writer, method, operation)
-}
-
 fn write_record<'a>(
     writer: &mut csv::Writer<Vec<u8>>,
     fields: impl IntoIterator<Item = &'a str>,
     method: SearchMethod,
     operation: &'static str,
 ) -> Result<()> {
-    let escaped = fields
-        .into_iter()
-        .map(pandas_escape_field)
-        .collect::<Vec<_>>();
     writer
-        .write_record(escaped.iter().map(|field| field.as_bytes()))
+        .write_record(fields)
         .map_err(|source| csv_error(method, operation, &source))
 }
 
 fn writer() -> csv::Writer<Vec<u8>> {
     csv::WriterBuilder::new()
         .delimiter(b'|')
-        .escape(b'\\')
         .from_writer(Vec::new())
 }
 
@@ -266,14 +226,6 @@ fn finish(
     })
 }
 
-fn pandas_escape_field(value: &str) -> Cow<'_, str> {
-    if value.contains('\\') {
-        Cow::Owned(value.replace('\\', "\\\\"))
-    } else {
-        Cow::Borrowed(value)
-    }
-}
-
 fn csv_error(method: SearchMethod, operation: &'static str, source: &csv::Error) -> QueryError {
     QueryError::QueryContext {
         method,
@@ -286,6 +238,10 @@ fn csv_error(method: SearchMethod, operation: &'static str, source: &csv::Error)
 mod tests {
     use super::ContextTable;
     use crate::query::{QueryError, SearchMethod};
+
+    const REPORT_CSV_GOLDEN: &str = include_str!(
+        "../../../../../tests/compat/fixtures/query/report_csv_special_characters.json"
+    );
 
     #[test]
     fn test_should_render_raw_delimited_fields_without_normalization() {
@@ -307,7 +263,7 @@ mod tests {
             table
                 .render_csv_section("Csv", SearchMethod::Global, "render csv test")
                 .expect("CSV context")
-                .contains("\"value|\"\"quoted\"\" \\\\path")
+                .contains("\"value|\"\"quoted\"\" \\path")
         );
     }
 
@@ -326,5 +282,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_should_match_pandas_csv_special_character_golden() {
+        let golden =
+            serde_json::from_str::<serde_json::Value>(REPORT_CSV_GOLDEN).expect("CSV golden");
+        let table = ContextTable::new(
+            ["value"],
+            [
+                "plain",
+                "a|b",
+                "a\"b",
+                "a\\b",
+                "a\nb",
+                "a\r\nb",
+                "a\\b|c\"d",
+            ]
+            .into_iter()
+            .map(|value| vec![value.to_owned()])
+            .collect(),
+        );
+
+        assert_eq!(
+            table
+                .render_csv(SearchMethod::Local, "render pandas CSV golden")
+                .expect("CSV text"),
+            golden["csv_values"].as_str().expect("golden CSV text")
+        );
     }
 }

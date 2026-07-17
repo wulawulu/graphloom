@@ -154,7 +154,7 @@ impl GlobalContextBuilder {
         }
         let header = ["id", "title", WEIGHT_COLUMN, "content", RANK_COLUMN];
         let header_table = ContextTable::new(header, Vec::new());
-        let initial = header_table.render_csv_header(
+        let initial = header_table.render_delimited_header(
             CONTEXT_NAME,
             SearchMethod::Global,
             "render Global community header",
@@ -167,7 +167,7 @@ impl GlobalContextBuilder {
 
         for report in reports {
             let row = report_row(&report);
-            let row_text = header_table.render_csv_row(
+            let row_text = header_table.render_delimited_row(
                 &row,
                 SearchMethod::Global,
                 "render Global community row",
@@ -411,6 +411,10 @@ mod tests {
         query::{CommunityReport, Entity, GlobalQueryData},
     };
 
+    const REPORT_CSV_GOLDEN: &str = include_str!(
+        "../../../../../tests/compat/fixtures/query/report_csv_special_characters.json"
+    );
+
     #[derive(Debug)]
     struct ByteTokenizer;
 
@@ -561,6 +565,67 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![vec!["3", "1"], vec!["2", "0"]]);
+    }
+
+    #[test]
+    fn test_should_account_global_report_tokens_as_raw_and_render_csv_batches() {
+        let golden = serde_json::from_str::<serde_json::Value>(REPORT_CSV_GOLDEN)
+            .expect("report CSV golden");
+        let config = GlobalSearchConfig {
+            max_context_tokens: golden["global_budget"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .expect("Global report budget"),
+            ..GlobalSearchConfig::default()
+        };
+        let mut reports = (0..4)
+            .map(|id| report(id, &id.to_string(), Some(id as f64)))
+            .collect::<Vec<_>>();
+        reports[1].full_content = "alpha|beta \"quoted\" \\path\nsecond line".to_owned();
+        let entities = (0..4)
+            .map(|id| entity(&[&id.to_string()], &["unit"]))
+            .collect();
+
+        let result = builder(config, entities, reports)
+            .build_fixed()
+            .expect("special-character Global batches");
+        let expected_batches = golden["global_batches"]
+            .as_array()
+            .expect("Global batch golden")
+            .iter()
+            .map(|batch| batch.as_str().expect("Global batch").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(result.batches, expected_batches);
+        assert!(result.batches[0].contains("\\path"));
+        assert!(!result.batches[0].contains("\\\\path"));
+        let ids = result
+            .records
+            .iter()
+            .map(|frame| {
+                frame
+                    .column("id")
+                    .expect("Global report id")
+                    .str()
+                    .expect("Global report id strings")
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected_ids = golden["global_batch_ids"]
+            .as_array()
+            .expect("Global batch IDs")
+            .iter()
+            .map(|batch| {
+                batch
+                    .as_array()
+                    .expect("Global batch ID list")
+                    .iter()
+                    .map(|id| id.as_str().expect("Global report ID"))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids);
     }
 
     #[test]
