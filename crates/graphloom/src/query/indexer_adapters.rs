@@ -25,8 +25,8 @@ pub fn read_indexer_text_units(
         "text_units",
         &[("id", "string"), ("text", "string")],
         &[
-            ("entity_ids", "nullable list<string>"),
-            ("relationship_ids", "nullable list<string>"),
+            ("entity_ids", "nullable string or list<string>"),
+            ("relationship_ids", "nullable string or list<string>"),
             ("n_tokens", "nullable integer"),
             ("document_id", "nullable string"),
         ],
@@ -74,7 +74,7 @@ pub fn read_indexer_relationships(
             ("description", "nullable string"),
             ("weight", "nullable float"),
             ("combined_degree", "nullable integer"),
-            ("text_unit_ids", "nullable list<string>"),
+            ("text_unit_ids", "nullable string or list<string>"),
         ],
     )?;
     let mut rows = Vec::with_capacity(dataframe.height());
@@ -176,7 +176,7 @@ pub fn read_indexer_entities(
             ("type", "nullable string"),
             ("description", "nullable string"),
             ("degree", "nullable integer"),
-            ("text_unit_ids", "nullable list<string>"),
+            ("text_unit_ids", "nullable string or list<string>"),
         ],
     )?;
     validate_schema(
@@ -244,32 +244,31 @@ pub fn read_indexer_reports(
     dynamic: bool,
     method: SearchMethod,
 ) -> Result<Vec<CommunityReport>> {
-    validate_required_columns(
+    validate_schema(
         reports,
         method,
         "community_reports",
         &[
             ("id", "string"),
-            ("community", "integer"),
+            ("community", "nullable community number"),
             ("level", "integer"),
             ("title", "string"),
             ("summary", "string"),
             ("full_content", "string"),
         ],
+        &[("rank", "nullable float")],
     )?;
-    let _ = required_column(reports, 0, "level", method, "community_reports", "integer")?;
-    let rollup_columns = if dynamic {
-        &[("level", "integer"), ("entity_ids", "any")][..]
+    let community_columns = if dynamic {
+        &[("level", "integer"), ("entity_ids", "list<string>")][..]
     } else {
         &[
             ("level", "integer"),
-            ("entity_ids", "any"),
-            ("community", "integer"),
-            ("title", "string"),
+            ("entity_ids", "list<string>"),
+            ("community", "nullable community number"),
+            ("title", "nullable string"),
         ][..]
     };
-    validate_required_columns(communities, method, "communities", rollup_columns)?;
-    let _ = required_column(communities, 0, "level", method, "communities", "integer")?;
+    validate_schema(communities, method, "communities", community_columns, &[])?;
     let allowed = if dynamic {
         // GraphRAG still explodes and level-filters the community rows in this
         // path, but it never reads their title before returning the reports.
@@ -305,7 +304,7 @@ pub fn read_indexer_reports(
             continue;
         }
         let community = if dynamic {
-            required_i64(reports, row, "community", method, "community_reports")?
+            required_community_id(reports, row, "community", method, "community_reports")?
         } else {
             let Some(community) =
                 optional_community_id(reports, row, "community", method, "community_reports")?
@@ -524,32 +523,6 @@ fn validate_schema(
     Ok(())
 }
 
-fn validate_required_columns(
-    dataframe: &DataFrame,
-    method: SearchMethod,
-    table: &'static str,
-    required: &[(&str, &'static str)],
-) -> Result<()> {
-    for (name, expected) in required {
-        if dataframe.get_column_index(name).is_none() {
-            return Err(QueryError::InvalidQueryTable {
-                method,
-                operation: "adapt query table",
-                details: Box::new(QueryTableErrorDetails {
-                    table,
-                    column: (*name).to_owned(),
-                    expected,
-                    actual: "missing".to_owned(),
-                    row: " at row 0".to_owned(),
-                    message: "required column is absent".to_owned(),
-                    source: None,
-                }),
-            });
-        }
-    }
-    Ok(())
-}
-
 fn required_column<'a>(
     dataframe: &'a DataFrame,
     row: usize,
@@ -619,12 +592,14 @@ fn validate_column_type(
 }
 
 fn column_type_matches(dtype: &DataType, expected: &str) -> bool {
+    if matches!(dtype, DataType::Null) && expected.starts_with("nullable ") {
+        return true;
+    }
     let is_integer = matches!(
         dtype,
         DataType::Int32 | DataType::Int64 | DataType::UInt32 | DataType::UInt64
     );
     match expected {
-        "any" => true,
         "string" | "nullable string" => matches!(dtype, DataType::String),
         "string or integer" | "nullable string or integer" => {
             matches!(dtype, DataType::String) || is_integer
@@ -634,7 +609,11 @@ fn column_type_matches(dtype: &DataType, expected: &str) -> bool {
             is_integer || matches!(dtype, DataType::Float32 | DataType::Float64)
         }
         "nullable float" => matches!(dtype, DataType::Float32 | DataType::Float64) || is_integer,
-        "list<string>" | "nullable list<string>" => {
+        "nullable string or list<string>" => {
+            matches!(dtype, DataType::String)
+                || matches!(dtype, DataType::List(inner) if matches!(inner.as_ref(), DataType::String | DataType::Null))
+        }
+        "list<string>" => {
             matches!(dtype, DataType::List(inner) if matches!(inner.as_ref(), DataType::String | DataType::Null))
         }
         "list<integer>" | "nullable list<integer>" => {
@@ -890,6 +869,29 @@ fn optional_community_id(
     }
 }
 
+fn required_community_id(
+    dataframe: &DataFrame,
+    row: usize,
+    name: &str,
+    method: SearchMethod,
+    table: &'static str,
+) -> Result<i64> {
+    optional_community_id(dataframe, row, name, method, table)?.ok_or_else(|| {
+        invalid_value(
+            method,
+            table,
+            name,
+            "nullable community number",
+            &dataframe.column(name).map_or_else(
+                |_| "missing".to_owned(),
+                |column| column.dtype().to_string(),
+            ),
+            row,
+            "value is null",
+        )
+    })
+}
+
 fn integral_f64(
     value: f64,
     method: SearchMethod,
@@ -973,12 +975,16 @@ fn optional_string_list(
     method: SearchMethod,
     table: &'static str,
 ) -> Result<Vec<String>> {
-    let Some((value, actual)) =
-        optional_value(dataframe, row, name, method, table, "nullable list<string>")?
+    let expected = "nullable string or list<string>";
+    let Some((value, actual)) = optional_value(dataframe, row, name, method, table, expected)?
     else {
         return Ok(Vec::new());
     };
-    string_list_value(value, method, table, name, &actual, row)
+    match value {
+        AnyValue::String(value) => Ok(vec![value.to_owned()]),
+        AnyValue::StringOwned(value) => Ok(vec![value.to_string()]),
+        value => string_list_value(value, method, table, name, expected, &actual, row),
+    }
 }
 
 fn required_string_list(
@@ -1000,7 +1006,7 @@ fn required_string_list(
             "value is null",
         ));
     }
-    string_list_value(value, method, table, name, &actual, row)
+    string_list_value(value, method, table, name, "list<string>", &actual, row)
 }
 
 fn string_list_value(
@@ -1008,6 +1014,7 @@ fn string_list_value(
     method: SearchMethod,
     table: &'static str,
     name: &str,
+    expected: &'static str,
     actual: &str,
     row: usize,
 ) -> Result<Vec<String>> {
@@ -1021,7 +1028,7 @@ fn string_list_value(
                         method,
                         table,
                         name,
-                        "list<string>",
+                        expected,
                         actual,
                         row,
                         &source.to_string(),
@@ -1032,7 +1039,7 @@ fn string_list_value(
                         method,
                         table,
                         name,
-                        "list<string>",
+                        expected,
                         actual,
                         row,
                         "list contains a null or non-string value",
@@ -1046,7 +1053,7 @@ fn string_list_value(
             method,
             table,
             name,
-            "nullable list<string>",
+            expected,
             actual,
             row,
             "incompatible value",
@@ -1252,6 +1259,38 @@ mod tests {
         .expect("reports")
     }
 
+    fn empty_reports() -> DataFrame {
+        df!(
+            "id" => Vec::<&str>::new(),
+            "community" => Vec::<i64>::new(),
+            "level" => Vec::<i64>::new(),
+            "title" => Vec::<&str>::new(),
+            "summary" => Vec::<&str>::new(),
+            "full_content" => Vec::<&str>::new(),
+            "rank" => Vec::<f64>::new(),
+        )
+        .expect("empty reports")
+    }
+
+    fn assert_adapter_error(
+        error: QueryError,
+        table: &str,
+        column: &str,
+        expected: &str,
+        actual: &str,
+    ) {
+        let message = error.to_string();
+        assert!(message.contains("during adapt query table"), "{message}");
+        assert!(message.contains(table), "{message}");
+        assert!(message.contains(&format!("column {column}")), "{message}");
+        assert!(
+            message.contains(&format!("expected {expected}")),
+            "{message}"
+        );
+        assert!(message.contains(&format!("actual {actual}")), "{message}");
+        assert!(message.contains("row 0"), "{message}");
+    }
+
     fn rollup_communities() -> DataFrame {
         let mut dataframe = df!(
             "id" => ["co-1", "co-4", "co-2", "co-3", "co-9", "co-null", "co-no-title"],
@@ -1421,6 +1460,279 @@ mod tests {
         )
         .expect("dynamic selection must not require community titles");
         assert_eq!(dynamic.len(), 5);
+    }
+
+    #[test]
+    fn test_should_reject_invalid_report_schema_when_table_is_empty() {
+        let mut invalid_title = empty_reports();
+        invalid_title
+            .replace(
+                "title",
+                Series::new("title".into(), Vec::<i64>::new()).into(),
+            )
+            .expect("invalid empty title");
+        let error = read_indexer_reports(
+            &invalid_title,
+            &rollup_communities(),
+            1,
+            false,
+            SearchMethod::Global,
+        )
+        .expect_err("empty reports must validate required dtypes");
+        assert_adapter_error(error, "community_reports", "title", "string", "i64");
+
+        let mut invalid_rank = empty_reports();
+        invalid_rank
+            .replace(
+                "rank",
+                Series::new("rank".into(), Vec::<&str>::new()).into(),
+            )
+            .expect("invalid empty rank");
+        let error = read_indexer_reports(
+            &invalid_rank,
+            &rollup_communities(),
+            1,
+            false,
+            SearchMethod::Global,
+        )
+        .expect_err("empty reports must validate optional dtypes");
+        assert_adapter_error(error, "community_reports", "rank", "nullable float", "str");
+    }
+
+    #[test]
+    fn test_should_reject_invalid_report_schema_when_all_rows_are_filtered() {
+        let invalid = df!(
+            "id" => ["rp-3", "rp-4"],
+            "community" => [3_i64, 4],
+            "level" => [3_i64, 4],
+            "title" => [3_i64, 4],
+            "summary" => ["S3", "S4"],
+            "full_content" => ["F3", "F4"],
+        )
+        .expect("filtered reports with invalid title schema");
+
+        let error = read_indexer_reports(
+            &invalid,
+            &rollup_communities(),
+            1,
+            false,
+            SearchMethod::Global,
+        )
+        .expect_err("filtered reports must validate schema first");
+        assert_adapter_error(error, "community_reports", "title", "string", "i64");
+    }
+
+    #[test]
+    fn test_should_reject_invalid_report_community_schemas() {
+        let dynamic = df!(
+            "level" => Vec::<i64>::new(),
+            "entity_ids" => Vec::<&str>::new(),
+        )
+        .expect("empty dynamic communities with scalar entity-id schema");
+        let error = read_indexer_reports(&reports(), &dynamic, 1, true, SearchMethod::Global)
+            .expect_err("dynamic explode column must be a list");
+        assert_adapter_error(error, "communities", "entity_ids", "list<string>", "str");
+
+        let mut invalid_title = df!(
+            "level" => [3_i64],
+            "community" => [1_i64],
+            "title" => [1_i64],
+        )
+        .expect("filtered non-dynamic communities with invalid title");
+        invalid_title
+            .with_column(list_column("entity_ids", &[vec!["entity-1".to_owned()]]))
+            .expect("entity ids");
+        let error =
+            read_indexer_reports(&reports(), &invalid_title, 1, false, SearchMethod::Global)
+                .expect_err("non-dynamic title must be nullable string");
+        assert_adapter_error(error, "communities", "title", "nullable string", "i64");
+
+        let mut invalid_community = df!(
+            "level" => [0_i64],
+            "community" => ["one"],
+        )
+        .expect("non-dynamic communities with invalid community");
+        invalid_community
+            .with_column(Series::new_null("title".into(), 1).into())
+            .expect("all-null titles");
+        invalid_community
+            .with_column(list_column("entity_ids", &[vec!["entity-1".to_owned()]]))
+            .expect("entity ids");
+        let error = read_indexer_reports(
+            &reports(),
+            &invalid_community,
+            1,
+            false,
+            SearchMethod::Global,
+        )
+        .expect_err("non-dynamic community must be numeric");
+        assert_adapter_error(
+            error,
+            "communities",
+            "community",
+            "nullable community number",
+            "str",
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_dynamic_report_community_values() {
+        let mut communities = df!("level" => [0_i64]).expect("dynamic communities");
+        communities
+            .with_column(list_column("entity_ids", &[vec!["entity-1".to_owned()]]))
+            .expect("entity ids");
+
+        for community in [
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            i64::MAX as f64,
+        ] {
+            let reports = df!(
+                "id" => ["rp-1"],
+                "community" => [community],
+                "level" => [0_i64],
+                "title" => ["Report"],
+                "summary" => ["Summary"],
+                "full_content" => ["Content"],
+            )
+            .expect("report with invalid community");
+            let error = read_indexer_reports(&reports, &communities, 1, true, SearchMethod::Global)
+                .expect_err("invalid dynamic community value must fail");
+            assert_adapter_error(
+                error,
+                "community_reports",
+                "community",
+                "integral finite community number",
+                "f64",
+            );
+        }
+
+        let reports = df!(
+            "id" => ["rp-1"],
+            "community" => [None::<f64>],
+            "level" => [0_i64],
+            "title" => ["Report"],
+            "summary" => ["Summary"],
+            "full_content" => ["Content"],
+        )
+        .expect("report with null community");
+        let error = read_indexer_reports(&reports, &communities, 1, true, SearchMethod::Global)
+            .expect_err("dynamic community must be non-null");
+        assert_adapter_error(
+            error,
+            "community_reports",
+            "community",
+            "nullable community number",
+            "f64",
+        );
+    }
+
+    #[test]
+    fn test_should_accept_scalar_string_for_optional_string_list() {
+        let text_units = df!(
+            "id" => ["tu-1"],
+            "text" => ["Text"],
+            "entity_ids" => ["e-1"],
+            "relationship_ids" => ["r-1"],
+        )
+        .expect("text units with scalar ids");
+        let text_unit = read_indexer_text_units(&text_units, SearchMethod::Basic)
+            .expect("scalar text-unit ids should adapt")
+            .remove(0);
+        assert_eq!(text_unit.entity_ids, ["e-1"]);
+        assert_eq!(text_unit.relationship_ids, ["r-1"]);
+
+        let entities = df!(
+            "id" => ["e-1"],
+            "title" => ["Entity"],
+            "text_unit_ids" => ["tu-1"],
+        )
+        .expect("entity with scalar text-unit id");
+        let entity = read_indexer_entities(&entities, &communities(), 1, SearchMethod::Local)
+            .expect("scalar entity text-unit id should adapt")
+            .remove(0);
+        assert_eq!(entity.text_unit_ids, ["tu-1"]);
+
+        let relationships = df!(
+            "id" => ["r-1"],
+            "source" => ["A"],
+            "target" => ["B"],
+            "text_unit_ids" => ["tu-2"],
+        )
+        .expect("relationship with scalar text-unit id");
+        let relationship = read_indexer_relationships(&relationships, SearchMethod::Local)
+            .expect("scalar relationship text-unit id should adapt")
+            .remove(0);
+        assert_eq!(relationship.text_unit_ids, ["tu-2"]);
+    }
+
+    #[test]
+    fn test_should_reject_invalid_optional_string_lists() {
+        let invalid_scalar = df!(
+            "id" => ["e-1"],
+            "title" => ["Entity"],
+            "text_unit_ids" => [1_i64],
+        )
+        .expect("integer optional list");
+        let error = read_indexer_entities(&invalid_scalar, &communities(), 1, SearchMethod::Local)
+            .expect_err("integer optional list must fail");
+        assert_adapter_error(
+            error,
+            "entities",
+            "text_unit_ids",
+            "nullable string or list<string>",
+            "i64",
+        );
+
+        let mut invalid_list = df!(
+            "id" => ["e-1"],
+            "title" => ["Entity"],
+        )
+        .expect("integer-list entity");
+        invalid_list
+            .with_column(
+                Series::new(
+                    "text_unit_ids".into(),
+                    vec![Series::new("item".into(), [1_i64])],
+                )
+                .into(),
+            )
+            .expect("integer list");
+        let error = read_indexer_entities(&invalid_list, &communities(), 1, SearchMethod::Local)
+            .expect_err("integer list must fail");
+        assert_adapter_error(
+            error,
+            "entities",
+            "text_unit_ids",
+            "nullable string or list<string>",
+            "list[i64]",
+        );
+
+        let mut null_item = df!(
+            "id" => ["e-1"],
+            "title" => ["Entity"],
+        )
+        .expect("null-item entity");
+        null_item
+            .with_column(
+                Series::new(
+                    "text_unit_ids".into(),
+                    vec![Series::new("item".into(), [Some("tu-1"), None])],
+                )
+                .into(),
+            )
+            .expect("nullable string list");
+        let error = read_indexer_entities(&null_item, &communities(), 1, SearchMethod::Local)
+            .expect_err("null list item must fail");
+        assert_adapter_error(
+            error,
+            "entities",
+            "text_unit_ids",
+            "nullable string or list<string>",
+            "list[str]",
+        );
     }
 
     #[test]
