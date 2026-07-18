@@ -257,9 +257,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "drift search is recognized but is not provided",
-        ));
+        .stderr(predicate::str::contains("query parse failed for drift"));
 
     let table_path = tempdir.path().join("output").join("text_units.parquet");
     let table_bytes = tokio::fs::read(&table_path).await.expect("table bytes");

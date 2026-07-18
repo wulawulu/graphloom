@@ -8,7 +8,8 @@ use std::{
 
 use futures_util::StreamExt;
 use graphloom::{
-    ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig, TEXT_UNIT_TEXT_EMBEDDING,
+    COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig,
+    TEXT_UNIT_TEXT_EMBEDDING,
     api::{query, query_stream},
     query::{
         MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
@@ -22,9 +23,97 @@ use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
+
+fn completion_response(content: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "drift-response",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "chat-test",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "refusal": null
+            },
+            "finish_reason": "stop"
+        }]
+    }))
+}
+
+fn drift_chat_responder(request: &Request) -> ResponseTemplate {
+    let body = request.body_json::<Value>().expect("DRIFT request JSON");
+    let messages = body["messages"].as_array().expect("DRIFT messages");
+    let first = messages
+        .first()
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    let streaming = body["stream"].as_bool() == Some(true);
+    if streaming {
+        let content = if first.contains("follow_up_queries") {
+            r#"{"response":"Action answer.","score":80,"follow_up_queries":[]}"#
+        } else {
+            "DRIFT final."
+        };
+        let midpoint = content.len() / 2;
+        let (first_chunk, second_chunk) = content.split_at(midpoint);
+        let first_event = serde_json::json!({
+            "id": "drift-1",
+            "model": "chat-test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": first_chunk},
+                "finish_reason": null,
+            }],
+        });
+        let second_event = serde_json::json!({
+            "id": "drift-2",
+            "model": "chat-test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": second_chunk},
+                "finish_reason": "stop",
+            }],
+        });
+        let stream = format!("data: {first_event}\n\ndata: {second_event}\n\ndata: [DONE]\n\n",);
+        return ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(stream);
+    }
+    if first.starts_with("Create a hypothetical answer") {
+        completion_response("Expanded question")
+    } else if first.starts_with("You are a helpful agent designed to reason") {
+        completion_response(
+            r#"{"intermediate_answer":"Primer answer.","score":70,"follow_up_queries":["Who?"]}"#,
+        )
+    } else {
+        completion_response("DRIFT final.")
+    }
+}
+
+async fn mount_drift_query_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0]}],
+            "model": "embed-test",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(drift_chat_responder)
+        .mount(&server)
+        .await;
+    server
+}
 
 struct QueryFixture {
     project: TempDir,
@@ -802,6 +891,205 @@ async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors
 }
 
 #[tokio::test]
+async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only() {
+    let server = mount_drift_query_stub().await;
+    let mut fixture = fixture(&server).await;
+    let paths = write_local_tables(&fixture.project.path().join("output")).await;
+    let before = futures_util::future::join_all(paths.iter().map(|path| async move {
+        (
+            file_hash(path).await,
+            tokio::fs::metadata(path)
+                .await
+                .expect("DRIFT table metadata")
+                .modified()
+                .expect("DRIFT table mtime"),
+        )
+    }))
+    .await;
+    fixture.config.drift_search.primer_folds = 1;
+    fixture.config.drift_search.drift_k_followups = 1;
+    fixture.config.drift_search.n_depth = 1;
+    fixture.config.drift_search.concurrency = 2;
+    fixture.config.drift_search.local_search_max_data_tokens = 4_000;
+    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("connect DRIFT LanceDB");
+    let entity_schema = fixture
+        .config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    let report_schema = fixture
+        .config
+        .vector_store
+        .schema_for(COMMUNITY_FULL_CONTENT_EMBEDDING);
+    for schema in [&entity_schema, &report_schema] {
+        store
+            .ensure_index(schema)
+            .await
+            .expect("DRIFT vector index");
+    }
+    store
+        .upsert_documents(
+            &entity_schema,
+            &[VectorDocument {
+                id: "entity-a".to_owned(),
+                vector: vec![1.0, 0.0],
+            }],
+        )
+        .await
+        .expect("entity vector");
+    store
+        .upsert_documents(
+            &report_schema,
+            &[VectorDocument {
+                id: "report-a".to_owned(),
+                vector: vec![1.0, 0.0],
+            }],
+        )
+        .await
+        .expect("report vector");
+    let entity_ids = store.ids(&entity_schema).await.expect("entity ids");
+    let report_ids = store.ids(&report_schema).await.expect("report ids");
+    let options = QueryOptions::new(
+        fixture.project.path().to_path_buf(),
+        "What changed?".to_owned(),
+        SearchMethod::Drift,
+    );
+
+    let result = query(fixture.config.clone(), options.clone())
+        .await
+        .expect("DRIFT Query");
+
+    assert_eq!(result.response, "DRIFT final.");
+    assert_eq!(
+        result.usage.categories.keys().cloned().collect::<Vec<_>>(),
+        ["action", "build_context", "primer", "reduce"]
+    );
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 1);
+    assert_eq!(result.usage.categories["primer"].llm_calls, 1);
+    assert_eq!(result.usage.categories["action"].llm_calls, 1);
+    assert_eq!(result.usage.categories["reduce"].llm_calls, 1);
+    let QueryContextText::Composite(context) = &result.context.text else {
+        panic!("expected composite DRIFT context");
+    };
+    assert_eq!(
+        context.keys().cloned().collect::<Vec<_>>(),
+        ["actions", "primer", "reduce", "state"]
+    );
+
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut stream_options = options;
+    stream_options.callbacks.push(callbacks.clone());
+    let mut events = query_stream(fixture.config.clone(), stream_options)
+        .await
+        .expect("DRIFT stream");
+    let mut order = Vec::new();
+    let mut public_chunks = Vec::new();
+    while let Some(event) = events.next().await {
+        match event.expect("DRIFT event") {
+            QueryEvent::Context(_) => order.push("context"),
+            QueryEvent::Token(token) => {
+                order.push("token");
+                public_chunks.push(token);
+            }
+            QueryEvent::Completed(result) => {
+                order.push("completed");
+                assert_eq!(result.response, "DRIFT final.");
+            }
+            _ => panic!("unexpected DRIFT event"),
+        }
+    }
+    assert_eq!(public_chunks.concat(), "DRIFT final.");
+    assert_eq!(order, ["context", "token", "token", "completed"]);
+    {
+        let callback_events = callbacks.events.lock().expect("DRIFT callbacks");
+        assert_eq!(
+            callback_events.as_slice(),
+            [
+                "token:{\"response\":\"Action answer.\",\"s",
+                "token:core\":80,\"follow_up_queries\":[]}",
+                "context",
+                "reduce_start",
+                "token:DRIFT ",
+                "token:final.",
+                "reduce_end:DRIFT final.",
+            ]
+        );
+    }
+
+    for (path, (hash, modified)) in paths.iter().zip(before) {
+        assert_eq!(file_hash(path).await, hash);
+        assert_eq!(
+            tokio::fs::metadata(path)
+                .await
+                .expect("DRIFT metadata after")
+                .modified()
+                .expect("DRIFT mtime after"),
+            modified
+        );
+    }
+    let reopened = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("reopen DRIFT LanceDB");
+    assert_eq!(
+        reopened
+            .ids(&entity_schema)
+            .await
+            .expect("entity ids after"),
+        entity_ids
+    );
+    assert_eq!(
+        reopened
+            .ids(&report_schema)
+            .await
+            .expect("report ids after"),
+        report_ids
+    );
+    assert!(!fixture.project.path().join("cache").exists());
+    let requests = server.received_requests().await.expect("DRIFT requests");
+    let bodies = requests
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .collect::<Vec<_>>();
+    let embeddings = bodies
+        .iter()
+        .filter(|body| body.get("input").is_some())
+        .collect::<Vec<_>>();
+    let completions = bodies
+        .iter()
+        .filter(|body| body.get("messages").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(embeddings.len(), 4);
+    assert_eq!(completions.len(), 8);
+    assert_eq!(
+        completions
+            .iter()
+            .filter(|body| body["response_format"]["type"] == "json_schema")
+            .count(),
+        2
+    );
+    assert_eq!(
+        completions
+            .iter()
+            .filter(|body| {
+                body["stream"] == true && body["response_format"]["type"] == "json_object"
+            })
+            .count(),
+        2
+    );
+    assert!(
+        completions
+            .iter()
+            .filter(|body| {
+                body["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
+            })
+            .all(|body| body["stream"] == false && body.get("response_format").is_none())
+    );
+}
+
+#[tokio::test]
 async fn test_should_use_data_override_only_for_parquet_tables() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
@@ -1199,11 +1487,11 @@ async fn test_should_not_emit_map_end_callback_after_provider_failure() {
 }
 
 #[tokio::test]
-async fn test_should_return_typed_errors_for_missing_resources_and_later_methods() {
+async fn test_should_return_typed_errors_for_missing_resources() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
 
-    let method_error = query(
+    let drift_error = query(
         fixture.config.clone(),
         QueryOptions::new(
             fixture.project.path().to_path_buf(),
@@ -1212,13 +1500,36 @@ async fn test_should_return_typed_errors_for_missing_resources_and_later_methods
         ),
     )
     .await
-    .expect_err("DRIFT is intentionally unavailable");
+    .expect_err("fixture does not contain the DRIFT community vector index");
     assert!(matches!(
-        method_error,
-        GraphLoomError::Query(source) if matches!(source.as_ref(), QueryError::QueryMethod {
-            method: Some(SearchMethod::Drift),
+        drift_error,
+        GraphLoomError::Query(source) if matches!(source.as_ref(), QueryError::MissingQueryTable {
+            method: SearchMethod::Drift,
             ..
         })
+    ));
+
+    let empty_drift_error = query(
+        fixture.config.clone(),
+        QueryOptions::new(
+            fixture.project.path().to_path_buf(),
+            String::new(),
+            SearchMethod::Drift,
+        ),
+    )
+    .await
+    .expect_err("empty DRIFT query must fail before resource loading");
+    assert!(matches!(
+        empty_drift_error,
+        GraphLoomError::Query(source)
+            if matches!(
+                source.as_ref(),
+                QueryError::InvalidQueryConfig {
+                    method: SearchMethod::Drift,
+                    message,
+                    ..
+                } if message.contains("DRIFT Search query cannot be empty")
+            )
     ));
 
     tokio::fs::remove_file(&fixture.text_units_path)

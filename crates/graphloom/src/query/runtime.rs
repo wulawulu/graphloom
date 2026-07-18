@@ -12,7 +12,8 @@ use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore, create_vect
 use super::{
     QueryCallbackChain, QueryCallbacks, QueryError, QueryOptions, Result, SearchMethod, TextUnit,
     basic::BasicContextBuilder,
-    data_loader::{GlobalQueryData, LocalQueryData, QueryDataLoader},
+    data_loader::{DriftQueryData, GlobalQueryData, LocalQueryData, QueryDataLoader},
+    drift::DriftContextBuilder,
     global::GlobalContextBuilder,
     local::LocalContextBuilder,
     requirements::QueryRequirements,
@@ -60,6 +61,15 @@ pub(crate) struct GlobalQueryRuntime {
     pub(crate) dynamic_community_selection: bool,
 }
 
+/// Prepared resources for one DRIFT Search invocation.
+#[derive(Debug)]
+pub(crate) struct DriftQueryRuntime {
+    pub(crate) context: DriftContextBuilder,
+    pub(crate) local_prompt: PromptTemplate,
+    pub(crate) reduce_prompt: PromptTemplate,
+    pub(crate) callbacks: Arc<dyn QueryCallbacks>,
+}
+
 struct QueryCompletionResources {
     completion: Arc<dyn CompletionModel>,
     completion_id: String,
@@ -79,6 +89,12 @@ struct QueryModelResources {
 struct QueryVectorResources {
     store: Arc<dyn VectorStore>,
     schema: VectorIndexSchema,
+}
+
+struct DriftVectorResources {
+    store: Arc<dyn VectorStore>,
+    entity_schema: VectorIndexSchema,
+    community_schema: VectorIndexSchema,
 }
 
 /// Factory that assembles only resources required by the active Query method.
@@ -168,6 +184,7 @@ impl QueryRuntimeFactory {
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
         Ok(LocalQueryRuntime {
             local_context: LocalContextBuilder {
+                method,
                 config: project.config.local_search.clone(),
                 entities: data.entities,
                 reports: data.reports,
@@ -246,6 +263,105 @@ impl QueryRuntimeFactory {
             concurrent_requests: project.config.concurrent_requests,
             dynamic_community_selection: options.dynamic_community_selection,
         })
+    }
+
+    pub(crate) async fn build_drift(
+        project: &LoadedProject,
+        options: &QueryOptions,
+    ) -> Result<DriftQueryRuntime> {
+        Self::build_drift_with_factory(project, options, &DefaultModelFactory).await
+    }
+
+    async fn build_drift_with_factory(
+        project: &LoadedProject,
+        options: &QueryOptions,
+        model_factory: &dyn ModelFactory,
+    ) -> Result<DriftQueryRuntime> {
+        let method = SearchMethod::Drift;
+        validate_drift_requirements(project, options)?;
+        let data = load_drift_data(project, options).await?;
+        let models = create_query_models(
+            project,
+            model_factory,
+            method,
+            &project.config.drift_search.completion_model_id,
+            &project.config.drift_search.embedding_model_id,
+        )?;
+        let vectors = open_drift_vectors(project).await?;
+        let repository = PromptRepository::new(&project.root);
+        let local_prompt = repository
+            .load_configured(
+                PromptKind::DriftSearch,
+                project.config.drift_search.prompt.as_deref(),
+            )
+            .await
+            .map_err(|source| QueryError::QueryPrompt {
+                method,
+                operation: "load DRIFT Local prompt",
+                prompt: "drift_search_system_prompt.txt",
+                source: Box::new(source),
+            })?;
+        let reduce_prompt = repository
+            .load_configured(
+                PromptKind::DriftReduce,
+                project.config.drift_search.reduce_prompt.as_deref(),
+            )
+            .await
+            .map_err(|source| QueryError::QueryPrompt {
+                method,
+                operation: "load DRIFT reduce prompt",
+                prompt: "drift_reduce_prompt.txt",
+                source: Box::new(source),
+            })?;
+        let local_config = drift_local_config(&project.config.drift_search);
+        let local = LocalContextBuilder {
+            method,
+            config: local_config,
+            entities: data.entities,
+            reports: data.reports.clone(),
+            text_units: data.text_units,
+            relationships: data.relationships,
+            covariates: Vec::new(),
+            embedding_model: Arc::clone(&models.embedding),
+            embedding_model_id: models.embedding_id.clone(),
+            vector_store: Arc::clone(&vectors.store),
+            vector_schema: vectors.entity_schema,
+            tokenizer: Arc::clone(&models.tokenizer),
+        };
+        let callbacks: Arc<dyn QueryCallbacks> =
+            Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
+        Ok(DriftQueryRuntime {
+            context: DriftContextBuilder {
+                config: project.config.drift_search.clone(),
+                reports: data.reports,
+                local,
+                completion_model: models.completion,
+                embedding_model: models.embedding,
+                completion_model_id: models.completion_id,
+                embedding_model_id: models.embedding_id,
+                completion_config: models.completion_config,
+                vector_store: vectors.store,
+                community_schema: vectors.community_schema,
+                tokenizer: models.tokenizer,
+            },
+            local_prompt,
+            reduce_prompt,
+            callbacks,
+        })
+    }
+}
+
+fn drift_local_config(config: &crate::DriftSearchConfig) -> crate::LocalSearchConfig {
+    crate::LocalSearchConfig {
+        prompt: config.prompt.clone(),
+        completion_model_id: config.completion_model_id.clone(),
+        embedding_model_id: config.embedding_model_id.clone(),
+        text_unit_prop: config.local_search_text_unit_prop,
+        community_prop: config.local_search_community_prop,
+        conversation_history_max_turns: 5,
+        top_k_entities: config.local_search_top_k_mapped_entities,
+        top_k_relationships: config.local_search_top_k_relationships,
+        max_context_tokens: config.local_search_max_data_tokens,
     }
 }
 
@@ -382,6 +498,47 @@ fn validate_global_requirements(project: &LoadedProject, options: &QueryOptions)
     })
 }
 
+fn validate_drift_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+    let method = SearchMethod::Drift;
+    if options.query.is_empty() {
+        return Err(QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate DRIFT Search query",
+            message: "DRIFT Search query cannot be empty".to_owned(),
+        });
+    }
+    if options.community_level < 0 {
+        return Err(QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate query options",
+            message: "community_level must be non-negative".to_owned(),
+        });
+    }
+    project
+        .config
+        .drift_search
+        .validate()
+        .map_err(|message| QueryError::InvalidQueryConfig {
+            method,
+            operation: "validate DRIFT Search config",
+            message,
+        })?;
+    let requirements = QueryRequirements::for_method(method, &project.config);
+    if requirements.tables.len() == 5
+        && requirements.optional_tables.is_empty()
+        && requirements.embeddings.len() == 2
+    {
+        return Ok(());
+    }
+    Err(QueryError::QueryRuntime {
+        method,
+        operation: "resolve DRIFT Search requirements",
+        source: Box::new(std::io::Error::other(
+            "DRIFT Search requirements are internally inconsistent",
+        )),
+    })
+}
+
 async fn load_basic_text_units(
     project: &LoadedProject,
     options: &QueryOptions,
@@ -410,6 +567,16 @@ async fn load_global_data(
     let table_provider = open_table_provider(project, options, SearchMethod::Global, "entities")?;
     QueryDataLoader::new(table_provider)
         .load_global(options.community_level, options.dynamic_community_selection)
+        .await
+}
+
+async fn load_drift_data(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<DriftQueryData> {
+    let table_provider = open_table_provider(project, options, SearchMethod::Drift, "entities")?;
+    QueryDataLoader::new(table_provider)
+        .load_drift(options.community_level)
         .await
 }
 
@@ -496,6 +663,56 @@ async fn open_local_vectors(project: &LoadedProject) -> Result<QueryVectorResour
         crate::ENTITY_DESCRIPTION_EMBEDDING,
     )
     .await
+}
+
+async fn open_drift_vectors(project: &LoadedProject) -> Result<DriftVectorResources> {
+    let method = SearchMethod::Drift;
+    let entity_schema = project
+        .config
+        .vector_store
+        .schema_for(crate::ENTITY_DESCRIPTION_EMBEDDING);
+    let community_schema = project
+        .config
+        .vector_store
+        .schema_for(crate::COMMUNITY_FULL_CONTENT_EMBEDDING);
+    if !project.paths.vector_db_uri.is_dir() {
+        return Err(QueryError::MissingVectorIndex {
+            method,
+            operation: "open DRIFT vector database",
+            index: community_schema.index_name.clone(),
+            source: Box::new(VectorError::MissingIndex {
+                index_name: community_schema.index_name.clone(),
+            }),
+        });
+    }
+    let store = create_vector_store(&project.config.vector_store)
+        .await
+        .map_err(|source| QueryError::QueryRuntime {
+            method,
+            operation: "connect DRIFT vector store",
+            source: Box::new(source),
+        })?;
+    for schema in [&entity_schema, &community_schema] {
+        store.count(schema).await.map_err(|source| match source {
+            source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
+                method,
+                operation: "validate DRIFT vector index",
+                index: schema.index_name.clone(),
+                source: Box::new(source),
+            },
+            source => QueryError::InvalidVectorIndex {
+                method,
+                operation: "validate DRIFT vector index",
+                index: schema.index_name.clone(),
+                source: Box::new(source),
+            },
+        })?;
+    }
+    Ok(DriftVectorResources {
+        store,
+        entity_schema,
+        community_schema,
+    })
 }
 
 fn open_table_provider(
@@ -679,4 +896,32 @@ fn required_model<'a>(
             operation: "resolve Query model",
             message: format!("required {kind} model {id:?} is not configured"),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drift_local_config;
+    use crate::DriftSearchConfig;
+
+    #[test]
+    fn test_should_map_only_drift_local_context_fields() {
+        let config = DriftSearchConfig {
+            local_search_text_unit_prop: 0.8,
+            local_search_community_prop: 0.2,
+            local_search_top_k_mapped_entities: 7,
+            local_search_top_k_relationships: 9,
+            local_search_max_data_tokens: 321,
+            ..DriftSearchConfig::default()
+        };
+
+        let local = drift_local_config(&config);
+
+        assert_eq!(local.text_unit_prop, 0.8);
+        assert_eq!(local.community_prop, 0.2);
+        assert_eq!(local.top_k_entities, 7);
+        assert_eq!(local.top_k_relationships, 9);
+        assert_eq!(local.max_context_tokens, 321);
+        assert_eq!(local.completion_model_id, config.completion_model_id);
+        assert_eq!(local.embedding_model_id, config.embedding_model_id);
+    }
 }

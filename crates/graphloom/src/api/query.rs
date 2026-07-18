@@ -4,8 +4,9 @@ use crate::{
     GraphRagConfig, Result,
     project::LoadedProject,
     query::{
-        QueryError, QueryEventStream, QueryOptions, QueryResult, SearchMethod,
+        QueryEventStream, QueryOptions, QueryResult, SearchMethod,
         basic::{basic_search as run_basic, basic_search_streaming as run_basic_streaming},
+        drift::{drift_search as run_drift, drift_search_streaming as run_drift_streaming},
         global::{global_search as run_global, global_search_streaming as run_global_streaming},
         local::{local_search as run_local, local_search_streaming as run_local_streaming},
     },
@@ -64,6 +65,32 @@ pub async fn basic_search_streaming(
     query_stream(config, options).await
 }
 
+/// Execute DRIFT Search with the unified options structure.
+///
+/// # Errors
+///
+/// Returns a typed Query error when DRIFT cannot load or query the index.
+pub async fn drift_search(
+    config: GraphRagConfig,
+    mut options: QueryOptions,
+) -> Result<QueryResult> {
+    options.method = SearchMethod::Drift;
+    query(config, options).await
+}
+
+/// Stream DRIFT Search events with the unified options structure.
+///
+/// # Errors
+///
+/// Returns a typed Query error when DRIFT cannot start.
+pub async fn drift_search_streaming(
+    config: GraphRagConfig,
+    mut options: QueryOptions,
+) -> Result<QueryEventStream> {
+    options.method = SearchMethod::Drift;
+    query_stream(config, options).await
+}
+
 pub(crate) async fn query_loaded(
     project: LoadedProject,
     options: QueryOptions,
@@ -90,7 +117,11 @@ pub(crate) async fn query_loaded(
                 crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
             Ok(run_global(runtime, &options.query, &options.response_type).await?)
         }
-        method => Err(unimplemented_method(method).into()),
+        SearchMethod::Drift => {
+            let runtime =
+                crate::query::QueryRuntimeFactory::build_drift(&project, &options).await?;
+            Ok(run_drift(runtime, &options.query, &options.response_type).await?)
+        }
     }
 }
 
@@ -120,16 +151,10 @@ pub(crate) async fn query_loaded_stream(
                 crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
             Ok(run_global_streaming(runtime, &options.query, &options.response_type).await?)
         }
-        method => Err(unimplemented_method(method).into()),
-    }
-}
-
-fn unimplemented_method(method: SearchMethod) -> QueryError {
-    QueryError::QueryMethod {
-        method: Some(method),
-        operation: "dispatch query",
-        message: format!(
-            "{method} search is recognized but is not provided until its later Phase 2 step"
-        ),
+        SearchMethod::Drift => {
+            let runtime =
+                crate::query::QueryRuntimeFactory::build_drift(&project, &options).await?;
+            Ok(run_drift_streaming(runtime, &options.query, &options.response_type).await?)
+        }
     }
 }

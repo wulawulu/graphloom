@@ -11,6 +11,7 @@ mod result;
 mod runtime;
 
 pub(crate) mod basic;
+pub(crate) mod drift;
 pub(crate) mod global;
 pub(crate) mod local;
 
@@ -36,7 +37,8 @@ pub use result::{
     QueryUsage, QueryUsageCategory,
 };
 pub(crate) use runtime::{
-    BasicQueryRuntime, GlobalQueryRuntime, LocalQueryRuntime, QueryRuntimeFactory,
+    BasicQueryRuntime, DriftQueryRuntime, GlobalQueryRuntime, LocalQueryRuntime,
+    QueryRuntimeFactory,
 };
 
 /// Public `GraphRAG` query method.

@@ -60,6 +60,19 @@ from graphrag.query.structured_search.local_search.mixed_context import (
 )
 from graphrag.query.structured_search.local_search.search import LocalSearch
 from graphrag.query.structured_search.global_search.search import GlobalSearch
+from graphrag.query.structured_search.drift_search.search import DRIFTSearch
+from graphrag.query.structured_search.drift_search.drift_context import (
+    DRIFTSearchContextBuilder,
+)
+from graphrag.query.structured_search.drift_search.primer import (
+    DRIFTPrimer,
+    PrimerQueryProcessor,
+    PrimerResponse,
+)
+from graphrag.query.structured_search.drift_search.state import QueryState
+from graphrag.query.structured_search.drift_search.action import DriftAction
+from graphrag.query.llm.text_utils import try_parse_json_object
+from graphrag.prompts.query.drift_search_system_prompt import DRIFT_PRIMER_PROMPT
 
 
 LOCAL_CONTEXT = (
@@ -83,6 +96,11 @@ REPORT_CSV_SPECIAL_CHARACTERS = json.loads(
         / "report_csv_special_characters.json"
     ).read_text(encoding="utf-8")
 )
+DRIFT_HYDE_PROMPT = (
+    (Path(__file__).parent / "fixtures" / "query" / "drift_hyde_prompt.txt")
+    .read_text(encoding="utf-8")
+    .removesuffix("\n")
+)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -101,7 +119,19 @@ def require_isolated_graphrag_distribution() -> None:
     package_path = Path(inspect.getfile(graphrag)).resolve()
     local_path = Path(inspect.getfile(LocalSearchMixedContext)).resolve()
     dynamic_path = Path(inspect.getfile(DynamicCommunitySelection)).resolve()
-    module_paths = [package_path, local_path, dynamic_path]
+    drift_search_path = Path(inspect.getfile(DRIFTSearch)).resolve()
+    drift_context_path = Path(inspect.getfile(DRIFTSearchContextBuilder)).resolve()
+    drift_primer_path = Path(inspect.getfile(DRIFTPrimer)).resolve()
+    drift_state_path = Path(inspect.getfile(QueryState)).resolve()
+    module_paths = [
+        package_path,
+        local_path,
+        dynamic_path,
+        drift_search_path,
+        drift_context_path,
+        drift_primer_path,
+        drift_state_path,
+    ]
     configured_roots = {
         Path(value).resolve()
         for value in [
@@ -132,6 +162,10 @@ def require_isolated_graphrag_distribution() -> None:
         f"graphrag package path: {package_path}\n"
         f"LocalSearchMixedContext path: {local_path}\n"
         f"DynamicCommunitySelection path: {dynamic_path}\n"
+        f"DRIFTSearch path: {drift_search_path}\n"
+        f"DRIFTSearchContextBuilder path: {drift_context_path}\n"
+        f"DRIFTPrimer path: {drift_primer_path}\n"
+        f"QueryState path: {drift_state_path}\n"
         f"distribution package path: {installed_package}\n"
         f"direct_url.json: {direct_url}\n"
         f"site-package roots: {sorted(map(str, configured_roots))}\n"
@@ -216,6 +250,20 @@ class RecordingCompletion:
                 )
 
         return chunks()
+
+
+class RecordingDriftCompletion:
+    """Non-streaming DRIFT completion recorder with scripted structured output."""
+
+    def __init__(self, responses: list[tuple[str, Any | None]]) -> None:
+        self.responses = responses
+        self.requests: list[tuple[Any, dict[str, Any]]] = []
+        self.tokenizer = ByteTokenizer()
+
+    async def completion_async(self, messages: Any, **kwargs: Any) -> SimpleNamespace:
+        self.requests.append((messages, kwargs))
+        content, formatted = self.responses.pop(0)
+        return SimpleNamespace(content=content, formatted_response=formatted)
 
 
 class RecordingCallbacks:
@@ -1411,3 +1459,329 @@ def test_graphrag_3_1_dynamic_selection_feeds_fixed_global_batches_golden() -> N
     )
     assert batches == GLOBAL_BATCHES
     assert records["reports"]["id"].tolist() == ["3", "1", "2", "0"]
+
+
+def test_graphrag_3_1_drift_hyde_prompt_and_embedding_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock the exact odd HyDE prompt, strict-empty fallback, and embedding input."""
+    reports = [_report("0", 1.0, "# Template\nFacts.")]
+    completion = RecordingDriftCompletion([("", None)])
+    embedding = RecordingEmbedding()
+    monkeypatch.setattr("secrets.choice", lambda values: values[0])
+    processor = PrimerQueryProcessor(
+        chat_model=completion,
+        text_embedder=embedding,
+        reports=reports,
+        tokenizer=ByteTokenizer(),
+    )
+
+    vector, usage = asyncio.run(processor("What changed?"))
+    expected = (
+        "Create a hypothetical answer to the following query: What changed?\n\n\n"
+        "                  Format it to follow the structure of the template below:\n\n\n"
+        '                  # Template\nFacts.\n"\n'
+        "                  Ensure that the hypothetical answer does not reference new "
+        "named entities that are not present in the original query."
+    )
+    assert expected == DRIFT_HYDE_PROMPT
+    assert completion.requests == [(DRIFT_HYDE_PROMPT, {})]
+    assert embedding.inputs == [["What changed?"]]
+    assert vector == [0.2, 0.8]
+    assert usage == {
+        "llm_calls": 1,
+        "prompt_tokens": len(expected.encode()),
+        "output_tokens": 0,
+    }
+
+
+def test_graphrag_3_1_drift_ranking_and_stable_tie_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock report-id hydration shape and pandas nlargest keep-first ordering."""
+    reports = [
+        _report("0", 1.0, "First"),
+        _report("1", 1.0, "Second"),
+        _report("2", 1.0, "Third"),
+    ]
+    reports[0].full_content_embedding = [1.0, 0.0]
+    reports[1].full_content_embedding = [1.0, 0.0]
+    reports[2].full_content_embedding = [0.0, 1.0]
+    completion = RecordingDriftCompletion([("expanded", None)])
+    embedding = RecordingEmbedding()
+    embedding.embedding = lambda input: SimpleNamespace(first_embedding=[1.0, 0.0])
+    monkeypatch.setattr("secrets.choice", lambda values: values[0])
+    builder = object.__new__(DRIFTSearchContextBuilder)
+    builder.reports = reports
+    builder.model = completion
+    builder.text_embedder = embedding
+    builder.tokenizer = ByteTokenizer()
+    builder.config = SimpleNamespace(drift_k_followups=2)
+
+    top_k, usage = asyncio.run(builder.build_context("Question"))
+
+    assert top_k["short_id"].tolist() == ["0", "1"]
+    assert list(top_k.columns) == ["short_id", "community_id", "full_content"]
+    assert usage["llm_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    ("length", "folds", "sizes"),
+    [
+        (5, 3, [2, 2, 1]),
+        (2, 4, [1, 1, 0, 0]),
+        (2, 0, [2]),
+    ],
+)
+def test_graphrag_3_1_drift_numpy_array_split_golden(
+    length: int,
+    folds: int,
+    sizes: list[int],
+) -> None:
+    """Lock uneven, zero, and empty-fold primer splitting."""
+    primer = object.__new__(DRIFTPrimer)
+    primer.config = SimpleNamespace(primer_folds=folds)
+    frame = pd.DataFrame({"full_content": [str(index) for index in range(length)]})
+
+    assert [len(fold) for fold in primer.split_reports(frame)] == sizes
+
+
+def test_graphrag_3_1_drift_primer_prompt_schema_and_usage_golden() -> None:
+    """Lock primer message shape, Pydantic schema, aggregation input, and usage."""
+    formatted = PrimerResponse(
+        intermediate_answer="# Answer",
+        score=70,
+        follow_up_queries=["next", "next"],
+    )
+    completion = RecordingDriftCompletion(
+        [
+            (
+                '{"intermediate_answer":"# Answer","score":70,"follow_up_queries":["next","next"]}',
+                formatted,
+            )
+        ]
+    )
+    primer = object.__new__(DRIFTPrimer)
+    primer.chat_model = completion
+    primer.tokenizer = ByteTokenizer()
+    primer.config = SimpleNamespace(primer_folds=1)
+    reports = pd.DataFrame({"full_content": ["Report A", "Report B"]})
+
+    response, usage = asyncio.run(primer.decompose_query("Question", reports))
+    expected_prompt = DRIFT_PRIMER_PROMPT.format(
+        query="Question",
+        community_reports="Report A\n\nReport B",
+    )
+
+    assert completion.requests == [
+        (expected_prompt, {"response_format": PrimerResponse})
+    ]
+    assert response == formatted.model_dump()
+    assert usage == {
+        "llm_calls": 1,
+        "prompt_tokens": len(expected_prompt.encode()),
+        "output_tokens": len(completion.requests[0][0].encode())
+        - len(expected_prompt.encode())
+        + len(
+            '{"intermediate_answer":"# Answer","score":70,'
+            '"follow_up_queries":["next","next"]}'.encode()
+        ),
+    }
+    schema = PrimerResponse.model_json_schema()
+    assert schema["required"] == [
+        "intermediate_answer",
+        "score",
+        "follow_up_queries",
+    ]
+
+
+def test_graphrag_3_1_drift_action_repair_and_state_identity_golden() -> None:
+    """Lock repair, float conversion, empty primer answers, and graph identity."""
+    _, parsed = try_parse_json_object(
+        'prefix {response:"answer",score:"80",follow_up_queries:["same"],} suffix'
+    )
+    assert parsed == {
+        "response": "answer",
+        "score": "80",
+        "follow_up_queries": ["same"],
+    }
+    root = DriftAction("root", answer="root answer")
+    root.score = 70
+    state = QueryState()
+    state.add_action(root)
+    state.add_all_follow_ups(root, ["same", "same"])
+    serialized, _, _ = state.serialize()
+
+    assert [node["query"] for node in serialized["nodes"]] == ["root", "same"]
+    assert [node["id"] for node in serialized["nodes"]] == [0, 1]
+    assert serialized["edges"] == [
+        {"source": 0, "target": 1, "weight": 1.0},
+        {"source": 0, "target": 1, "weight": 1.0},
+    ]
+
+    class FixedLocalSearch:
+        async def search(self, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                response='{"response":"","score":"-inf","follow_up_queries":[]}',
+                context_data={},
+                prompt_tokens=0,
+                output_tokens=0,
+            )
+
+    action = DriftAction("empty action")
+    asyncio.run(
+        action.search(
+            search_engine=FixedLocalSearch(),
+            global_query="root",
+            k_followups=1,
+        )
+    )
+    assert action.answer == ""
+    assert action.score == float("-inf")
+
+    search = object.__new__(DRIFTSearch)
+    primer_action = search._process_primer_results(
+        "root",
+        SimpleNamespace(
+            response=[
+                {
+                    "intermediate_answer": "",
+                    "score": 0,
+                    "follow_up_queries": ["next"],
+                }
+            ]
+        ),
+    )
+    assert primer_action.answer == ""
+    assert primer_action.follow_ups == ["next"]
+
+
+def test_graphrag_3_1_drift_reduce_python_list_representation_golden() -> None:
+    """Lock Python list/string escaping used by DRIFT reduce prompt formatting."""
+    answers = ["one", 'it\'s "quoted"\\next\nline']
+
+    assert str(answers) == r"""['one', 'it\'s "quoted"\\next\nline']"""
+
+
+def test_graphrag_3_1_drift_stream_callback_and_reduce_request_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock deterministic depth, intermediate callbacks, and final reduce request."""
+
+    class ContextBuilder:
+        config = SimpleNamespace(
+            n_depth=1,
+            drift_k_followups=1,
+            reduce_temperature=0.25,
+            reduce_max_completion_tokens=321,
+        )
+        reduce_system_prompt = "REDUCE {context_data} AS {response_type}"
+        response_type = "Multiple Paragraphs"
+
+        async def build_context(
+            self, _query: str
+        ) -> tuple[pd.DataFrame, dict[str, int]]:
+            return pd.DataFrame({"full_content": ["Report"]}), {
+                "llm_calls": 1,
+                "prompt_tokens": 2,
+                "output_tokens": 3,
+            }
+
+    class Primer:
+        async def search(self, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                response=[
+                    {
+                        "intermediate_answer": "Primer answer",
+                        "score": 70,
+                        "follow_up_queries": ["followup"],
+                    }
+                ],
+                llm_calls=1,
+                prompt_tokens=4,
+                output_tokens=5,
+            )
+
+    class Callbacks(RecordingCallbacks):
+        def on_reduce_response_start(self, _context: Any) -> None:
+            self.events.append("reduce_start")
+
+        def on_reduce_response_end(self, response: str) -> None:
+            self.events.append(f"reduce_end:{response}")
+
+    callbacks = Callbacks()
+
+    class Local:
+        async def search(self, **_kwargs: Any) -> SimpleNamespace:
+            callbacks.on_llm_new_token("action-token")
+            callbacks.on_context({"entities": ["entity"]})
+            return SimpleNamespace(
+                response='{"response":"Action answer","score":80,"follow_up_queries":[]}',
+                context_data={"entities": ["entity"]},
+                prompt_tokens=6,
+                output_tokens=7,
+            )
+
+    class ReduceModel:
+        tokenizer = ByteTokenizer()
+
+        def __init__(self) -> None:
+            self.requests: list[tuple[list[Any], dict[str, Any]]] = []
+
+        async def completion_async(
+            self,
+            messages: list[Any],
+            **kwargs: Any,
+        ) -> AsyncIterator[SimpleNamespace]:
+            self.requests.append((messages, kwargs))
+
+            async def chunks() -> AsyncIterator[SimpleNamespace]:
+                for text in ["Final ", "answer"]:
+                    yield SimpleNamespace(
+                        choices=[SimpleNamespace(delta=SimpleNamespace(content=text))]
+                    )
+
+            return chunks()
+
+    model = ReduceModel()
+    search = object.__new__(DRIFTSearch)
+    search.model = model
+    search.context_builder = ContextBuilder()
+    search.tokenizer = ByteTokenizer()
+    search.query_state = QueryState()
+    search.primer = Primer()
+    search.callbacks = [callbacks]
+    search.local_search = Local()
+    monkeypatch.setattr(
+        "graphrag.query.structured_search.drift_search.state.random.shuffle",
+        lambda actions: None,
+    )
+
+    async def collect() -> list[str]:
+        return [chunk async for chunk in search.stream_search("Root query")]
+
+    assert asyncio.run(collect()) == ["Final ", "answer"]
+    assert callbacks.events == [
+        "token:action-token",
+        "context",
+        "reduce_start",
+        "token:Final ",
+        "token:answer",
+        "reduce_end:Final answer",
+    ]
+    assert len(model.requests) == 1
+    messages, kwargs = model.requests[0]
+    assert messages == [
+        {
+            "role": "system",
+            "content": (
+                "REDUCE ['Primer answer', 'Action answer'] AS Multiple Paragraphs"
+            ),
+        },
+        {"role": "user", "content": "Root query"},
+    ]
+    assert kwargs == {
+        "stream": True,
+        "temperature": 0.25,
+        "max_completion_tokens": 321,
+    }

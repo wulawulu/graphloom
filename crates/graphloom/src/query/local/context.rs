@@ -20,6 +20,7 @@ use crate::LocalSearchConfig;
 /// Local Search context resources, independent of completion orchestration.
 #[derive(Debug)]
 pub(crate) struct LocalContextBuilder {
+    pub(crate) method: SearchMethod,
     pub(crate) config: LocalSearchConfig,
     pub(crate) entities: Vec<Entity>,
     pub(crate) reports: Vec<CommunityReport>,
@@ -125,7 +126,7 @@ impl LocalContextBuilder {
             .into_iter()
             .map(|(name, table)| {
                 table
-                    .to_dataframe(SearchMethod::Local, "build Local context records")
+                    .to_dataframe(self.method, "build Local context records")
                     .and_then(|mut dataframe| {
                         if local_table_requires_in_context(&name) {
                             dataframe
@@ -137,7 +138,7 @@ impl LocalContextBuilder {
                                     .into(),
                                 )
                                 .map_err(|source| QueryError::QueryContext {
-                                    method: SearchMethod::Local,
+                                    method: self.method,
                                     operation: "mark standard Local context records",
                                     message: source.to_string(),
                                 })?;
@@ -177,7 +178,7 @@ impl LocalContextBuilder {
                 .embed(EmbeddingRequest::new(vec![query.to_owned()]))
                 .await
                 .map_err(|source| QueryError::QueryEmbedding {
-                    method: SearchMethod::Local,
+                    method: self.method,
                     operation: "embed Local Search entity mapping query",
                     model: self.embedding_model_id.clone(),
                     source: Box::new(source),
@@ -189,7 +190,7 @@ impl LocalContextBuilder {
                 .into_iter()
                 .next()
                 .ok_or_else(|| QueryError::QueryEmbedding {
-                    method: SearchMethod::Local,
+                    method: self.method,
                     operation: "read Local Search query embedding",
                     model: self.embedding_model_id.clone(),
                     source: Box::new(graphloom_llm::LlmError::InvalidResponse {
@@ -200,7 +201,7 @@ impl LocalContextBuilder {
                 })?;
             if vector.iter().any(|value| !value.is_finite()) {
                 return Err(QueryError::QueryEmbedding {
-                    method: SearchMethod::Local,
+                    method: self.method,
                     operation: "validate Local Search query embedding",
                     model: self.embedding_model_id.clone(),
                     source: Box::new(graphloom_llm::LlmError::InvalidResponse {
@@ -212,7 +213,7 @@ impl LocalContextBuilder {
             }
             let ann_k = self.config.top_k_entities.checked_mul(2).ok_or_else(|| {
                 QueryError::InvalidQueryConfig {
-                    method: SearchMethod::Local,
+                    method: self.method,
                     operation: "compute Local Search ANN oversampling",
                     message: "top_k_entities * 2 exceeds usize".to_owned(),
                 }
@@ -223,13 +224,13 @@ impl LocalContextBuilder {
                 .await
                 .map_err(|source| match source {
                     source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
-                        method: SearchMethod::Local,
+                        method: self.method,
                         operation: "search entity_description",
                         index: self.vector_schema.index_name.clone(),
                         source: Box::new(source),
                     },
                     source => QueryError::InvalidVectorIndex {
-                        method: SearchMethod::Local,
+                        method: self.method,
                         operation: "search entity_description",
                         index: self.vector_schema.index_name.clone(),
                         source: Box::new(source),
@@ -254,7 +255,7 @@ impl LocalContextBuilder {
                     entities.push(*entity);
                 } else {
                     tracing::warn!(
-                        method = %SearchMethod::Local,
+                        method = %self.method,
                         entity_id = %result.document.id,
                         "entity_description contains a stale entity id"
                     );
@@ -350,7 +351,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text: table.render_csv_section(
                 "Reports",
-                SearchMethod::Local,
+                self.method,
                 "render Local Reports context",
             )?,
             table,
@@ -391,7 +392,7 @@ impl LocalContextBuilder {
         )?;
         let entity_text = entity_table.render_delimited_section(
             "Entities",
-            SearchMethod::Local,
+            self.method,
             "render Local Entities context",
         )?;
         let entity_tokens = self.count(&entity_text, "count Local Entities context")?;
@@ -443,7 +444,7 @@ impl LocalContextBuilder {
             }
             if total_tokens > max_tokens {
                 tracing::warn!(
-                    method = %SearchMethod::Local,
+                    method = %self.method,
                     "Local entity expansion reached the token limit; reverting the current entity"
                 );
                 break;
@@ -515,7 +516,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text: table.render_delimited_section(
                 "Relationships",
-                SearchMethod::Local,
+                self.method,
                 "render Local Relationships context",
             )?,
             table,
@@ -559,7 +560,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text: table.render_delimited_section(
                 name,
-                SearchMethod::Local,
+                self.method,
                 "render Local covariate context",
             )?,
             table,
@@ -595,7 +596,7 @@ impl LocalContextBuilder {
                 }
                 let Some(unit) = units.get(text_unit_id.as_str()).copied() else {
                     tracing::warn!(
-                        method = %SearchMethod::Local,
+                        method = %self.method,
                         text_unit_id,
                         "entity references a missing text unit"
                     );
@@ -632,7 +633,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text: table.render_delimited_section(
                 "Sources",
-                SearchMethod::Local,
+                self.method,
                 "render Local Sources context",
             )?,
             table,
@@ -647,10 +648,10 @@ impl LocalContextBuilder {
         max_tokens: usize,
         operation: &'static str,
     ) -> Result<ContextTable> {
-        let header = table.render_delimited_header(context_name, SearchMethod::Local, operation)?;
+        let header = table.render_delimited_header(context_name, self.method, operation)?;
         let mut tokens = self.count(&header, operation)?;
         for row in candidates {
-            let row_text = table.render_delimited_row(&row, SearchMethod::Local, operation)?;
+            let row_text = table.render_delimited_row(&row, self.method, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
             if tokens.saturating_add(row_tokens) > max_tokens {
                 break;
@@ -669,10 +670,10 @@ impl LocalContextBuilder {
         max_tokens: usize,
         operation: &'static str,
     ) -> Result<ContextTable> {
-        let header = table.render_delimited_header(context_name, SearchMethod::Local, operation)?;
+        let header = table.render_delimited_header(context_name, self.method, operation)?;
         let mut tokens = self.count(&header, operation)?;
         for row in candidates {
-            let row_text = table.render_delimited_row(&row, SearchMethod::Local, operation)?;
+            let row_text = table.render_delimited_row(&row, self.method, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
             if tokens.saturating_add(row_tokens) > max_tokens {
                 break;
@@ -687,7 +688,7 @@ impl LocalContextBuilder {
         self.tokenizer
             .count(text)
             .map_err(|source| QueryError::QueryContext {
-                method: SearchMethod::Local,
+                method: self.method,
                 operation,
                 message: source.to_string(),
             })
@@ -1085,6 +1086,7 @@ mod tests {
             .collect();
         Fixture {
             builder: LocalContextBuilder {
+                method: SearchMethod::Local,
                 config: LocalSearchConfig {
                     max_context_tokens,
                     top_k_entities: 2,
