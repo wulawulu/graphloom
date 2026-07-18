@@ -116,7 +116,11 @@ pub struct QueryOptions {
     pub query: String,
     /// Query method.
     pub method: SearchMethod,
-    /// Optional Parquet table directory override.
+    /// Optional Parquet table storage override.
+    ///
+    /// Absolute paths are used directly. Relative paths supplied by library callers are resolved
+    /// against [`Self::project_root`]. The CLI canonicalizes `--data` against the process current
+    /// directory before constructing these options.
     pub data_dir: Option<PathBuf>,
     /// Maximum community hierarchy level.
     pub community_level: i64,

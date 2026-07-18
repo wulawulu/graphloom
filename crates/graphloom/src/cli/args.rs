@@ -1,8 +1,13 @@
 //! Command line argument definitions.
 
-use std::path::PathBuf;
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 
 use crate::query::SearchMethod;
 
@@ -18,6 +23,30 @@ pub struct Cli {
     /// Subcommand to execute.
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Parse process arguments and validate Query paths after Clap syntax validation succeeds.
+    #[must_use]
+    pub fn parse() -> Self {
+        match Self::try_parse_from(std::env::args_os()) {
+            Ok(cli) => cli,
+            Err(error) => error.exit(),
+        }
+    }
+
+    /// Parse supplied arguments and validate Query paths after Clap syntax validation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Clap syntax or path value-validation error.
+    pub fn try_parse_from<I, T>(arguments: I) -> std::result::Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        try_parse_cli_from_with_probe(arguments, probe_directory_writable)
+    }
 }
 
 /// Supported top-level commands.
@@ -140,6 +169,130 @@ fn default_root() -> PathBuf {
     PathBuf::from(".")
 }
 
+fn try_parse_cli_from_with_probe<I, T, F>(
+    arguments: I,
+    writable_probe: F,
+) -> std::result::Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+    F: Fn(&Path) -> Result<(), String>,
+{
+    let mut cli = <Cli as Parser>::try_parse_from(arguments)?;
+    let Command::Query(args) = &mut cli.command else {
+        return Ok(cli);
+    };
+    args.root = parse_existing_root(&args.root).map_err(query_path_error)?;
+    args.data = args
+        .data
+        .as_deref()
+        .map(parse_existing_data_path)
+        .transpose()
+        .map_err(query_path_error)?;
+    writable_probe(&args.root).map_err(query_path_error)?;
+    Ok(cli)
+}
+
+fn query_path_error(message: String) -> clap::Error {
+    let mut command = Cli::command();
+    if let Some(query) = command.find_subcommand_mut("query") {
+        return query.clone().error(ErrorKind::ValueValidation, message);
+    }
+    clap::Error::raw(ErrorKind::ValueValidation, message)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "clap path validation is synchronous and must finish before async runtime entry"
+)]
+fn parse_existing_root(value: &Path) -> Result<PathBuf, String> {
+    let path = canonicalize_from_current_dir(value, "project root")?;
+    if !path.is_dir() {
+        return Err(format!(
+            "project root must be a directory: {}",
+            path.display()
+        ));
+    }
+    std::fs::read_dir(&path)
+        .map_err(|source| format!("project root is not readable {}: {source}", path.display()))?;
+    Ok(path)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "clap value parsers are synchronous and must validate paths before async runtime \
+              entry"
+)]
+fn parse_existing_data_path(value: &Path) -> Result<PathBuf, String> {
+    let path = canonicalize_from_current_dir(value, "data path")?;
+    if path.is_dir() {
+        std::fs::read_dir(&path).map_err(|source| {
+            format!(
+                "data directory is not readable {}: {source}",
+                path.display()
+            )
+        })?;
+    } else if path.is_file() {
+        open_readable_file(&path)?;
+    } else {
+        return Err(format!(
+            "data path must be a file or directory: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn canonicalize_from_current_dir(value: &Path, description: &str) -> Result<PathBuf, String> {
+    let path = if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| format!("cannot resolve current directory: {source}"))?
+            .join(value)
+    };
+    path.canonicalize()
+        .map_err(|source| format!("{description} does not exist or cannot be resolved: {source}"))
+}
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "clap value parsers are synchronous; opening without reading verifies \
+              Click-compatible file readability without loading an unbounded external file"
+)]
+fn open_readable_file(path: &Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .map(drop)
+        .map_err(|source| format!("data file is not readable {}: {source}", path.display()))
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the synchronous clap parser requires an atomic create/remove writability probe"
+)]
+fn probe_directory_writable(path: &Path) -> Result<(), String> {
+    static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|source| format!("cannot construct project root write probe: {source}"))?
+        .as_nanos();
+    let sequence = PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let probe = path.join(format!(
+        ".graphloom-query-write-probe-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&probe)
+        .map_err(|source| format!("project root is not writable {}: {source}", path.display()))?;
+    std::fs::remove_dir(&probe).map_err(|source| {
+        let _cleanup_result = std::fs::remove_dir(&probe);
+        format!(
+            "cannot remove project root write probe {}: {source}",
+            probe.display()
+        )
+    })
+}
+
 /// `graphloom init` arguments.
 #[derive(Debug, Clone, Parser)]
 pub struct InitArgs {
@@ -208,10 +361,15 @@ impl IndexArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
-    use serde_json::Value;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{Cli, Command};
+    use clap::CommandFactory;
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    use super::{
+        Cli, Command, parse_existing_data_path, parse_existing_root, try_parse_cli_from_with_probe,
+    };
 
     const QUERY_CLI_CONTRACT: &str =
         include_str!("../../../../tests/compat/fixtures/query/query_cli_contract.json");
@@ -241,7 +399,13 @@ mod tests {
         let Command::Query(args) = cli.command else {
             panic!("expected query command");
         };
-        assert_eq!(args.root, std::path::Path::new("."));
+        assert_eq!(
+            args.root,
+            std::env::current_dir()
+                .expect("current directory")
+                .canonicalize()
+                .expect("canonical current directory")
+        );
         assert_eq!(args.method, crate::query::SearchMethod::Global);
         assert_eq!(args.community_level, 2);
         assert_eq!(args.response_type, "Multiple Paragraphs");
@@ -249,6 +413,66 @@ mod tests {
         assert!(args.data.is_none());
         assert!(!args.dynamic_selection_enabled());
         assert!(!args.streaming_enabled());
+    }
+
+    #[test]
+    fn test_should_apply_graphrag_path_contract_to_query_arguments() {
+        let fixture = TempDir::new().expect("path fixture");
+        let data_file = tempfile::NamedTempFile::new_in(fixture.path()).expect("data file");
+        let data_file_path = data_file.path();
+
+        assert_eq!(
+            parse_existing_root(fixture.path()).expect("existing root"),
+            fixture.path().canonicalize().expect("canonical root")
+        );
+        assert_eq!(
+            parse_existing_data_path(fixture.path()).expect("existing data directory"),
+            fixture
+                .path()
+                .canonicalize()
+                .expect("canonical data directory")
+        );
+        assert_eq!(
+            parse_existing_data_path(data_file_path).expect("existing data file"),
+            data_file_path.canonicalize().expect("canonical data file")
+        );
+        assert!(parse_existing_root(data_file_path).is_err());
+        assert!(parse_existing_data_path(&fixture.path().join("missing")).is_err());
+        assert!(
+            !fixture
+                .path()
+                .read_dir()
+                .expect("fixture entries")
+                .filter_map(std::result::Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".graphloom-query-write-probe-"))
+        );
+    }
+
+    #[test]
+    fn test_should_not_probe_query_root_before_clap_syntax_succeeds() {
+        for arguments in [
+            &["graphloom", "query"][..],
+            &["graphloom", "query", "--unknown", "question"][..],
+            &["graphloom", "query", "--root"][..],
+            &[
+                "graphloom",
+                "query",
+                "--data",
+                ".graphloom-definitely-missing-query-data",
+                "question",
+            ][..],
+        ] {
+            let probed = AtomicBool::new(false);
+            let result = try_parse_cli_from_with_probe(arguments, |_| {
+                probed.store(true, Ordering::Relaxed);
+                Ok(())
+            });
+            assert!(result.is_err(), "{arguments:?}");
+            assert!(!probed.load(Ordering::Relaxed), "{arguments:?}");
+        }
     }
 
     #[test]
@@ -387,7 +611,7 @@ mod tests {
                 option["required"].as_bool().expect("required flag")
             );
             let default = match name {
-                "root" => Value::String(defaults.root.to_string_lossy().into_owned()),
+                "root" => Value::String(".".to_owned()),
                 "method" => Value::String(defaults.method.to_string()),
                 "verbose" => Value::Bool(defaults.verbose),
                 "data" => Value::Null,

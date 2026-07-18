@@ -224,6 +224,20 @@ def _normalize_default(name: str, value: Any) -> Any:
     return "." if name == "root" else value
 
 
+def _path_contract(option: Any) -> dict[str, bool] | None:
+    """Extract Click Path validation flags without depending on rendered help."""
+    if option.name not in {"root", "data"}:
+        return None
+    return {
+        "exists": option.type.exists,
+        "file_okay": option.type.file_okay,
+        "dir_okay": option.type.dir_okay,
+        "readable": option.type.readable,
+        "writable": option.type.writable,
+        "resolve_path": option.type.resolve_path,
+    }
+
+
 def _query_cli_contract() -> dict[str, Any]:
     """Extract framework-neutral metadata from GraphRAG's real Click command."""
     root_command = get_command(cli_main_module.app)
@@ -250,6 +264,11 @@ def _query_cli_contract() -> dict[str, Any]:
                 ),
                 "help": option.help,
                 "choices": list(getattr(option.type, "choices", ()) or ()),
+                **(
+                    {"path": path_contract}
+                    if (path_contract := _path_contract(option)) is not None
+                    else {}
+                ),
             }
             for option in options
         ],
@@ -267,6 +286,82 @@ def test_graphrag_3_1_query_positional_is_required() -> None:
 
     assert result.exit_code == 2
     assert "Missing argument" in result.output
+
+
+@pytest.mark.parametrize("data_kind", ["directory", "file"])
+def test_graphrag_3_1_query_resolves_root_and_data_from_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    data_kind: str,
+) -> None:
+    """Lock cwd-relative canonical paths and GraphRAG's data-file acceptance."""
+    cwd = tmp_path / "cwd"
+    project = tmp_path / "project"
+    cwd.mkdir()
+    project.mkdir()
+    data = cwd / "cwd-data"
+    if data_kind == "directory":
+        data.mkdir()
+    else:
+        data.write_text("table sentinel", encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli_query_module,
+        "run_basic_search",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.chdir(cwd)
+
+    result = CliRunner().invoke(
+        cli_main_module.app,
+        [
+            "query",
+            "--method",
+            "basic",
+            "--root",
+            "../project",
+            "--data",
+            "cwd-data",
+            "question",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["root_dir"] == project.resolve()
+    assert calls[0]["data_dir"] == data.resolve()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--root", "missing-root"],
+        ["--root", "root-file"],
+        ["--data", "missing-data"],
+    ],
+)
+def test_graphrag_3_1_query_rejects_missing_or_invalid_paths_with_exit_two(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    """Lock stable Click path failures without calling a Query implementation."""
+    (tmp_path / "root-file").write_text("not a directory", encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli_query_module,
+        "run_global_search",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli_main_module.app,
+        ["query", *arguments, "question"],
+    )
+
+    assert result.exit_code == 2
+    assert calls == []
 
 
 @pytest.mark.parametrize("method", ["local", "global", "drift", "basic"])

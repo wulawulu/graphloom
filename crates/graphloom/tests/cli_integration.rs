@@ -35,10 +35,15 @@ use wiremock::{
 
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+fn graphloom_command() -> Command {
+    let mut command = Command::cargo_bin("graphloom").expect("binary");
+    command.env_remove("RUST_LOG");
+    command
+}
+
 #[test]
 fn test_should_match_complete_query_help_snapshot() {
-    let output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let output = graphloom_command()
         .args(["query", "--help"])
         .output()
         .expect("query help");
@@ -59,8 +64,7 @@ async fn test_should_return_exact_query_cli_exit_codes() {
         vec!["query", "--unknown", "question"],
         vec!["query", "--root"],
     ] {
-        let output = Command::cargo_bin("graphloom")
-            .expect("binary")
+        let output = graphloom_command()
             .args(arguments)
             .current_dir(parse_root.path())
             .output()
@@ -76,8 +80,7 @@ async fn test_should_return_exact_query_cli_exit_codes() {
     }
     assert!(!parse_root.path().join("logs").exists());
 
-    let missing_settings = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let missing_settings = graphloom_command()
         .args([
             "query",
             "--root",
@@ -99,8 +102,7 @@ async fn test_should_return_exact_query_cli_exit_codes() {
     )
     .await
     .expect("invalid settings");
-    let invalid_config = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let invalid_config = graphloom_command()
         .args([
             "query",
             "--root",
@@ -115,8 +117,7 @@ async fn test_should_return_exact_query_cli_exit_codes() {
 
     let runtime_root = TempDir::new().expect("runtime root");
     init_project(runtime_root.path());
-    let output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -143,6 +144,294 @@ async fn test_should_return_exact_query_cli_exit_codes() {
 }
 
 #[tokio::test]
+async fn test_should_resolve_query_root_and_data_relative_to_current_directory() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let workspace = TempDir::new().expect("workspace");
+    let cwd = workspace.path().join("cwd");
+    let project = workspace.path().join("project");
+    tokio::fs::create_dir(&cwd).await.expect("cwd");
+    tokio::fs::create_dir(&project).await.expect("project");
+    init_project(&project);
+    tokio::fs::write(project.join(".env"), "GRAPHRAG_API_KEY=cwd-path-secret\n")
+        .await
+        .expect("env");
+    patch_settings(&project, &server.uri()).await;
+    write_minimal_query_index(&project).await;
+    write_text_units_with_marker(
+        &project.join("output"),
+        &cwd.join("alternate_tables"),
+        "CWD_DATA_SENTINEL",
+    )
+    .await;
+    write_text_units_with_marker(
+        &project.join("output"),
+        &project.join("alternate_tables"),
+        "PROJECT_DATA_SENTINEL",
+    )
+    .await;
+
+    let output = graphloom_command()
+        .current_dir(&cwd)
+        .args([
+            "query",
+            "--root",
+            "../project",
+            "--data",
+            "alternate_tables",
+            "--method",
+            "basic",
+            "facts",
+        ])
+        .output()
+        .expect("cwd-relative Query");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(normalize_cli_text(&output.stdout), "Basic answer.\n");
+    assert!(output.stderr.is_empty());
+    assert!(project.join("logs").join("query.log").is_file());
+    assert!(!cwd.join("logs").exists());
+    let requests = server.received_requests().await.expect("requests");
+    let prompt_text = requests
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .filter_map(|body| body["messages"].as_array().cloned())
+        .flatten()
+        .filter_map(|message| message["content"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(prompt_text.contains("CWD_DATA_SENTINEL"));
+    assert!(!prompt_text.contains("PROJECT_DATA_SENTINEL"));
+}
+
+#[tokio::test]
+async fn test_should_return_two_without_side_effects_for_invalid_query_paths() {
+    let workspace = TempDir::new().expect("workspace");
+    let existing_root = workspace.path().join("project");
+    tokio::fs::create_dir(&existing_root)
+        .await
+        .expect("project");
+    let root_file = workspace.path().join("root-file");
+    tokio::fs::write(&root_file, b"not a directory")
+        .await
+        .expect("root file");
+
+    for arguments in [
+        vec!["query", "--root", "missing-root", "question"],
+        vec!["query", "--root", "root-file", "question"],
+        vec![
+            "query",
+            "--root",
+            "project",
+            "--data",
+            "missing-data",
+            "question",
+        ],
+    ] {
+        let output = graphloom_command()
+            .current_dir(workspace.path())
+            .args(arguments)
+            .output()
+            .expect("path parse failure");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = normalize_cli_text(&output.stderr);
+        assert!(stderr.contains("error:") && stderr.contains("--help"));
+    }
+
+    assert!(!workspace.path().join("logs").exists());
+    assert!(!existing_root.join("logs").exists());
+    assert!(!existing_root.join("cache").exists());
+    assert_eq!(
+        tokio::fs::read(&root_file).await.expect("root file"),
+        b"not a directory"
+    );
+    let mut entries = tokio::fs::read_dir(&existing_root)
+        .await
+        .expect("project entries");
+    while let Some(entry) = entries.next_entry().await.expect("project entry") {
+        assert!(
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".graphloom-query-write-probe-")
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_should_report_missing_query_before_default_root_writability() {
+    let output = graphloom_command()
+        .current_dir("/proc")
+        .args(["query"])
+        .output()
+        .expect("missing Query from read-only cwd");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(stderr.contains("required arguments") && stderr.contains("<QUERY>"));
+    assert!(!stderr.contains("project root is not writable"));
+}
+
+#[tokio::test]
+async fn test_should_accept_existing_data_file_then_return_runtime_exit_one() {
+    let project = TempDir::new().expect("project");
+    init_project(project.path());
+    let data_file = project.path().join("existing-data-file");
+    tokio::fs::write(&data_file, "not table storage")
+        .await
+        .expect("data file");
+
+    let output = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--data",
+            data_file.to_str().expect("UTF-8 data file"),
+            "--method",
+            "basic",
+            "question",
+        ])
+        .output()
+        .expect("data file Query");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(stderr.contains("requires table text_units"));
+    assert!(!stderr.contains("Usage:"));
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("runtime failure log");
+    assert!(log.contains("query run started"));
+    assert!(log.contains("query run failed"));
+}
+
+#[tokio::test]
+async fn test_should_append_safe_query_lifecycle_across_rust_log_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let project = TempDir::new().expect("project");
+    init_project(project.path());
+    tokio::fs::write(
+        project.path().join(".env"),
+        "GRAPHRAG_API_KEY=TRACE_API_KEY_SENTINEL\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(project.path(), &server.uri()).await;
+    write_minimal_query_index(project.path()).await;
+    write_text_units_with_marker(
+        &project.path().join("output"),
+        &project.path().join("output"),
+        "TRACE_CONTEXT_SENTINEL",
+    )
+    .await;
+
+    for (rust_log, query) in [
+        (Some("off"), "OFF_QUERY_SENTINEL"),
+        (Some("trace"), "TRACE_QUERY_SENTINEL"),
+        (None, "DEFAULT_QUERY_SENTINEL"),
+    ] {
+        let mut command = graphloom_command();
+        if let Some(filter) = rust_log {
+            command.env("RUST_LOG", filter);
+        }
+        let output = command
+            .args([
+                "query",
+                "--root",
+                project.path().to_str().expect("UTF-8 root"),
+                "--method",
+                "basic",
+                query,
+            ])
+            .output()
+            .expect("RUST_LOG Query");
+        assert_eq!(output.status.code(), Some(0), "{rust_log:?}");
+        assert_eq!(normalize_cli_text(&output.stdout), "Basic answer.\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    let text_units = project.path().join("output").join("text_units.parquet");
+    let hidden_text_units = project
+        .path()
+        .join("output")
+        .join("text_units.query-log-hidden");
+    tokio::fs::rename(&text_units, &hidden_text_units)
+        .await
+        .expect("hide text units");
+    let failure = graphloom_command()
+        .env("RUST_LOG", "off")
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "basic",
+            "OFF_FAILURE_QUERY_SENTINEL",
+        ])
+        .output()
+        .expect("RUST_LOG=off failure");
+    tokio::fs::rename(&hidden_text_units, &text_units)
+        .await
+        .expect("restore text units");
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+    let failure_stderr = normalize_cli_text(&failure.stderr);
+    assert!(failure_stderr.contains("requires table text_units"));
+    assert!(!failure_stderr.contains("TRACE_API_KEY_SENTINEL"));
+
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert_eq!(log.matches("query run started").count(), 4);
+    assert_eq!(log.matches("query run completed").count(), 3);
+    assert_eq!(log.matches("query run failed").count(), 1);
+    for field in [
+        "method=basic",
+        "streaming=false",
+        "llm_calls",
+        "prompt_tokens",
+        "output_tokens",
+    ] {
+        assert!(log.contains(field), "missing lifecycle field {field}");
+    }
+    for sentinel in [
+        "OFF_QUERY_SENTINEL",
+        "TRACE_QUERY_SENTINEL",
+        "DEFAULT_QUERY_SENTINEL",
+        "OFF_FAILURE_QUERY_SENTINEL",
+        "TRACE_CONTEXT_SENTINEL",
+        "TRACE_API_KEY_SENTINEL",
+        "Authorization",
+    ] {
+        assert!(!log.contains(sentinel), "query.log leaked {sentinel}");
+    }
+}
+
+#[tokio::test]
 async fn test_should_flush_first_cli_stream_chunk_before_provider_finishes() {
     let (server_uri, first_chunk_sent, release_completion, server_thread) = delayed_query_server();
     let tempdir = TempDir::new().expect("tempdir");
@@ -157,6 +446,7 @@ async fn test_should_flush_first_cli_stream_chunk_before_provider_finishes() {
     write_minimal_query_index(tempdir.path()).await;
 
     let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("graphloom"))
+        .env_remove("RUST_LOG")
         .args([
             "query",
             "--root",
@@ -227,8 +517,7 @@ async fn test_should_preserve_partial_stream_and_fail_without_terminal_newline()
     patch_settings(project.path(), &server.uri()).await;
     write_minimal_query_index(project.path()).await;
 
-    let output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -257,9 +546,12 @@ async fn test_should_preserve_partial_stream_and_fail_without_terminal_newline()
     assert!(!log.contains("PARTIAL_STREAM_QUERY_SENTINEL"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_should_return_one_for_query_stdout_io_failure() {
+    if !std::path::Path::new("/dev/full").exists() {
+        return;
+    }
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -286,6 +578,7 @@ async fn test_should_return_one_for_query_stdout_io_failure() {
         .into_std()
         .await;
     let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("graphloom"))
+        .env_remove("RUST_LOG")
         .args([
             "query",
             "--root",
@@ -375,8 +668,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
     let cache = FileStorage::existing(tempdir.path().join("cache")).expect("cache");
     let cache_before = cache.list("").await.expect("cache before");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "query",
             "--root",
@@ -389,8 +681,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         .success()
         .stdout("Basic answer.\n")
         .stderr(predicate::str::is_empty());
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "query",
             "--root",
@@ -417,8 +708,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
             arguments.push("--streaming");
         }
         arguments.push("What are the main themes?");
-        Command::cargo_bin("graphloom")
-            .expect("binary")
+        graphloom_command()
             .args(arguments)
             .assert()
             .success()
@@ -466,8 +756,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
             .modified()
             .expect("override mtime"),
     );
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "query",
             "--root",
@@ -481,8 +770,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         .assert()
         .success()
         .stdout("Basic answer.\n");
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "query",
             "--root",
@@ -493,13 +781,13 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
             "alternate_tables",
             "facts",
         ])
+        .current_dir(tempdir.path())
         .assert()
         .success()
         .stdout("Basic answer.\n")
         .stderr(predicate::str::is_empty());
     let missing_override = tempdir.path().join("missing_alternate_tables");
-    let missing_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let missing_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -512,9 +800,10 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         ])
         .output()
         .expect("missing data Query");
-    assert_eq!(missing_output.status.code(), Some(1));
+    assert_eq!(missing_output.status.code(), Some(2));
     assert!(missing_output.stdout.is_empty());
-    assert!(normalize_cli_text(&missing_output.stderr).contains("requires table text_units"));
+    let missing_stderr = normalize_cli_text(&missing_output.stderr);
+    assert!(missing_stderr.contains("error:") && missing_stderr.contains("--help"));
     assert!(!missing_override.exists());
     assert!(!override_root.join("lancedb").exists());
     assert_eq!(
@@ -682,8 +971,7 @@ async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
                 arguments.push("--streaming");
             }
             arguments.push(query_sentinel);
-            let output = Command::cargo_bin("graphloom")
-                .expect("binary")
+            let output = graphloom_command()
                 .args(arguments)
                 .output()
                 .expect("Query command");
@@ -754,8 +1042,7 @@ async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
             arguments.push("--streaming");
         }
         arguments.push(query_sentinel);
-        let dynamic_output = Command::cargo_bin("graphloom")
-            .expect("binary")
+        let dynamic_output = graphloom_command()
             .args(arguments)
             .output()
             .expect("Dynamic Global Query");
@@ -779,8 +1066,7 @@ async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
     }
 
     set_query_vector_db(project.path(), &original_settings, &basic_vector_db).await;
-    let verbose_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let verbose_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -882,8 +1168,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
     let tempdir = TempDir::new().expect("tempdir");
     run_minimal_standard_index(tempdir.path(), &server.uri()).await;
 
-    let drift_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let drift_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -903,8 +1188,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
     tokio::fs::remove_file(&table_path)
         .await
         .expect("remove text units");
-    let table_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let table_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -939,8 +1223,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
     tokio::fs::write(&settings_path, settings)
         .await
         .expect("settings with missing index");
-    let vector_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let vector_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -969,8 +1252,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
     tokio::fs::remove_file(&prompt_path)
         .await
         .expect("remove Basic prompt");
-    let prompt_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let prompt_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -1002,8 +1284,7 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
         .respond_with(embedding_responder)
         .mount(&server)
         .await;
-    let provider_output = Command::cargo_bin("graphloom")
-        .expect("binary")
+    let provider_output = graphloom_command()
         .args([
             "query",
             "--root",
@@ -1042,8 +1323,7 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
         .await;
 
     let tempdir = TempDir::new().expect("tempdir");
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "init",
             "--root",
@@ -1076,8 +1356,7 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
     .expect("write env");
     patch_settings(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1121,8 +1400,7 @@ async fn test_should_run_binary_init_dry_run_and_standard_index_with_openai_stub
             })
     }));
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1197,8 +1475,7 @@ async fn test_should_bypass_matching_cache_during_dry_run_connectivity() {
     let cache = FileStorage::existing(tempdir.path().join("cache")).expect("cache storage");
     let before = cache.list("").await.expect("cache files before dry run");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1299,8 +1576,7 @@ async fn test_should_write_text_units_in_graphrag_3_1_schema() {
 }
 
 async fn run_minimal_standard_index(root: &std::path::Path, server_uri: &str) {
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "init",
             "--root",
@@ -1323,8 +1599,7 @@ async fn run_minimal_standard_index(root: &std::path::Path, server_uri: &str) {
         .expect("write env");
     patch_settings(root, server_uri).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args(["index", "--root", root.to_str().expect("utf8 root")])
         .assert()
         .success();
@@ -1341,8 +1616,7 @@ async fn assert_full_rerun_resets_vector_ids(
     )
     .await
     .expect("replace input");
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1399,8 +1673,7 @@ async fn test_should_fail_dry_run_when_api_key_is_placeholder() {
         .await
         .expect("input");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1439,8 +1712,7 @@ async fn test_should_fail_dry_run_on_real_model_authentication_error() {
         .expect("input");
     patch_settings(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1584,8 +1856,7 @@ async fn test_should_fail_dry_run_when_prompt_is_missing() {
         .await
         .expect("remove prompt");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1617,8 +1888,7 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
         .await
         .expect("remove prompt");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1629,8 +1899,7 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
         .stderr(predicate::str::contains("failed to load ExtractGraph"))
         .stderr(predicate::str::contains("super-secret-key").not());
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1660,8 +1929,7 @@ async fn test_should_skip_optional_validation_for_real_index_but_keep_dry_run_si
     .await
     .expect("dry input");
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1684,8 +1952,7 @@ async fn test_should_fail_dry_run_when_no_input_matches_pattern() {
     let tempdir = TempDir::new().expect("tempdir");
     init_project(tempdir.path());
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1768,8 +2035,7 @@ async fn test_should_report_common_preflight_errors_without_resetting_output() {
             .expect("sentinel");
         apply_cli_preflight_case(tempdir.path(), case).await;
 
-        Command::cargo_bin("graphloom")
-            .expect("binary")
+        graphloom_command()
             .args([
                 "index",
                 "--root",
@@ -1817,8 +2083,7 @@ async fn test_should_log_workflow_failure_without_secret() {
     .expect("env");
     patch_settings(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1866,8 +2131,7 @@ async fn test_should_fail_embedding_cardinality_mismatch_without_secret() {
     .expect("env");
     patch_settings(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -1913,8 +2177,7 @@ async fn test_should_skip_malformed_community_report_without_secret() {
     .expect("env");
     patch_settings(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "index",
             "--root",
@@ -2950,8 +3213,7 @@ fn set_yaml(value: &mut serde_yaml::Value, path: &[&str], replacement: serde_yam
 }
 
 fn init_project(root: &std::path::Path) {
-    Command::cargo_bin("graphloom")
-        .expect("binary")
+    graphloom_command()
         .args([
             "init",
             "--root",
@@ -2966,7 +3228,7 @@ fn init_project(root: &std::path::Path) {
 }
 
 fn run_index(root: &std::path::Path, extra_args: &[&str]) {
-    let mut command = Command::cargo_bin("graphloom").expect("binary");
+    let mut command = graphloom_command();
     command.args(["index", "--root", root.to_str().expect("utf8 root")]);
     command.args(extra_args);
     command
@@ -3457,4 +3719,27 @@ async fn write_minimal_query_index(root: &std::path::Path) {
         )
         .await
         .expect("query vector");
+}
+
+async fn write_text_units_with_marker(
+    source_root: &std::path::Path,
+    target_root: &std::path::Path,
+    marker: &str,
+) {
+    let source = ParquetTableProvider::new(source_root).expect("source table provider");
+    let mut text_units = source
+        .read_dataframe("text_units")
+        .await
+        .expect("source text units");
+    text_units
+        .replace(
+            "text",
+            Series::new("text".into(), vec![marker; text_units.height()]).into(),
+        )
+        .expect("replace text marker");
+    ParquetTableProvider::new(target_root)
+        .expect("target table provider")
+        .write_dataframe("text_units", text_units)
+        .await
+        .expect("target text units");
 }

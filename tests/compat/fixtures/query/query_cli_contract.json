@@ -13,7 +13,15 @@
       "required": false,
       "default": ".",
       "help": "The project root directory.",
-      "choices": []
+      "choices": [],
+      "path": {
+        "exists": true,
+        "file_okay": false,
+        "dir_okay": true,
+        "readable": true,
+        "writable": true,
+        "resolve_path": true
+      }
     },
     {
       "name": "method",
@@ -37,7 +45,15 @@
       "required": false,
       "default": null,
       "help": "Index output directory (contains the parquet files).",
-      "choices": []
+      "choices": [],
+      "path": {
+        "exists": true,
+        "file_okay": true,
+        "dir_okay": true,
+        "readable": true,
+        "writable": false,
+        "resolve_path": true
+      }
     },
     {
       "name": "community_level",
