@@ -127,6 +127,7 @@ struct QueryFixture {
 #[derive(Debug, Default)]
 struct RecordingQueryCallbacks {
     events: Mutex<Vec<String>>,
+    reduce_start_payloads: Mutex<Vec<String>>,
 }
 
 impl QueryCallbacks for RecordingQueryCallbacks {
@@ -158,7 +159,11 @@ impl QueryCallbacks for RecordingQueryCallbacks {
             .push(format!("map_end:{}", outputs.len()));
     }
 
-    fn on_reduce_response_start(&self, _context: &str) {
+    fn on_reduce_response_start(&self, context: &str) {
+        self.reduce_start_payloads
+            .lock()
+            .expect("callback payload mutex")
+            .push(context.to_owned());
         self.events
             .lock()
             .expect("callback mutex")
@@ -955,8 +960,13 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         "What changed?".to_owned(),
         SearchMethod::Drift,
     );
+    let non_stream_callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut non_stream_options = options.clone();
+    non_stream_options
+        .callbacks
+        .push(non_stream_callbacks.clone());
 
-    let result = query(fixture.config.clone(), options.clone())
+    let result = query(fixture.config.clone(), non_stream_options)
         .await
         .expect("DRIFT Query");
 
@@ -976,6 +986,28 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         context.keys().cloned().collect::<Vec<_>>(),
         ["actions", "primer", "reduce", "state"]
     );
+    let QueryContextText::Text(state_context) = &context["state"] else {
+        panic!("expected DRIFT state context");
+    };
+    let QueryContextText::Text(reduce_context) = &context["reduce"] else {
+        panic!("expected DRIFT reduce context");
+    };
+    assert_eq!(reduce_context, "['Primer answer.', 'Action answer.']");
+    let state_value: Value = serde_json::from_str(state_context).expect("DRIFT state JSON");
+    assert!(state_value["nodes"].is_array());
+    assert!(state_value["edges"].is_array());
+    assert_eq!(state_value["nodes"][0]["query"], "What changed?");
+    assert_eq!(state_value["nodes"][1]["query"], "Who?");
+    let non_stream_payloads = non_stream_callbacks
+        .reduce_start_payloads
+        .lock()
+        .expect("non-stream DRIFT callback payloads")
+        .clone();
+    assert_eq!(
+        non_stream_payloads.as_slice(),
+        std::slice::from_ref(state_context)
+    );
+    assert_ne!(non_stream_payloads[0], *reduce_context);
 
     let callbacks = Arc::new(RecordingQueryCallbacks::default());
     let mut stream_options = options;
@@ -1016,6 +1048,12 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
             ]
         );
     }
+    let stream_payloads = callbacks
+        .reduce_start_payloads
+        .lock()
+        .expect("stream DRIFT callback payloads")
+        .clone();
+    assert_eq!(stream_payloads.as_slice(), non_stream_payloads.as_slice());
 
     for (path, (hash, modified)) in paths.iter().zip(before) {
         assert_eq!(file_hash(path).await, hash);
@@ -1061,32 +1099,84 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .collect::<Vec<_>>();
     assert_eq!(embeddings.len(), 4);
     assert_eq!(completions.len(), 8);
-    assert_eq!(
-        completions
-            .iter()
-            .filter(|body| body["response_format"]["type"] == "json_schema")
-            .count(),
-        2
-    );
-    assert_eq!(
-        completions
-            .iter()
-            .filter(|body| {
-                body["stream"] == true && body["response_format"]["type"] == "json_object"
-            })
-            .count(),
-        2
-    );
+    let assert_model_call_args = |body: &&Value| {
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["seed"], 42);
+        assert_eq!(body["stop"], json!(["END"]));
+        assert_eq!(body["presence_penalty"], 0.1);
+        assert_eq!(body["frequency_penalty"], 0.2);
+        assert_eq!(body["custom_query_arg"], json!({"enabled": true}));
+    };
+    completions.iter().for_each(assert_model_call_args);
+    let hyde = completions
+        .iter()
+        .filter(|body| {
+            body["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(hyde.len(), 2);
+    assert!(hyde.iter().all(|body| {
+        body["max_completion_tokens"] == 128
+            && body["stream"] == false
+            && body.get("response_format").is_none()
+    }));
+    let primer = completions
+        .iter()
+        .filter(|body| body["response_format"]["type"] == "json_schema")
+        .collect::<Vec<_>>();
+    assert_eq!(primer.len(), 2);
     assert!(
-        completions
+        primer
             .iter()
-            .filter(|body| {
-                body["messages"][0]["content"]
+            .all(|body| { body["max_completion_tokens"] == 128 && body["stream"] == false })
+    );
+    let actions = completions
+        .iter()
+        .filter(|body| body["response_format"]["type"] == "json_object")
+        .collect::<Vec<_>>();
+    assert_eq!(actions.len(), 2);
+    assert!(actions.iter().all(|body| {
+        body["max_completion_tokens"]
+            == json!(
+                fixture
+                    .config
+                    .drift_search
+                    .local_search_llm_max_gen_completion_tokens
+            )
+            && body["temperature"] == json!(fixture.config.drift_search.local_search_temperature)
+            && body["top_p"] == json!(fixture.config.drift_search.local_search_top_p)
+            && body["n"] == json!(fixture.config.drift_search.local_search_n)
+            && body["stream"] == true
+    }));
+    let reduce = completions
+        .iter()
+        .filter(|body| {
+            body.get("response_format").is_none()
+                && !body["messages"][0]["content"]
                     .as_str()
                     .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
-            })
-            .all(|body| body["stream"] == false && body.get("response_format").is_none())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reduce.len(), 2);
+    assert!(reduce.iter().all(|body| {
+        body["max_completion_tokens"]
+            == json!(fixture.config.drift_search.reduce_max_completion_tokens)
+            && body["temperature"] == json!(fixture.config.drift_search.reduce_temperature)
+    }));
+    assert_eq!(
+        reduce
+            .iter()
+            .map(|body| body["stream"].as_bool().expect("reduce stream flag"))
+            .collect::<Vec<_>>(),
+        [false, true]
     );
+    assert!(reduce.iter().all(|body| {
+        body["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains(reduce_context))
+    }));
 }
 
 #[tokio::test]

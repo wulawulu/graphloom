@@ -23,6 +23,7 @@ use crate::query::{
 #[derive(Debug)]
 struct DriftPrepared {
     context: QueryContext,
+    state_context: String,
     reduce_context: String,
     usage: BTreeMap<String, QueryUsageCategory>,
 }
@@ -68,7 +69,7 @@ pub(crate) async fn drift_search(
     apply_reduce_request(&runtime, &mut request, false)?;
     runtime
         .callbacks
-        .on_reduce_response_start(&prepared.reduce_context);
+        .on_reduce_response_start(&prepared.state_context);
     let response = runtime
         .context
         .completion_model
@@ -133,7 +134,7 @@ pub(crate) async fn drift_search_streaming(
         request: Some(request),
         provider: None,
         context: prepared.context,
-        reduce_context: prepared.reduce_context,
+        state_context: prepared.state_context,
         response: String::new(),
         started,
         usage: prepared.usage,
@@ -173,10 +174,12 @@ async fn prepare(
         &primer.followups,
     );
     let action_usage = run_depths(runtime, query, random, &mut state).await?;
-    let reduce_context = python_list_repr(&state.answers());
-    let context = build_query_context(&ranked, &primer, &state, &reduce_context)?;
+    let state_context = state.to_json()?;
+    let reduce_context = python_list_repr(&state.reduce_answers());
+    let context = build_query_context(&ranked, &primer, &state, &state_context, &reduce_context)?;
     Ok(DriftPrepared {
         context,
+        state_context,
         reduce_context,
         usage: BTreeMap::from([
             ("build_context".to_owned(), build_usage),
@@ -298,7 +301,6 @@ async fn run_action(
                     }
                 })?,
             );
-            request.max_tokens = None;
             request.max_completion_tokens = runtime
                 .context
                 .config
@@ -359,6 +361,7 @@ fn build_query_context(
     reports: &[RankedReport],
     primer: &PrimerAggregate,
     state: &DriftQueryState,
+    state_context: &str,
     reduce_context: &str,
 ) -> Result<QueryContext> {
     let primer_rows = reports
@@ -381,7 +384,6 @@ fn build_query_context(
     );
     let primer_text =
         primer_table.render_csv(SearchMethod::Drift, "render DRIFT primer context")?;
-    let state_text = state.to_json()?;
     let mut action_text = BTreeMap::new();
     let mut action_records = BTreeMap::new();
     for action in state.nodes() {
@@ -428,7 +430,10 @@ fn build_query_context(
     Ok(QueryContext {
         text: QueryContextText::Composite(BTreeMap::from([
             ("primer".to_owned(), QueryContextText::Text(primer_text)),
-            ("state".to_owned(), QueryContextText::Text(state_text)),
+            (
+                "state".to_owned(),
+                QueryContextText::Text(state_context.to_owned()),
+            ),
             (
                 "actions".to_owned(),
                 QueryContextText::Composite(action_text),
@@ -558,7 +563,6 @@ fn apply_reduce_request(
         .apply_call_args(&runtime.context.completion_config.call_args)
         .and_then(|()| {
             request.temperature = Some(runtime.context.config.reduce_temperature);
-            request.max_tokens = None;
             request.max_completion_tokens = runtime.context.config.reduce_max_completion_tokens;
             request.stream = Some(stream);
             request.response_format = None;
@@ -609,7 +613,7 @@ struct DriftStreamState {
     request: Option<CompletionRequest>,
     provider: Option<CompletionStream>,
     context: QueryContext,
-    reduce_context: String,
+    state_context: String,
     response: String,
     started: Instant,
     usage: BTreeMap<String, QueryUsageCategory>,
@@ -632,7 +636,7 @@ async fn next_stream_event(
             DriftStreamPhase::Start => {
                 state
                     .callbacks
-                    .on_reduce_response_start(&state.reduce_context);
+                    .on_reduce_response_start(&state.state_context);
                 let Some(request) = state.request.take() else {
                     return Some((Err(stream_error(&state, "missing reduce request")), None));
                 };

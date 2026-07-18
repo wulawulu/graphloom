@@ -84,10 +84,11 @@ impl DriftQueryState {
         Ok(())
     }
 
-    pub(super) fn answers(&self) -> Vec<&str> {
+    pub(super) fn reduce_answers(&self) -> Vec<&str> {
         self.nodes
             .iter()
             .filter_map(|action| action.answer.as_deref())
+            .filter(|answer| !answer.is_empty())
             .collect()
     }
 
@@ -179,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_include_completed_empty_answers_in_reduce_input() {
+    fn test_should_treat_empty_answer_as_completed_but_exclude_it_from_reduce() {
         let mut state = DriftQueryState::default();
         state.add_root(
             "root".to_owned(),
@@ -199,6 +200,40 @@ mod tests {
             )
             .expect("apply empty completed answer");
 
-        assert_eq!(state.answers(), ["", ""]);
+        assert!(state.incomplete_ids().is_empty());
+        assert!(state.reduce_answers().is_empty());
+        let value: Value =
+            serde_json::from_str(&state.to_json().expect("state JSON")).expect("valid JSON");
+        assert_eq!(value["nodes"][0]["answer"], "");
+        assert_eq!(value["nodes"][1]["answer"], "");
+    }
+
+    #[test]
+    fn test_should_reduce_truthy_answers_in_insertion_order() {
+        let mut state = DriftQueryState::default();
+        let none = state.add_or_get("none".to_owned());
+        let empty = state.add_or_get("empty".to_owned());
+        let spaces = state.add_or_get("spaces".to_owned());
+        let answer = state.add_or_get("answer".to_owned());
+        for (id, value) in [
+            (empty, String::new()),
+            (spaces, "   ".to_owned()),
+            (answer, "real answer".to_owned()),
+        ] {
+            state
+                .apply(
+                    id,
+                    DriftActionResponse {
+                        answer: Some(value),
+                        score: 0.0,
+                        follow_up_queries: Vec::new(),
+                    },
+                    DriftActionMetadata::default(),
+                )
+                .expect("apply completed answer");
+        }
+
+        assert_eq!(state.incomplete_ids(), [none]);
+        assert_eq!(state.reduce_answers(), ["   ", "real answer"]);
     }
 }

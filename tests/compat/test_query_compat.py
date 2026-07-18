@@ -1637,6 +1637,7 @@ def test_graphrag_3_1_drift_action_repair_and_state_identity_golden() -> None:
         )
     )
     assert action.answer == ""
+    assert action.is_complete
     assert action.score == float("-inf")
 
     search = object.__new__(DRIFTSearch)
@@ -1657,10 +1658,56 @@ def test_graphrag_3_1_drift_action_repair_and_state_identity_golden() -> None:
 
 
 def test_graphrag_3_1_drift_reduce_python_list_representation_golden() -> None:
-    """Lock Python list/string escaping used by DRIFT reduce prompt formatting."""
+    """Lock truthy answer filtering and Python list formatting for reduce."""
     answers = ["one", 'it\'s "quoted"\\next\nline']
 
     assert str(answers) == r"""['one', 'it\'s "quoted"\\next\nline']"""
+
+    class ReduceModel:
+        async def completion_async(
+            self,
+            messages: list[Any],
+            **kwargs: Any,
+        ) -> AsyncIterator[SimpleNamespace]:
+            assert messages[0]["content"] == "REDUCE ['   ', 'real answer']"
+            assert messages[1]["content"] == "Root query"
+            assert kwargs == {"stream": True}
+
+            async def chunks() -> AsyncIterator[SimpleNamespace]:
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="final"))]
+                )
+
+            return chunks()
+
+    search = object.__new__(DRIFTSearch)
+    search.model = ReduceModel()
+    search.context_builder = SimpleNamespace(
+        reduce_system_prompt="REDUCE {context_data}",
+        response_type="Multiple Paragraphs",
+    )
+    search.callbacks = []
+    response_state = {
+        "nodes": [
+            {"answer": None},
+            {"answer": ""},
+            {"answer": "   "},
+            {"answer": "real answer"},
+        ],
+        "edges": [],
+    }
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in search._reduce_response_streaming(
+                responses=response_state,
+                query="Root query",
+                model_params={},
+            )
+        ]
+
+    assert asyncio.run(collect()) == ["final"]
 
 
 def test_graphrag_3_1_drift_stream_callback_and_reduce_request_golden(
@@ -1703,7 +1750,12 @@ def test_graphrag_3_1_drift_stream_callback_and_reduce_request_golden(
             )
 
     class Callbacks(RecordingCallbacks):
-        def on_reduce_response_start(self, _context: Any) -> None:
+        def __init__(self) -> None:
+            super().__init__()
+            self.reduce_starts: list[Any] = []
+
+        def on_reduce_response_start(self, context: Any) -> None:
+            self.reduce_starts.append(context)
             self.events.append("reduce_start")
 
         def on_reduce_response_end(self, response: str) -> None:
@@ -1769,6 +1821,15 @@ def test_graphrag_3_1_drift_stream_callback_and_reduce_request_golden(
         "token:answer",
         "reduce_end:Final answer",
     ]
+    assert len(callbacks.reduce_starts) == 1
+    reduce_start = callbacks.reduce_starts[0]
+    assert isinstance(reduce_start, dict)
+    assert [node["query"] for node in reduce_start["nodes"]] == [
+        "Root query",
+        "followup",
+    ]
+    assert reduce_start["edges"] == [{"source": 0, "target": 1, "weight": 1.0}]
+    assert reduce_start != ["Primer answer", "Action answer"]
     assert len(model.requests) == 1
     messages, kwargs = model.requests[0]
     assert messages == [
@@ -1785,3 +1846,38 @@ def test_graphrag_3_1_drift_stream_callback_and_reduce_request_golden(
         "temperature": 0.25,
         "max_completion_tokens": 321,
     }
+    assert "max_tokens" not in kwargs
+
+
+def test_graphrag_3_1_drift_call_kwargs_do_not_override_max_tokens() -> None:
+    """Lock that DRIFT call-level kwargs leave provider base max_tokens intact."""
+    search = object.__new__(DRIFTSearch)
+    search.context_builder = SimpleNamespace(
+        config=SimpleNamespace(
+            local_search_text_unit_prop=0.5,
+            local_search_community_prop=0.1,
+            local_search_top_k_mapped_entities=10,
+            local_search_top_k_relationships=10,
+            local_search_temperature=0.2,
+            local_search_n=1,
+            local_search_top_p=0.9,
+            local_search_llm_max_gen_completion_tokens=123,
+            local_search_max_data_tokens=1_000,
+        ),
+        local_system_prompt="DRIFT Local",
+        local_mixed_context=object(),
+    )
+    search.model = object()
+    search.tokenizer = ByteTokenizer()
+    search.callbacks = []
+
+    local = search.init_local_search()
+
+    assert local.model_params == {
+        "temperature": 0.2,
+        "n": 1,
+        "top_p": 0.9,
+        "max_completion_tokens": 123,
+        "response_format_json_object": True,
+    }
+    assert "max_tokens" not in local.model_params
