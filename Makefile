@@ -15,10 +15,13 @@ test-integration:
 
 test-compat:
 	@cargo build -p graphloom
+	@cargo build -p graphloom-vectors --example compat_vector_manifest
 	@uv run --project tests/compat --locked ruff format --check tests/compat
 	@uv run --project tests/compat --locked ruff check tests/compat
-	@GRAPHLOOM_BIN="$$(cargo metadata --no-deps --format-version 1 | \
-		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/graphloom" \
+	@TARGET_DIR="$$(cargo metadata --no-deps --format-version 1 | \
+		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"; \
+	GRAPHLOOM_BIN="$$TARGET_DIR/debug/graphloom" \
+	GRAPHLOOM_VECTOR_MANIFEST_BIN="$$TARGET_DIR/debug/examples/compat_vector_manifest" \
 		uv run --project tests/compat --locked \
 		pytest -q tests/compat
 	@cargo test -p graphloom-llm --test cache_compat

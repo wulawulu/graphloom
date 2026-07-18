@@ -15,6 +15,7 @@ from collections import Counter
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pandas as pd
@@ -36,8 +37,37 @@ FIXTURE_INPUT = Path(__file__).parent / "fixtures" / "input"
 class CommandResult:
     """Captured subprocess result."""
 
+    returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class RecordedRequest:
+    """Secret-free provider request projection used by Query assertions."""
+
+    operation: str
+    endpoint: str
+    model: str | None
+    message_roles: tuple[str, ...]
+    system_prompt: str
+    user_message: str
+    response_format: Any
+    temperature: Any
+    top_p: Any
+    n: Any
+    max_tokens: Any
+    max_completion_tokens: Any
+    stream: bool
+    embedding_input: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DelayedStream:
+    """Synchronization points for one delayed SSE response."""
+
+    first_delta_sent: Event
+    release_remaining: Event
 
 
 @dataclass(frozen=True)
@@ -48,6 +78,7 @@ class CompatibilityRun:
     graphloom_project: Path
     graphrag_project: Path
     graphloom_bin: Path
+    vector_manifest_bin: Path
     server: FixtureModelServer
 
 
@@ -55,7 +86,8 @@ class FixtureModelServer:
     """Deterministic OpenAI-compatible server shared by both indexers."""
 
     def __init__(self) -> None:
-        self._requests: list[str] = []
+        self._requests: list[RecordedRequest] = []
+        self._delayed_stream: DelayedStream | None = None
         self._lock = threading.Lock()
         handler = self._handler_type()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -81,11 +113,75 @@ class FixtureModelServer:
     def snapshot(self) -> Counter[str]:
         """Return request counts by semantic operation."""
         with self._lock:
-            return Counter(self._requests)
+            return Counter(request.operation for request in self._requests)
 
-    def _record(self, operation: str) -> None:
+    def offset(self) -> int:
+        """Return a stable recorder offset for one test phase."""
         with self._lock:
-            self._requests.append(operation)
+            return len(self._requests)
+
+    def requests_since(self, offset: int) -> tuple[RecordedRequest, ...]:
+        """Return requests recorded after ``offset``."""
+        with self._lock:
+            return tuple(self._requests[offset:])
+
+    def delay_next_stream(self) -> DelayedStream:
+        """Delay one streaming response after its first non-empty delta."""
+        delayed = DelayedStream(Event(), Event())
+        with self._lock:
+            if self._delayed_stream is not None:
+                raise AssertionError("a delayed stream is already pending")
+            self._delayed_stream = delayed
+        return delayed
+
+    def _take_delayed_stream(self) -> DelayedStream | None:
+        with self._lock:
+            delayed = self._delayed_stream
+            self._delayed_stream = None
+            return delayed
+
+    def _record(
+        self,
+        operation: str,
+        endpoint: str,
+        payload: dict[str, Any],
+    ) -> None:
+        messages = [
+            message
+            for message in payload.get("messages", [])
+            if isinstance(message, dict)
+        ]
+        roles = tuple(str(message.get("role", "")) for message in messages)
+        system_prompt = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "system"
+        )
+        user_message = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "user"
+        )
+        raw_input = payload.get("input", [])
+        embedding_input = raw_input if isinstance(raw_input, list) else [raw_input]
+        request = RecordedRequest(
+            operation=operation,
+            endpoint=endpoint,
+            model=payload.get("model"),
+            message_roles=roles,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            response_format=payload.get("response_format"),
+            temperature=payload.get("temperature"),
+            top_p=payload.get("top_p"),
+            n=payload.get("n"),
+            max_tokens=payload.get("max_tokens"),
+            max_completion_tokens=payload.get("max_completion_tokens"),
+            stream=payload.get("stream") is True,
+            embedding_input=tuple(str(value) for value in embedding_input),
+        )
+        with self._lock:
+            self._requests.append(request)
 
     @staticmethod
     def _handler_type() -> type[BaseHTTPRequestHandler]:
@@ -100,20 +196,37 @@ class FixtureModelServer:
                 elif self.path.endswith("/chat/completions"):
                     operation, content = _completion_content(payload)
                     if payload.get("stream") is True:
-                        fixture._record(operation)
-                        body = _streaming_completion_response(payload, content)
+                        fixture._record(operation, self.path, payload)
+                        events = _streaming_completion_events(payload, content)
+                        delayed = fixture._take_delayed_stream()
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
                         self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Content-Length", str(len(body)))
+                        if delayed is None:
+                            self.send_header(
+                                "Content-Length",
+                                str(sum(len(event) for event in events)),
+                            )
+                        else:
+                            self.send_header("Connection", "close")
                         self.end_headers()
-                        self.wfile.write(body)
+                        self.wfile.write(events[0])
+                        self.wfile.flush()
+                        if delayed is not None:
+                            delayed.first_delta_sent.set()
+                            if not delayed.release_remaining.wait(timeout=15):
+                                return
+                        for event in events[1:]:
+                            self.wfile.write(event)
+                            self.wfile.flush()
+                        if delayed is not None:
+                            self.close_connection = True
                         return
                     response = _completion_response(payload, content)
                 else:
                     self.send_error(404, "unsupported fixture endpoint")
                     return
-                fixture._record(operation)
+                fixture._record(operation, self.path, payload)
                 body = json.dumps(response).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -159,6 +272,10 @@ def initialize_fixture_project(graphloom_bin: Path, root: Path, api_base: str) -
     settings["extract_claims"]["max_gleanings"] = 0
     settings["vector_store"]["vector_size"] = 4
     settings["snapshots"]["embeddings"] = True
+    settings["drift_search"]["n_depth"] = 1
+    settings["drift_search"]["primer_folds"] = 1
+    settings["drift_search"]["drift_k_followups"] = 1
+    settings["drift_search"]["concurrency"] = 1
     settings_path.write_text(
         yaml.safe_dump(settings, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -240,6 +357,76 @@ def run_graphrag_global_query(project: Path, query: str) -> CommandResult:
     )
 
 
+def configure_consumer_vector_db(project: Path, db_uri: Path) -> None:
+    """Point a consumer-only project view at its native bridge database."""
+    settings_path = project / "settings.yaml"
+    settings = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+    settings["vector_store"]["db_uri"] = str(db_uri.resolve())
+    settings_path.write_text(
+        yaml.safe_dump(settings, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
+def run_graphloom_query(
+    graphloom_bin: Path,
+    project: Path,
+    data: Path,
+    method: str,
+    query: str,
+    *,
+    streaming: bool,
+    dynamic: bool = False,
+) -> CommandResult:
+    """Run the real GraphLoom Query CLI over producer-owned Parquet."""
+    command = [
+        str(graphloom_bin),
+        "query",
+        "--root",
+        str(project),
+        "--data",
+        str(data),
+        "--method",
+        method,
+    ]
+    if dynamic:
+        command.append("--dynamic-community-selection")
+    if streaming:
+        command.append("--streaming")
+    command.append(query)
+    return run_command(command, cwd=project)
+
+
+def run_graphrag_query(
+    project: Path,
+    data: Path,
+    method: str,
+    query: str,
+    *,
+    streaming: bool,
+    dynamic: bool = False,
+) -> CommandResult:
+    """Run the pinned GraphRAG 3.1.0 Query CLI over producer-owned Parquet."""
+    command = [
+        sys.executable,
+        "-m",
+        "graphrag",
+        "query",
+        "--root",
+        str(project),
+        "--data",
+        str(data),
+        "--method",
+        method,
+    ]
+    if dynamic:
+        command.append("--dynamic-community-selection")
+    if streaming:
+        command.append("--streaming")
+    command.append(query)
+    return run_command(command, cwd=project)
+
+
 def run_command(command: list[str], cwd: Path | None = None) -> CommandResult:
     """Run one bounded subprocess and retain diagnostics on failure."""
     environment = os.environ.copy()
@@ -261,7 +448,11 @@ def run_command(command: list[str], cwd: Path | None = None) -> CommandResult:
             f"command failed ({result.returncode}): {' '.join(command)}\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
-    return CommandResult(stdout=result.stdout, stderr=result.stderr)
+    return CommandResult(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
 
 
 def load_tables(output: Path) -> dict[str, pd.DataFrame]:
@@ -478,6 +669,46 @@ def _completion_content(payload: dict[str, Any]) -> tuple[str, str]:
         )
     if "well-formed JSON-formatted string" in prompt:
         return "community_report", _community_report(prompt)
+    if "Create a hypothetical answer to the following query" in prompt:
+        return "drift_hyde", "A hypothetical answer connecting the fixture characters."
+    if "top-ranked community summaries" in prompt:
+        return (
+            "drift_primer",
+            json.dumps(
+                {
+                    "intermediate_answer": (
+                        "Producer community reports connect the fixture characters."
+                    ),
+                    "score": 85,
+                    "follow_up_queries": [
+                        "How are 西门庆 and 武松 connected through 清河县?"
+                    ],
+                }
+            ),
+        )
+    if "how relevant or helpful is the provided information" in prompt:
+        return (
+            "dynamic_rating",
+            json.dumps(
+                {
+                    "reason": "The producer community report is relevant.",
+                    "rating": 5,
+                }
+            ),
+        )
+    if "---Data Reports---" in prompt:
+        return "drift_reduce", "DRIFT interoperable answer."
+    if "'follow_up_queries': List[str]" in prompt and "'score': int" in prompt:
+        return (
+            "drift_action",
+            json.dumps(
+                {
+                    "response": "Producer entity and source evidence was retrieved.",
+                    "score": 90,
+                    "follow_up_queries": [],
+                }
+            ),
+        )
     if "list of key points" in prompt and '"points"' in prompt:
         return (
             "global_search_map",
@@ -494,10 +725,11 @@ def _completion_content(payload: dict[str, Any]) -> tuple[str, str]:
             ),
         )
     if "multiple analysts" in prompt:
-        return (
-            "global_search_reduce",
-            "西门庆与武松通过清河县人物网络间接相连 [Data: Reports (0)].",
-        )
+        return "global_search_reduce", "Global interoperable answer."
+    if "---Data tables---" in prompt and "Sources" in prompt:
+        if "Relationships" in prompt and "Entities" in prompt:
+            return "local_search", "Local interoperable answer."
+        return "basic_search", "Basic interoperable answer."
     return "summarize_descriptions", "A concise summary of the provided descriptions."
 
 
@@ -553,8 +785,13 @@ def _completion_response(payload: dict[str, Any], content: str) -> dict[str, Any
     }
 
 
-def _streaming_completion_response(payload: dict[str, Any], content: str) -> bytes:
+def _streaming_completion_events(
+    payload: dict[str, Any],
+    content: str,
+) -> list[bytes]:
     model = payload.get("model", "gpt-test")
+    split_at = max(1, len(content) // 2)
+    content_parts = [content[:split_at], content[split_at:]]
     chunks = [
         {
             "id": "chatcmpl-compat",
@@ -564,21 +801,25 @@ def _streaming_completion_response(payload: dict[str, Any], content: str) -> byt
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": content},
+                    "delta": {"role": "assistant", "content": content_part},
                     "finish_reason": None,
                 }
             ],
-        },
+        }
+        for content_part in content_parts
+        if content_part
+    ] + [
         {
             "id": "chatcmpl-compat",
             "object": "chat.completion.chunk",
             "created": 0,
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        },
+        }
     ]
-    events = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
-    return f"{events}data: [DONE]\n\n".encode("utf-8")
+    events = [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks]
+    events.append(b"data: [DONE]\n\n")
+    return events
 
 
 def _embedding_response(payload: dict[str, Any]) -> dict[str, Any]:

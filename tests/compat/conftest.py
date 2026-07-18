@@ -33,6 +33,20 @@ def graphloom_bin() -> Path:
     return binary
 
 
+@pytest.fixture(scope="session")
+def vector_manifest_bin() -> Path:
+    """Resolve the built test-only logical vector bridge."""
+    value = os.environ.get("GRAPHLOOM_VECTOR_MANIFEST_BIN")
+    if not value:
+        pytest.fail(
+            "GRAPHLOOM_VECTOR_MANIFEST_BIN must point to the built vector helper"
+        )
+    binary = Path(value).resolve()
+    if not binary.is_file():
+        pytest.fail(f"GRAPHLOOM_VECTOR_MANIFEST_BIN does not exist: {binary}")
+    return binary
+
+
 @pytest.fixture(scope="session", autouse=True)
 def fixed_graphrag_version() -> None:
     """Pin tests to the GraphRAG v3.1.0 Python distribution."""
@@ -45,6 +59,7 @@ def fixed_graphrag_version() -> None:
 def compatibility_run(
     tmp_path_factory: pytest.TempPathFactory,
     graphloom_bin: Path,
+    vector_manifest_bin: Path,
 ) -> CompatibilityRun:
     """Run both indexers once against the same deterministic fixture."""
     root = tmp_path_factory.mktemp("graphloom-compat")
@@ -65,6 +80,7 @@ def compatibility_run(
             graphloom_project=graphloom_project,
             graphrag_project=graphrag_project,
             graphloom_bin=graphloom_bin,
+            vector_manifest_bin=vector_manifest_bin,
             server=server,
         )
     finally:

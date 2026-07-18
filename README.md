@@ -1,9 +1,9 @@
 # GraphLoom
 
-GraphLoom is a Rust implementation compatible with Microsoft GraphRAG indexing.
-The core indexing compatibility target is Microsoft GraphRAG 3.1.0. Cache and
-selected workflow interoperability are additionally checked against pinned
-newer GraphRAG source where the protocol has evolved.
+GraphLoom is a Rust implementation compatible with Microsoft GraphRAG indexing
+and Query behavior. The compatibility baseline is Microsoft GraphRAG 3.1.0.
+Cache protocol behavior is additionally checked against pinned newer GraphRAG
+source where that protocol has evolved.
 
 ## Install
 
@@ -23,11 +23,13 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 
 - `graphloom::api` exposes programmatic indexing and Query entry points.
   `build_index` runs standard indexing and returns structured workflow output
-  and pipeline stats. `query`, `query_stream`, `basic_search`, and
-  `basic_search_streaming` provide read-only Query access. `build_index` always
-  performs full validation and then runs workflows directly against the
-  configured output, so API callers do not need to run CLI validation first.
-  Completed writes are not rolled back if a later workflow fails.
+  and pipeline stats. Read-only Query access is available through `query`,
+  `query_stream`, `basic_search`, `basic_search_streaming`, `local_search`,
+  `local_search_streaming`, `global_search`, `global_search_streaming`,
+  `drift_search`, and `drift_search_streaming`. `build_index` always performs
+  full validation and then runs workflows directly against the configured
+  output, so API callers do not need to run CLI validation first. Completed
+  writes are not rolled back if a later workflow fails.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` loads project
   configuration and performs CLI validation before dry-run output or indexing.
@@ -59,8 +61,7 @@ GraphLoom prompt templates use Tera/Jinja double-brace syntax, such as
 `prompts/community_report_graph.txt` and `prompts/community_report_text.txt`.
 `graphloom init` generates all 13 GraphRAG 3.1.0 managed indexing and Query
 prompts. Query prompts include Basic, Local, Global, DRIFT, and question
-generation templates; methods not yet implemented still fail explicitly rather
-than falling back to another search algorithm.
+generation templates.
 
 `init` performs path and symlink preflight before creating directories or
 writing managed files. If a project path, `input/`, `prompts/`, or managed file
@@ -135,31 +136,35 @@ succeed.
 
 ## Query
 
-Basic Search is the first supported Query method:
+All GraphRAG 3.1.0 public Query methods are available:
 
 ```bash
 graphloom query --root ./demo --method basic "What are the main facts?"
+
+graphloom query --root ./demo --method local "What happened to Alice?"
+
+graphloom query --root ./demo --method global "What are the major themes?"
+
+graphloom query --root ./demo --method global \
+  --dynamic-community-selection \
+  "What are the major themes?"
+
+graphloom query --root ./demo --method drift \
+  --streaming \
+  "Explore the causes and consequences."
 ```
 
-Provider deltas can be streamed directly to stdout:
+The default method is `global`. `--streaming` flushes final-answer provider
+deltas as they arrive and emits one terminal newline. Intermediate context,
+Global map/rating output, DRIFT actions, and usage data do not enter stdout.
+Without `--verbose`, successful Query stderr is empty; stdout contains only the
+answer. Query lifecycle diagnostics are appended to `logs/query.log`.
 
-```bash
-graphloom query --root ./demo --method basic --streaming "What are the main facts?"
-```
-
-Basic Search embeds the query, searches the existing `text_unit_text` LanceDB
-index, restores matching text units to their original Parquet row order, builds
-the GraphRAG-compatible Sources context, and streams the final completion. It is
-strictly read-only: it does not create missing table/vector directories, reset
-indices, write Parquet, or populate the indexing cache. Query logs are written
-to `logs/query.log`; stdout contains only the answer.
-
-The CLI keeps GraphRAG's default method, `global`. During the current Phase 2
-slice, `global`, `local`, and `drift` are recognized but return an explicit
-typed “not yet provided” error. They never fall back to Basic Search.
-
-`--data <directory>` overrides only the Parquet table directory. LanceDB still
-uses `vector_store.db_uri` from project settings.
+`--data <path>` overrides only the producer Parquet table location. It is
+resolved from the process working directory, while LanceDB continues to use
+`vector_store.db_uri` from project settings. Query is strictly read-only: it
+does not write Parquet, mutate vector records, create a Query cache, or run an
+index workflow.
 
 ## Skip Optional Validation
 
@@ -273,23 +278,32 @@ configuration, prompts, and model responses, the standard workflows should make
 the same indexing decisions and produce logically equivalent data. This stable
 baseline comes before GraphLoom-specific optimizations.
 
-Manual cross-implementation testing has exercised all ten standard workflows
-listed above. The automated `make test-compat` gate now runs GraphLoom and the
-uv-locked GraphRAG 3.1.0 package against one deterministic OpenAI-compatible
-server, checks all seven standard Parquet tables through PyArrow, pandas, and
+The automated `make test-compat` gate runs GraphLoom and the uv-locked PyPI
+GraphRAG 3.1.0 package against one deterministic OpenAI-compatible HTTP server.
+It checks all seven standard Parquet tables through PyArrow, pandas, and
 GraphRAG's typed `DataReader`, compares UUID-independent index semantics and
-references, runs upstream Global Search over the GraphLoom index, and verifies
-GraphLoom can reuse GraphRAG's `extract_graph` cache. Cache key and payload
-compatibility for the newer `79ab7c9...` protocol baseline remains a separate
-golden-fixture gate.
+references, and verifies GraphLoom can reuse GraphRAG's `extract_graph` cache.
+Cache key and payload compatibility for the newer `79ab7c9...` protocol
+baseline remains a separate golden-fixture gate.
 
-This does not mean the persisted artifacts are byte-for-byte interchangeable.
-GraphLoom's Rust Parquet writer and Arrow representation differ from GraphRAG's
-Python/PyArrow stack, but GraphLoom's standard tables are now automatically
-cross-read at the logical schema level. The two projects still use different
-LanceDB versions, so a LanceDB directory created by GraphLoom is not currently
-promised to open in GraphRAG. LanceDB on-disk compatibility remains a known
-storage-level gap tracked separately from workflow and cache behavior. See the
+The same gate runs 20 cross-implementation Query CLI scenarios: each index
+producer is consumed by the other implementation for Basic, Local, Global, and
+DRIFT in streaming and non-streaming modes, plus Dynamic Global in both modes.
+Producer Parquet is read directly. For Basic, Local, and DRIFT, a versioned
+canonical vector manifest exports the producer's original logical `id` and
+float32 `vector` records and materializes them in the consumer's native LanceDB
+version. Export/import performs no embedding requests. Tests verify collection
+names, IDs, dimensions, vector values, by-ID/ANN reads, provider stages,
+producer context, delayed streaming flush, and read-only snapshots.
+
+This does not mean persisted artifacts are byte-for-byte interchangeable.
+GraphLoom's Rust Parquet writer and Arrow representation differ from
+GraphRAG's Python/PyArrow stack, though standard tables are cross-read at the
+logical schema level. Basic/Local/DRIFT cross-implementation E2E uses the
+logical vector manifest to materialize producer records in the consumer-native
+LanceDB version without re-embedding. It does not claim direct on-disk
+compatibility between Python LanceDB 0.24.3 and Rust lancedb 0.31.0. That
+physical storage gap remains a separate hardening item. See the
 [compatibility test guide](docs/python-compatibility-testing.md).
 
 One known behavioral difference remains in `extract_graph`: when one title has
@@ -312,19 +326,20 @@ Supported:
   `openai`, `deepseek`, or `ollama` provider names; provider defaults normalize
   DeepSeek and Ollama API bases without GraphLoom-only settings changes
 - LanceDB vector storage
-- Basic Search through the Rust API and `graphloom query --method basic`, with
-  provider-native streaming
-- Linux and Windows CI
+- Basic, Local, Global, Dynamic Global, and DRIFT through the Rust API and CLI
+- provider-native streaming
+- Linux, Windows, and macOS Rust CI
 - tag releases published once by a dedicated Ubuntu release job after Linux and
-  Windows build jobs and the GraphRAG compatibility gate pass
+  cross-platform build jobs and the GraphRAG compatibility gate pass
 
 Not yet supported:
 
-- Local, Global, Dynamic Community Selection, and DRIFT Query execution
-- update commands
-- prompt tuning
+- update workflows
+- prompt-tuning CLI
 - Azure OpenAI or Azure managed identity
-- blob storage, CosmosDB, or Azure AI Search
+- remote blob storage, CosmosDB, or Azure AI Search
+- Query result cache
+- cross-version LanceDB on-disk interoperability
 - CSV, JSON, or JSONL input
 
 Settings, prompts, workflow behavior, cache protocol, logical Parquet schemas,

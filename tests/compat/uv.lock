@@ -746,6 +746,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "graphrag" },
+    { name = "lancedb" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pytest" },
@@ -760,6 +761,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "graphrag", specifier = "==3.1.0" },
+    { name = "lancedb", specifier = "==0.24.3" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "pyarrow", specifier = "==22.0.0" },
     { name = "pytest", specifier = "==9.1.1" },
