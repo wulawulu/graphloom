@@ -18,7 +18,7 @@ pub(crate) mod local;
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 pub use callbacks::{NoopQueryCallbacks, QueryCallbackChain, QueryCallbacks};
-use clap::ValueEnum;
+use clap::{ValueEnum, builder::PossibleValue};
 pub use context::{ConversationHistory, ConversationRole, ConversationTurn};
 pub use data_loader::{
     BasicQueryData, DriftQueryData, GlobalQueryData, LocalQueryData, QueryDataLoader,
@@ -42,8 +42,7 @@ pub(crate) use runtime::{
 };
 
 /// Public `GraphRAG` query method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
-#[value(rename_all = "lower")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum SearchMethod {
     /// Global community map/reduce search.
@@ -54,6 +53,28 @@ pub enum SearchMethod {
     Drift,
     /// Basic text-unit vector search.
     Basic,
+}
+
+impl ValueEnum for SearchMethod {
+    fn value_variants<'a>() -> &'a [Self] {
+        // GraphRAG 3.1.0 declares its CLI enum in this observable order.
+        const VARIANTS: &[SearchMethod] = &[
+            SearchMethod::Local,
+            SearchMethod::Global,
+            SearchMethod::Drift,
+            SearchMethod::Basic,
+        ];
+        VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(match self {
+            Self::Global => PossibleValue::new("global").help("Global community map/reduce search"),
+            Self::Local => PossibleValue::new("local").help("Local graph-neighborhood search"),
+            Self::Drift => PossibleValue::new("drift").help("DRIFT exploratory search"),
+            Self::Basic => PossibleValue::new("basic").help("Basic text-unit vector search"),
+        })
+    }
 }
 
 impl std::fmt::Display for SearchMethod {

@@ -1,0 +1,75 @@
+{
+  "command": "query",
+  "about": "Query a knowledge graph index.",
+  "argument": {
+    "name": "query",
+    "required": true,
+    "help": "The query to execute."
+  },
+  "options": [
+    {
+      "name": "root",
+      "flags": ["-r", "--root"],
+      "required": false,
+      "default": ".",
+      "help": "The project root directory.",
+      "choices": []
+    },
+    {
+      "name": "method",
+      "flags": ["-m", "--method"],
+      "required": false,
+      "default": "global",
+      "help": "The query algorithm to use.",
+      "choices": ["local", "global", "drift", "basic"]
+    },
+    {
+      "name": "verbose",
+      "flags": ["-v", "--verbose"],
+      "required": false,
+      "default": false,
+      "help": "Run the query with verbose logging.",
+      "choices": []
+    },
+    {
+      "name": "data",
+      "flags": ["-d", "--data"],
+      "required": false,
+      "default": null,
+      "help": "Index output directory (contains the parquet files).",
+      "choices": []
+    },
+    {
+      "name": "community_level",
+      "flags": ["--community-level"],
+      "required": false,
+      "default": 2,
+      "help": "Leiden hierarchy level from which to load community reports. Higher values represent smaller communities.",
+      "choices": []
+    },
+    {
+      "name": "dynamic_community_selection",
+      "flags": ["--dynamic-community-selection", "--no-dynamic-selection"],
+      "required": false,
+      "default": false,
+      "help": "Use global search with dynamic community selection.",
+      "choices": []
+    },
+    {
+      "name": "response_type",
+      "flags": ["--response-type"],
+      "required": false,
+      "default": "Multiple Paragraphs",
+      "help": "Free-form description of the desired response format (e.g. 'Single Sentence', 'List of 3-7 Points', etc.).",
+      "choices": []
+    },
+    {
+      "name": "streaming",
+      "flags": ["--streaming", "--no-streaming"],
+      "required": false,
+      "default": false,
+      "help": "Print the response in a streaming manner.",
+      "choices": []
+    }
+  ]
+}

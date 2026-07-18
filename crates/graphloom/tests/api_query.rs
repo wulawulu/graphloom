@@ -10,10 +10,25 @@ use futures_util::StreamExt;
 use graphloom::{
     COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
-    api::{query, query_stream},
+    api::{
+        basic_search, basic_search_streaming, drift_search, drift_search_streaming, global_search,
+        global_search_streaming, local_search, local_search_streaming, query,
+        query::{
+            basic_search as module_basic_search,
+            basic_search_streaming as module_basic_search_streaming,
+            drift_search as module_drift_search,
+            drift_search_streaming as module_drift_search_streaming,
+            global_search as module_global_search,
+            global_search_streaming as module_global_search_streaming,
+            local_search as module_local_search,
+            local_search_streaming as module_local_search_streaming, query as module_query,
+            query_stream as module_query_stream,
+        },
+        query_stream,
+    },
     query::{
         MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
-        QueryError, QueryEvent, QueryOptions, SearchMethod,
+        QueryError, QueryEvent, QueryEventStream, QueryOptions, SearchMethod,
     },
 };
 use graphloom_llm::ModelConfig;
@@ -663,6 +678,16 @@ async fn fixture(server: &MockServer) -> QueryFixture {
     }
 }
 
+async fn recorded_request_bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .iter()
+        .map(|request| request.body_json::<Value>().expect("request JSON"))
+        .collect()
+}
+
 async fn file_hash(path: &Path) -> u64 {
     let bytes = tokio::fs::read(path).await.expect("artifact bytes");
     let mut hasher = DefaultHasher::new();
@@ -692,6 +717,152 @@ fn global_options(root: &Path, query_text: &str) -> QueryOptions {
         query_text.to_owned(),
         SearchMethod::Global,
     )
+}
+
+fn expect_stream_error(result: graphloom::Result<QueryEventStream>) -> GraphLoomError {
+    match result {
+        Ok(_) => panic!("expected Query stream startup error"),
+        Err(error) => error,
+    }
+}
+
+#[tokio::test]
+async fn test_should_export_all_query_apis_and_force_method_specific_dispatch() {
+    let project = TempDir::new().expect("project");
+    let config = GraphRagConfig::default();
+    let wrong_options =
+        |method| QueryOptions::new(project.path().to_path_buf(), "question".to_owned(), method);
+
+    let errors = [
+        basic_search(config.clone(), wrong_options(SearchMethod::Global))
+            .await
+            .expect_err("Basic method must load Basic resources"),
+        module_basic_search(config.clone(), wrong_options(SearchMethod::Local))
+            .await
+            .expect_err("module Basic method must load Basic resources"),
+        local_search(config.clone(), wrong_options(SearchMethod::Global))
+            .await
+            .expect_err("Local method must load Local resources"),
+        module_local_search(config.clone(), wrong_options(SearchMethod::Basic))
+            .await
+            .expect_err("module Local method must load Local resources"),
+        global_search(config.clone(), wrong_options(SearchMethod::Local))
+            .await
+            .expect_err("Global method must load Global resources"),
+        module_global_search(config.clone(), wrong_options(SearchMethod::Drift))
+            .await
+            .expect_err("module Global method must load Global resources"),
+        drift_search(config.clone(), wrong_options(SearchMethod::Basic))
+            .await
+            .expect_err("DRIFT method must load DRIFT resources"),
+        module_drift_search(config.clone(), wrong_options(SearchMethod::Global))
+            .await
+            .expect_err("module DRIFT method must load DRIFT resources"),
+    ];
+    for (error, method) in errors.into_iter().zip([
+        "basic", "basic", "local", "local", "global", "global", "drift", "drift",
+    ]) {
+        assert!(
+            error.to_string().starts_with(method)
+                || error.to_string().contains(&format!("for {method}")),
+            "{error}"
+        );
+    }
+
+    let stream_errors = [
+        expect_stream_error(
+            basic_search_streaming(config.clone(), wrong_options(SearchMethod::Global)).await,
+        ),
+        expect_stream_error(
+            module_basic_search_streaming(config.clone(), wrong_options(SearchMethod::Local)).await,
+        ),
+        expect_stream_error(
+            local_search_streaming(config.clone(), wrong_options(SearchMethod::Global)).await,
+        ),
+        expect_stream_error(
+            module_local_search_streaming(config.clone(), wrong_options(SearchMethod::Basic)).await,
+        ),
+        expect_stream_error(
+            global_search_streaming(config.clone(), wrong_options(SearchMethod::Local)).await,
+        ),
+        expect_stream_error(
+            module_global_search_streaming(config.clone(), wrong_options(SearchMethod::Drift))
+                .await,
+        ),
+        expect_stream_error(
+            drift_search_streaming(config.clone(), wrong_options(SearchMethod::Basic)).await,
+        ),
+        expect_stream_error(
+            module_drift_search_streaming(config.clone(), wrong_options(SearchMethod::Global))
+                .await,
+        ),
+    ];
+    for (error, method) in stream_errors.into_iter().zip([
+        "basic", "basic", "local", "local", "global", "global", "drift", "drift",
+    ]) {
+        assert!(
+            error.to_string().starts_with(method)
+                || error.to_string().contains(&format!("for {method}")),
+            "{error}"
+        );
+    }
+
+    module_query(config.clone(), wrong_options(SearchMethod::Basic))
+        .await
+        .expect_err("unified module API must dispatch Basic");
+    let _ =
+        expect_stream_error(module_query_stream(config, wrong_options(SearchMethod::Basic)).await);
+}
+
+#[tokio::test]
+async fn test_should_make_unified_and_method_specific_basic_requests_identical() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let options = basic_options(fixture.project.path(), "What are the facts?");
+
+    let method_result = basic_search(fixture.config.clone(), options.clone())
+        .await
+        .expect("method-specific Basic Query");
+    let unified_result = query(fixture.config.clone(), options.clone())
+        .await
+        .expect("unified Basic Query");
+    assert_eq!(method_result.response, unified_result.response);
+    let (QueryContextText::Text(method_context), QueryContextText::Text(unified_context)) =
+        (method_result.context.text, unified_result.context.text)
+    else {
+        panic!("expected Basic text contexts");
+    };
+    assert_eq!(method_context, unified_context);
+    assert_eq!(method_result.usage, unified_result.usage);
+
+    let mut method_events = basic_search_streaming(fixture.config.clone(), options.clone())
+        .await
+        .expect("method-specific Basic stream");
+    let mut unified_events = query_stream(fixture.config, options)
+        .await
+        .expect("unified Basic stream");
+    let mut method_tokens = Vec::new();
+    let mut unified_tokens = Vec::new();
+    while let Some(event) = method_events.next().await {
+        if let QueryEvent::Token(token) = event.expect("method stream event") {
+            method_tokens.push(token);
+        }
+    }
+    while let Some(event) = unified_events.next().await {
+        if let QueryEvent::Token(token) = event.expect("unified stream event") {
+            unified_tokens.push(token);
+        }
+    }
+    assert_eq!(method_tokens, unified_tokens);
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 8);
+    let bodies = requests
+        .iter()
+        .map(|request| request.body_json::<Value>().expect("request JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(&bodies[0..2], &bodies[2..4]);
+    assert_eq!(&bodies[4..6], &bodies[6..8]);
 }
 
 #[tokio::test]
@@ -826,14 +997,33 @@ async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors
         .expect("entity vector");
     let vector_ids = store.ids(&schema).await.expect("entity ids");
 
-    let result = query(
+    let mut method_options = local_options(fixture.project.path(), "Who is Alice?");
+    method_options.method = SearchMethod::Global;
+    let result = local_search(fixture.config.clone(), method_options)
+        .await
+        .expect("method-specific Local Query");
+    let method_request_bodies = recorded_request_bodies(&server).await;
+    let unified_result = query(
         fixture.config.clone(),
         local_options(fixture.project.path(), "Who is Alice?"),
     )
     .await
-    .expect("Local Query");
+    .expect("unified Local Query");
+    let all_non_stream_request_bodies = recorded_request_bodies(&server).await;
+    assert_eq!(
+        all_non_stream_request_bodies
+            .get(method_request_bodies.len()..)
+            .expect("unified Local request bodies"),
+        method_request_bodies.as_slice()
+    );
+    assert_eq!(unified_result.response, result.response);
+    assert_eq!(unified_result.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", unified_result.context),
+        format!("{:?}", result.context)
+    );
     assert_eq!(result.response, "Basic answer.");
-    let QueryContextText::Text(context) = result.context.text else {
+    let QueryContextText::Text(context) = &result.context.text else {
         panic!("expected Local context");
     };
     assert!(context.contains("-----Reports-----"));
@@ -850,12 +1040,23 @@ async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors
         .await
         .expect("Local stream");
     let mut chunks = Vec::new();
+    let mut completed = None;
     while let Some(event) = events.next().await {
-        if let QueryEvent::Token(token) = event.expect("Local stream event") {
-            chunks.push(token);
+        match event.expect("Local stream event") {
+            QueryEvent::Token(token) => chunks.push(token),
+            QueryEvent::Completed(stream_result) => completed = Some(stream_result),
+            QueryEvent::Context(_) => {}
+            _ => panic!("unexpected future Query event"),
         }
     }
     assert_eq!(chunks, ["Basic ", "answer."]);
+    let completed = completed.expect("Local completed result");
+    assert_eq!(completed.response, result.response);
+    assert_eq!(completed.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", completed.context),
+        format!("{:?}", result.context)
+    );
     assert_eq!(
         *callbacks.events.lock().expect("callback events"),
         ["context", "token:Basic ", "token:answer."]
@@ -886,7 +1087,7 @@ async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors
         .filter_map(|request| request.body_json::<Value>().ok())
         .filter(|body| body.get("messages").is_some())
         .collect::<Vec<_>>();
-    assert_eq!(completions.len(), 2);
+    assert_eq!(completions.len(), 3);
     assert!(completions.iter().all(|request| request["stream"] == true));
     assert!(completions.iter().all(|request| {
         request["messages"][0]["content"]
@@ -966,9 +1167,27 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .callbacks
         .push(non_stream_callbacks.clone());
 
-    let result = query(fixture.config.clone(), non_stream_options)
+    non_stream_options.method = SearchMethod::Basic;
+    let result = drift_search(fixture.config.clone(), non_stream_options)
         .await
-        .expect("DRIFT Query");
+        .expect("method-specific DRIFT Query");
+    let method_request_bodies = recorded_request_bodies(&server).await;
+    let unified_result = query(fixture.config.clone(), options.clone())
+        .await
+        .expect("unified DRIFT Query");
+    let all_non_stream_request_bodies = recorded_request_bodies(&server).await;
+    assert_eq!(
+        all_non_stream_request_bodies
+            .get(method_request_bodies.len()..)
+            .expect("unified DRIFT request bodies"),
+        method_request_bodies.as_slice()
+    );
+    assert_eq!(unified_result.response, result.response);
+    assert_eq!(unified_result.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", unified_result.context),
+        format!("{:?}", result.context)
+    );
 
     assert_eq!(result.response, "DRIFT final.");
     assert_eq!(
@@ -1017,6 +1236,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .expect("DRIFT stream");
     let mut order = Vec::new();
     let mut public_chunks = Vec::new();
+    let mut completed = None;
     while let Some(event) = events.next().await {
         match event.expect("DRIFT event") {
             QueryEvent::Context(_) => order.push("context"),
@@ -1024,15 +1244,23 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
                 order.push("token");
                 public_chunks.push(token);
             }
-            QueryEvent::Completed(result) => {
+            QueryEvent::Completed(stream_result) => {
                 order.push("completed");
-                assert_eq!(result.response, "DRIFT final.");
+                assert_eq!(stream_result.response, "DRIFT final.");
+                completed = Some(stream_result);
             }
             _ => panic!("unexpected DRIFT event"),
         }
     }
     assert_eq!(public_chunks.concat(), "DRIFT final.");
     assert_eq!(order, ["context", "token", "token", "completed"]);
+    let completed = completed.expect("DRIFT completed result");
+    assert_eq!(completed.response, result.response);
+    assert_eq!(completed.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", completed.context),
+        format!("{:?}", result.context)
+    );
     {
         let callback_events = callbacks.events.lock().expect("DRIFT callbacks");
         assert_eq!(
@@ -1097,8 +1325,8 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .iter()
         .filter(|body| body.get("messages").is_some())
         .collect::<Vec<_>>();
-    assert_eq!(embeddings.len(), 4);
-    assert_eq!(completions.len(), 8);
+    assert_eq!(embeddings.len(), 6);
+    assert_eq!(completions.len(), 12);
     let assert_model_call_args = |body: &&Value| {
         assert_eq!(body["max_tokens"], 64);
         assert_eq!(body["seed"], 42);
@@ -1116,7 +1344,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
                 .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(hyde.len(), 2);
+    assert_eq!(hyde.len(), 3);
     assert!(hyde.iter().all(|body| {
         body["max_completion_tokens"] == 128
             && body["stream"] == false
@@ -1126,7 +1354,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .iter()
         .filter(|body| body["response_format"]["type"] == "json_schema")
         .collect::<Vec<_>>();
-    assert_eq!(primer.len(), 2);
+    assert_eq!(primer.len(), 3);
     assert!(
         primer
             .iter()
@@ -1136,7 +1364,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .iter()
         .filter(|body| body["response_format"]["type"] == "json_object")
         .collect::<Vec<_>>();
-    assert_eq!(actions.len(), 2);
+    assert_eq!(actions.len(), 3);
     assert!(actions.iter().all(|body| {
         body["max_completion_tokens"]
             == json!(
@@ -1159,7 +1387,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
                     .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(reduce.len(), 2);
+    assert_eq!(reduce.len(), 3);
     assert!(reduce.iter().all(|body| {
         body["max_completion_tokens"]
             == json!(fixture.config.drift_search.reduce_max_completion_tokens)
@@ -1170,7 +1398,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
             .iter()
             .map(|body| body["stream"].as_bool().expect("reduce stream flag"))
             .collect::<Vec<_>>(),
-        [false, true]
+        [false, false, true]
     );
     assert!(reduce.iter().all(|body| {
         body["messages"][0]["content"]
@@ -1239,12 +1467,31 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
         .display()
         .to_string();
 
-    let result = query(
+    let mut method_options = global_options(project.path(), "What are the themes?");
+    method_options.method = SearchMethod::Local;
+    let result = global_search(config.clone(), method_options)
+        .await
+        .expect("method-specific Global Query");
+    let method_request_bodies = recorded_request_bodies(&server).await;
+    let unified_result = query(
         config.clone(),
         global_options(project.path(), "What are the themes?"),
     )
     .await
-    .expect("Global Query");
+    .expect("unified Global Query");
+    let all_non_stream_request_bodies = recorded_request_bodies(&server).await;
+    assert_eq!(
+        all_non_stream_request_bodies
+            .get(method_request_bodies.len()..)
+            .expect("unified Global request bodies"),
+        method_request_bodies.as_slice()
+    );
+    assert_eq!(unified_result.response, result.response);
+    assert_eq!(unified_result.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", unified_result.context),
+        format!("{:?}", result.context)
+    );
     assert_eq!(result.response, "Global answer.");
     let QueryContextText::Composite(text) = &result.context.text else {
         panic!("expected composite Global context");
@@ -1273,12 +1520,23 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
         .await
         .expect("Global stream");
     let mut chunks = Vec::new();
+    let mut completed = None;
     while let Some(event) = events.next().await {
-        if let QueryEvent::Token(token) = event.expect("Global stream event") {
-            chunks.push(token);
+        match event.expect("Global stream event") {
+            QueryEvent::Token(token) => chunks.push(token),
+            QueryEvent::Completed(stream_result) => completed = Some(stream_result),
+            QueryEvent::Context(_) => {}
+            _ => panic!("unexpected future Query event"),
         }
     }
     assert_eq!(chunks, ["Global ", "answer."]);
+    let completed = completed.expect("Global completed result");
+    assert_eq!(completed.response, result.response);
+    assert_eq!(completed.usage, result.usage);
+    assert_eq!(
+        format!("{:?}", completed.context),
+        format!("{:?}", result.context)
+    );
     assert_eq!(
         *callbacks.events.lock().expect("Global callback events"),
         [
@@ -1306,7 +1564,7 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
     assert!(!project.path().join("must-not-open-lancedb").exists());
     assert!(!project.path().join("cache").exists());
     let requests = server.received_requests().await.expect("Global requests");
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 6);
     let bodies = requests
         .iter()
         .map(|request| request.body_json::<Value>().expect("request JSON"))
@@ -1318,7 +1576,7 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
     );
     assert_eq!(
         bodies.iter().filter(|body| body["stream"] == false).count(),
-        2
+        3
     );
     assert!(
         bodies
@@ -1328,7 +1586,7 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
     );
     assert_eq!(
         bodies.iter().filter(|body| body["stream"] == true).count(),
-        2
+        3
     );
     assert!(bodies.iter().all(|body| {
         body["temperature"] == 0.0

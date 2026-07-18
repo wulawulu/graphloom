@@ -20,6 +20,11 @@ from typing import Any
 import pytest
 import pandas as pd
 import graphrag
+import graphrag.cli.main as cli_main_module
+import graphrag.cli.query as cli_query_module
+from click import Context
+from typer.main import get_command
+from typer.testing import CliRunner
 from graphrag.data_model.community_report import CommunityReport
 from graphrag.data_model.community import Community
 from graphrag.data_model.covariate import Covariate
@@ -101,6 +106,11 @@ DRIFT_HYDE_PROMPT = (
     .read_text(encoding="utf-8")
     .removesuffix("\n")
 )
+QUERY_CLI_CONTRACT = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "query" / "query_cli_contract.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -123,6 +133,8 @@ def require_isolated_graphrag_distribution() -> None:
     drift_context_path = Path(inspect.getfile(DRIFTSearchContextBuilder)).resolve()
     drift_primer_path = Path(inspect.getfile(DRIFTPrimer)).resolve()
     drift_state_path = Path(inspect.getfile(QueryState)).resolve()
+    cli_main_path = Path(inspect.getfile(cli_main_module)).resolve()
+    cli_query_path = Path(inspect.getfile(cli_query_module)).resolve()
     module_paths = [
         package_path,
         local_path,
@@ -131,6 +143,8 @@ def require_isolated_graphrag_distribution() -> None:
         drift_context_path,
         drift_primer_path,
         drift_state_path,
+        cli_main_path,
+        cli_query_path,
     ]
     configured_roots = {
         Path(value).resolve()
@@ -166,11 +180,15 @@ def require_isolated_graphrag_distribution() -> None:
         f"DRIFTSearchContextBuilder path: {drift_context_path}\n"
         f"DRIFTPrimer path: {drift_primer_path}\n"
         f"QueryState path: {drift_state_path}\n"
+        f"CLI main module path: {cli_main_path}\n"
+        f"CLI query module path: {cli_query_path}\n"
         f"distribution package path: {installed_package}\n"
         f"direct_url.json: {direct_url}\n"
         f"site-package roots: {sorted(map(str, configured_roots))}\n"
         f"sys.path: {sys.path}"
     )
+    # Compatibility runs intentionally expose their installed-package provenance.
+    print(diagnostic)  # noqa: T201
     assert version == "3.1.0", diagnostic
     assert not editable and not local_direct_url, diagnostic
     assert not from_neighboring_source, diagnostic
@@ -193,6 +211,151 @@ class ByteTokenizer:
 def test_should_load_pypi_graphrag_3_1_0_from_isolated_environment() -> None:
     """Expose the distribution assertion as an explicit compatibility test."""
     assert importlib.metadata.version("graphrag") == "3.1.0"
+
+
+def _canonical_flags(primary: list[str], secondary: list[str]) -> list[str]:
+    """Put short aliases first while retaining positive/negative flag order."""
+    flags = [*primary, *secondary]
+    return sorted(flags, key=lambda flag: flag.startswith("--"))
+
+
+def _normalize_default(name: str, value: Any) -> Any:
+    """Remove process-CWD variability from GraphRAG's root default."""
+    return "." if name == "root" else value
+
+
+def _query_cli_contract() -> dict[str, Any]:
+    """Extract framework-neutral metadata from GraphRAG's real Click command."""
+    root_command = get_command(cli_main_module.app)
+    query_command = root_command.commands["query"]
+    context = Context(query_command, info_name="query")
+    argument, *options = query_command.params
+
+    return {
+        "command": query_command.name,
+        "about": query_command.help,
+        "argument": {
+            "name": argument.name,
+            "required": argument.required,
+            "help": argument.help,
+        },
+        "options": [
+            {
+                "name": option.name,
+                "flags": _canonical_flags(option.opts, option.secondary_opts),
+                "required": option.required,
+                "default": _normalize_default(
+                    option.name,
+                    option.get_default(context),
+                ),
+                "help": option.help,
+                "choices": list(getattr(option.type, "choices", ()) or ()),
+            }
+            for option in options
+        ],
+    }
+
+
+def test_graphrag_3_1_query_cli_contract_golden() -> None:
+    """Lock positional/options order, defaults, help, flags, and method choices."""
+    assert _query_cli_contract() == QUERY_CLI_CONTRACT
+
+
+def test_graphrag_3_1_query_positional_is_required() -> None:
+    """Lock the real command's missing-positional usage failure."""
+    result = CliRunner().invoke(cli_main_module.app, ["query"])
+
+    assert result.exit_code == 2
+    assert "Missing argument" in result.output
+
+
+@pytest.mark.parametrize("method", ["local", "global", "drift", "basic"])
+def test_graphrag_3_1_query_dispatches_named_method(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    """Lock all four public CLI dispatch names without calling a provider."""
+    calls: list[str] = []
+    for name in ["local", "global", "drift", "basic"]:
+        monkeypatch.setattr(
+            cli_query_module,
+            f"run_{name}_search",
+            lambda *, _name=name, **_kwargs: calls.append(_name),
+        )
+
+    result = CliRunner().invoke(
+        cli_main_module.app,
+        ["query", "--method", method, "--dynamic-community-selection", "question"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [method]
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], False),
+        (["--streaming"], True),
+        (["--no-streaming"], False),
+        (["--streaming", "--no-streaming"], False),
+        (["--no-streaming", "--streaming"], True),
+    ],
+)
+def test_graphrag_3_1_streaming_boolean_pair_last_flag_wins(
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    expected: bool,
+) -> None:
+    """Lock Click's observable positive/negative streaming flag semantics."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli_query_module,
+        "run_global_search",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    result = CliRunner().invoke(cli_main_module.app, ["query", *flags, "question"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["streaming"] is expected
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], False),
+        (["--dynamic-community-selection"], True),
+        (["--no-dynamic-selection"], False),
+        (
+            ["--dynamic-community-selection", "--no-dynamic-selection"],
+            False,
+        ),
+        (
+            ["--no-dynamic-selection", "--dynamic-community-selection"],
+            True,
+        ),
+    ],
+)
+def test_graphrag_3_1_dynamic_boolean_pair_last_flag_wins(
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    expected: bool,
+) -> None:
+    """Lock Click's observable dynamic-selection flag semantics."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli_query_module,
+        "run_global_search",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    result = CliRunner().invoke(cli_main_module.app, ["query", *flags, "question"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["dynamic_community_selection"] is expected
 
 
 class RecordingEmbedding:

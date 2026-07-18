@@ -12,7 +12,10 @@ use std::{
 };
 
 use assert_cmd::Command;
-use graphloom::{ALL_EMBEDDINGS, GraphRagConfig};
+use graphloom::{
+    ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphRagConfig,
+    TEXT_UNIT_TEXT_EMBEDDING,
+};
 use graphloom_llm::{
     CachedModelResult, ChatMessage, CompletionRequest, CompletionResponse, EmbeddingRequest,
     EmbeddingResponse, completion_request_cache_key, embedding_request_cache_key,
@@ -31,6 +34,113 @@ use wiremock::{
 };
 
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn test_should_match_complete_query_help_snapshot() {
+    let output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args(["query", "--help"])
+        .output()
+        .expect("query help");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let actual = normalize_help_text(&output.stdout);
+    let expected = include_str!("fixtures/cli/query_help.txt").replace("\r\n", "\n");
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_should_return_exact_query_cli_exit_codes() {
+    let parse_root = TempDir::new().expect("parse root");
+    for arguments in [
+        vec!["query"],
+        vec!["query", "--method", "invalid", "question"],
+        vec!["query", "--unknown", "question"],
+        vec!["query", "--root"],
+    ] {
+        let output = Command::cargo_bin("graphloom")
+            .expect("binary")
+            .args(arguments)
+            .current_dir(parse_root.path())
+            .output()
+            .expect("Clap error");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = normalize_cli_text(&output.stderr);
+        assert!(
+            stderr.contains("error:") && stderr.contains("--help"),
+            "stderr was {}",
+            stderr
+        );
+    }
+    assert!(!parse_root.path().join("logs").exists());
+
+    let missing_settings = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            parse_root.path().to_str().expect("UTF-8 root"),
+            "question",
+        ])
+        .output()
+        .expect("missing settings");
+    assert_eq!(missing_settings.status.code(), Some(1));
+    assert!(missing_settings.stdout.is_empty());
+    assert!(normalize_cli_text(&missing_settings.stderr).contains("no settings"));
+    assert!(!parse_root.path().join("logs").exists());
+
+    let invalid_config_root = TempDir::new().expect("invalid config root");
+    init_project(invalid_config_root.path());
+    tokio::fs::write(
+        invalid_config_root.path().join("settings.yaml"),
+        "completion_models: [invalid",
+    )
+    .await
+    .expect("invalid settings");
+    let invalid_config = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            invalid_config_root.path().to_str().expect("UTF-8 root"),
+            "question",
+        ])
+        .output()
+        .expect("invalid configuration");
+    assert_eq!(invalid_config.status.code(), Some(1));
+    assert!(invalid_config.stdout.is_empty());
+    assert!(normalize_cli_text(&invalid_config.stderr).contains("failed to parse"));
+
+    let runtime_root = TempDir::new().expect("runtime root");
+    init_project(runtime_root.path());
+    let output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            runtime_root.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "basic",
+            "question",
+        ])
+        .output()
+        .expect("runtime error");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(stderr.contains("requires table text_units"));
+    assert!(!stderr.contains("Usage:"));
+    let log = tokio::fs::read_to_string(runtime_root.path().join("logs").join("query.log"))
+        .await
+        .expect("query failure log");
+    assert!(log.contains("query run started"));
+    assert!(log.contains("query run failed"));
+    assert!(log.contains("method=basic"));
+    assert!(log.contains("streaming=false"));
+    assert!(log.contains("error_category=\"query\""));
+}
 
 #[tokio::test]
 async fn test_should_flush_first_cli_stream_chunk_before_provider_finishes() {
@@ -91,6 +201,153 @@ async fn test_should_flush_first_cli_stream_chunk_before_provider_finishes() {
     first_stdout.extend(stdout_rest);
     assert_eq!(first_stdout, b"Basic answer.\n");
     assert!(stderr_bytes.is_empty());
+}
+
+#[tokio::test]
+async fn test_should_preserve_partial_stream_and_fail_without_terminal_newline() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(partial_failure_stream_response())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let project = TempDir::new().expect("project");
+    init_project(project.path());
+    tokio::fs::write(
+        project.path().join(".env"),
+        "GRAPHRAG_API_KEY=partial-stream-secret\n",
+    )
+    .await
+    .expect("env");
+    patch_settings(project.path(), &server.uri()).await;
+    write_minimal_query_index(project.path()).await;
+
+    let output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "basic",
+            "--streaming",
+            "PARTIAL_STREAM_QUERY_SENTINEL",
+        ])
+        .output()
+        .expect("partial stream Query");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(normalize_cli_text(&output.stdout), "Basic ");
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(stderr.contains("query completion model"));
+    assert!(!stderr.contains("Completed"));
+    assert!(!stderr.contains("partial-stream-secret"));
+    assert!(!stderr.contains("Authorization"));
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("failure log");
+    assert!(log.contains("query run failed"));
+    assert!(!log.contains("query run completed"));
+    assert!(!log.contains("partial-stream-secret"));
+    assert!(!log.contains("PARTIAL_STREAM_QUERY_SENTINEL"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_return_one_for_query_stdout_io_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let project = TempDir::new().expect("project");
+    init_project(project.path());
+    tokio::fs::write(project.path().join(".env"), "GRAPHRAG_API_KEY=io-secret\n")
+        .await
+        .expect("env");
+    patch_settings(project.path(), &server.uri()).await;
+    write_minimal_query_index(project.path()).await;
+    let full = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .await
+        .expect("/dev/full")
+        .into_std()
+        .await;
+    let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("graphloom"))
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "basic",
+            "question",
+        ])
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdout failure Query");
+    let mut stderr = child.stderr.take().expect("stderr");
+    let mut stderr_bytes = Vec::new();
+    let (read_result, status) = tokio::join!(stderr.read_to_end(&mut stderr_bytes), child.wait());
+    read_result.expect("read stderr");
+    let status = status.expect("Query status");
+
+    assert_eq!(status.code(), Some(1));
+    let stderr = normalize_cli_text(&stderr_bytes);
+    assert!(
+        stderr.contains("Query stdout")
+            || stderr.contains("Query response")
+            || stderr.contains("Query terminal newline"),
+        "unexpected stderr: {stderr}",
+    );
+    assert!(!stderr.contains("io-secret"));
+}
+
+fn normalize_cli_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    let mut normalized = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            normalized.push(character);
+            continue;
+        }
+        if characters.next() != Some('[') {
+            continue;
+        }
+        for suffix in characters.by_ref() {
+            if suffix.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    normalized
+}
+
+fn normalize_help_text(bytes: &[u8]) -> String {
+    let normalized = normalize_cli_text(bytes);
+    let had_terminal_newline = normalized.ends_with('\n');
+    let mut normalized = normalized
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_terminal_newline {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 #[tokio::test]
@@ -165,7 +422,7 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
             .args(arguments)
             .assert()
             .success()
-            .stdout("I am sorry but I am unable to answer this question given the provided data.\n")
+            .stdout("Global answer.\n")
             .stderr(predicate::str::is_empty());
     }
 
@@ -198,6 +455,17 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         .write_dataframe("text_units", overridden)
         .await
         .expect("override text units");
+    let override_table = override_root.join("text_units.parquet");
+    let override_before = (
+        tokio::fs::read(&override_table)
+            .await
+            .expect("override bytes"),
+        tokio::fs::metadata(&override_table)
+            .await
+            .expect("override metadata")
+            .modified()
+            .expect("override mtime"),
+    );
     Command::cargo_bin("graphloom")
         .expect("binary")
         .args([
@@ -213,6 +481,69 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
         .assert()
         .success()
         .stdout("Basic answer.\n");
+    Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "--data",
+            "alternate_tables",
+            "facts",
+        ])
+        .assert()
+        .success()
+        .stdout("Basic answer.\n")
+        .stderr(predicate::str::is_empty());
+    let missing_override = tempdir.path().join("missing_alternate_tables");
+    let missing_output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "--data",
+            missing_override.to_str().expect("UTF-8 missing data root"),
+            "facts",
+        ])
+        .output()
+        .expect("missing data Query");
+    assert_eq!(missing_output.status.code(), Some(1));
+    assert!(missing_output.stdout.is_empty());
+    assert!(normalize_cli_text(&missing_output.stderr).contains("requires table text_units"));
+    assert!(!missing_override.exists());
+    assert!(!override_root.join("lancedb").exists());
+    assert_eq!(
+        tokio::fs::read(&override_table)
+            .await
+            .expect("override bytes after"),
+        override_before.0
+    );
+    assert_eq!(
+        tokio::fs::metadata(&override_table)
+            .await
+            .expect("override metadata after")
+            .modified()
+            .expect("override mtime after"),
+        override_before.1
+    );
+    let mut override_entries = tokio::fs::read_dir(&override_root)
+        .await
+        .expect("override directory");
+    let mut override_entry_count = 0_usize;
+    while override_entries
+        .next_entry()
+        .await
+        .expect("override directory entry")
+        .is_some()
+    {
+        override_entry_count = override_entry_count.saturating_add(1);
+    }
+    assert_eq!(override_entry_count, 1);
     let requests = server.received_requests().await.expect("requests");
     assert!(requests.iter().any(|request| {
         request
@@ -227,10 +558,19 @@ async fn test_should_run_basic_query_cli_stream_and_data_override_read_only() {
                 })
             })
     }));
+    let query_log = tokio::fs::read_to_string(tempdir.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert!(!query_log.contains("DATA_OVERRIDE_MARKER"));
 }
 
 #[tokio::test]
-async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CLI dispatch matrix keeps cross-method output, provider, logging, and read-only \
+              assertions in one shared-index scenario"
+)]
+async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -242,10 +582,307 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
         .respond_with(embedding_responder)
         .mount(&server)
         .await;
+    let project = TempDir::new().expect("project");
+    run_minimal_standard_index(project.path(), &server.uri()).await;
+    let original_settings = tokio::fs::read_to_string(project.path().join("settings.yaml"))
+        .await
+        .expect("settings");
+    let vector_fixture = TempDir::new().expect("method vector fixture");
+    let basic_vector_db = vector_fixture.path().join("basic");
+    let local_vector_db = vector_fixture.path().join("local");
+    let drift_vector_db = vector_fixture.path().join("drift");
+    let global_vector_db = vector_fixture.path().join("must-not-open");
+    let basic_vector_ids = copy_vector_indices(
+        project.path(),
+        &basic_vector_db,
+        &[TEXT_UNIT_TEXT_EMBEDDING],
+    )
+    .await;
+    let local_vector_ids = copy_vector_indices(
+        project.path(),
+        &local_vector_db,
+        &[ENTITY_DESCRIPTION_EMBEDDING],
+    )
+    .await;
+    let drift_vector_ids = copy_vector_indices(
+        project.path(),
+        &drift_vector_db,
+        &[
+            ENTITY_DESCRIPTION_EMBEDDING,
+            COMMUNITY_FULL_CONTENT_EMBEDDING,
+        ],
+    )
+    .await;
+    let parquet_before = parquet_artifact_snapshot(project.path()).await;
+    let vector_ids_before = managed_vector_ids(project.path()).await;
+    let cache = FileStorage::existing(project.path().join("cache")).expect("cache");
+    let cache_before = cache.list("").await.expect("cache before");
+    let indexing_log_path = project.path().join("logs").join("indexing-engine.log");
+    let indexing_log_before = tokio::fs::read(&indexing_log_path)
+        .await
+        .expect("indexing log");
+    let indexing_log_mtime = tokio::fs::metadata(&indexing_log_path)
+        .await
+        .expect("indexing log metadata")
+        .modified()
+        .expect("indexing log mtime");
+    assert!(!project.path().join("logs").join("index.log").exists());
+
+    let query_sentinel = "QUERY_SENTINEL_SHOULD_NOT_REACH_LOGS";
+    for (method_name, answer, prompt_marker) in [
+        ("basic", "Basic answer.\n", "primary context"),
+        (
+            "local",
+            "Local answer.\n",
+            "incorporating any relevant general knowledge",
+        ),
+        (
+            "global",
+            "Global answer.\n",
+            "dataset by synthesizing perspectives",
+        ),
+        ("drift", "DRIFT answer.\n", "data in the reports provided"),
+    ] {
+        for streaming in [false, true] {
+            let method_vector_db = match method_name {
+                "basic" => &basic_vector_db,
+                "local" => &local_vector_db,
+                "drift" => &drift_vector_db,
+                "global" => &global_vector_db,
+                other => panic!("unexpected Query method {other}"),
+            };
+            set_query_vector_db(project.path(), &original_settings, method_vector_db).await;
+            let allowed_tables = match method_name {
+                "basic" => &["text_units"][..],
+                "global" => &["entities", "communities", "community_reports"][..],
+                "local" | "drift" => &[
+                    "entities",
+                    "communities",
+                    "community_reports",
+                    "text_units",
+                    "relationships",
+                    "covariates",
+                ][..],
+                other => panic!("unexpected Query method {other}"),
+            };
+            let hidden_tables = hide_unneeded_parquet(project.path(), allowed_tables).await;
+            let request_offset = server
+                .received_requests()
+                .await
+                .expect("requests before Query")
+                .len();
+            let mut arguments = vec![
+                "query",
+                "--root",
+                project.path().to_str().expect("UTF-8 root"),
+                "--method",
+                method_name,
+            ];
+            if streaming {
+                arguments.push("--streaming");
+            }
+            arguments.push(query_sentinel);
+            let output = Command::cargo_bin("graphloom")
+                .expect("binary")
+                .args(arguments)
+                .output()
+                .expect("Query command");
+            restore_hidden_parquet(&hidden_tables).await;
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{method_name} streaming={streaming}: {}",
+                normalize_cli_text(&output.stderr)
+            );
+            assert_eq!(normalize_cli_text(&output.stdout), answer);
+            assert!(output.stderr.is_empty());
+
+            let requests = server.received_requests().await.expect("Query requests");
+            let query_requests = requests.get(request_offset..).expect("new Query requests");
+            assert!(!query_requests.is_empty());
+            assert!(
+                query_requests
+                    .iter()
+                    .filter_map(|request| request.body_json::<Value>().ok())
+                    .any(|body| {
+                        body["messages"]
+                            .as_array()
+                            .and_then(|messages| messages.first())
+                            .and_then(|message| message["content"].as_str())
+                            .is_some_and(|content| content.contains(prompt_marker))
+                    }),
+                "{method_name} did not send its method prompt"
+            );
+            if method_name == "global" {
+                assert!(!query_requests.iter().any(is_dynamic_rating_request));
+                assert!(
+                    !query_requests
+                        .iter()
+                        .any(|request| request.url.path().contains("embeddings"))
+                );
+            } else {
+                assert!(
+                    query_requests
+                        .iter()
+                        .any(|request| request.url.path().contains("embeddings"))
+                );
+            }
+        }
+    }
+
+    for streaming in [false, true] {
+        set_query_vector_db(project.path(), &original_settings, &global_vector_db).await;
+        let hidden_tables = hide_unneeded_parquet(
+            project.path(),
+            &["entities", "communities", "community_reports"],
+        )
+        .await;
+        let dynamic_offset = server
+            .received_requests()
+            .await
+            .expect("requests before Dynamic Global")
+            .len();
+        let mut arguments = vec![
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "global",
+            "--dynamic-community-selection",
+        ];
+        if streaming {
+            arguments.push("--streaming");
+        }
+        arguments.push(query_sentinel);
+        let dynamic_output = Command::cargo_bin("graphloom")
+            .expect("binary")
+            .args(arguments)
+            .output()
+            .expect("Dynamic Global Query");
+        restore_hidden_parquet(&hidden_tables).await;
+        assert_eq!(dynamic_output.status.code(), Some(0));
+        assert_eq!(
+            normalize_cli_text(&dynamic_output.stdout),
+            "Global answer.\n"
+        );
+        assert!(dynamic_output.stderr.is_empty());
+        let requests = server.received_requests().await.expect("Dynamic requests");
+        let dynamic_requests = requests
+            .get(dynamic_offset..)
+            .expect("new Dynamic Global requests");
+        assert!(dynamic_requests.iter().any(is_dynamic_rating_request));
+        assert!(
+            !dynamic_requests
+                .iter()
+                .any(|request| request.url.path().contains("embeddings"))
+        );
+    }
+
+    set_query_vector_db(project.path(), &original_settings, &basic_vector_db).await;
+    let verbose_output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "basic",
+            "--verbose",
+            query_sentinel,
+        ])
+        .output()
+        .expect("verbose Basic Query");
+    assert_eq!(verbose_output.status.code(), Some(0));
+    assert_eq!(
+        normalize_cli_text(&verbose_output.stdout),
+        "Basic answer.\n"
+    );
+    let verbose_stderr = normalize_cli_text(&verbose_output.stderr);
+    assert!(!verbose_stderr.is_empty());
+    assert!(!verbose_stderr.contains("Basic answer."));
+    assert!(!verbose_stderr.contains("test-key"));
+    assert!(!verbose_stderr.contains("Authorization"));
+    assert!(!verbose_stderr.contains(query_sentinel));
+
+    tokio::fs::write(project.path().join("settings.yaml"), &original_settings)
+        .await
+        .expect("restore settings");
+    assert_eq!(
+        parquet_artifact_snapshot(project.path()).await,
+        parquet_before
+    );
+    assert_eq!(managed_vector_ids(project.path()).await, vector_ids_before);
+    assert_vector_indices_unchanged(&original_settings, &basic_vector_db, &basic_vector_ids).await;
+    assert_vector_indices_unchanged(&original_settings, &local_vector_db, &local_vector_ids).await;
+    assert_vector_indices_unchanged(&original_settings, &drift_vector_db, &drift_vector_ids).await;
+    assert!(!global_vector_db.exists());
+    assert_eq!(cache.list("").await.expect("cache after"), cache_before);
+    assert_eq!(
+        tokio::fs::read(&indexing_log_path)
+            .await
+            .expect("indexing log after Query"),
+        indexing_log_before
+    );
+    assert_eq!(
+        tokio::fs::metadata(&indexing_log_path)
+            .await
+            .expect("indexing log metadata after Query")
+            .modified()
+            .expect("indexing log mtime after Query"),
+        indexing_log_mtime
+    );
+    assert!(!project.path().join("logs").join("index.log").exists());
+
+    let query_log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert_eq!(query_log.matches("query run started").count(), 11);
+    assert_eq!(query_log.matches("query run completed").count(), 11);
+    for method_name in ["basic", "local", "global", "drift"] {
+        assert!(query_log.contains(&format!("method={method_name} streaming=false")));
+        assert!(query_log.contains(&format!("method={method_name} streaming=true")));
+    }
+    for usage_field in ["elapsed_ms", "llm_calls", "prompt_tokens", "output_tokens"] {
+        assert!(query_log.contains(usage_field));
+    }
+    assert!(!query_log.contains("test-key"));
+    assert!(!query_log.contains("Authorization"));
+    assert!(!query_log.contains(query_sentinel));
+    assert!(!query_log.contains("Alice works for Acme"));
+}
+
+fn is_dynamic_rating_request(request: &Request) -> bool {
+    request
+        .body_json::<Value>()
+        .ok()
+        .and_then(|body| {
+            body["messages"]
+                .as_array()
+                .and_then(|messages| messages.first())
+                .and_then(|message| message["content"].as_str().map(str::to_owned))
+        })
+        .is_some_and(|content| {
+            content.contains("deciding whether the provided information is useful")
+        })
+}
+
+#[tokio::test]
+async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder_with_drift_parse_failure)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
     let tempdir = TempDir::new().expect("tempdir");
     run_minimal_standard_index(tempdir.path(), &server.uri()).await;
 
-    Command::cargo_bin("graphloom")
+    let drift_output = Command::cargo_bin("graphloom")
         .expect("binary")
         .args([
             "query",
@@ -255,16 +892,18 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
             "drift",
             "facts",
         ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("query parse failed for drift"));
+        .output()
+        .expect("DRIFT parse error");
+    assert_eq!(drift_output.status.code(), Some(1));
+    assert!(drift_output.stdout.is_empty());
+    assert!(normalize_cli_text(&drift_output.stderr).contains("query parse failed for drift"));
 
     let table_path = tempdir.path().join("output").join("text_units.parquet");
     let table_bytes = tokio::fs::read(&table_path).await.expect("table bytes");
     tokio::fs::remove_file(&table_path)
         .await
         .expect("remove text units");
-    Command::cargo_bin("graphloom")
+    let table_output = Command::cargo_bin("graphloom")
         .expect("binary")
         .args([
             "query",
@@ -274,18 +913,20 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
             "basic",
             "facts",
         ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("requires table text_units"));
+        .output()
+        .expect("missing table error");
+    assert_eq!(table_output.status.code(), Some(1));
+    assert!(table_output.stdout.is_empty());
+    assert!(normalize_cli_text(&table_output.stderr).contains("requires table text_units"));
     tokio::fs::write(&table_path, table_bytes)
         .await
         .expect("restore text units");
 
     let settings_path = tempdir.path().join("settings.yaml");
-    let settings = tokio::fs::read_to_string(&settings_path)
+    let original_settings = tokio::fs::read_to_string(&settings_path)
         .await
         .expect("settings");
-    let settings = settings.replace(
+    let settings = original_settings.replace(
         "  vector_size: 4",
         concat!(
             "  vector_size: 4\n",
@@ -295,10 +936,10 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
             "      vector_size: 4"
         ),
     );
-    tokio::fs::write(settings_path, settings)
+    tokio::fs::write(&settings_path, settings)
         .await
         .expect("settings with missing index");
-    Command::cargo_bin("graphloom")
+    let vector_output = Command::cargo_bin("graphloom")
         .expect("binary")
         .args([
             "query",
@@ -308,11 +949,77 @@ async fn test_should_fail_cli_query_with_typed_resource_and_method_errors() {
             "basic",
             "facts",
         ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "requires vector index missing_text_unit_text",
-        ));
+        .output()
+        .expect("missing vector error");
+    assert_eq!(vector_output.status.code(), Some(1));
+    assert!(vector_output.stdout.is_empty());
+    assert!(
+        normalize_cli_text(&vector_output.stderr)
+            .contains("requires vector index missing_text_unit_text")
+    );
+
+    tokio::fs::write(&settings_path, &original_settings)
+        .await
+        .expect("restore settings");
+    let prompt_path = tempdir
+        .path()
+        .join("prompts")
+        .join("basic_search_system_prompt.txt");
+    let prompt = tokio::fs::read(&prompt_path).await.expect("Basic prompt");
+    tokio::fs::remove_file(&prompt_path)
+        .await
+        .expect("remove Basic prompt");
+    let prompt_output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "facts",
+        ])
+        .output()
+        .expect("missing prompt error");
+    assert_eq!(prompt_output.status.code(), Some(1));
+    assert!(prompt_output.stdout.is_empty());
+    assert!(normalize_cli_text(&prompt_output.stderr).contains("query prompt"));
+    tokio::fs::write(&prompt_path, prompt)
+        .await
+        .expect("restore Basic prompt");
+
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"error": {"message": "authentication failed"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let provider_output = Command::cargo_bin("graphloom")
+        .expect("binary")
+        .args([
+            "query",
+            "--root",
+            tempdir.path().to_str().expect("utf8 root"),
+            "--method",
+            "basic",
+            "facts",
+        ])
+        .output()
+        .expect("provider authentication error");
+    assert_eq!(provider_output.status.code(), Some(1));
+    assert!(provider_output.stdout.is_empty());
+    let provider_stderr = normalize_cli_text(&provider_output.stderr);
+    assert!(provider_stderr.contains("query completion model"));
+    assert!(!provider_stderr.contains("test-key"));
+    assert!(!provider_stderr.contains("Authorization"));
 }
 
 #[tokio::test]
@@ -1906,6 +2613,46 @@ async fn parquet_artifact_snapshot(
     snapshot
 }
 
+async fn hide_unneeded_parquet(
+    root: &std::path::Path,
+    allowed_tables: &[&str],
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let mut entries = tokio::fs::read_dir(root.join("output"))
+        .await
+        .expect("output directory");
+    let mut hidden = Vec::new();
+    while let Some(entry) = entries.next_entry().await.expect("output entry") {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "parquet")
+        {
+            continue;
+        }
+        let table = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("UTF-8 table name");
+        if allowed_tables.contains(&table) {
+            continue;
+        }
+        let hidden_path = path.with_extension("parquet.query-test-hidden");
+        tokio::fs::rename(&path, &hidden_path)
+            .await
+            .expect("hide unrelated Query table");
+        hidden.push((hidden_path, path));
+    }
+    hidden
+}
+
+async fn restore_hidden_parquet(hidden: &[(std::path::PathBuf, std::path::PathBuf)]) {
+    for (hidden_path, original_path) in hidden {
+        tokio::fs::rename(hidden_path, original_path)
+            .await
+            .expect("restore unrelated Query table");
+    }
+}
+
 async fn managed_vector_ids(
     root: &std::path::Path,
 ) -> std::collections::BTreeMap<String, BTreeSet<String>> {
@@ -1930,6 +2677,88 @@ async fn managed_vector_ids(
         );
     }
     ids
+}
+
+async fn copy_vector_indices(
+    root: &std::path::Path,
+    target_uri: &std::path::Path,
+    embedding_names: &[&str],
+) -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    let settings = tokio::fs::read_to_string(root.join("settings.yaml"))
+        .await
+        .expect("settings");
+    let mut source_config: GraphRagConfig = serde_yaml::from_str(&settings).expect("config");
+    source_config.vector_store.db_uri = root
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .to_string();
+    let source = LanceDbVectorStore::connect(&source_config.vector_store)
+        .await
+        .expect("source LanceDB");
+    let mut target_config = source_config.clone();
+    target_config.vector_store.db_uri = target_uri.to_string_lossy().to_string();
+    let target = LanceDbVectorStore::connect(&target_config.vector_store)
+        .await
+        .expect("target LanceDB");
+    let mut expected_ids = std::collections::BTreeMap::new();
+    for embedding_name in embedding_names {
+        let schema = source_config.vector_store.schema_for(embedding_name);
+        let ids = source.ids(&schema).await.expect("source vector ids");
+        let mut documents = Vec::with_capacity(ids.len());
+        for id in &ids {
+            documents.push(
+                source
+                    .get_by_id(&schema, id)
+                    .await
+                    .expect("source vector")
+                    .expect("source vector document"),
+            );
+        }
+        target
+            .ensure_index(&schema)
+            .await
+            .expect("target vector index");
+        target
+            .upsert_documents(&schema, &documents)
+            .await
+            .expect("target vectors");
+        expected_ids.insert((*embedding_name).to_owned(), ids.into_iter().collect());
+    }
+    expected_ids
+}
+
+async fn assert_vector_indices_unchanged(
+    settings: &str,
+    db_uri: &std::path::Path,
+    expected: &std::collections::BTreeMap<String, BTreeSet<String>>,
+) {
+    let mut config: GraphRagConfig = serde_yaml::from_str(settings).expect("config");
+    config.vector_store.db_uri = db_uri.to_string_lossy().to_string();
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("dedicated LanceDB");
+    for (embedding_name, expected_ids) in expected {
+        let schema = config.vector_store.schema_for(embedding_name);
+        let actual = store
+            .ids(&schema)
+            .await
+            .expect("dedicated vector ids")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(&actual, expected_ids, "{embedding_name} vector ids changed");
+    }
+}
+
+async fn set_query_vector_db(root: &std::path::Path, settings: &str, db_uri: &std::path::Path) {
+    let mut config: GraphRagConfig = serde_yaml::from_str(settings).expect("config");
+    config.vector_store.db_uri = db_uri.to_string_lossy().to_string();
+    tokio::fs::write(
+        root.join("settings.yaml"),
+        serde_yaml::to_string(&config).expect("serialize config"),
+    )
+    .await
+    .expect("write Query vector configuration");
 }
 
 async fn patch_settings(root: &std::path::Path, server_uri: &str) {
@@ -2148,15 +2977,44 @@ fn run_index(root: &std::path::Path, extra_args: &[&str]) {
 
 fn chat_responder(request: &Request) -> ResponseTemplate {
     let body = request.body_json::<Value>().expect("chat request json");
-    if body["stream"].as_bool() == Some(true) {
-        return query_stream_response();
-    }
     let messages = body["messages"].as_array().expect("messages");
+    let first = messages
+        .first()
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    if body["stream"].as_bool() == Some(true) {
+        if body.get("response_format").is_some() {
+            return query_stream_response(
+                r#"{"response":"DRIFT action.","score":90,"follow_up_queries":[]}"#,
+            );
+        }
+        let answer = if first.contains("dataset by synthesizing perspectives") {
+            "Global answer."
+        } else if first.contains("data in the reports provided") {
+            "DRIFT answer."
+        } else if first.contains("incorporating any relevant general knowledge") {
+            "Local answer."
+        } else {
+            "Basic answer."
+        };
+        return query_stream_response(answer);
+    }
     let last = messages
         .last()
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default();
-    let content = if last.contains("Given a text document") && last.contains("Carol founded Beta") {
+    let content = if first.contains("deciding whether the provided information is useful") {
+        r#"{"reason":"relevant","rating":5}"#.to_owned()
+    } else if first.contains("list of key points") && body.get("response_format").is_some() {
+        r#"{"points":[{"description":"Mapped fact [Data: Reports (0)]","score":8}]}"#.to_owned()
+    } else if first.starts_with("Create a hypothetical answer") {
+        "Expanded query answer.".to_owned()
+    } else if first.starts_with("You are a helpful agent designed to reason") {
+        r#"{"intermediate_answer":"Primer answer.","score":90,"follow_up_queries":["Who?"]}"#
+            .to_owned()
+    } else if first.contains("data in the reports provided") {
+        "DRIFT answer.".to_owned()
+    } else if last.contains("Given a text document") && last.contains("Carol founded Beta") {
         "(\"entity\"<|>CAROL<|>person<|>Carol founded \
          Beta)##(\"entity\"<|>BETA<|>organization<|>Beta was founded by \
          Carol)##(\"relationship\"<|>CAROL<|>BETA<|>Carol founded Beta<|>5)##<|COMPLETE|>"
@@ -2176,13 +3034,55 @@ fn chat_responder(request: &Request) -> ResponseTemplate {
     chat_response(&content)
 }
 
-fn query_stream_response() -> ResponseTemplate {
+fn chat_responder_with_drift_parse_failure(request: &Request) -> ResponseTemplate {
+    let body = request.body_json::<Value>().expect("chat request json");
+    let first = body["messages"]
+        .as_array()
+        .and_then(|messages| messages.first())
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    if first.starts_with("You are a helpful agent designed to reason") {
+        return chat_response("invalid DRIFT primer");
+    }
+    chat_responder(request)
+}
+
+fn query_stream_response(answer: &str) -> ResponseTemplate {
+    let split = answer
+        .find(' ')
+        .map_or(answer.len(), |index| index.saturating_add(1));
+    let (first, second) = answer.split_at(split);
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "query-1",
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": first},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "query-2",
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": second},
+                "finish_reason": "stop"
+            }]
+        }),
+    );
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(body)
+}
+
+fn partial_failure_stream_response() -> ResponseTemplate {
     let body = concat!(
         "data: {\"id\":\"query-1\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"\
          content\":\"Basic \"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"query-2\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"\
-         content\":\"answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: [DONE]\n\n"
+        "data: {not valid JSON}\n\n"
     );
     ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")

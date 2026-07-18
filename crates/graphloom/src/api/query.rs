@@ -19,8 +19,12 @@ use crate::{
 /// Returns a typed Query error for invalid configuration, missing data, provider
 /// failures, or methods scheduled after the current implementation slice.
 pub async fn query(config: GraphRagConfig, options: QueryOptions) -> Result<QueryResult> {
-    let project = LoadedProject::from_config(&options.project_root, config)?;
-    query_loaded(project, options).await
+    match options.method {
+        SearchMethod::Global => global_search(config, options).await,
+        SearchMethod::Local => local_search(config, options).await,
+        SearchMethod::Drift => drift_search(config, options).await,
+        SearchMethod::Basic => basic_search(config, options).await,
+    }
 }
 
 /// Create a streaming event sequence for the selected Query method.
@@ -35,8 +39,62 @@ pub async fn query_stream(
     config: GraphRagConfig,
     options: QueryOptions,
 ) -> Result<QueryEventStream> {
-    let project = LoadedProject::from_config(&options.project_root, config)?;
-    query_loaded_stream(project, options).await
+    match options.method {
+        SearchMethod::Global => global_search_streaming(config, options).await,
+        SearchMethod::Local => local_search_streaming(config, options).await,
+        SearchMethod::Drift => drift_search_streaming(config, options).await,
+        SearchMethod::Basic => basic_search_streaming(config, options).await,
+    }
+}
+
+/// Execute Global Search with the unified options structure.
+///
+/// The method in `options` is always overridden with [`SearchMethod::Global`].
+///
+/// # Errors
+///
+/// Returns a typed Query error when Global Search cannot load or query the index.
+pub async fn global_search(config: GraphRagConfig, options: QueryOptions) -> Result<QueryResult> {
+    execute_query(config, options, SearchMethod::Global).await
+}
+
+/// Stream Global Search events with the unified options structure.
+///
+/// The method in `options` is always overridden with [`SearchMethod::Global`].
+///
+/// # Errors
+///
+/// Returns a typed Query error when Global Search cannot start.
+pub async fn global_search_streaming(
+    config: GraphRagConfig,
+    options: QueryOptions,
+) -> Result<QueryEventStream> {
+    execute_query_stream(config, options, SearchMethod::Global).await
+}
+
+/// Execute Local Search with the unified options structure.
+///
+/// The method in `options` is always overridden with [`SearchMethod::Local`].
+///
+/// # Errors
+///
+/// Returns a typed Query error when Local Search cannot load or query the index.
+pub async fn local_search(config: GraphRagConfig, options: QueryOptions) -> Result<QueryResult> {
+    execute_query(config, options, SearchMethod::Local).await
+}
+
+/// Stream Local Search events with the unified options structure.
+///
+/// The method in `options` is always overridden with [`SearchMethod::Local`].
+///
+/// # Errors
+///
+/// Returns a typed Query error when Local Search cannot start.
+pub async fn local_search_streaming(
+    config: GraphRagConfig,
+    options: QueryOptions,
+) -> Result<QueryEventStream> {
+    execute_query_stream(config, options, SearchMethod::Local).await
 }
 
 /// Execute Basic Search with the unified options structure.
@@ -44,12 +102,8 @@ pub async fn query_stream(
 /// # Errors
 ///
 /// Returns a typed Query error when Basic Search cannot load or query the index.
-pub async fn basic_search(
-    config: GraphRagConfig,
-    mut options: QueryOptions,
-) -> Result<QueryResult> {
-    options.method = SearchMethod::Basic;
-    query(config, options).await
+pub async fn basic_search(config: GraphRagConfig, options: QueryOptions) -> Result<QueryResult> {
+    execute_query(config, options, SearchMethod::Basic).await
 }
 
 /// Stream Basic Search events with the unified options structure.
@@ -59,10 +113,9 @@ pub async fn basic_search(
 /// Returns a typed Query error when Basic Search cannot start.
 pub async fn basic_search_streaming(
     config: GraphRagConfig,
-    mut options: QueryOptions,
+    options: QueryOptions,
 ) -> Result<QueryEventStream> {
-    options.method = SearchMethod::Basic;
-    query_stream(config, options).await
+    execute_query_stream(config, options, SearchMethod::Basic).await
 }
 
 /// Execute DRIFT Search with the unified options structure.
@@ -70,12 +123,8 @@ pub async fn basic_search_streaming(
 /// # Errors
 ///
 /// Returns a typed Query error when DRIFT cannot load or query the index.
-pub async fn drift_search(
-    config: GraphRagConfig,
-    mut options: QueryOptions,
-) -> Result<QueryResult> {
-    options.method = SearchMethod::Drift;
-    query(config, options).await
+pub async fn drift_search(config: GraphRagConfig, options: QueryOptions) -> Result<QueryResult> {
+    execute_query(config, options, SearchMethod::Drift).await
 }
 
 /// Stream DRIFT Search events with the unified options structure.
@@ -85,10 +134,29 @@ pub async fn drift_search(
 /// Returns a typed Query error when DRIFT cannot start.
 pub async fn drift_search_streaming(
     config: GraphRagConfig,
-    mut options: QueryOptions,
+    options: QueryOptions,
 ) -> Result<QueryEventStream> {
-    options.method = SearchMethod::Drift;
-    query_stream(config, options).await
+    execute_query_stream(config, options, SearchMethod::Drift).await
+}
+
+async fn execute_query(
+    config: GraphRagConfig,
+    mut options: QueryOptions,
+    method: SearchMethod,
+) -> Result<QueryResult> {
+    options.method = method;
+    let project = LoadedProject::from_config(&options.project_root, config)?;
+    query_loaded(project, options).await
+}
+
+async fn execute_query_stream(
+    config: GraphRagConfig,
+    mut options: QueryOptions,
+    method: SearchMethod,
+) -> Result<QueryEventStream> {
+    options.method = method;
+    let project = LoadedProject::from_config(&options.project_root, config)?;
+    query_loaded_stream(project, options).await
 }
 
 pub(crate) async fn query_loaded(

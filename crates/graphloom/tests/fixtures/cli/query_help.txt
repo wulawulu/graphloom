@@ -1,0 +1,55 @@
+Query a knowledge graph index.
+
+Usage: graphloom query [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>
+          The query to execute.
+
+Options:
+  -r, --root <ROOT>
+          The project root directory.
+
+          [default: .]
+
+  -m, --method <METHOD>
+          The query algorithm to use.
+
+          Possible values:
+          - local:  Local graph-neighborhood search
+          - global: Global community map/reduce search
+          - drift:  DRIFT exploratory search
+          - basic:  Basic text-unit vector search
+
+          [default: global]
+
+  -v, --verbose
+          Run the query with verbose logging.
+
+  -d, --data <DATA>
+          Index output directory (contains the parquet files).
+
+      --community-level <COMMUNITY_LEVEL>
+          Leiden hierarchy level from which to load community reports. Higher values represent smaller communities.
+
+          [default: 2]
+
+      --dynamic-community-selection
+          Use global search with dynamic community selection.
+
+      --no-dynamic-selection
+          Use global search with dynamic community selection.
+
+      --response-type <RESPONSE_TYPE>
+          Free-form description of the desired response format (e.g. 'Single Sentence', 'List of 3-7 Points', etc.).
+
+          [default: "Multiple Paragraphs"]
+
+      --streaming
+          Print the response in a streaming manner.
+
+      --no-streaming
+          Print the response in a streaming manner.
+
+  -h, --help
+          Print help (see a summary with '-h')
