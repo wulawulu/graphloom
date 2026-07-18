@@ -36,11 +36,14 @@ use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorIndexSchema, VectorStore};
 use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
+
+mod support;
+
+use support::CanonicalTempDir as TempDir;
 
 fn completion_response(content: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({

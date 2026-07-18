@@ -26,12 +26,15 @@ use polars_core::prelude::{AnyValue, DataFrame, DataType, NamedFrom, PlSmallStr,
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use serde_yaml::Mapping;
-use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
+
+mod support;
+
+use support::CanonicalTempDir as TempDir;
 
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

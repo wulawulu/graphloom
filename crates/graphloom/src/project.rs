@@ -258,9 +258,8 @@ fn absolute_normalized(path: &Path) -> Result<PathBuf> {
 mod tests {
     use std::{collections::BTreeMap, ffi::OsString};
 
-    use tempfile::TempDir;
-
     use super::*;
+    use crate::test_support::CanonicalTempDir;
 
     #[cfg(windows)]
     #[test]
@@ -301,7 +300,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_should_allow_case_insensitive_non_overlapping_siblings() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let config = config_with_paths("Input-A", "input-b", "Cache", "Logs", "input-b/lancedb");
 
         ProjectPaths::resolve(tempdir.path(), &config)
@@ -330,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_should_allow_separate_sibling_project_directories() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
 
         ProjectPaths::resolve(tempdir.path(), &config)
@@ -339,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_non_directory_existing_path_ancestor() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let file = tempdir.path().join("file");
         tokio::fs::write(&file, "not a directory")
             .await
@@ -354,7 +353,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_should_resolve_canonical_verbatim_path_without_querying_prefix_only_path() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
         crate::path_safety::tests::windows::assert_windows_verbatim_path(&canonical);
 
@@ -364,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_should_reject_output_ancestor_of_reporting_dir() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let config = config_with_paths("input", "logs", "cache", "logs/index", "output/lancedb");
 
         let error = ProjectPaths::resolve(tempdir.path(), &config)
@@ -375,8 +374,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_reject_destructive_output_symlink_escape() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("output-link"))
             .expect("symlink");
         let config = config_with_paths(
@@ -395,8 +394,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_allow_input_symlink_when_vector_path_is_separate() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
             .expect("input symlink");
 
@@ -408,8 +407,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_reject_output_inside_resolved_input_symlink() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("input"))
             .expect("input symlink");
         let output = external.path().join("generated");
@@ -430,8 +429,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_allow_cache_symlink_when_vector_path_is_separate() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
             .expect("cache symlink");
 
@@ -443,8 +442,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_reject_output_inside_resolved_cache_symlink() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("cache"))
             .expect("cache symlink");
         let output = external.path().join("generated");
@@ -465,8 +464,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_should_allow_reporting_symlink_when_vector_path_is_separate() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("logs"))
             .expect("logs symlink");
 
@@ -477,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_should_reject_unsafe_active_vector_paths() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
 
         for (vector, expected) in [
             ("input", "overlap input"),
@@ -548,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_output_equal_to_home() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let home = tempdir.path().join("home");
         let project = tempdir.path().join("project");
         tokio::fs::create_dir(&home).await.expect("home dir");
@@ -596,7 +595,7 @@ mod tests {
         reporting: &str,
         expected: &str,
     ) {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let vector = format!("{output}/lancedb");
         let config = config_with_paths(input, output, cache, reporting, &vector);
 

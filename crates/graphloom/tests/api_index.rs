@@ -10,11 +10,14 @@ use graphloom::{
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
+
+mod support;
+
+use support::CanonicalTempDir as TempDir;
 
 #[tokio::test]
 async fn test_should_write_directly_without_touching_inactive_vector_store() {

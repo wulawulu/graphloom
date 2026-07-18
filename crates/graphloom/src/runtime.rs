@@ -156,13 +156,13 @@ mod runtime_factory_tests {
         Result as VectorResult, VectorDocument, VectorIndexSchema, VectorSearchResult, VectorStore,
         VectorStoreConfig,
     };
-    use tempfile::TempDir;
 
     use super::{IndexRuntimeFactory, IndexVectorStoreFactory, prepare_index_runtime_with_factory};
     use crate::{
         GraphLoomError, GraphRagConfig, IndexWorkflowRequirements, ModelRegistry, Result,
         project::LoadedProject,
         runtime::{CacheService, IndexRuntimeIo, PreparedIndexServices},
+        test_support::CanonicalTempDir,
     };
 
     #[derive(Debug, Default)]
@@ -340,7 +340,7 @@ mod runtime_factory_tests {
 
     #[tokio::test]
     async fn test_should_prepare_runtime_entirely_from_injected_factory() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut config = GraphRagConfig {
             workflows: vec![crate::GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
             ..Default::default()
@@ -416,7 +416,7 @@ mod runtime_factory_tests {
 
     #[tokio::test]
     async fn test_should_reuse_factory_store_when_vector_path_is_outside_output() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut config = GraphRagConfig {
             workflows: vec![crate::GENERATE_TEXT_EMBEDDINGS_WORKFLOW.to_owned()],
             ..Default::default()
@@ -474,7 +474,7 @@ mod runtime_factory_tests {
 
     #[tokio::test]
     async fn test_should_run_chunk_only_without_vector_capability() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut config = serde_yaml::from_str::<GraphRagConfig>(
             "workflows:\n  - load_input_documents\n  - create_base_text_units\n",
         )
