@@ -11,7 +11,11 @@ The gate builds the real `graphloom` binary and the test-only
 distribution from `tests/compat/.venv`. The fixed GraphRAG source commit is
 `7fc6607edda3d387d23e52ededbf8a75b6730f97`; the annotated v3.1.0 tag object is
 `2077c4205add901e6594aced159fca81b7a6d522`. Tests reject editable installs and
-neighboring source checkouts.
+neighboring source checkouts. A session-wide probe validates `graphrag==3.1.0`,
+`graphrag-vectors==3.1.0`, and `lancedb==0.24.3`, their `direct_url.json`
+metadata, and every Query module path against the active uv environment's
+`site-packages`. All compatibility subprocesses remove `PYTHONPATH` and disable
+the user site.
 
 ## Compatibility contract
 
@@ -180,6 +184,18 @@ Assertions cover:
 - DRIFT: HyDE completion, expanded-query embedding, structured primer, Local
   action, and final reduce.
 
+`fixtures/query/query_interop_request_contract.json` is the reviewed,
+checked-in request contract observed from the isolated PyPI
+`graphrag==3.1.0` baseline. Ordinary tests only read it. For every consumer,
+method, Dynamic mode, and public streaming mode it fixes the complete operation
+sequence and count, endpoint, model, message roles, embedding input count, and
+presence-aware values for `response_format`, `temperature`, `top_p`, `n`,
+`max_tokens`, `max_completion_tokens`, and `stream`. The contract records
+intentional client differences explicitly: GraphRAG omits `response_format`
+and `stream` on map/rating calls where GraphLoom sends an equivalent JSON-object
+request with `stream=false`; GraphRAG buffers an internally streamed DRIFT
+reduce in public non-streaming mode, while GraphLoom sends `stream=false`.
+
 Only the final provider response enters public streaming output. Two additional
 delayed-SSE tests—one for each consumer—hold the server after the first delta,
 observe that delta in the real CLI pipe before process completion, then release
@@ -198,6 +214,7 @@ reset. Query-specific log files are allowed.
 ```bash
 cargo build -p graphloom
 cargo build -p graphloom-vectors --example compat_vector_manifest
+cargo test -p graphloom-vectors --example compat_vector_manifest
 
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | \
   python -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
@@ -209,8 +226,40 @@ uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_query_interop.py
 ```
 
+The same environment prefix applies to focused goldens and Phase 1 tests:
+
+```bash
+env -u PYTHONPATH \
+GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
+GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+uv run --project tests/compat --locked \
+pytest -vv tests/compat/test_query_compat.py
+
+env -u PYTHONPATH \
+GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
+GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+uv run --project tests/compat --locked \
+pytest -vv tests/compat/test_compat.py
+```
+
+PowerShell equivalent:
+
+```powershell
+$oldPythonPath = $env:PYTHONPATH
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+$env:GRAPHLOOM_BIN = "$env:TARGET_DIR\debug\graphloom.exe"
+$env:GRAPHLOOM_VECTOR_MANIFEST_BIN = `
+  "$env:TARGET_DIR\debug\examples\compat_vector_manifest.exe"
+uv run --project tests/compat --locked pytest -q tests/compat/test_query_interop.py
+if ($null -ne $oldPythonPath) {
+  $env:PYTHONPATH = $oldPythonPath
+}
+```
+
 Run all Python/Rust compatibility checks, including Ruff and cache goldens, with
-`make test-compat`.
+`make test-compat`. That target also executes the five Rust manifest parser
+tests rather than merely compiling the example. The same explicit example-test
+command runs in the Ubuntu, Windows, and macOS Rust CI matrix.
 
 ## Known physical storage gap
 

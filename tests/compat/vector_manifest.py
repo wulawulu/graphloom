@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import struct
 import subprocess
 from pathlib import Path
@@ -17,6 +16,7 @@ from graphrag_vectors import (
     VectorStoreDocument,
     create_vector_store,
 )
+from compat_harness import compatibility_environment
 
 FORMAT_VERSION = 1
 COLLECTION_NAMES = (
@@ -219,15 +219,13 @@ def _require_new_or_empty_directory(path: Path) -> None:
 
 
 def _run_helper(helper: Path, arguments: list[str]) -> None:
-    environment = os.environ.copy()
-    environment.pop("RUST_LOG", None)
     result = subprocess.run(
         [str(helper), *arguments],
         check=False,
         capture_output=True,
         text=True,
         timeout=60,
-        env=environment,
+        env=compatibility_environment(),
     )
     assert result.returncode == 0, (
         f"vector helper failed ({result.returncode})\n"

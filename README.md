@@ -295,6 +295,9 @@ float32 `vector` records and materializes them in the consumer's native LanceDB
 version. Export/import performs no embedding requests. Tests verify collection
 names, IDs, dimensions, vector values, by-ID/ANN reads, provider stages,
 producer context, delayed streaming flush, and read-only snapshots.
+Provider-stage checks use a reviewed GraphRAG 3.1.0 request contract that locks
+operation counts and presence-aware model parameters without storing prompts or
+credentials.
 
 This does not mean persisted artifacts are byte-for-byte interchangeable.
 GraphLoom's Rust Parquet writer and Arrow representation differ from

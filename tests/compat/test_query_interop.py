@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import os
+import json
 import struct
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from compat_harness import (
     CompatibilityRun,
     RecordedRequest,
     clone_project,
+    compatibility_environment,
     configure_consumer_vector_db,
     convert_prompts_for_graphrag,
     run_graphloom_query,
@@ -45,6 +46,36 @@ EXPECTED_ANSWERS = {
     "global": "Global interoperable answer.",
     "drift": "DRIFT interoperable answer.",
 }
+
+REQUEST_CONTRACT_PATH = (
+    Path(__file__).parent / "fixtures" / "query" / "query_interop_request_contract.json"
+)
+
+
+@dataclass(frozen=True)
+class NormalizedField:
+    """Presence-aware JSON request field."""
+
+    present: bool
+    kind: str
+    value: Any
+
+
+@dataclass(frozen=True)
+class NormalizedRequest:
+    """Secret-free stable request projection used by the checked-in contract."""
+
+    endpoint: str
+    model: NormalizedField
+    message_roles: tuple[str, ...]
+    response_format: NormalizedField
+    temperature: NormalizedField
+    top_p: NormalizedField
+    n: NormalizedField
+    max_tokens: NormalizedField
+    max_completion_tokens: NormalizedField
+    stream: NormalizedField
+    embedding_input_count: int
 
 
 def _minimal_vector_manifest() -> VectorManifest:
@@ -242,22 +273,59 @@ def test_should_generate_equivalent_vectors_for_semantically_equal_records(
     assert graphloom_entities == graphrag_entities
 
 
+def _request_operations(method: str, dynamic: bool) -> str:
+    if method == "basic":
+        return "embedding+basic_search"
+    if method == "local":
+        return "embedding+local_search"
+    if method == "global" and dynamic:
+        return "dynamic_rating+global_search_map+global_search_reduce"
+    if method == "global":
+        return "global_search_map+global_search_reduce"
+    return "drift_hyde+embedding+drift_primer+drift_action+drift_reduce"
+
+
+def _interop_cases() -> list[Any]:
+    cases = []
+    for producer in ("graphrag", "graphloom"):
+        consumer = "graphloom" if producer == "graphrag" else "graphrag"
+        for method in ("basic", "local", "global", "drift"):
+            for streaming in (False, True):
+                cases.append(
+                    pytest.param(
+                        producer,
+                        method,
+                        False,
+                        streaming,
+                        id=(
+                            f"producer={producer}__consumer={consumer}__method={method}"
+                            f"__dynamic=false__streaming={str(streaming).lower()}"
+                            f"__operations={_request_operations(method, False)}"
+                        ),
+                    )
+                )
+        for streaming in (False, True):
+            cases.append(
+                pytest.param(
+                    producer,
+                    "global",
+                    True,
+                    streaming,
+                    id=(
+                        f"producer={producer}__consumer={consumer}__method=global"
+                        f"__dynamic=true__streaming={str(streaming).lower()}"
+                        f"__operations={_request_operations('global', True)}"
+                    ),
+                )
+            )
+    return cases
+
+
 @pytest.mark.parametrize(
     ("producer", "method", "dynamic", "streaming"),
-    [
-        (producer, method, False, streaming)
-        for producer in ("graphrag", "graphloom")
-        for method in ("basic", "local", "global", "drift")
-        for streaming in (False, True)
-    ]
-    + [
-        (producer, "global", True, streaming)
-        for producer in ("graphrag", "graphloom")
-        for streaming in (False, True)
-    ],
-    ids=lambda value: str(value).lower().replace("_", "-"),
+    _interop_cases(),
 )
-def test_should_query_producer_index_across_implementations(
+def test_should_match_graphrag_request_contract(
     interop_run: InteropRun,
     producer: str,
     method: str,
@@ -291,7 +359,7 @@ def test_should_query_producer_index_across_implementations(
     assert EXPECTED_ANSWERS[method] in result.stdout
     assert result.stdout.count(EXPECTED_ANSWERS[method]) == 1
     requests = compatibility.server.requests_since(offset)
-    _assert_request_shape(
+    _assert_request_contract(
         requests,
         method,
         dynamic,
@@ -353,7 +421,7 @@ def test_should_run_global_directly_without_a_vector_bridge(
     assert EXPECTED_ANSWERS["global"] in result.stdout
     assert not missing_vector_db.exists()
     requests = compatibility.server.requests_since(offset)
-    _assert_request_shape(
+    _assert_request_contract(
         requests,
         "global",
         dynamic,
@@ -404,12 +472,10 @@ def test_should_flush_first_cross_implementation_stream_delta(
         ]
         cwd = interop_run.graphrag_consumer
 
-    environment = os.environ.copy()
-    environment["GRAPHRAG_API_KEY"] = "compat-test-key"
     process = subprocess.Popen(
         command,
         cwd=cwd,
-        env=environment,
+        env=compatibility_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -453,7 +519,127 @@ def test_should_flush_first_cross_implementation_stream_delta(
     assert "compat-test-key" not in stderr
 
 
-def _assert_request_shape(
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list):
+        return [_normalize_json_value(item) for item in value]
+    return value
+
+
+def _normalized_field(request: RecordedRequest, name: str) -> NormalizedField:
+    present = name in request.present_fields
+    value = _normalize_json_value(getattr(request, name))
+    if not present:
+        kind = "absent"
+    elif value is None:
+        kind = "null"
+    elif isinstance(value, bool):
+        kind = "boolean"
+    elif isinstance(value, int):
+        kind = "integer"
+    elif isinstance(value, float):
+        kind = "number"
+    elif isinstance(value, str):
+        kind = "string"
+    elif isinstance(value, dict):
+        kind = "object"
+    elif isinstance(value, list):
+        kind = "array"
+    else:
+        raise AssertionError(f"unsupported normalized request value: {value!r}")
+    return NormalizedField(
+        present=present,
+        kind=kind,
+        value=value,
+    )
+
+
+def _normalize_request(request: RecordedRequest) -> dict[str, Any]:
+    normalized = NormalizedRequest(
+        endpoint=request.endpoint,
+        model=_normalized_field(request, "model"),
+        message_roles=request.message_roles,
+        response_format=_normalized_field(request, "response_format"),
+        temperature=_normalized_field(request, "temperature"),
+        top_p=_normalized_field(request, "top_p"),
+        n=_normalized_field(request, "n"),
+        max_tokens=_normalized_field(request, "max_tokens"),
+        max_completion_tokens=_normalized_field(request, "max_completion_tokens"),
+        stream=_normalized_field(request, "stream"),
+        embedding_input_count=len(request.embedding_input),
+    )
+    return json.loads(
+        json.dumps(asdict(normalized), ensure_ascii=False, sort_keys=True)
+    )
+
+
+def _normalize_request_scenario(
+    requests: tuple[RecordedRequest, ...],
+) -> dict[str, Any]:
+    operations = [request.operation for request in requests]
+    normalized_operations = {}
+    for operation in sorted(set(operations)):
+        projections = [
+            _normalize_request(request)
+            for request in requests
+            if request.operation == operation
+        ]
+        projections.sort(
+            key=lambda projection: json.dumps(
+                projection,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        normalized_operations[operation] = {
+            "count": len(projections),
+            "requests": projections,
+        }
+    return {
+        "sequence": operations,
+        "operations": normalized_operations,
+        "total_count": len(requests),
+    }
+
+
+def _request_scenario_name(method: str, dynamic: bool, streaming: bool) -> str:
+    algorithm = "dynamic_global" if method == "global" and dynamic else method
+    output_mode = "stream" if streaming else "non_stream"
+    return f"{algorithm}__{output_mode}"
+
+
+def _load_request_contract() -> dict[str, Any]:
+    contract = json.loads(REQUEST_CONTRACT_PATH.read_text(encoding="utf-8"))
+    assert contract["format_version"] == 1
+    assert contract["baseline"] == {
+        "distribution": "graphrag",
+        "version": "3.1.0",
+    }
+    expected_request_fields = {
+        "embedding_input_count",
+        "endpoint",
+        "max_completion_tokens",
+        "max_tokens",
+        "message_roles",
+        "model",
+        "n",
+        "response_format",
+        "stream",
+        "temperature",
+        "top_p",
+    }
+    assert all(
+        set(template) == expected_request_fields
+        for template in contract["request_templates"].values()
+    )
+    return contract
+
+
+def _assert_request_contract(
     requests: tuple[RecordedRequest, ...],
     method: str,
     dynamic: bool,
@@ -461,96 +647,34 @@ def _assert_request_shape(
     *,
     graphloom_consumer: bool,
 ) -> None:
-    operations = [request.operation for request in requests]
-    assert all(
-        request.model
-        == ("embed-test" if request.operation == "embedding" else "gpt-test")
-        for request in requests
-    )
-    assert all(
-        request.embedding_input
-        for request in requests
-        if request.operation == "embedding"
-    )
-    assert all(
-        request.message_roles
-        for request in requests
-        if request.operation != "embedding"
-    )
-    assert all(
-        request.response_format is None or isinstance(request.response_format, dict)
-        for request in requests
-    )
-    allowed_operations = {
-        "basic": {"embedding", "basic_search"},
-        "local": {"embedding", "local_search"},
-        "global": {"dynamic_rating", "global_search_map", "global_search_reduce"},
-        "drift": {
-            "drift_hyde",
-            "embedding",
-            "drift_primer",
-            "drift_action",
-            "drift_reduce",
-        },
-    }[method]
-    assert set(operations) <= allowed_operations
-    if method == "basic":
-        assert operations.count("embedding") == 1
-        assert operations.count("basic_search") == 1
-    elif method == "local":
-        assert operations.count("embedding") == 1
-        assert operations.count("local_search") == 1
-    elif method == "global":
-        assert "embedding" not in operations
-        assert "global_search_map" in operations
-        assert operations.count("global_search_reduce") == 1
-        assert ("dynamic_rating" in operations) is dynamic
-    else:
-        expected_counts = {
-            "drift_hyde": 1,
-            "embedding": 2,
-            "drift_primer": 1,
-            "drift_action": 1,
-            "drift_reduce": 1,
-        }
-        assert {
-            operation: operations.count(operation) for operation in expected_counts
-        } == expected_counts
-        embedding_text = "\n".join(
-            value
-            for request in requests
-            if request.operation == "embedding"
-            for value in request.embedding_input
-        )
-        assert "hypothetical answer" in embedding_text
+    consumer = "graphloom" if graphloom_consumer else "graphrag"
+    scenario = _request_scenario_name(method, dynamic, streaming)
+    actual = _normalize_request_scenario(requests)
+    contract = _load_request_contract()
+    expected = contract["consumers"][consumer][scenario]
+    assert actual["sequence"] == expected["sequence"]
+    assert actual["total_count"] == expected["total_count"]
+    assert set(actual["operations"]) == set(expected["operations"])
+    for operation, operation_contract in expected["operations"].items():
+        actual_operation = actual["operations"][operation]
+        assert actual_operation["count"] == operation_contract["count"], operation
+        template = contract["request_templates"][operation_contract["request_template"]]
+        assert (
+            actual_operation["requests"] == [template] * operation_contract["count"]
+        ), operation
 
-    final_operation = {
-        "basic": "basic_search",
-        "local": "local_search",
-        "global": "global_search_reduce",
-        "drift": "drift_reduce",
-    }[method]
-    final_requests = [
-        request for request in requests if request.operation == final_operation
+    embedding_requests = [
+        request for request in requests if request.operation == "embedding"
     ]
-    assert len(final_requests) == 1
-    # Basic, Local, and Global stream internally in both pinned implementations.
-    # GraphLoom DRIFT passes through the CLI mode; GraphRAG DRIFT streams its
-    # final model call internally and buffers the public non-streaming result.
-    expected_final_stream = (
-        streaming if method == "drift" and graphloom_consumer else True
-    )
-    assert final_requests[0].stream is expected_final_stream
-    if method == "global":
-        assert all(
-            not request.stream
-            for request in requests
-            if request.operation in {"dynamic_rating", "global_search_map"}
-        )
-    assert all(
-        request.endpoint in {"/v1/embeddings", "/v1/chat/completions"}
-        for request in requests
-    )
+    if method in {"basic", "local"}:
+        assert [request.embedding_input for request in embedding_requests] == [(QUERY,)]
+    elif method == "drift":
+        assert [request.embedding_input for request in embedding_requests] == [
+            ("A hypothetical answer connecting the fixture characters.",),
+            ("How are 西门庆 and 武松 connected through 清河县?",),
+        ]
+    else:
+        assert not embedding_requests
 
 
 def _assert_producer_context(

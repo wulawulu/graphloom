@@ -6,11 +6,7 @@ tests use the same identifiers, ordering, and exact context snapshot.
 
 import asyncio
 import importlib.metadata
-import inspect
 import json
-import site
-import sys
-import sysconfig
 from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
@@ -19,7 +15,6 @@ from typing import Any
 
 import pytest
 import pandas as pd
-import graphrag
 import graphrag.cli.main as cli_main_module
 import graphrag.cli.query as cli_query_module
 from click import Context
@@ -111,88 +106,6 @@ QUERY_CLI_CONTRACT = json.loads(
         Path(__file__).parent / "fixtures" / "query" / "query_cli_contract.json"
     ).read_text(encoding="utf-8")
 )
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
-@pytest.fixture(scope="session", autouse=True)
-def require_isolated_graphrag_distribution() -> None:
-    """Reject editable or neighboring source-tree GraphRAG imports."""
-    version = importlib.metadata.version("graphrag")
-    distribution = importlib.metadata.distribution("graphrag")
-    package_path = Path(inspect.getfile(graphrag)).resolve()
-    local_path = Path(inspect.getfile(LocalSearchMixedContext)).resolve()
-    dynamic_path = Path(inspect.getfile(DynamicCommunitySelection)).resolve()
-    drift_search_path = Path(inspect.getfile(DRIFTSearch)).resolve()
-    drift_context_path = Path(inspect.getfile(DRIFTSearchContextBuilder)).resolve()
-    drift_primer_path = Path(inspect.getfile(DRIFTPrimer)).resolve()
-    drift_state_path = Path(inspect.getfile(QueryState)).resolve()
-    cli_main_path = Path(inspect.getfile(cli_main_module)).resolve()
-    cli_query_path = Path(inspect.getfile(cli_query_module)).resolve()
-    module_paths = [
-        package_path,
-        local_path,
-        dynamic_path,
-        drift_search_path,
-        drift_context_path,
-        drift_primer_path,
-        drift_state_path,
-        cli_main_path,
-        cli_query_path,
-    ]
-    configured_roots = {
-        Path(value).resolve()
-        for value in [
-            *site.getsitepackages(),
-            site.getusersitepackages(),
-            sysconfig.get_paths().get("purelib"),
-            sysconfig.get_paths().get("platlib"),
-        ]
-        if value
-    }
-    installed_package = Path(distribution.locate_file("graphrag")).resolve()
-    direct_url_text = distribution.read_text("direct_url.json")
-    direct_url = json.loads(direct_url_text) if direct_url_text else {}
-    editable = direct_url.get("dir_info", {}).get("editable", False)
-    local_direct_url = str(direct_url.get("url", "")).startswith("file:")
-    repository_root = Path(__file__).resolve().parents[2]
-    neighboring_source_root = repository_root.parent
-    from_neighboring_source = any(
-        _is_relative_to(path, neighboring_source_root)
-        and not any(_is_relative_to(path, root) for root in configured_roots)
-        for path in module_paths
-    )
-    modules_match_distribution = all(
-        _is_relative_to(path, installed_package) for path in module_paths
-    )
-    diagnostic = (
-        f"graphrag version: {version}\n"
-        f"graphrag package path: {package_path}\n"
-        f"LocalSearchMixedContext path: {local_path}\n"
-        f"DynamicCommunitySelection path: {dynamic_path}\n"
-        f"DRIFTSearch path: {drift_search_path}\n"
-        f"DRIFTSearchContextBuilder path: {drift_context_path}\n"
-        f"DRIFTPrimer path: {drift_primer_path}\n"
-        f"QueryState path: {drift_state_path}\n"
-        f"CLI main module path: {cli_main_path}\n"
-        f"CLI query module path: {cli_query_path}\n"
-        f"distribution package path: {installed_package}\n"
-        f"direct_url.json: {direct_url}\n"
-        f"site-package roots: {sorted(map(str, configured_roots))}\n"
-        f"sys.path: {sys.path}"
-    )
-    # Compatibility runs intentionally expose their installed-package provenance.
-    print(diagnostic)  # noqa: T201
-    assert version == "3.1.0", diagnostic
-    assert not editable and not local_direct_url, diagnostic
-    assert not from_neighboring_source, diagnostic
-    assert modules_match_distribution, diagnostic
 
 
 class ByteTokenizer:

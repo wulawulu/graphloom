@@ -60,6 +60,7 @@ class RecordedRequest:
     max_completion_tokens: Any
     stream: bool
     embedding_input: tuple[str, ...]
+    present_fields: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,16 @@ class CompatibilityRun:
     graphloom_bin: Path
     vector_manifest_bin: Path
     server: FixtureModelServer
+
+
+def compatibility_environment() -> dict[str, str]:
+    """Return a deterministic, secret-scoped compatibility subprocess environment."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("RUST_LOG", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["GRAPHRAG_API_KEY"] = "compat-test-key"
+    return environment
 
 
 class FixtureModelServer:
@@ -179,6 +190,7 @@ class FixtureModelServer:
             max_completion_tokens=payload.get("max_completion_tokens"),
             stream=payload.get("stream") is True,
             embedding_input=tuple(str(value) for value in embedding_input),
+            present_fields=frozenset(payload),
         )
         with self._lock:
             self._requests.append(request)
@@ -429,13 +441,11 @@ def run_graphrag_query(
 
 def run_command(command: list[str], cwd: Path | None = None) -> CommandResult:
     """Run one bounded subprocess and retain diagnostics on failure."""
-    environment = os.environ.copy()
-    environment["GRAPHRAG_API_KEY"] = "compat-test-key"
     try:
         result = subprocess.run(
             command,
             cwd=cwd,
-            env=environment,
+            env=compatibility_environment(),
             check=False,
             capture_output=True,
             text=True,

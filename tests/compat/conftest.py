@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -17,8 +16,7 @@ from compat_harness import (
     run_graphloom_index,
     run_graphrag_index,
 )
-
-GRAPHRAG_VERSION = "3.1.0"
+from probe_environment import DistributionEvidence, inspect_locked_environment
 
 
 @pytest.fixture(scope="session")
@@ -48,11 +46,9 @@ def vector_manifest_bin() -> Path:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def fixed_graphrag_version() -> None:
-    """Pin tests to the GraphRAG v3.1.0 Python distribution."""
-    actual = version("graphrag")
-    if actual != GRAPHRAG_VERSION:
-        pytest.fail(f"expected graphrag {GRAPHRAG_VERSION}, found {actual}")
+def require_isolated_python_distributions() -> dict[str, DistributionEvidence]:
+    """Reject non-locked, editable, local, or neighboring Python imports."""
+    return inspect_locked_environment()
 
 
 @pytest.fixture(scope="session")

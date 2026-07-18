@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -18,6 +20,7 @@ from compat_harness import (
     convert_prompts_for_graphrag,
     load_tables,
     replace_cache,
+    run_command,
     run_graphloom_index,
     run_graphrag_global_query,
 )
@@ -26,6 +29,7 @@ from graphrag.data_model.data_reader import DataReader
 from graphrag.query.indexer_adapters import read_indexer_reports
 from graphrag_storage import create_storage
 from graphrag_storage.tables.table_provider_factory import create_table_provider
+from probe_environment import DistributionEvidence
 
 EXPECTED_COLUMNS = {
     "documents": schemas.DOCUMENTS_FINAL_COLUMNS,
@@ -63,6 +67,64 @@ EXPECTED_LOGICAL_LIST_TYPES = {
         "findings",
     ): "list<struct<explanation:string,summary:string>>",
 }
+
+
+def test_should_use_locked_graphrag_distribution(
+    require_isolated_python_distributions: dict[str, DistributionEvidence],
+) -> None:
+    """Lock the GraphRAG package and distribution provenance."""
+    evidence = require_isolated_python_distributions["graphrag"]
+    assert evidence.distribution == "graphrag"
+    assert evidence.version == "3.1.0"
+
+
+def test_should_use_locked_graphrag_vectors_distribution(
+    require_isolated_python_distributions: dict[str, DistributionEvidence],
+) -> None:
+    """Lock the real graphrag_vectors distribution mapping and provenance."""
+    evidence = require_isolated_python_distributions["graphrag_vectors"]
+    assert evidence.distribution == "graphrag-vectors"
+    assert evidence.version == "3.1.0"
+
+
+def test_should_use_locked_lancedb_distribution(
+    require_isolated_python_distributions: dict[str, DistributionEvidence],
+) -> None:
+    """Lock the Python LanceDB package and distribution provenance."""
+    evidence = require_isolated_python_distributions["lancedb"]
+    assert evidence.distribution == "lancedb"
+    assert evidence.version == "0.24.3"
+
+
+def test_should_ignore_host_pythonpath_in_compat_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove a fresh compatibility process cannot import poisoned host packages."""
+    poison = tmp_path / "poison"
+    for package in ("graphrag", "graphrag_vectors"):
+        package_root = poison / package
+        package_root.mkdir(parents=True)
+        (package_root / "__init__.py").write_text(
+            f'raise RuntimeError("PYTHONPATH {package} leak")\n',
+            encoding="utf-8",
+        )
+    (poison / "lancedb.py").write_text(
+        'raise RuntimeError("PYTHONPATH lancedb leak")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+
+    result = run_command(
+        [sys.executable, str(Path(__file__).parent / "probe_environment.py")]
+    )
+
+    assert "graphrag: distribution=graphrag version=3.1.0" in result.stdout
+    assert "graphrag_vectors: distribution=graphrag-vectors version=3.1.0" in (
+        result.stdout
+    )
+    assert "lancedb: distribution=lancedb version=0.24.3" in result.stdout
+    assert str(poison) not in result.stdout
 
 
 def test_graphrag_3_1_report_rollup_golden() -> None:

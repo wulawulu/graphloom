@@ -1,0 +1,438 @@
+{
+  "format_version": 1,
+  "baseline": {
+    "distribution": "graphrag",
+    "version": "3.1.0"
+  },
+  "request_templates": {
+    "embedding": {
+      "embedding_input_count": 1,
+      "endpoint": "/v1/embeddings",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": [],
+      "model": {"present": true, "kind": "string", "value": "embed-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": false, "kind": "absent", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "chat_stream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": true},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphloom_json_nonstream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {
+        "present": true,
+        "kind": "object",
+        "value": {"type": "json_object"}
+      },
+      "stream": {"present": true, "kind": "boolean", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphrag_nonstream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": false, "kind": "absent", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphloom_user_nonstream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphrag_user_nonstream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": false, "kind": "absent", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphloom_primer": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {
+        "present": true,
+        "kind": "object",
+        "value": {
+          "json_schema": {
+            "name": "PrimerResponse",
+            "schema": {
+              "additionalProperties": false,
+              "description": "Response model for the primer.",
+              "properties": {
+                "follow_up_queries": {
+                  "description": "A list of follow-up queries that could be asked to further explore the topic. These should be formatted as a list of strings. Generate at least five good follow-up queries.",
+                  "items": {"type": "string"},
+                  "title": "Follow Up Queries",
+                  "type": "array"
+                },
+                "intermediate_answer": {
+                  "description": "This answer should match the level of detail and length found in the community summaries. The intermediate answer should be exactly 2000 characters long. This must be formatted in markdown and must begin with a header that explains how the following text is related to the query.",
+                  "title": "Intermediate Answer",
+                  "type": "string"
+                },
+                "score": {
+                  "description": "A score on how well the intermediate answer addresses the query. A score of 0 indicates a poor, unfocused answer, while a score of 100 indicates a highly focused, relevant answer that addresses the query in its entirety.",
+                  "title": "Score",
+                  "type": "integer"
+                }
+              },
+              "required": ["intermediate_answer", "score", "follow_up_queries"],
+              "title": "PrimerResponse",
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      },
+      "stream": {"present": true, "kind": "boolean", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphrag_primer": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {
+        "present": true,
+        "kind": "object",
+        "value": {
+          "json_schema": {
+            "name": "PrimerResponse",
+            "schema": {
+              "additionalProperties": false,
+              "description": "Response model for the primer.",
+              "properties": {
+                "follow_up_queries": {
+                  "description": "A list of follow-up queries that could be asked to further explore the topic. These should be formatted as a list of strings. Generate at least five good follow-up queries.",
+                  "items": {"type": "string"},
+                  "title": "Follow Up Queries",
+                  "type": "array"
+                },
+                "intermediate_answer": {
+                  "description": "This answer should match the level of detail and length found in the community summaries. The intermediate answer should be exactly 2000 characters long. This must be formatted in markdown and must begin with a header that explains how the following text is related to the query.",
+                  "title": "Intermediate Answer",
+                  "type": "string"
+                },
+                "score": {
+                  "description": "A score on how well the intermediate answer addresses the query. A score of 0 indicates a poor, unfocused answer, while a score of 100 indicates a highly focused, relevant answer that addresses the query in its entirety.",
+                  "title": "Score",
+                  "type": "integer"
+                }
+              },
+              "required": ["intermediate_answer", "score", "follow_up_queries"],
+              "title": "PrimerResponse",
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      },
+      "stream": {"present": false, "kind": "absent", "value": false},
+      "temperature": {"present": false, "kind": "absent", "value": null},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphloom_action": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": true, "kind": "integer", "value": 1},
+      "response_format": {
+        "present": true,
+        "kind": "object",
+        "value": {"type": "json_object"}
+      },
+      "stream": {"present": true, "kind": "boolean", "value": true},
+      "temperature": {"present": true, "kind": "number", "value": 0.0},
+      "top_p": {"present": true, "kind": "number", "value": 1.0}
+    },
+    "graphrag_action": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": true, "kind": "integer", "value": 1},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": true},
+      "temperature": {"present": true, "kind": "integer", "value": 0},
+      "top_p": {"present": true, "kind": "integer", "value": 1}
+    },
+    "graphloom_reduce_nonstream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": false},
+      "temperature": {"present": true, "kind": "number", "value": 0.0},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphloom_reduce_stream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": true},
+      "temperature": {"present": true, "kind": "number", "value": 0.0},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    },
+    "graphrag_reduce_stream": {
+      "embedding_input_count": 0,
+      "endpoint": "/v1/chat/completions",
+      "max_completion_tokens": {"present": false, "kind": "absent", "value": null},
+      "max_tokens": {"present": false, "kind": "absent", "value": null},
+      "message_roles": ["system", "user"],
+      "model": {"present": true, "kind": "string", "value": "gpt-test"},
+      "n": {"present": false, "kind": "absent", "value": null},
+      "response_format": {"present": false, "kind": "absent", "value": null},
+      "stream": {"present": true, "kind": "boolean", "value": true},
+      "temperature": {"present": true, "kind": "integer", "value": 0},
+      "top_p": {"present": false, "kind": "absent", "value": null}
+    }
+  },
+  "consumers": {
+    "graphloom": {
+      "basic__non_stream": {
+        "sequence": ["embedding", "basic_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "basic_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "basic__stream": {
+        "sequence": ["embedding", "basic_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "basic_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "local__non_stream": {
+        "sequence": ["embedding", "local_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "local_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "local__stream": {
+        "sequence": ["embedding", "local_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "local_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "global__non_stream": {
+        "sequence": ["global_search_map", "global_search_reduce"],
+        "total_count": 2,
+        "operations": {
+          "global_search_map": {"count": 1, "request_template": "graphloom_json_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "global__stream": {
+        "sequence": ["global_search_map", "global_search_reduce"],
+        "total_count": 2,
+        "operations": {
+          "global_search_map": {"count": 1, "request_template": "graphloom_json_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "dynamic_global__non_stream": {
+        "sequence": ["dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "global_search_map", "global_search_reduce"],
+        "total_count": 8,
+        "operations": {
+          "dynamic_rating": {"count": 6, "request_template": "graphloom_json_nonstream"},
+          "global_search_map": {"count": 1, "request_template": "graphloom_json_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "dynamic_global__stream": {
+        "sequence": ["dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "global_search_map", "global_search_reduce"],
+        "total_count": 8,
+        "operations": {
+          "dynamic_rating": {"count": 6, "request_template": "graphloom_json_nonstream"},
+          "global_search_map": {"count": 1, "request_template": "graphloom_json_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "drift__non_stream": {
+        "sequence": ["drift_hyde", "embedding", "drift_primer", "embedding", "drift_action", "drift_reduce"],
+        "total_count": 6,
+        "operations": {
+          "drift_hyde": {"count": 1, "request_template": "graphloom_user_nonstream"},
+          "embedding": {"count": 2, "request_template": "embedding"},
+          "drift_primer": {"count": 1, "request_template": "graphloom_primer"},
+          "drift_action": {"count": 1, "request_template": "graphloom_action"},
+          "drift_reduce": {"count": 1, "request_template": "graphloom_reduce_nonstream"}
+        }
+      },
+      "drift__stream": {
+        "sequence": ["drift_hyde", "embedding", "drift_primer", "embedding", "drift_action", "drift_reduce"],
+        "total_count": 6,
+        "operations": {
+          "drift_hyde": {"count": 1, "request_template": "graphloom_user_nonstream"},
+          "embedding": {"count": 2, "request_template": "embedding"},
+          "drift_primer": {"count": 1, "request_template": "graphloom_primer"},
+          "drift_action": {"count": 1, "request_template": "graphloom_action"},
+          "drift_reduce": {"count": 1, "request_template": "graphloom_reduce_stream"}
+        }
+      }
+    },
+    "graphrag": {
+      "basic__non_stream": {
+        "sequence": ["embedding", "basic_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "basic_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "basic__stream": {
+        "sequence": ["embedding", "basic_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "basic_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "local__non_stream": {
+        "sequence": ["embedding", "local_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "local_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "local__stream": {
+        "sequence": ["embedding", "local_search"],
+        "total_count": 2,
+        "operations": {
+          "embedding": {"count": 1, "request_template": "embedding"},
+          "local_search": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "global__non_stream": {
+        "sequence": ["global_search_map", "global_search_reduce"],
+        "total_count": 2,
+        "operations": {
+          "global_search_map": {"count": 1, "request_template": "graphrag_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "global__stream": {
+        "sequence": ["global_search_map", "global_search_reduce"],
+        "total_count": 2,
+        "operations": {
+          "global_search_map": {"count": 1, "request_template": "graphrag_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "dynamic_global__non_stream": {
+        "sequence": ["dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "global_search_map", "global_search_reduce"],
+        "total_count": 8,
+        "operations": {
+          "dynamic_rating": {"count": 6, "request_template": "graphrag_nonstream"},
+          "global_search_map": {"count": 1, "request_template": "graphrag_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "dynamic_global__stream": {
+        "sequence": ["dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "dynamic_rating", "global_search_map", "global_search_reduce"],
+        "total_count": 8,
+        "operations": {
+          "dynamic_rating": {"count": 6, "request_template": "graphrag_nonstream"},
+          "global_search_map": {"count": 1, "request_template": "graphrag_nonstream"},
+          "global_search_reduce": {"count": 1, "request_template": "chat_stream"}
+        }
+      },
+      "drift__non_stream": {
+        "sequence": ["drift_hyde", "embedding", "drift_primer", "embedding", "drift_action", "drift_reduce"],
+        "total_count": 6,
+        "operations": {
+          "drift_hyde": {"count": 1, "request_template": "graphrag_user_nonstream"},
+          "embedding": {"count": 2, "request_template": "embedding"},
+          "drift_primer": {"count": 1, "request_template": "graphrag_primer"},
+          "drift_action": {"count": 1, "request_template": "graphrag_action"},
+          "drift_reduce": {"count": 1, "request_template": "graphrag_reduce_stream"}
+        }
+      },
+      "drift__stream": {
+        "sequence": ["drift_hyde", "embedding", "drift_primer", "embedding", "drift_action", "drift_reduce"],
+        "total_count": 6,
+        "operations": {
+          "drift_hyde": {"count": 1, "request_template": "graphrag_user_nonstream"},
+          "embedding": {"count": 2, "request_template": "embedding"},
+          "drift_primer": {"count": 1, "request_template": "graphrag_primer"},
+          "drift_action": {"count": 1, "request_template": "graphrag_action"},
+          "drift_reduce": {"count": 1, "request_template": "graphrag_reduce_stream"}
+        }
+      }
+    }
+  }
+}

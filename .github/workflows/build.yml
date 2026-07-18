@@ -61,6 +61,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Execute rust tests
         run: cargo nextest run --workspace --all-features
+      - name: Test vector compatibility manifest
+        run: cargo test -p graphloom-vectors --example compat_vector_manifest
 
   compatibility:
     runs-on: ubuntu-latest
