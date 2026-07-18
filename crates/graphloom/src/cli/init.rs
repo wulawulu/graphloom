@@ -238,9 +238,8 @@ async fn reject_symlink(path: &Path) -> Result<()> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use tempfile::TempDir;
-
     use super::*;
+    use crate::test_support::CanonicalTempDir;
 
     fn args(root: &Path, force: bool) -> InitArgs {
         InitArgs {
@@ -253,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_create_project_with_all_assets() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("init");
@@ -274,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_initialize_tera_prompt_templates() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("init");
@@ -303,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_initialize_only_managed_prompt_kinds() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("init");
@@ -339,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_compile_every_initialized_prompt() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("init");
@@ -372,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_write_model_names_with_yaml_safe_serialization() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let completion = "vendor:model#v1 \"quoted\"";
         let embedding = "embed:model#v2 [brackets]";
         init_project(&InitArgs {
@@ -434,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_control_character_model_name_without_side_effects() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let root = tempdir.path().join("project");
         let error = init_project(&InitArgs {
             root: root.clone(),
@@ -451,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_fail_when_already_initialized_without_force() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let settings = tempdir.path().join("settings.yaml");
         tokio::fs::write(&settings, "original")
             .await
@@ -470,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_force_overwrite_managed_files_and_preserve_user_files() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("init");
@@ -531,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_roll_back_every_managed_file_when_force_publish_fails() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&args(tempdir.path(), false))
             .await
             .expect("initial init");
@@ -591,7 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_remove_new_scaffold_when_initial_publish_fails() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let root = tempdir.path().join("project");
         let plan = InitPlan::build(&args(&root, false)).await.expect("plan");
 
@@ -636,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_not_overwrite_partial_project_without_settings() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         tokio::fs::create_dir(tempdir.path().join("prompts"))
             .await
             .expect("prompts");
@@ -677,7 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_ignore_stale_temporary_file_names() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         tokio::fs::write(tempdir.path().join(".settings.yaml.tmp-graphloom"), "stale")
             .await
             .expect("stale temp");
@@ -698,7 +697,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_managed_file_target() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let external = tempdir.path().join("external-settings.yaml");
         tokio::fs::write(&external, "external")
             .await
@@ -724,8 +723,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_prompt_parent() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("prompts"))
             .expect("symlink");
 
@@ -749,8 +748,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_root_without_side_effects() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         let project = external.path().join("project");
         tokio::fs::create_dir(&project).await.expect("project");
         let link = tempdir.path().join("project-link");
@@ -769,8 +768,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_ancestor_before_normalization_without_side_effects() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         let link = tempdir.path().join("ancestor-link");
         std::os::unix::fs::symlink(external.path(), &link).expect("symlink");
         let root = link.join("project");
@@ -790,8 +789,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_ancestor_hidden_by_parent_component() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         let link = tempdir.path().join("ancestor-link");
         std::os::unix::fs::symlink(external.path(), &link).expect("symlink");
         let root = link.join("..").join("project");
@@ -807,7 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_non_directory_parent_before_target_check() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let file = tempdir.path().join("file");
         tokio::fs::write(&file, "not a directory")
             .await
@@ -823,7 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_non_directory_ancestor_cross_platform() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let file = tempdir.path().join("file");
         tokio::fs::write(&file, "not a directory")
             .await
@@ -840,7 +839,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn test_should_check_verbatim_path_ancestors_without_querying_prefix_only_path() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
         crate::path_safety::tests::windows::assert_windows_verbatim_path(&canonical);
 
@@ -852,8 +851,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_should_reject_symlink_input_directory_without_side_effects() {
-        let tempdir = TempDir::new().expect("tempdir");
-        let external = TempDir::new().expect("external");
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
         std::os::unix::fs::symlink(external.path(), tempdir.path().join("input")).expect("symlink");
 
         let error = init_project(&args(tempdir.path(), false))

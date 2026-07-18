@@ -57,4 +57,7 @@ pub(crate) use workflows::{
 pub(crate) use workflows::{LOAD_INPUT_DOCUMENTS_WORKFLOW, register_standard_index_workflows};
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests;

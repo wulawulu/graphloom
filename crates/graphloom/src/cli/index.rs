@@ -174,14 +174,16 @@ mod tests {
     use graphloom_llm::{
         CompletionModel, EmbeddingModel, MockCompletionModel, MockEmbeddingModel, ModelConfig,
     };
-    use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::{IndexMethodArg, InitArgs, init_project};
+    use crate::{
+        cli::{IndexMethodArg, InitArgs, init_project},
+        test_support::CanonicalTempDir,
+    };
 
     #[tokio::test]
     async fn test_should_reject_missing_project_settings() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let error = run(&IndexArgs {
             root: tempdir.path().to_path_buf(),
             method: IndexMethodArg::Standard,
@@ -199,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_dry_run_without_creating_runtime_outputs() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         #[cfg(windows)]
         {
             let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
@@ -253,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_reject_output_file_during_dry_run_without_side_effects() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
@@ -308,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_skip_optional_and_connectivity_validation() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
@@ -344,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_report_missing_input_before_model_connectivity() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),

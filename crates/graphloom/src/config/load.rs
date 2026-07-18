@@ -649,10 +649,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use secrecy::ExposeSecret;
-    use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::{InitArgs, init_project};
+    use crate::{
+        cli::{InitArgs, init_project},
+        test_support::CanonicalTempDir,
+    };
 
     #[test]
     fn test_should_parse_supported_dotenv_syntax() {
@@ -679,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_load_initialized_yaml_without_changing_cwd() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "custom-chat".to_owned(),
@@ -761,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_support_yml_json_and_env_precedence() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         tokio::fs::write(
             tempdir.path().join(".env"),
             "GRAPHRAG_API_KEY=from-dotenv\n",
@@ -849,7 +851,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_fail_on_missing_env_and_malformed_dotenv() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         tokio::fs::write(
             tempdir.path().join("settings.yaml"),
             "completion_models:\n  default_completion_model:\n    model: gpt\n    api_key: \
@@ -873,7 +875,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_dry_run_preflight_requirements() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         init_project(&InitArgs {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
@@ -896,7 +898,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_input_file_pattern_with_reader_regex() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.md"), "Alice")
             .await
@@ -916,7 +918,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_match_input_pattern_against_storage_logical_path() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::create_dir_all(tempdir.path().join("input").join("subdir"))
             .await
@@ -940,7 +942,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_only_active_workflow_dependencies() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -966,7 +968,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_require_embedding_model_only_when_embeddings_are_active() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -992,7 +994,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_ignore_unused_unsupported_completion_models() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -1011,7 +1013,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_require_claims_model_when_claims_enabled() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -1027,7 +1029,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_not_require_summarize_dependencies_for_finalize_graph_only() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         project.config.workflows = vec!["finalize_graph".to_owned()];
         project.config.completion_models.clear();
@@ -1040,7 +1042,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_require_summarize_dependencies_for_extract_graph() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -1057,7 +1059,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_effective_completion_encoding_for_community_reports() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         project.config.workflows = vec!["create_community_reports".to_owned()];
         project
@@ -1077,7 +1079,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_use_graphrag_litellm_fallback_for_model_tokenizers() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         project.config.chunking.encoding_model = "o200k_base".to_owned();
         project
@@ -1108,7 +1110,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_effective_embedding_encoding_for_text_embeddings() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         project.config.workflows = vec!["generate_text_embeddings".to_owned()];
         project
@@ -1128,7 +1130,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_chunking_only_for_workflows_that_require_it() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -1148,7 +1150,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_only_active_tokenizer_requirements() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         tokio::fs::write(tempdir.path().join("input").join("doc.txt"), "Alice")
             .await
@@ -1169,7 +1171,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_validate_only_runtime_required_community_report_prompt() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         project.config.workflows = vec!["create_community_reports".to_owned()];
         tokio::fs::remove_file(
@@ -1202,7 +1204,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_probe_only_paths_needed_by_the_active_run() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         let blocked = tempdir.path().join("ordinary-file");
         tokio::fs::write(&blocked, "not a directory")
@@ -1232,7 +1234,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_clean_writability_probes_without_creating_runtime_paths() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         let output = tempdir.path().join("existing-output");
         let sentinel = output.join("sentinel");
@@ -1276,7 +1278,7 @@ embedding_models:
 
     #[tokio::test]
     async fn test_should_skip_optional_writability_probes() {
-        let tempdir = TempDir::new().expect("tempdir");
+        let tempdir = CanonicalTempDir::new();
         let mut project = initialized_project(tempdir.path()).await;
         let blocked = tempdir.path().join("cache-is-a-file");
         tokio::fs::write(&blocked, "not a directory")
