@@ -15,6 +15,7 @@ use crate::query::SearchMethod;
 #[derive(Debug, Parser)]
 #[command(
     name = "graphloom",
+    bin_name = "graphloom",
     version,
     about = "GraphLoom: A graph-based retrieval-augmented generation (RAG) system.",
     arg_required_else_help = true
@@ -373,6 +374,18 @@ mod tests {
 
     const QUERY_CLI_CONTRACT: &str =
         include_str!("../../../../tests/compat/fixtures/query/query_cli_contract.json");
+
+    #[test]
+    fn test_should_use_stable_binary_name_when_argv_zero_has_exe_suffix() {
+        let error = Cli::try_parse_from(["graphloom.exe", "query", "--help"])
+            .expect_err("help should exit through Clap");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+
+        let help = error.to_string();
+        assert!(help.contains("Usage: graphloom query [OPTIONS] <QUERY>"));
+        assert!(!help.contains("graphloom.exe"));
+    }
 
     #[test]
     fn test_should_enable_configured_cache_by_default() {
