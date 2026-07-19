@@ -193,34 +193,38 @@ impl VectorStore for LanceDbVectorStore {
         let mut stream = table
             .query()
             .select(Select::columns(&[&schema.id_field, &schema.vector_field]))
+            .only_if_expr(col(&schema.id_field).eq(lit(id)))
+            .limit(1)
             .execute()
             .await?;
 
-        while let Some(batch) = stream.try_next().await? {
-            let ids = batch
-                .column_by_name(&schema.id_field)
-                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| VectorError::InvalidDocument {
-                    index_name: schema.index_name.clone(),
-                    message: format!("id field {} is not Utf8", schema.id_field),
-                })?;
-            let vectors = batch
-                .column_by_name(&schema.vector_field)
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
-                .ok_or_else(|| VectorError::InvalidDocument {
-                    index_name: schema.index_name.clone(),
-                    message: format!("vector field {} is not FixedSizeList", schema.vector_field),
-                })?;
-            for row_index in 0..batch.num_rows() {
-                if !ids.is_null(row_index) && ids.value(row_index) == id {
-                    return Ok(Some(VectorDocument {
-                        id: id.to_owned(),
-                        vector: vector_value(schema, vectors, row_index)?,
-                    }));
-                }
-            }
+        let Some(batch) = stream.try_next().await? else {
+            return Ok(None);
+        };
+        if batch.num_rows() == 0 {
+            return Ok(None);
         }
-        Ok(None)
+        let ids = batch
+            .column_by_name(&schema.id_field)
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| VectorError::InvalidDocument {
+                index_name: schema.index_name.clone(),
+                message: format!("id field {} is not Utf8", schema.id_field),
+            })?;
+        let vectors = batch
+            .column_by_name(&schema.vector_field)
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+            .ok_or_else(|| VectorError::InvalidDocument {
+                index_name: schema.index_name.clone(),
+                message: format!("vector field {} is not FixedSizeList", schema.vector_field),
+            })?;
+        if ids.is_null(0) {
+            return Ok(None);
+        }
+        Ok(Some(VectorDocument {
+            id: ids.value(0).to_owned(),
+            vector: vector_value(schema, vectors, 0)?,
+        }))
     }
 
     async fn similarity_search_by_vector(
@@ -759,6 +763,8 @@ fn vector_value(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -839,6 +845,89 @@ mod tests {
                 .vector,
             vec![0.0, 1.0]
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_filter_get_by_id_for_missing_and_special_character_ids() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let index_schema = schema("special_ids", 2);
+        let store = connect_store(&tempdir).await;
+        let special_id = "quote' \" slash\\ newline\n世界";
+        store
+            .upsert_documents(
+                &index_schema,
+                &[VectorDocument {
+                    id: special_id.to_owned(),
+                    vector: vec![0.25, 0.75],
+                }],
+            )
+            .await
+            .expect("seed special id");
+
+        assert_eq!(
+            store
+                .get_by_id(&index_schema, special_id)
+                .await
+                .expect("query special id"),
+            Some(VectorDocument {
+                id: special_id.to_owned(),
+                vector: vec![0.25, 0.75],
+            })
+        );
+        assert_eq!(
+            store
+                .get_by_id(&index_schema, "missing'id")
+                .await
+                .expect("query missing id"),
+            None
+        );
+
+        let wrong_dimension = schema("special_ids", 3);
+        let error = store
+            .get_by_id(&wrong_dimension, special_id)
+            .await
+            .expect_err("stored vector dimension mismatch");
+        assert!(error.to_string().contains("size 3"));
+    }
+
+    #[tokio::test]
+    #[ignore = "repeatable LanceDB performance probe; run through make bench-query"]
+    async fn test_performance_get_by_id_small_large_and_missing() {
+        for row_count in [100_usize, 100_000] {
+            let tempdir = TempDir::new().expect("tempdir");
+            let index_schema = schema(&format!("get_by_id_{row_count}"), 2);
+            let store = connect_store(&tempdir).await;
+            let documents = (0..row_count)
+                .map(|index| VectorDocument {
+                    id: format!("document-{index}"),
+                    vector: vec![1.0, 0.0],
+                })
+                .collect::<Vec<_>>();
+            store
+                .upsert_documents(&index_schema, &documents)
+                .await
+                .expect("seed get_by_id benchmark");
+
+            let existing_started = Instant::now();
+            let existing = store
+                .get_by_id(&index_schema, &format!("document-{}", row_count / 2))
+                .await
+                .expect("existing lookup");
+            let existing_elapsed = existing_started.elapsed();
+            let missing_started = Instant::now();
+            let missing = store
+                .get_by_id(&index_schema, "absent-document")
+                .await
+                .expect("missing lookup");
+            let missing_elapsed = missing_started.elapsed();
+
+            assert!(existing.is_some());
+            assert!(missing.is_none());
+            eprintln!(
+                "LanceDB get_by_id performance: rows={row_count}, existing={existing_elapsed:?}, \
+                 missing={missing_elapsed:?}"
+            );
+        }
     }
 
     #[tokio::test]
