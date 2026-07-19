@@ -3,7 +3,7 @@ use std::{
     hash::{Hash, Hasher},
     path::Path,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 use futures_util::StreamExt;
@@ -28,7 +28,7 @@ use graphloom::{
     },
     query::{
         MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
-        QueryError, QueryEvent, QueryEventStream, QueryOptions, SearchMethod,
+        QueryEngine, QueryError, QueryEvent, QueryEventStream, QueryOptions, SearchMethod,
     },
 };
 use graphloom_llm::ModelConfig;
@@ -66,6 +66,11 @@ fn completion_response(content: &str) -> ResponseTemplate {
 fn drift_chat_responder(request: &Request) -> ResponseTemplate {
     let body = request.body_json::<Value>().expect("DRIFT request JSON");
     let messages = body["messages"].as_array().expect("DRIFT messages");
+    let benchmark = messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("benchmark-depth"))
+    });
     let first = messages
         .first()
         .and_then(|message| message["content"].as_str())
@@ -73,7 +78,11 @@ fn drift_chat_responder(request: &Request) -> ResponseTemplate {
     let streaming = body["stream"].as_bool() == Some(true);
     if streaming {
         let content = if first.contains("follow_up_queries") {
-            r#"{"response":"Action answer.","score":80,"follow_up_queries":[]}"#
+            if benchmark {
+                r#"{"response":"Action answer.","score":80,"follow_up_queries":["Next benchmark-depth?"]}"#
+            } else {
+                r#"{"response":"Action answer.","score":80,"follow_up_queries":[]}"#
+            }
         } else {
             "DRIFT final."
         };
@@ -105,9 +114,15 @@ fn drift_chat_responder(request: &Request) -> ResponseTemplate {
     if first.starts_with("Create a hypothetical answer") {
         completion_response("Expanded question")
     } else if first.starts_with("You are a helpful agent designed to reason") {
-        completion_response(
-            r#"{"intermediate_answer":"Primer answer.","score":70,"follow_up_queries":["Who?"]}"#,
-        )
+        if benchmark {
+            completion_response(
+                r#"{"intermediate_answer":"Primer answer.","score":70,"follow_up_queries":["Who benchmark-depth?","What benchmark-depth?","Where benchmark-depth?"]}"#,
+            )
+        } else {
+            completion_response(
+                r#"{"intermediate_answer":"Primer answer.","score":70,"follow_up_queries":["Who?"]}"#,
+            )
+        }
     } else {
         completion_response("DRIFT final.")
     }
@@ -468,6 +483,46 @@ async fn write_local_tables(root: &Path) -> Vec<std::path::PathBuf> {
     .iter()
     .map(|name| root.join(format!("{name}.parquet")))
     .collect()
+}
+
+async fn seed_drift_vectors(config: &GraphRagConfig) -> (Vec<String>, Vec<String>) {
+    let store = LanceDbVectorStore::connect(&config.vector_store)
+        .await
+        .expect("connect DRIFT LanceDB");
+    let entity_schema = config.vector_store.schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    let report_schema = config
+        .vector_store
+        .schema_for(COMMUNITY_FULL_CONTENT_EMBEDDING);
+    for schema in [&entity_schema, &report_schema] {
+        store
+            .ensure_index(schema)
+            .await
+            .expect("DRIFT vector index");
+    }
+    store
+        .upsert_documents(
+            &entity_schema,
+            &[VectorDocument {
+                id: "entity-a".to_owned(),
+                vector: vec![1.0, 0.0],
+            }],
+        )
+        .await
+        .expect("entity vector");
+    store
+        .upsert_documents(
+            &report_schema,
+            &[VectorDocument {
+                id: "report-a".to_owned(),
+                vector: vec![1.0, 0.0],
+            }],
+        )
+        .await
+        .expect("report vector");
+    (
+        store.ids(&entity_schema).await.expect("entity ids"),
+        store.ids(&report_schema).await.expect("report ids"),
+    )
 }
 
 async fn write_dynamic_global_tables(root: &Path) -> Vec<std::path::PathBuf> {
@@ -869,6 +924,149 @@ async fn test_should_make_unified_and_method_specific_basic_requests_identical()
 }
 
 #[tokio::test]
+async fn test_should_reuse_query_engine_snapshot_and_isolate_concurrent_requests() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let engine = Arc::new(
+        QueryEngine::load(fixture.config.clone(), fixture.project.path())
+            .await
+            .expect("Query engine"),
+    );
+    let first_callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut first = basic_options(fixture.project.path(), "first engine query");
+    first.callbacks.push(first_callbacks.clone());
+    let first_result = engine.query(first).await.expect("first engine query");
+
+    let hidden_table = fixture.text_units_path.with_extension("parquet.hidden");
+    tokio::fs::rename(&fixture.text_units_path, &hidden_table)
+        .await
+        .expect("hide table after snapshot preparation");
+
+    let second_callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let third_callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut second = basic_options(fixture.project.path(), "second engine query");
+    second.callbacks.push(second_callbacks.clone());
+    let mut third = basic_options(fixture.project.path(), "third engine query is longer");
+    third.callbacks.push(third_callbacks.clone());
+    let (second_result, third_result) = tokio::join!(engine.query(second), engine.query(third));
+    let second_result = second_result.expect("second engine query");
+    let third_result = third_result.expect("third engine query");
+
+    assert_eq!(first_result.response, second_result.response);
+    assert_eq!(second_result.response, third_result.response);
+    assert_ne!(
+        second_result.usage.categories["response"].prompt_tokens,
+        third_result.usage.categories["response"].prompt_tokens
+    );
+    for callbacks in [&first_callbacks, &second_callbacks, &third_callbacks] {
+        let events = callbacks.events.lock().expect("callback events");
+        assert_eq!(events.first().map(String::as_str), Some("context"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("token:"))
+                .count(),
+            2
+        );
+    }
+    assert_eq!(
+        first_callbacks
+            .events
+            .lock()
+            .expect("first callback events")
+            .len(),
+        3
+    );
+    assert_eq!(
+        second_callbacks
+            .events
+            .lock()
+            .expect("second callback events")
+            .len(),
+        3
+    );
+    assert_eq!(
+        third_callbacks
+            .events
+            .lock()
+            .expect("third callback events")
+            .len(),
+        3
+    );
+
+    tokio::fs::rename(hidden_table, &fixture.text_units_path)
+        .await
+        .expect("restore table fixture");
+}
+
+#[tokio::test]
+#[ignore = "repeatable local performance probe; run through make bench-query"]
+async fn test_performance_cold_and_warm_basic_queries() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let options = basic_options(fixture.project.path(), "benchmark query");
+
+    let cold_started = Instant::now();
+    query(fixture.config.clone(), options.clone())
+        .await
+        .expect("cold one-shot query");
+    let cold_elapsed = cold_started.elapsed();
+
+    let engine = QueryEngine::load(fixture.config, fixture.project.path())
+        .await
+        .expect("warm engine");
+    let warm_started = Instant::now();
+    for _ in 0..10 {
+        engine
+            .query(options.clone())
+            .await
+            .expect("warm engine query");
+    }
+    let warm_elapsed = warm_started.elapsed();
+
+    eprintln!(
+        "query performance: cold_once={cold_elapsed:?}, warm_10={warm_elapsed:?}, \
+         warm_average={:?}",
+        warm_elapsed / 10
+    );
+}
+
+#[tokio::test]
+#[ignore = "repeatable DRIFT performance probe; run through make bench-query"]
+async fn test_performance_drift_multiple_depths_and_concurrent_actions() {
+    let server = mount_drift_query_stub().await;
+    let mut fixture = fixture(&server).await;
+    write_local_tables(&fixture.project.path().join("output")).await;
+    seed_drift_vectors(&fixture.config).await;
+    fixture.config.drift_search.primer_folds = 1;
+    fixture.config.drift_search.drift_k_followups = 3;
+    fixture.config.drift_search.n_depth = 3;
+    fixture.config.drift_search.concurrency = 2;
+    fixture.config.drift_search.local_search_max_data_tokens = 4_000;
+
+    let engine = QueryEngine::load(fixture.config, fixture.project.path())
+        .await
+        .expect("DRIFT benchmark engine");
+    let options = QueryOptions::new(
+        fixture.project.path().to_path_buf(),
+        "What changed benchmark-depth?".to_owned(),
+        SearchMethod::Drift,
+    );
+    let started = Instant::now();
+    let result = engine
+        .query(options)
+        .await
+        .expect("multi-depth DRIFT benchmark query");
+
+    eprintln!(
+        "DRIFT performance: depth=3, followups=3, concurrency=2, elapsed={:?}, llm_calls={}",
+        started.elapsed(),
+        result.usage.llm_calls
+    );
+    assert!(result.usage.categories["action"].llm_calls > 3);
+}
+
+#[tokio::test]
 async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
@@ -884,7 +1082,9 @@ async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
         panic!("expected Basic context text");
     };
     assert_eq!(context, "id|text\n0|first source\n1|second source\n");
-    assert_eq!(result.usage.llm_calls, 1);
+    assert_eq!(result.usage.llm_calls, 2);
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 1);
+    assert_eq!(result.usage.categories["response"].llm_calls, 1);
 
     let mut events = query_stream(
         fixture.config.clone(),
@@ -1120,9 +1320,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
     fixture.config.drift_search.n_depth = 1;
     fixture.config.drift_search.concurrency = 2;
     fixture.config.drift_search.local_search_max_data_tokens = 4_000;
-    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
-        .await
-        .expect("connect DRIFT LanceDB");
+    let (entity_ids, report_ids) = seed_drift_vectors(&fixture.config).await;
     let entity_schema = fixture
         .config
         .vector_store
@@ -1131,34 +1329,6 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         .config
         .vector_store
         .schema_for(COMMUNITY_FULL_CONTENT_EMBEDDING);
-    for schema in [&entity_schema, &report_schema] {
-        store
-            .ensure_index(schema)
-            .await
-            .expect("DRIFT vector index");
-    }
-    store
-        .upsert_documents(
-            &entity_schema,
-            &[VectorDocument {
-                id: "entity-a".to_owned(),
-                vector: vec![1.0, 0.0],
-            }],
-        )
-        .await
-        .expect("entity vector");
-    store
-        .upsert_documents(
-            &report_schema,
-            &[VectorDocument {
-                id: "report-a".to_owned(),
-                vector: vec![1.0, 0.0],
-            }],
-        )
-        .await
-        .expect("report vector");
-    let entity_ids = store.ids(&entity_schema).await.expect("entity ids");
-    let report_ids = store.ids(&report_schema).await.expect("report ids");
     let options = QueryOptions::new(
         fixture.project.path().to_path_buf(),
         "What changed?".to_owned(),
@@ -1197,10 +1367,19 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         result.usage.categories.keys().cloned().collect::<Vec<_>>(),
         ["action", "build_context", "primer", "reduce"]
     );
-    assert_eq!(result.usage.categories["build_context"].llm_calls, 1);
+    assert_eq!(result.usage.categories["build_context"].llm_calls, 2);
     assert_eq!(result.usage.categories["primer"].llm_calls, 1);
-    assert_eq!(result.usage.categories["action"].llm_calls, 1);
+    assert_eq!(result.usage.categories["action"].llm_calls, 2);
     assert_eq!(result.usage.categories["reduce"].llm_calls, 1);
+    assert_eq!(
+        result.usage.llm_calls,
+        result
+            .usage
+            .categories
+            .values()
+            .map(|category| category.llm_calls)
+            .sum::<usize>()
+    );
     let QueryContextText::Composite(context) = &result.context.text else {
         panic!("expected composite DRIFT context");
     };

@@ -1,14 +1,18 @@
 //! Query contracts, read-only runtime, data adapters, and search implementations.
 
 mod callbacks;
+mod concurrency;
 mod context;
+mod data_index;
 mod data_loader;
 mod data_model;
+mod engine;
 mod error;
 mod indexer_adapters;
 mod requirements;
 mod result;
 mod runtime;
+mod streaming;
 
 pub(crate) mod basic;
 pub(crate) mod drift;
@@ -20,10 +24,12 @@ use std::{path::PathBuf, str::FromStr, sync::Arc};
 pub use callbacks::{NoopQueryCallbacks, QueryCallbackChain, QueryCallbacks};
 use clap::{ValueEnum, builder::PossibleValue};
 pub use context::{ConversationHistory, ConversationRole, ConversationTurn};
+pub(crate) use data_index::QueryDataIndex;
 pub use data_loader::{
     BasicQueryData, DriftQueryData, GlobalQueryData, LocalQueryData, QueryDataLoader,
 };
 pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship, TextUnit};
+pub use engine::QueryEngine;
 pub use error::{QueryError, QueryTableErrorDetails, Result};
 pub use global::{DynamicRating, MapPoint, MapSearchResult};
 pub use indexer_adapters::{

@@ -10,13 +10,13 @@ use graphloom_storage::{FileStorage, ParquetTableProvider, TableProvider};
 use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore, create_vector_store};
 
 use super::{
-    QueryCallbackChain, QueryCallbacks, QueryError, QueryOptions, Result, SearchMethod, TextUnit,
+    QueryCallbackChain, QueryCallbacks, QueryDataIndex, QueryError, QueryOptions, Result,
+    SearchMethod, TextUnit,
     basic::BasicContextBuilder,
     data_loader::{DriftQueryData, GlobalQueryData, LocalQueryData, QueryDataLoader},
     drift::DriftContextBuilder,
     global::GlobalContextBuilder,
     local::LocalContextBuilder,
-    requirements::QueryRequirements,
 };
 use crate::{
     project::LoadedProject,
@@ -25,9 +25,9 @@ use crate::{
 };
 
 /// Prepared resources for one Basic Search invocation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BasicQueryRuntime {
-    pub(crate) basic_context: BasicContextBuilder,
+    pub(crate) basic_context: Arc<BasicContextBuilder>,
     pub(crate) completion_model: Arc<dyn CompletionModel>,
     pub(crate) completion_model_id: String,
     pub(crate) completion_config: ModelConfig,
@@ -36,9 +36,9 @@ pub(crate) struct BasicQueryRuntime {
 }
 
 /// Prepared resources for one Local Search invocation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LocalQueryRuntime {
-    pub(crate) local_context: LocalContextBuilder,
+    pub(crate) local_context: Arc<LocalContextBuilder>,
     pub(crate) completion_model: Arc<dyn CompletionModel>,
     pub(crate) completion_model_id: String,
     pub(crate) completion_config: ModelConfig,
@@ -47,14 +47,16 @@ pub(crate) struct LocalQueryRuntime {
 }
 
 /// Prepared resources for one Global Search invocation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GlobalQueryRuntime {
-    pub(crate) global_context: GlobalContextBuilder,
+    pub(crate) global_context: Arc<GlobalContextBuilder>,
     pub(crate) completion_model: Arc<dyn CompletionModel>,
     pub(crate) completion_model_id: String,
     pub(crate) completion_config: ModelConfig,
     pub(crate) map_prompt: PromptTemplate,
     pub(crate) reduce_prompt: PromptTemplate,
+    // GraphRAG 3.1.0 validates this configured prompt during runtime assembly even though the
+    // CLI keeps allow_general_knowledge disabled and does not render it.
     pub(crate) _knowledge_prompt: PromptTemplate,
     pub(crate) callbacks: Arc<dyn QueryCallbacks>,
     pub(crate) concurrent_requests: usize,
@@ -62,9 +64,9 @@ pub(crate) struct GlobalQueryRuntime {
 }
 
 /// Prepared resources for one DRIFT Search invocation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DriftQueryRuntime {
-    pub(crate) context: DriftContextBuilder,
+    pub(crate) context: Arc<DriftContextBuilder>,
     pub(crate) local_prompt: PromptTemplate,
     pub(crate) reduce_prompt: PromptTemplate,
     pub(crate) callbacks: Arc<dyn QueryCallbacks>,
@@ -109,7 +111,7 @@ impl QueryRuntimeFactory {
         Self::build_basic_with_factory(project, options, &DefaultModelFactory).await
     }
 
-    async fn build_basic_with_factory(
+    pub(crate) async fn build_basic_with_factory(
         project: &LoadedProject,
         options: &QueryOptions,
         model_factory: &dyn ModelFactory,
@@ -134,7 +136,7 @@ impl QueryRuntimeFactory {
         let callbacks: Arc<dyn QueryCallbacks> =
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
         Ok(BasicQueryRuntime {
-            basic_context: BasicContextBuilder {
+            basic_context: Arc::new(BasicContextBuilder {
                 config: project.config.basic_search.clone(),
                 text_units,
                 embedding_model: models.embedding,
@@ -142,7 +144,7 @@ impl QueryRuntimeFactory {
                 vector_store: vectors.store,
                 vector_schema: vectors.schema,
                 tokenizer: models.tokenizer,
-            },
+            }),
             completion_model: models.completion,
             completion_model_id: models.completion_id,
             completion_config: models.completion_config,
@@ -158,7 +160,7 @@ impl QueryRuntimeFactory {
         Self::build_local_with_factory(project, options, &DefaultModelFactory).await
     }
 
-    async fn build_local_with_factory(
+    pub(crate) async fn build_local_with_factory(
         project: &LoadedProject,
         options: &QueryOptions,
         model_factory: &dyn ModelFactory,
@@ -166,6 +168,13 @@ impl QueryRuntimeFactory {
         let method = SearchMethod::Local;
         validate_local_requirements(project, options)?;
         let data = load_local_data(project, options).await?;
+        let index = Arc::new(QueryDataIndex::new(
+            &data.entities,
+            &data.reports,
+            &data.text_units,
+            &data.relationships,
+            &data.covariates,
+        ));
         let models = create_local_models(project, model_factory)?;
         let vectors = open_local_vectors(project).await?;
         let prompt = PromptRepository::new(&project.root)
@@ -183,7 +192,7 @@ impl QueryRuntimeFactory {
         let callbacks: Arc<dyn QueryCallbacks> =
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
         Ok(LocalQueryRuntime {
-            local_context: LocalContextBuilder {
+            local_context: Arc::new(LocalContextBuilder {
                 method,
                 config: project.config.local_search.clone(),
                 entities: data.entities,
@@ -191,12 +200,13 @@ impl QueryRuntimeFactory {
                 text_units: data.text_units,
                 relationships: data.relationships,
                 covariates: data.covariates,
+                index,
                 embedding_model: models.embedding,
                 embedding_model_id: models.embedding_id,
                 vector_store: vectors.store,
                 vector_schema: vectors.schema,
                 tokenizer: models.tokenizer,
-            },
+            }),
             completion_model: models.completion,
             completion_model_id: models.completion_id,
             completion_config: models.completion_config,
@@ -212,7 +222,7 @@ impl QueryRuntimeFactory {
         Self::build_global_with_factory(project, options, &DefaultModelFactory).await
     }
 
-    async fn build_global_with_factory(
+    pub(crate) async fn build_global_with_factory(
         project: &LoadedProject,
         options: &QueryOptions,
         model_factory: &dyn ModelFactory,
@@ -248,11 +258,11 @@ impl QueryRuntimeFactory {
         let callbacks: Arc<dyn QueryCallbacks> =
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
         Ok(GlobalQueryRuntime {
-            global_context: GlobalContextBuilder::new(
+            global_context: Arc::new(GlobalContextBuilder::new(
                 project.config.global_search.clone(),
                 data,
                 models.tokenizer,
-            ),
+            )),
             completion_model: models.completion,
             completion_model_id: models.completion_id,
             completion_config: models.completion_config,
@@ -272,7 +282,7 @@ impl QueryRuntimeFactory {
         Self::build_drift_with_factory(project, options, &DefaultModelFactory).await
     }
 
-    async fn build_drift_with_factory(
+    pub(crate) async fn build_drift_with_factory(
         project: &LoadedProject,
         options: &QueryOptions,
         model_factory: &dyn ModelFactory,
@@ -280,6 +290,13 @@ impl QueryRuntimeFactory {
         let method = SearchMethod::Drift;
         validate_drift_requirements(project, options)?;
         let data = load_drift_data(project, options).await?;
+        let index = Arc::new(QueryDataIndex::new(
+            &data.entities,
+            &data.reports,
+            &data.text_units,
+            &data.relationships,
+            &[],
+        ));
         let models = create_query_models(
             project,
             model_factory,
@@ -322,6 +339,7 @@ impl QueryRuntimeFactory {
             text_units: data.text_units,
             relationships: data.relationships,
             covariates: Vec::new(),
+            index,
             embedding_model: Arc::clone(&models.embedding),
             embedding_model_id: models.embedding_id.clone(),
             vector_store: Arc::clone(&vectors.store),
@@ -330,20 +348,22 @@ impl QueryRuntimeFactory {
         };
         let callbacks: Arc<dyn QueryCallbacks> =
             Arc::new(QueryCallbackChain::new(options.callbacks.clone()));
+        let mut context = DriftContextBuilder {
+            config: project.config.drift_search.clone(),
+            reports: data.reports,
+            local,
+            completion_model: models.completion,
+            embedding_model: models.embedding,
+            completion_model_id: models.completion_id,
+            embedding_model_id: models.embedding_id,
+            completion_config: models.completion_config,
+            vector_store: vectors.store,
+            community_schema: vectors.community_schema,
+            tokenizer: models.tokenizer,
+        };
+        context.hydrate_reports().await?;
         Ok(DriftQueryRuntime {
-            context: DriftContextBuilder {
-                config: project.config.drift_search.clone(),
-                reports: data.reports,
-                local,
-                completion_model: models.completion,
-                embedding_model: models.embedding,
-                completion_model_id: models.completion_id,
-                embedding_model_id: models.embedding_id,
-                completion_config: models.completion_config,
-                vector_store: vectors.store,
-                community_schema: vectors.community_schema,
-                tokenizer: models.tokenizer,
-            },
+            context: Arc::new(context),
             local_prompt,
             reduce_prompt,
             callbacks,
@@ -383,7 +403,10 @@ async fn load_global_prompt(
         })
 }
 
-fn validate_basic_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+pub(crate) fn validate_basic_requirements(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<()> {
     let method = SearchMethod::Basic;
     if options.community_level < 0 {
         return Err(QueryError::InvalidQueryConfig {
@@ -401,20 +424,13 @@ fn validate_basic_requirements(project: &LoadedProject, options: &QueryOptions) 
             operation: "validate Basic Search config",
             message,
         })?;
-    let requirements = QueryRequirements::for_method(method, &project.config);
-    if requirements.tables.len() == 1 && requirements.embeddings.len() == 1 {
-        return Ok(());
-    }
-    Err(QueryError::QueryRuntime {
-        method,
-        operation: "resolve Basic Search requirements",
-        source: Box::new(std::io::Error::other(
-            "Basic Search requirements are internally inconsistent",
-        )),
-    })
+    Ok(())
 }
 
-fn validate_local_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+pub(crate) fn validate_local_requirements(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<()> {
     let method = SearchMethod::Local;
     if options.community_level < 0 {
         return Err(QueryError::InvalidQueryConfig {
@@ -441,23 +457,13 @@ fn validate_local_requirements(project: &LoadedProject, options: &QueryOptions) 
                 message,
             })?;
     }
-    let requirements = QueryRequirements::for_method(method, &project.config);
-    if requirements.tables.len() == 5
-        && requirements.optional_tables.len() == 1
-        && requirements.embeddings.len() == 1
-    {
-        return Ok(());
-    }
-    Err(QueryError::QueryRuntime {
-        method,
-        operation: "resolve Local Search requirements",
-        source: Box::new(std::io::Error::other(
-            "Local Search requirements are internally inconsistent",
-        )),
-    })
+    Ok(())
 }
 
-fn validate_global_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+pub(crate) fn validate_global_requirements(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<()> {
     let method = SearchMethod::Global;
     if options.community_level < 0 {
         return Err(QueryError::InvalidQueryConfig {
@@ -482,23 +488,13 @@ fn validate_global_requirements(project: &LoadedProject, options: &QueryOptions)
             message: "concurrent_requests must be greater than zero".to_owned(),
         });
     }
-    let requirements = QueryRequirements::for_method(method, &project.config);
-    if requirements.tables.len() == 3
-        && requirements.optional_tables.is_empty()
-        && requirements.embeddings.is_empty()
-    {
-        return Ok(());
-    }
-    Err(QueryError::QueryRuntime {
-        method,
-        operation: "resolve Global Search requirements",
-        source: Box::new(std::io::Error::other(
-            "Global Search requirements are internally inconsistent",
-        )),
-    })
+    Ok(())
 }
 
-fn validate_drift_requirements(project: &LoadedProject, options: &QueryOptions) -> Result<()> {
+pub(crate) fn validate_drift_requirements(
+    project: &LoadedProject,
+    options: &QueryOptions,
+) -> Result<()> {
     let method = SearchMethod::Drift;
     if options.query.is_empty() {
         return Err(QueryError::InvalidQueryConfig {
@@ -523,20 +519,7 @@ fn validate_drift_requirements(project: &LoadedProject, options: &QueryOptions) 
             operation: "validate DRIFT Search config",
             message,
         })?;
-    let requirements = QueryRequirements::for_method(method, &project.config);
-    if requirements.tables.len() == 5
-        && requirements.optional_tables.is_empty()
-        && requirements.embeddings.len() == 2
-    {
-        return Ok(());
-    }
-    Err(QueryError::QueryRuntime {
-        method,
-        operation: "resolve DRIFT Search requirements",
-        source: Box::new(std::io::Error::other(
-            "DRIFT Search requirements are internally inconsistent",
-        )),
-    })
+    Ok(())
 }
 
 async fn load_basic_text_units(

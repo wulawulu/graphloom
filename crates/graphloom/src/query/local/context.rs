@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -12,8 +12,8 @@ use polars_core::prelude::{NamedFrom, Series};
 
 use super::super::{
     CommunityReport, ConversationHistory, Covariate, Entity, QueryContext, QueryContextRecords,
-    QueryContextText, QueryError, QueryUsageCategory, Relationship, Result, SearchMethod, TextUnit,
-    context::ContextTable,
+    QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory, Relationship, Result,
+    SearchMethod, TextUnit, context::ContextTable,
 };
 use crate::LocalSearchConfig;
 
@@ -27,6 +27,7 @@ pub(crate) struct LocalContextBuilder {
     pub(crate) text_units: Vec<TextUnit>,
     pub(crate) relationships: Vec<Relationship>,
     pub(crate) covariates: Vec<Covariate>,
+    pub(crate) index: Arc<QueryDataIndex>,
     pub(crate) embedding_model: Arc<dyn EmbeddingModel>,
     pub(crate) embedding_model_id: String,
     pub(crate) vector_store: Arc<dyn VectorStore>,
@@ -236,23 +237,24 @@ impl LocalContextBuilder {
                         source: Box::new(source),
                     },
                 })?;
-            let by_id = self
-                .entities
-                .iter()
-                .map(|entity| (entity.id.as_str(), entity))
-                .collect::<BTreeMap<_, _>>();
             let mut entities = Vec::with_capacity(results.len());
             for result in results {
-                let direct = by_id.get(result.document.id.as_str());
                 let normalized = uuid::Uuid::parse_str(&result.document.id)
                     .ok()
                     .map(|value| value.simple().to_string());
-                if let Some(entity) = direct.or_else(|| {
-                    normalized
-                        .as_deref()
-                        .and_then(|normalized_id| by_id.get(normalized_id))
-                }) {
-                    entities.push(*entity);
+                let position = self
+                    .index
+                    .entity_by_id
+                    .get(result.document.id.as_str())
+                    .copied()
+                    .or_else(|| {
+                        normalized
+                            .as_deref()
+                            .and_then(|normalized_id| self.index.entity_by_id.get(normalized_id))
+                            .copied()
+                    });
+                if let Some(entity) = position.and_then(|index| self.entities.get(index)) {
+                    entities.push(entity);
                 } else {
                     tracing::warn!(
                         method = %self.method,
@@ -264,6 +266,7 @@ impl LocalContextBuilder {
             return Ok((
                 add_entity_filters(
                     &self.entities,
+                    &self.index,
                     entities,
                     include_entity_names,
                     exclude_entity_names,
@@ -277,6 +280,7 @@ impl LocalContextBuilder {
         };
         matched = add_entity_filters(
             &self.entities,
+            &self.index,
             matched,
             include_entity_names,
             exclude_entity_names,
@@ -305,17 +309,13 @@ impl LocalContextBuilder {
                 }
             }
         }
-        let reports = self
-            .reports
-            .iter()
-            .map(|report| (report.community_id.as_str(), report))
-            .collect::<BTreeMap<_, _>>();
         let mut selected = matches
             .into_iter()
             .filter_map(|(community_id, count)| {
-                reports
+                self.index
+                    .report_by_community_id
                     .get(community_id.as_str())
-                    .copied()
+                    .and_then(|index| self.reports.get(*index))
                     .filter(|report| report.rank.is_some_and(|rank| rank >= 0.0))
                     .map(|report| (report, count))
             })
@@ -397,14 +397,33 @@ impl LocalContextBuilder {
         )?;
         let entity_tokens = self.count(&entity_text, "count Local Entities context")?;
 
-        let covariate_groups = group_covariates(&self.covariates);
         let mut accepted_text = Vec::new();
         let mut accepted_tables = BTreeMap::new();
         let mut learned_links = BTreeMap::new();
+        let mut relationship_positions = BTreeSet::new();
+        let mut covariate_positions = Vec::new();
         for end in 1..=selected_entities.len() {
             let current_entities = &selected_entities[..end];
-            let relationship = self.build_relationship_context_with_links(
+            let added_entity = selected_entities[end - 1];
+            relationship_positions.extend(
+                self.index
+                    .relationships_by_entity
+                    .get(added_entity.title.as_str())
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            covariate_positions.extend(
+                self.index
+                    .covariates_by_subject
+                    .get(added_entity.title.as_str())
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            let relationship = self.build_relationship_context_from_positions(
                 current_entities,
+                &relationship_positions,
                 max_tokens,
                 &mut learned_links,
             )?;
@@ -426,9 +445,12 @@ impl LocalContextBuilder {
                     ),
                 );
             }
-            for (name, covariates) in &covariate_groups {
-                let section =
-                    self.build_covariate_context(name, covariates, current_entities, max_tokens)?;
+            for name in &self.index.covariate_types {
+                let section = self.build_covariate_context_from_positions(
+                    name,
+                    &covariate_positions,
+                    max_tokens,
+                )?;
                 if let Some(section) = section {
                     total_tokens = total_tokens.saturating_add(
                         self.count(&section.text, "count Local covariate context")?,
@@ -465,15 +487,17 @@ impl LocalContextBuilder {
         })
     }
 
-    fn build_relationship_context_with_links(
+    fn build_relationship_context_from_positions(
         &self,
         selected_entities: &[&Entity],
+        relationship_positions: &BTreeSet<usize>,
         max_tokens: usize,
         learned_links: &mut BTreeMap<String, usize>,
     ) -> Result<Option<Section>> {
         let selected = filter_relationships(
             selected_entities,
             &self.relationships,
+            relationship_positions,
             self.config.top_k_relationships,
             learned_links,
         );
@@ -523,20 +547,18 @@ impl LocalContextBuilder {
         }))
     }
 
-    fn build_covariate_context(
+    fn build_covariate_context_from_positions(
         &self,
         name: &str,
-        covariates: &[&Covariate],
-        selected_entities: &[&Entity],
+        positions: &[usize],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
-        let mut candidates = Vec::new();
-        for entity in selected_entities {
-            for covariate in covariates
-                .iter()
-                .filter(|covariate| covariate.subject_id == entity.title)
-            {
-                candidates.push(vec![
+        let candidates = positions
+            .iter()
+            .filter_map(|index| self.covariates.get(*index))
+            .filter(|covariate| covariate.covariate_type == name)
+            .map(|covariate| {
+                vec![
                     covariate.short_id.clone().unwrap_or_default(),
                     covariate.subject_id.clone(),
                     covariate.object_id.clone().unwrap_or_default(),
@@ -544,9 +566,9 @@ impl LocalContextBuilder {
                     covariate.start_date.clone().unwrap_or_default(),
                     covariate.end_date.clone().unwrap_or_default(),
                     covariate.description.clone().unwrap_or_default(),
-                ]);
-            }
-        }
+                ]
+            })
+            .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -575,26 +597,27 @@ impl LocalContextBuilder {
         if selected_entities.is_empty() || self.text_units.is_empty() {
             return Ok(None);
         }
-        let units = self
-            .text_units
-            .iter()
-            .map(|unit| (unit.id.as_str(), unit))
-            .collect::<BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
         let mut ranked = Vec::<(&TextUnit, usize, usize)>::new();
         for (entity_order, entity) in selected_entities.iter().enumerate() {
             let entity_relationships = self
-                .relationships
-                .iter()
-                .filter(|relationship| {
-                    relationship.source == entity.title || relationship.target == entity.title
-                })
+                .index
+                .relationships_by_entity
+                .get(entity.title.as_str())
+                .into_iter()
+                .flatten()
+                .filter_map(|index| self.relationships.get(*index))
                 .collect::<Vec<_>>();
             for text_unit_id in &entity.text_unit_ids {
                 if !seen.insert(text_unit_id.as_str()) {
                     continue;
                 }
-                let Some(unit) = units.get(text_unit_id.as_str()).copied() else {
+                let Some(unit) = self
+                    .index
+                    .text_unit_by_id
+                    .get(text_unit_id.as_str())
+                    .and_then(|index| self.text_units.get(*index))
+                else {
                     tracing::warn!(
                         method = %self.method,
                         text_unit_id,
@@ -701,13 +724,21 @@ fn local_table_requires_in_context(name: &str) -> bool {
 
 fn add_entity_filters<'a>(
     all_entities: &'a [Entity],
+    index: &QueryDataIndex,
     matched: Vec<&'a Entity>,
     include_entity_names: &[String],
     exclude_entity_names: &[String],
 ) -> Vec<&'a Entity> {
     let mut result = Vec::new();
     for name in include_entity_names {
-        result.extend(all_entities.iter().filter(|entity| &entity.title == name));
+        result.extend(
+            index
+                .entity_by_title
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter_map(|position| all_entities.get(*position)),
+        );
     }
     result.extend(matched.into_iter().filter(|entity| {
         !exclude_entity_names
@@ -720,6 +751,7 @@ fn add_entity_filters<'a>(
 fn filter_relationships<'a>(
     selected_entities: &[&Entity],
     relationships: &'a [Relationship],
+    relationship_positions: &BTreeSet<usize>,
     top_k_relationships: usize,
     learned_links: &mut BTreeMap<String, usize>,
 ) -> Vec<RankedRelationship<'a>> {
@@ -727,8 +759,13 @@ fn filter_relationships<'a>(
         .iter()
         .map(|entity| entity.title.as_str())
         .collect::<BTreeSet<_>>();
-    let mut in_network = relationships
+    let candidates = relationship_positions
         .iter()
+        .filter_map(|position| relationships.get(*position))
+        .collect::<Vec<_>>();
+    let mut in_network = candidates
+        .iter()
+        .copied()
         .filter(|relationship| {
             selected_names.contains(relationship.source.as_str())
                 && selected_names.contains(relationship.target.as_str())
@@ -740,13 +777,14 @@ fn filter_relationships<'a>(
         .collect::<Vec<_>>();
     in_network.sort_by(rank_relationships);
 
-    let mut out_network = relationships
+    let mut out_network = candidates
         .iter()
+        .copied()
         .filter(|relationship| {
             selected_names.contains(relationship.source.as_str())
                 && !selected_names.contains(relationship.target.as_str())
         })
-        .chain(relationships.iter().filter(|relationship| {
+        .chain(candidates.iter().copied().filter(|relationship| {
             selected_names.contains(relationship.target.as_str())
                 && !selected_names.contains(relationship.source.as_str())
         }))
@@ -757,42 +795,26 @@ fn filter_relationships<'a>(
         .collect::<Vec<_>>();
     out_network.sort_by(rank_relationships);
     if out_network.len() > 1 {
-        let outside_names = out_network
-            .iter()
-            .map(|ranked| {
-                if selected_names.contains(ranked.relationship.source.as_str()) {
-                    ranked.relationship.target.as_str()
-                } else {
-                    ranked.relationship.source.as_str()
-                }
-            })
-            .collect::<BTreeSet<_>>();
-        let links = outside_names
-            .into_iter()
-            .map(|outside| {
-                let neighbors = out_network
-                    .iter()
-                    .filter_map(|ranked| {
-                        let relationship = ranked.relationship;
-                        if relationship.source == outside {
-                            Some(relationship.target.as_str())
-                        } else if relationship.target == outside {
-                            Some(relationship.source.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<BTreeSet<_>>();
-                (outside, neighbors.len())
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut neighbors_by_outside = HashMap::<&str, BTreeSet<&str>>::new();
+        for ranked in &out_network {
+            let relationship = ranked.relationship;
+            let (outside, neighbor) = if selected_names.contains(relationship.source.as_str()) {
+                (relationship.target.as_str(), relationship.source.as_str())
+            } else {
+                (relationship.source.as_str(), relationship.target.as_str())
+            };
+            neighbors_by_outside
+                .entry(outside)
+                .or_default()
+                .insert(neighbor);
+        }
         for ranked in &mut out_network {
             let outside = if selected_names.contains(ranked.relationship.source.as_str()) {
                 ranked.relationship.target.as_str()
             } else {
                 ranked.relationship.source.as_str()
             };
-            ranked.links = links.get(outside).copied();
+            ranked.links = neighbors_by_outside.get(outside).map(BTreeSet::len);
             if let Some(link_count) = ranked.links {
                 learned_links.insert(ranked.relationship.id.clone(), link_count);
             }
@@ -843,21 +865,6 @@ fn count_relationships(entity_relationships: &[&Relationship], text_unit: &TextU
     }
 }
 
-fn group_covariates(covariates: &[Covariate]) -> Vec<(String, Vec<&Covariate>)> {
-    let mut groups = Vec::<(String, Vec<&Covariate>)>::new();
-    for covariate in covariates {
-        if let Some((_, values)) = groups
-            .iter_mut()
-            .find(|(name, _)| name == &covariate.covariate_type)
-        {
-            values.push(covariate);
-        } else {
-            groups.push((covariate.covariate_type.clone(), vec![covariate]));
-        }
-    }
-    groups
-}
-
 fn covariate_columns() -> [&'static str; 7] {
     [
         "id",
@@ -900,9 +907,12 @@ fn python_f64(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    use std::{
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+        time::Instant,
     };
 
     use async_trait::async_trait;
@@ -1084,6 +1094,34 @@ mod tests {
                 score: 1.0,
             })
             .collect();
+        let reports = vec![
+            report("1", 8.0, "Alpha report"),
+            report("2", 5.0, "Shared report"),
+            report("3", 9.0, "Carol report"),
+        ];
+        let text_units = vec![
+            text_unit("tu-a", "0", "Alice source", &["rel-ab", "rel-ax"]),
+            text_unit("tu-b", "1", "Bob source", &["rel-ab"]),
+            text_unit("tu-c", "2", "Carol source", &[]),
+            text_unit("tu-shared", "3", "Shared source", &["rel-ab"]),
+        ];
+        let relationships = vec![
+            relationship("rel-ab", "0", "Alice", "Bob", 9, 1.5, &["tu-a", "tu-b"]),
+            relationship("rel-ax", "1", "Alice", "External", 7, 0.0, &["tu-a"]),
+            relationship("rel-bx", "2", "Bob", "External", 6, 2.0, &[]),
+            relationship("rel-ay", "3", "Alice", "Other", 8, 3.0, &[]),
+        ];
+        let covariates = vec![
+            covariate("claim-1", "10", "Alice", "claims", "Alice claim"),
+            covariate("fact-1", "11", "Bob", "facts", "Bob fact"),
+        ];
+        let index = Arc::new(QueryDataIndex::new(
+            &entities,
+            &reports,
+            &text_units,
+            &relationships,
+            &covariates,
+        ));
         Fixture {
             builder: LocalContextBuilder {
                 method: SearchMethod::Local,
@@ -1096,27 +1134,11 @@ mod tests {
                     ..LocalSearchConfig::default()
                 },
                 entities,
-                reports: vec![
-                    report("1", 8.0, "Alpha report"),
-                    report("2", 5.0, "Shared report"),
-                    report("3", 9.0, "Carol report"),
-                ],
-                text_units: vec![
-                    text_unit("tu-a", "0", "Alice source", &["rel-ab", "rel-ax"]),
-                    text_unit("tu-b", "1", "Bob source", &["rel-ab"]),
-                    text_unit("tu-c", "2", "Carol source", &[]),
-                    text_unit("tu-shared", "3", "Shared source", &["rel-ab"]),
-                ],
-                relationships: vec![
-                    relationship("rel-ab", "0", "Alice", "Bob", 9, 1.5, &["tu-a", "tu-b"]),
-                    relationship("rel-ax", "1", "Alice", "External", 7, 0.0, &["tu-a"]),
-                    relationship("rel-bx", "2", "Bob", "External", 6, 2.0, &[]),
-                    relationship("rel-ay", "3", "Alice", "Other", 8, 3.0, &[]),
-                ],
-                covariates: vec![
-                    covariate("claim-1", "10", "Alice", "claims", "Alice claim"),
-                    covariate("fact-1", "11", "Bob", "facts", "Bob fact"),
-                ],
+                reports,
+                text_units,
+                relationships,
+                covariates,
+                index,
                 embedding_model: Arc::new(RecordingEmbedding {
                     inputs: Arc::clone(&embedding_inputs),
                 }),
@@ -1291,6 +1313,13 @@ mod tests {
         let dashed = "550e8400-e29b-41d4-a716-446655440000";
         let mut fixture = fixture(20_000, &[dashed]);
         fixture.builder.entities[0].id = dashed.replace('-', "");
+        fixture.builder.index = Arc::new(QueryDataIndex::new(
+            &fixture.builder.entities,
+            &fixture.builder.reports,
+            &fixture.builder.text_units,
+            &fixture.builder.relationships,
+            &fixture.builder.covariates,
+        ));
 
         let (selected, _) = fixture
             .builder
@@ -1523,6 +1552,13 @@ mod tests {
         fixture.builder.text_units.truncate(1);
         fixture.builder.text_units[0].text = "source|text \"quoted\" \\source\r\nnext".to_owned();
         fixture.builder.text_units[0].relationship_ids = vec!["rel-ab".to_owned()];
+        fixture.builder.index = Arc::new(QueryDataIndex::new(
+            &fixture.builder.entities,
+            &fixture.builder.reports,
+            &fixture.builder.text_units,
+            &fixture.builder.relationships,
+            &fixture.builder.covariates,
+        ));
 
         let built = fixture
             .builder
@@ -1633,10 +1669,23 @@ mod tests {
     fn test_should_rank_in_network_before_mutual_out_network_and_keep_stable_ties() {
         let fixture = fixture(20_000, &[]);
         let selected = vec![&fixture.builder.entities[0], &fixture.builder.entities[1]];
+        let positions = selected
+            .iter()
+            .filter_map(|entity| {
+                fixture
+                    .builder
+                    .index
+                    .relationships_by_entity
+                    .get(entity.title.as_str())
+            })
+            .flatten()
+            .copied()
+            .collect();
 
         let ranked = filter_relationships(
             &selected,
             &fixture.builder.relationships,
+            &positions,
             fixture.builder.config.top_k_relationships,
             &mut BTreeMap::new(),
         );
@@ -1650,6 +1699,46 @@ mod tests {
         );
         assert_eq!(ranked[1].links, Some(2));
         assert_eq!(ranked[2].links, Some(2));
+    }
+
+    #[test]
+    #[ignore = "repeatable large-context performance probe; run through make bench-query"]
+    fn test_performance_should_scale_indexed_relationship_expansion() {
+        for relationship_count in [10_000_usize, 100_000] {
+            let mut fixture = fixture(usize::MAX, &[]);
+            fixture.builder.relationships = (0..relationship_count)
+                .map(|index| {
+                    relationship(
+                        &format!("large-{index}"),
+                        &index.to_string(),
+                        "Alice",
+                        &format!("Outside-{index}"),
+                        i64::try_from(index % 100).unwrap_or_default(),
+                        1.0,
+                        &[],
+                    )
+                })
+                .collect();
+            fixture.builder.index = Arc::new(QueryDataIndex::new(
+                &fixture.builder.entities,
+                &fixture.builder.reports,
+                &fixture.builder.text_units,
+                &fixture.builder.relationships,
+                &fixture.builder.covariates,
+            ));
+            let selected = [&fixture.builder.entities[0], &fixture.builder.entities[1]];
+            let started = Instant::now();
+            let section = fixture
+                .builder
+                .build_local_context(&selected, usize::MAX)
+                .expect("large relationship context");
+            let elapsed = started.elapsed();
+            assert!(section.tables.contains_key("relationships"));
+            eprintln!(
+                "local relationship performance: relationships={relationship_count}, \
+                 elapsed={elapsed:?}"
+            );
+        }
     }
 
     #[test]
@@ -1683,15 +1772,24 @@ mod tests {
         let entity_text = entity_table
             .render_delimited_section("Entities", SearchMethod::Local, "test entities")
             .expect("entity text");
+        let relationship_positions = fixture.builder.index.relationships_by_entity["Alice"]
+            .iter()
+            .copied()
+            .collect();
         let relationship = fixture
             .builder
-            .build_relationship_context_with_links(&selected[..1], 20_000, &mut BTreeMap::new())
+            .build_relationship_context_from_positions(
+                &selected[..1],
+                &relationship_positions,
+                20_000,
+                &mut BTreeMap::new(),
+            )
             .expect("relationship section")
             .expect("Alice relationships");
-        let claim_group = group_covariates(&fixture.builder.covariates);
+        let covariate_positions = fixture.builder.index.covariates_by_subject["Alice"].clone();
         let claim = fixture
             .builder
-            .build_covariate_context(&claim_group[0].0, &claim_group[0].1, &selected[..1], 20_000)
+            .build_covariate_context_from_positions("claims", &covariate_positions, 20_000)
             .expect("claim context")
             .expect("Alice claim");
         let one_tokens = fixture

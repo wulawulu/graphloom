@@ -1,4 +1,8 @@
-//! Method-specific read-only Query requirements.
+//! Method-specific read-only Query capability introspection.
+//!
+//! Runtime loading remains explicit and method-typed so adapter dependencies and error operations
+//! stay reviewable. Exact-set tests below keep this public matrix synchronized; it is not a
+//! generic runtime loader.
 
 use std::collections::BTreeSet;
 
@@ -82,7 +86,7 @@ pub enum QueryPrompt {
 }
 
 /// Resources required to assemble one Query method without unrelated I/O.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct QueryRequirements {
     /// Required Parquet tables.
@@ -183,43 +187,85 @@ mod tests {
     #[test]
     fn test_should_resolve_exact_method_resource_matrix() {
         let config = crate::GraphRagConfig::default();
-        let global = QueryRequirements::for_method(SearchMethod::Global, &config);
         assert_eq!(
-            global.tables,
-            BTreeSet::from([
-                QueryTable::Entities,
-                QueryTable::Communities,
-                QueryTable::CommunityReports,
-            ])
-        );
-        assert!(global.embeddings.is_empty());
-        assert!(global.embedding_models.is_empty());
-
-        let local = QueryRequirements::for_method(SearchMethod::Local, &config);
-        assert_eq!(
-            local.optional_tables,
-            BTreeSet::from([QueryTable::Covariates])
-        );
-        assert_eq!(
-            local.embeddings,
-            BTreeSet::from([QueryEmbedding::EntityDescription])
-        );
-
-        let drift = QueryRequirements::for_method(SearchMethod::Drift, &config);
-        assert_eq!(
-            drift.embeddings,
-            BTreeSet::from([
-                QueryEmbedding::EntityDescription,
-                QueryEmbedding::CommunityFullContent,
-            ])
+            QueryRequirements::for_method(SearchMethod::Global, &config),
+            QueryRequirements {
+                tables: BTreeSet::from([
+                    QueryTable::Entities,
+                    QueryTable::Communities,
+                    QueryTable::CommunityReports,
+                ]),
+                completion_models: BTreeSet::from([config
+                    .global_search
+                    .completion_model_id
+                    .clone()]),
+                prompts: BTreeSet::from([
+                    QueryPrompt::GlobalMap,
+                    QueryPrompt::GlobalReduce,
+                    QueryPrompt::GlobalKnowledge,
+                ]),
+                ..QueryRequirements::default()
+            }
         );
 
-        let basic = QueryRequirements::for_method(SearchMethod::Basic, &config);
-        assert_eq!(basic.tables, BTreeSet::from([QueryTable::TextUnits]));
         assert_eq!(
-            basic.embeddings,
-            BTreeSet::from([QueryEmbedding::TextUnitText])
+            QueryRequirements::for_method(SearchMethod::Local, &config),
+            QueryRequirements {
+                tables: BTreeSet::from([
+                    QueryTable::Entities,
+                    QueryTable::Communities,
+                    QueryTable::CommunityReports,
+                    QueryTable::TextUnits,
+                    QueryTable::Relationships,
+                ]),
+                optional_tables: BTreeSet::from([QueryTable::Covariates]),
+                embeddings: BTreeSet::from([QueryEmbedding::EntityDescription]),
+                completion_models: BTreeSet::from([config
+                    .local_search
+                    .completion_model_id
+                    .clone()]),
+                embedding_models: BTreeSet::from([config.local_search.embedding_model_id.clone()]),
+                prompts: BTreeSet::from([QueryPrompt::Local]),
+            }
         );
-        assert_eq!(basic.prompts, BTreeSet::from([QueryPrompt::Basic]));
+
+        assert_eq!(
+            QueryRequirements::for_method(SearchMethod::Drift, &config),
+            QueryRequirements {
+                tables: BTreeSet::from([
+                    QueryTable::Entities,
+                    QueryTable::Communities,
+                    QueryTable::CommunityReports,
+                    QueryTable::TextUnits,
+                    QueryTable::Relationships,
+                ]),
+                embeddings: BTreeSet::from([
+                    QueryEmbedding::EntityDescription,
+                    QueryEmbedding::CommunityFullContent,
+                ]),
+                completion_models: BTreeSet::from([config
+                    .drift_search
+                    .completion_model_id
+                    .clone()]),
+                embedding_models: BTreeSet::from([config.drift_search.embedding_model_id.clone()]),
+                prompts: BTreeSet::from([QueryPrompt::Drift, QueryPrompt::DriftReduce]),
+                ..QueryRequirements::default()
+            }
+        );
+
+        assert_eq!(
+            QueryRequirements::for_method(SearchMethod::Basic, &config),
+            QueryRequirements {
+                tables: BTreeSet::from([QueryTable::TextUnits]),
+                embeddings: BTreeSet::from([QueryEmbedding::TextUnitText]),
+                completion_models: BTreeSet::from([config
+                    .basic_search
+                    .completion_model_id
+                    .clone()]),
+                embedding_models: BTreeSet::from([config.basic_search.embedding_model_id.clone()]),
+                prompts: BTreeSet::from([QueryPrompt::Basic]),
+                ..QueryRequirements::default()
+            }
+        );
     }
 }

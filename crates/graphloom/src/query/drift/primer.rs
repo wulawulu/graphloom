@@ -2,7 +2,6 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
 use serde_json::json;
 
@@ -81,12 +80,8 @@ pub(super) async fn run_primer(
             .await
         }
     });
-    let results = stream::iter(calls)
-        .buffered(resources.concurrency)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+    let results =
+        crate::query::concurrency::try_buffered_ordered(calls, resources.concurrency).await?;
     aggregate_primer(results)
 }
 
@@ -121,9 +116,7 @@ fn aggregate_primer(results: Vec<(PrimerResponse, QueryUsageCategory)>) -> Resul
     let usage = results
         .iter()
         .fold(QueryUsageCategory::default(), |mut total, (_, usage)| {
-            total.llm_calls = total.llm_calls.saturating_add(usage.llm_calls);
-            total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
-            total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+            total += *usage;
             total
         });
     Ok(PrimerAggregate {

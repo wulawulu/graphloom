@@ -31,6 +31,9 @@ test-compat:
 test-all:
 	@cargo nextest run --all-features
 
+bench-query:
+	@cargo test --workspace --all-features performance -- --ignored --nocapture
+
 check-agent-sync:
 	@cmp -s CLAUDE.md AGENTS.md || { \
 		echo "AGENTS.md must stay in sync with CLAUDE.md"; \
@@ -57,4 +60,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-compat test-all check-agent-sync release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-all bench-query check-agent-sync release update-submodule

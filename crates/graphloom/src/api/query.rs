@@ -4,7 +4,7 @@ use crate::{
     GraphRagConfig, Result,
     project::LoadedProject,
     query::{
-        QueryEventStream, QueryOptions, QueryResult, SearchMethod,
+        QueryEngine, QueryEventStream, QueryOptions, QueryResult, SearchMethod,
         basic::{basic_search as run_basic, basic_search_streaming as run_basic_streaming},
         drift::{drift_search as run_drift, drift_search_streaming as run_drift_streaming},
         global::{global_search as run_global, global_search_streaming as run_global_streaming},
@@ -145,8 +145,8 @@ async fn execute_query(
     method: SearchMethod,
 ) -> Result<QueryResult> {
     options.method = method;
-    let project = LoadedProject::from_config(&options.project_root, config)?;
-    query_loaded(project, options).await
+    let engine = QueryEngine::load(config, &options.project_root).await?;
+    engine.query(options).await
 }
 
 async fn execute_query_stream(
@@ -155,8 +155,8 @@ async fn execute_query_stream(
     method: SearchMethod,
 ) -> Result<QueryEventStream> {
     options.method = method;
-    let project = LoadedProject::from_config(&options.project_root, config)?;
-    query_loaded_stream(project, options).await
+    let engine = QueryEngine::load(config, &options.project_root).await?;
+    engine.query_stream(options).await
 }
 
 pub(crate) async fn query_loaded(

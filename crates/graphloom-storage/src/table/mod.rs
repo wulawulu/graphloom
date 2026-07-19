@@ -83,6 +83,19 @@ pub trait TableProvider: Send + Sync + std::fmt::Debug {
     /// Returns an error when the table does not exist or cannot be decoded.
     async fn read_dataframe(&self, table_name: &str) -> Result<DataFrame>;
 
+    /// Read a table when present using one provider operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an existing table cannot be decoded or accessed.
+    async fn read_optional_dataframe(&self, table_name: &str) -> Result<Option<DataFrame>> {
+        match self.read_dataframe(table_name).await {
+            Ok(dataframe) => Ok(Some(dataframe)),
+            Err(StorageError::MissingTable { .. }) => Ok(None),
+            Err(source) => Err(source),
+        }
+    }
+
     /// Write a complete table dataframe, replacing any existing table.
     ///
     /// # Errors

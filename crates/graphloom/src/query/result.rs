@@ -1,11 +1,12 @@
 //! Public Query results, usage accounting, and stream events.
 
-use std::{collections::BTreeMap, pin::Pin, time::Duration};
+use std::{collections::BTreeMap, ops::AddAssign, pin::Pin, time::Duration};
 
 use futures_util::Stream;
+use graphloom_llm::{ChatMessage, Tokenizer};
 use polars_core::prelude::DataFrame;
 
-use super::Result;
+use super::{QueryError, Result, SearchMethod};
 
 /// Query context text supplied to completion models.
 #[derive(Debug, Clone, Default)]
@@ -61,6 +62,21 @@ pub struct QueryUsageCategory {
     pub output_tokens: usize,
 }
 
+impl QueryUsageCategory {
+    /// Merge another category using saturating counters.
+    pub fn saturating_add_assign(&mut self, other: Self) {
+        self.llm_calls = self.llm_calls.saturating_add(other.llm_calls);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+    }
+}
+
+impl AddAssign for QueryUsageCategory {
+    fn add_assign(&mut self, rhs: Self) {
+        self.saturating_add_assign(rhs);
+    }
+}
+
 /// Aggregate Query usage.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -78,11 +94,79 @@ pub struct QueryUsage {
 impl QueryUsage {
     pub(crate) fn from_categories(categories: BTreeMap<String, QueryUsageCategory>) -> Self {
         Self {
-            llm_calls: categories.values().map(|value| value.llm_calls).sum(),
-            prompt_tokens: categories.values().map(|value| value.prompt_tokens).sum(),
-            output_tokens: categories.values().map(|value| value.output_tokens).sum(),
+            llm_calls: categories
+                .values()
+                .fold(0, |total, value| total.saturating_add(value.llm_calls)),
+            prompt_tokens: categories
+                .values()
+                .fold(0, |total, value| total.saturating_add(value.prompt_tokens)),
+            output_tokens: categories
+                .values()
+                .fold(0, |total, value| total.saturating_add(value.output_tokens)),
             categories,
         }
+    }
+}
+
+pub(crate) fn count_completion_input(
+    tokenizer: &dyn Tokenizer,
+    messages: &[ChatMessage],
+    method: SearchMethod,
+    operation: &'static str,
+) -> Result<usize> {
+    messages.iter().try_fold(0_usize, |total, message| {
+        tokenizer
+            .count(message.content.as_str())
+            .map(|tokens| total.saturating_add(tokens))
+            .map_err(|source| QueryError::QueryContext {
+                method,
+                operation,
+                message: source.to_string(),
+            })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{QueryUsage, QueryUsageCategory};
+
+    #[test]
+    fn test_should_saturate_category_merges_and_top_level_totals() {
+        let mut category = QueryUsageCategory {
+            llm_calls: usize::MAX,
+            prompt_tokens: usize::MAX - 1,
+            output_tokens: 3,
+        };
+        category += QueryUsageCategory {
+            llm_calls: 1,
+            prompt_tokens: 10,
+            output_tokens: usize::MAX,
+        };
+        assert_eq!(
+            category,
+            QueryUsageCategory {
+                llm_calls: usize::MAX,
+                prompt_tokens: usize::MAX,
+                output_tokens: usize::MAX,
+            }
+        );
+
+        let usage = QueryUsage::from_categories(BTreeMap::from([
+            ("first".to_owned(), category),
+            (
+                "second".to_owned(),
+                QueryUsageCategory {
+                    llm_calls: 1,
+                    prompt_tokens: 1,
+                    output_tokens: 1,
+                },
+            ),
+        ]));
+        assert_eq!(usage.llm_calls, usize::MAX);
+        assert_eq!(usage.prompt_tokens, usize::MAX);
+        assert_eq!(usage.output_tokens, usize::MAX);
     }
 }
 

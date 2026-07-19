@@ -3,9 +3,7 @@
 use std::{cmp::Ordering, collections::BTreeMap, sync::Arc, time::Instant};
 
 use futures_util::{StreamExt, stream};
-use graphloom_llm::{
-    ChatMessage, CompletionModel, CompletionRequest, CompletionStream, ModelConfig, Tokenizer,
-};
+use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
 use polars_core::prelude::DataFrame;
 use serde::Serialize;
 use serde_json::json;
@@ -18,8 +16,12 @@ use super::{
 use crate::{
     prompts::PromptTemplate,
     query::{
-        GlobalQueryRuntime, QueryCallbacks, QueryContext, QueryError, QueryEvent, QueryEventStream,
-        QueryResult, QueryUsage, QueryUsageCategory, Result, SearchMethod, context::ContextTable,
+        GlobalQueryRuntime, QueryContext, QueryError, QueryEvent, QueryEventStream, QueryResult,
+        QueryUsage, QueryUsageCategory, Result, SearchMethod,
+        concurrency::try_buffered_ordered,
+        context::ContextTable,
+        result::count_completion_input,
+        streaming::{CompletionStreamState, completion_event_stream},
     },
 };
 
@@ -37,25 +39,6 @@ struct ReducePromptContext<'a> {
     report_data: &'a str,
     response_type: &'a str,
     max_length: usize,
-}
-
-struct GlobalStreamState {
-    provider: CompletionStream,
-    context: QueryContext,
-    response: String,
-    started: Instant,
-    usage: BTreeMap<String, QueryUsageCategory>,
-    reduce_prompt_tokens: usize,
-    tokenizer: Arc<dyn Tokenizer>,
-    callbacks: Arc<dyn QueryCallbacks>,
-    completion_model_id: String,
-    phase: GlobalStreamPhase,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum GlobalStreamPhase {
-    Context,
-    Tokens,
 }
 
 pub(crate) async fn global_search(
@@ -155,15 +138,16 @@ pub(crate) async fn global_search_streaming(
             prompt: "global_search_reduce_system_prompt.txt",
             source: Box::new(source),
         })?;
-    let reduce_prompt_tokens = count(
-        runtime.global_context.tokenizer.as_ref(),
-        &rendered,
-        "count Global reduce prompt tokens",
-    )?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let reduce_prompt_tokens = count_completion_input(
+        runtime.global_context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Global,
+        "count Global reduce completion input tokens",
+    )?;
     request
         .apply_call_args(&runtime.completion_config.call_args)
         .and_then(|()| {
@@ -186,24 +170,26 @@ pub(crate) async fn global_search_streaming(
             model: runtime.completion_model_id.clone(),
             source: Box::new(source),
         })?;
-    let state = GlobalStreamState {
+    let state = CompletionStreamState {
         provider,
         context,
-        response: String::new(),
         started,
-        usage: BTreeMap::from([
+        categories: BTreeMap::from([
             ("build_context".to_owned(), build_usage),
             ("map".to_owned(), map_usage),
         ]),
-        reduce_prompt_tokens,
-        tokenizer: runtime.global_context.tokenizer,
+        completion_category: "reduce",
+        prompt_tokens: reduce_prompt_tokens,
+        tokenizer: Arc::clone(&runtime.global_context.tokenizer),
         callbacks: runtime.callbacks,
         completion_model_id: runtime.completion_model_id,
-        phase: GlobalStreamPhase::Context,
+        method: SearchMethod::Global,
+        consume_operation: "consume Global Search reduce stream",
+        output_count_operation: "count Global reduce output tokens",
+        output_count_is_context_error: true,
+        notify_reduce_end: true,
     };
-    Ok(Box::pin(stream::unfold(Some(state), |state| async move {
-        next_event(state).await
-    })))
+    Ok(completion_event_stream(state))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,12 +224,7 @@ async fn run_map_calls(
                 .await
             }
         });
-    stream::iter(futures)
-        .buffered(concurrent_requests)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect()
+    try_buffered_ordered(futures, concurrent_requests).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,15 +251,16 @@ async fn run_map_call(
             prompt: "global_search_map_system_prompt.txt",
             source: Box::new(source),
         })?;
-    let prompt_tokens = count(
-        tokenizer.as_ref(),
-        &rendered,
-        "count Global map prompt tokens",
-    )?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let prompt_tokens = count_completion_input(
+        tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Global,
+        "count Global map completion input tokens",
+    )?;
     request
         .apply_call_args(call_args)
         .and_then(|()| {
@@ -417,9 +399,7 @@ fn sum_map_usage(outputs: &[MapSearchResult]) -> QueryUsageCategory {
     outputs
         .iter()
         .fold(QueryUsageCategory::default(), |mut total, output| {
-            total.llm_calls += output.usage.llm_calls;
-            total.prompt_tokens += output.usage.prompt_tokens;
-            total.output_tokens += output.usage.output_tokens;
+            total += output.usage;
             total
         })
 }
@@ -447,76 +427,6 @@ fn no_data_stream(
     ]))
 }
 
-async fn next_event(
-    state: Option<GlobalStreamState>,
-) -> Option<(Result<QueryEvent>, Option<GlobalStreamState>)> {
-    let mut state = state?;
-    match state.phase {
-        GlobalStreamPhase::Context => {
-            state.phase = GlobalStreamPhase::Tokens;
-            Some((Ok(QueryEvent::Context(state.context.clone())), Some(state)))
-        }
-        GlobalStreamPhase::Tokens => loop {
-            match state.provider.next().await {
-                Some(Ok(chunk)) => {
-                    let content = chunk
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.delta.content.as_deref())
-                        .unwrap_or_default();
-                    if content.is_empty() {
-                        continue;
-                    }
-                    state.response.push_str(content);
-                    state.callbacks.on_llm_new_token(content);
-                    return Some((Ok(QueryEvent::Token(content.to_owned())), Some(state)));
-                }
-                Some(Err(source)) => {
-                    return Some((
-                        Err(QueryError::QueryCompletion {
-                            method: SearchMethod::Global,
-                            operation: "consume Global Search reduce stream",
-                            model: state.completion_model_id.clone(),
-                            source: Box::new(source),
-                        }),
-                        None,
-                    ));
-                }
-                None => return Some(completed_event(state)),
-            }
-        },
-    }
-}
-
-fn completed_event(
-    mut state: GlobalStreamState,
-) -> (Result<QueryEvent>, Option<GlobalStreamState>) {
-    let output_tokens = match count(
-        state.tokenizer.as_ref(),
-        &state.response,
-        "count Global reduce output tokens",
-    ) {
-        Ok(value) => value,
-        Err(error) => return (Err(error), None),
-    };
-    state.callbacks.on_reduce_response_end(&state.response);
-    state.usage.insert(
-        "reduce".to_owned(),
-        QueryUsageCategory {
-            llm_calls: 1,
-            prompt_tokens: state.reduce_prompt_tokens,
-            output_tokens,
-        },
-    );
-    let result = QueryResult {
-        response: state.response,
-        context: state.context,
-        elapsed: state.started.elapsed(),
-        usage: QueryUsage::from_categories(state.usage),
-    };
-    (Ok(QueryEvent::Completed(result)), None)
-}
-
 fn count(tokenizer: &dyn Tokenizer, text: &str, operation: &'static str) -> Result<usize> {
     tokenizer
         .count(text)
@@ -539,20 +449,20 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use futures_util::StreamExt;
     use graphloom_llm::{
         CompletionChunk, CompletionModel, CompletionRequest, CompletionResponse, LlmError,
         ModelConfig, Tokenizer,
     };
 
-    use super::{
-        GlobalStreamPhase, GlobalStreamState, build_reduce_context, map_outputs_frame, next_event,
-        run_map_calls,
-    };
+    use super::{build_reduce_context, map_outputs_frame, run_map_calls};
     use crate::{
         prompts::{PromptKind, PromptRepository},
         query::{
             MapPoint, MapSearchResult, QueryCallbacks, QueryContext, QueryEvent,
-            QueryUsageCategory, global::context::GlobalContextResult,
+            QueryUsageCategory,
+            global::context::GlobalContextResult,
+            streaming::{CompletionStreamState, completion_event_stream},
         },
     };
 
@@ -943,21 +853,30 @@ mod tests {
                 attempts: 1,
             }),
         ]));
-        let state = GlobalStreamState {
+        let state = CompletionStreamState {
             provider,
             context: QueryContext::default(),
-            response: String::new(),
             started: std::time::Instant::now(),
-            usage: BTreeMap::new(),
-            reduce_prompt_tokens: 0,
+            categories: BTreeMap::new(),
+            completion_category: "reduce",
+            prompt_tokens: 0,
             tokenizer: Arc::new(WordTokenizer),
             callbacks: callbacks.clone(),
             completion_model_id: "test".to_owned(),
-            phase: GlobalStreamPhase::Tokens,
+            method: crate::query::SearchMethod::Global,
+            consume_operation: "consume Global Search reduce stream",
+            output_count_operation: "count Global reduce output tokens",
+            output_count_is_context_error: true,
+            notify_reduce_end: true,
         };
-        let (event, state) = next_event(Some(state)).await.expect("token event");
+        let mut events = completion_event_stream(state);
+        assert!(matches!(
+            events.next().await.expect("context event"),
+            Ok(QueryEvent::Context(_))
+        ));
+        let event = events.next().await.expect("token event");
         assert!(matches!(event, Ok(QueryEvent::Token(ref token)) if token == "partial"));
-        let (event, state) = next_event(state).await.expect("error event");
+        let event = events.next().await.expect("error event");
         assert!(matches!(
             event,
             Err(crate::query::QueryError::QueryCompletion {
@@ -965,7 +884,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(state.is_none());
+        assert!(events.next().await.is_none());
         assert_eq!(
             *callbacks.events.lock().expect("events"),
             ["reduce_start", "token:partial"]

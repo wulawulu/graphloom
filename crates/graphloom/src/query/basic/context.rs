@@ -37,7 +37,7 @@ impl BasicContextBuilder {
         let (matched_ids, usage) = if query.is_empty() {
             (BTreeSet::new(), QueryUsageCategory::default())
         } else {
-            (self.retrieve(query).await?, QueryUsageCategory::default())
+            self.retrieve(query).await?
         };
         let candidates = self
             .text_units
@@ -73,7 +73,7 @@ impl BasicContextBuilder {
         Ok(BasicContextBuild { context, usage })
     }
 
-    async fn retrieve(&self, query: &str) -> Result<BTreeSet<String>> {
+    async fn retrieve(&self, query: &str) -> Result<(BTreeSet<String>, QueryUsageCategory)> {
         let response = self
             .embedding_model
             .embed(EmbeddingRequest::new(vec![query.to_owned()]))
@@ -84,6 +84,20 @@ impl BasicContextBuilder {
                 model: self.embedding_model_id.clone(),
                 source: Box::new(source),
             })?;
+        let provider_prompt_tokens =
+            usize::try_from(response.usage.prompt_tokens).unwrap_or(usize::MAX);
+        let prompt_tokens = if provider_prompt_tokens == 0 {
+            self.tokenizer
+                .count(query)
+                .map_err(|source| QueryError::QueryEmbedding {
+                    method: SearchMethod::Basic,
+                    operation: "count Basic Search embedding input tokens",
+                    model: self.embedding_model_id.clone(),
+                    source: Box::new(source),
+                })?
+        } else {
+            provider_prompt_tokens
+        };
         let vector = response
             .into_embeddings()
             .into_iter()
@@ -128,10 +142,17 @@ impl BasicContextBuilder {
                     source: Box::new(source),
                 },
             })?;
-        Ok(results
-            .into_iter()
-            .map(|result| result.document.id)
-            .collect())
+        Ok((
+            results
+                .into_iter()
+                .map(|result| result.document.id)
+                .collect(),
+            QueryUsageCategory {
+                llm_calls: 1,
+                prompt_tokens,
+                output_tokens: 0,
+            },
+        ))
     }
 
     fn within_budget<'a>(&self, candidates: &[&'a TextUnit]) -> Result<Vec<&'a TextUnit>> {
@@ -426,6 +447,14 @@ mod tests {
 
         assert_eq!(context_text(&built), "id|text\n0|first\n1|second\n");
         assert_eq!(
+            built.usage,
+            QueryUsageCategory {
+                llm_calls: 1,
+                prompt_tokens: "question".len(),
+                output_tokens: 0,
+            }
+        );
+        assert_eq!(
             embedding_inputs.lock().expect("inputs").as_slice(),
             &[vec!["question".to_owned()]]
         );
@@ -488,6 +517,7 @@ mod tests {
 
         let empty = builder.build("").await.expect("empty context");
         assert_eq!(context_text(&empty), "id|text\n");
+        assert_eq!(empty.usage, QueryUsageCategory::default());
         assert_eq!(embedding_calls.load(Ordering::SeqCst), 0);
         assert_eq!(vector_calls.load(Ordering::SeqCst), 0);
 

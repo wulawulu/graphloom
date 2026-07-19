@@ -2,39 +2,21 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-use futures_util::{StreamExt, stream};
-use graphloom_llm::{ChatMessage, CompletionRequest, CompletionStream, Tokenizer};
+use futures_util::StreamExt;
+use graphloom_llm::{ChatMessage, CompletionRequest};
 use serde::Serialize;
 
 use super::super::{
     ConversationHistory, LocalQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryResult,
-    QueryUsage, QueryUsageCategory, Result, SearchMethod,
+    Result, SearchMethod,
+    result::count_completion_input,
+    streaming::{CompletionStreamState, completion_event_stream},
 };
 
 #[derive(Debug, Serialize)]
 struct LocalPromptContext<'a> {
     context_data: &'a str,
     response_type: &'a str,
-}
-
-struct LocalStreamState {
-    provider: CompletionStream,
-    context: super::super::QueryContext,
-    response: String,
-    started: Instant,
-    prompt_tokens: usize,
-    build_context_usage: QueryUsageCategory,
-    tokenizer: Arc<dyn Tokenizer>,
-    callbacks: Arc<dyn super::super::QueryCallbacks>,
-    completion_model_id: String,
-    phase: LocalStreamPhase,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum LocalStreamPhase {
-    Context,
-    Tokens,
-    Completed,
 }
 
 pub(crate) async fn local_search(
@@ -96,19 +78,16 @@ pub(crate) async fn local_search_streaming(
             prompt: "local_search_system_prompt.txt",
             source: Box::new(source),
         })?;
-    let prompt_tokens = runtime
-        .local_context
-        .tokenizer
-        .count(&rendered)
-        .map_err(|source| QueryError::QueryContext {
-            method: SearchMethod::Local,
-            operation: "count Local Search prompt tokens",
-            message: source.to_string(),
-        })?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let prompt_tokens = count_completion_input(
+        runtime.local_context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Local,
+        "count Local Search completion input tokens",
+    )?;
     request
         .apply_call_args(&runtime.completion_config.call_args)
         .and_then(|()| {
@@ -131,99 +110,21 @@ pub(crate) async fn local_search_streaming(
             model: runtime.completion_model_id.clone(),
             source: Box::new(source),
         })?;
-    let state = LocalStreamState {
+    let state = CompletionStreamState {
         provider,
         context: built.context,
-        response: String::new(),
         started,
+        categories: BTreeMap::from([("build_context".to_owned(), built.usage)]),
+        completion_category: "response",
         prompt_tokens,
-        build_context_usage: built.usage,
         tokenizer: Arc::clone(&runtime.local_context.tokenizer),
         callbacks: runtime.callbacks,
         completion_model_id: runtime.completion_model_id,
-        phase: LocalStreamPhase::Context,
+        method: SearchMethod::Local,
+        consume_operation: "consume Local Search completion stream",
+        output_count_operation: "count Local Search output tokens",
+        output_count_is_context_error: false,
+        notify_reduce_end: false,
     };
-    Ok(Box::pin(stream::unfold(Some(state), |state| async move {
-        next_event(state).await
-    })))
-}
-
-async fn next_event(
-    state: Option<LocalStreamState>,
-) -> Option<(Result<QueryEvent>, Option<LocalStreamState>)> {
-    let mut state = state?;
-    match state.phase {
-        LocalStreamPhase::Context => {
-            state.phase = LocalStreamPhase::Tokens;
-            Some((Ok(QueryEvent::Context(state.context.clone())), Some(state)))
-        }
-        LocalStreamPhase::Tokens => loop {
-            match state.provider.next().await {
-                Some(Ok(chunk)) => {
-                    let content = chunk
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.delta.content.as_deref())
-                        .unwrap_or_default();
-                    if content.is_empty() {
-                        continue;
-                    }
-                    state.response.push_str(content);
-                    state.callbacks.on_llm_new_token(content);
-                    return Some((Ok(QueryEvent::Token(content.to_owned())), Some(state)));
-                }
-                Some(Err(source)) => {
-                    return Some((
-                        Err(QueryError::QueryCompletion {
-                            method: SearchMethod::Local,
-                            operation: "consume Local Search completion stream",
-                            model: state.completion_model_id.clone(),
-                            source: Box::new(source),
-                        }),
-                        None,
-                    ));
-                }
-                None => {
-                    state.phase = LocalStreamPhase::Completed;
-                    return Some(completed_event(state));
-                }
-            }
-        },
-        LocalStreamPhase::Completed => Some(completed_event(state)),
-    }
-}
-
-fn completed_event(state: LocalStreamState) -> (Result<QueryEvent>, Option<LocalStreamState>) {
-    let output_tokens = match state.tokenizer.count(&state.response) {
-        Ok(value) => value,
-        Err(source) => {
-            return (
-                Err(QueryError::QueryCompletion {
-                    method: SearchMethod::Local,
-                    operation: "count Local Search output tokens",
-                    model: state.completion_model_id,
-                    source: Box::new(source),
-                }),
-                None,
-            );
-        }
-    };
-    let usage = QueryUsage::from_categories(BTreeMap::from([
-        ("build_context".to_owned(), state.build_context_usage),
-        (
-            "response".to_owned(),
-            QueryUsageCategory {
-                llm_calls: 1,
-                prompt_tokens: state.prompt_tokens,
-                output_tokens,
-            },
-        ),
-    ]));
-    let result = QueryResult {
-        response: state.response,
-        context: state.context,
-        elapsed: state.started.elapsed(),
-        usage,
-    };
-    (Ok(QueryEvent::Completed(result)), None)
+    Ok(completion_event_stream(state))
 }

@@ -5,7 +5,6 @@ use std::{
     sync::Arc,
 };
 
-use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
 use serde::Serialize;
 use serde_json::Value;
@@ -163,9 +162,7 @@ impl DynamicCommunitySelection {
             let votes = self.rate_queue(&queue, &reports_by_id, query).await?;
             let mut next_queue = Vec::<String>::new();
             for (community_id, vote) in queue.iter().zip(votes) {
-                usage.llm_calls += vote.usage.llm_calls;
-                usage.prompt_tokens += vote.usage.prompt_tokens;
-                usage.output_tokens += vote.usage.output_tokens;
+                usage += vote.usage;
                 let relevant_vote = vote.selected_rating >= self.config.dynamic_search_threshold;
                 if relevant_vote {
                     if relevant.insert(community_id.clone()) {
@@ -263,12 +260,7 @@ impl DynamicCommunitySelection {
                 self.rate_community(community_id, report, &query).await
             }
         });
-        stream::iter(futures)
-            .buffered(self.concurrent_requests)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect()
+        crate::query::concurrency::try_buffered_ordered(futures, self.concurrent_requests).await
     }
 
     async fn rate_community(

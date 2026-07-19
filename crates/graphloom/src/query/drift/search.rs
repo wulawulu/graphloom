@@ -17,7 +17,7 @@ use super::{
 use crate::query::{
     DriftQueryRuntime, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
     QueryError, QueryEvent, QueryEventStream, QueryResult, QueryUsage, QueryUsageCategory, Result,
-    SearchMethod, context::ContextTable,
+    SearchMethod, context::ContextTable, result::count_completion_input,
 };
 
 #[derive(Debug)]
@@ -43,29 +43,25 @@ struct DriftReducePrompt<'a> {
 }
 
 pub(crate) async fn drift_search(
-    mut runtime: DriftQueryRuntime,
+    runtime: DriftQueryRuntime,
     query: &str,
     response_type: &str,
 ) -> Result<QueryResult> {
     validate_query(query)?;
     let started = Instant::now();
     let mut random = SystemDriftRandom;
-    let prepared = prepare(&mut runtime, query, &mut random).await?;
+    let prepared = prepare(&runtime, query, &mut random).await?;
     let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
-    let prompt_tokens = count(
-        &*runtime.context.tokenizer,
-        &rendered,
-        "count DRIFT reduce system prompt",
-    )?
-    .saturating_add(count(
-        &*runtime.context.tokenizer,
-        query,
-        "count DRIFT reduce user prompt",
-    )?);
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let prompt_tokens = count_completion_input(
+        runtime.context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Drift,
+        "count DRIFT reduce completion input tokens",
+    )?;
     apply_reduce_request(&runtime, &mut request, false)?;
     runtime
         .callbacks
@@ -104,33 +100,29 @@ pub(crate) async fn drift_search(
 }
 
 pub(crate) async fn drift_search_streaming(
-    mut runtime: DriftQueryRuntime,
+    runtime: DriftQueryRuntime,
     query: &str,
     response_type: &str,
 ) -> Result<QueryEventStream> {
     validate_query(query)?;
     let started = Instant::now();
     let mut random = SystemDriftRandom;
-    let prepared = prepare(&mut runtime, query, &mut random).await?;
+    let prepared = prepare(&runtime, query, &mut random).await?;
     let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
-    let prompt_tokens = count(
-        &*runtime.context.tokenizer,
-        &rendered,
-        "count DRIFT reduce system prompt",
-    )?
-    .saturating_add(count(
-        &*runtime.context.tokenizer,
-        query,
-        "count DRIFT reduce user prompt",
-    )?);
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let prompt_tokens = count_completion_input(
+        runtime.context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Drift,
+        "count DRIFT reduce completion input tokens",
+    )?;
     apply_reduce_request(&runtime, &mut request, true)?;
     let state = DriftStreamState {
         model: Arc::clone(&runtime.context.completion_model),
-        model_id: runtime.context.completion_model_id,
+        model_id: runtime.context.completion_model_id.clone(),
         request: Some(request),
         provider: None,
         context: prepared.context,
@@ -139,7 +131,7 @@ pub(crate) async fn drift_search_streaming(
         started,
         usage: prepared.usage,
         prompt_tokens,
-        tokenizer: runtime.context.tokenizer,
+        tokenizer: Arc::clone(&runtime.context.tokenizer),
         callbacks: runtime.callbacks,
         phase: DriftStreamPhase::Context,
     };
@@ -147,11 +139,10 @@ pub(crate) async fn drift_search_streaming(
 }
 
 async fn prepare(
-    runtime: &mut DriftQueryRuntime,
+    runtime: &DriftQueryRuntime,
     query: &str,
     random: &mut dyn DriftRandom,
 ) -> Result<DriftPrepared> {
-    runtime.context.hydrate_reports().await?;
     let (ranked, build_usage) = runtime.context.build_ranked_context(query, random).await?;
     let primer = run_primer(
         &ranked,
@@ -217,20 +208,13 @@ async fn run_depths(
         let calls = queries
             .into_iter()
             .map(|query| async move { run_action(runtime, original_query, query).await });
-        let results = stream::iter(calls)
-            .buffered(runtime.context.config.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let results = crate::query::concurrency::try_buffered_ordered(
+            calls,
+            runtime.context.config.concurrency,
+        )
+        .await?;
         for (id, (response, metadata)) in selected.into_iter().zip(results) {
-            total.llm_calls = total.llm_calls.saturating_add(metadata.usage.llm_calls);
-            total.prompt_tokens = total
-                .prompt_tokens
-                .saturating_add(metadata.usage.prompt_tokens);
-            total.output_tokens = total
-                .output_tokens
-                .saturating_add(metadata.usage.output_tokens);
+            total += metadata.usage;
             state.apply(id, response, metadata)?;
         }
     }
@@ -279,15 +263,16 @@ async fn run_action(
             prompt: "drift_search_system_prompt.txt",
             source: Box::new(source),
         })?;
-    let prompt_tokens = count(
-        &*runtime.context.tokenizer,
-        &rendered,
-        "count DRIFT Local prompt",
-    )?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(&query),
     ]);
+    let prompt_tokens = count_completion_input(
+        runtime.context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Drift,
+        "count DRIFT Local completion input tokens",
+    )?;
     request
         .apply_call_args(&runtime.context.completion_config.call_args)
         .and_then(|()| {
@@ -343,10 +328,11 @@ async fn run_action(
         &raw,
         "count DRIFT Local output",
     )?;
-    let usage = QueryUsageCategory {
+    let mut usage = built.usage;
+    usage += QueryUsageCategory {
         llm_calls: 1,
-        prompt_tokens: built.usage.prompt_tokens.saturating_add(prompt_tokens),
-        output_tokens: built.usage.output_tokens.saturating_add(output_tokens),
+        prompt_tokens,
+        output_tokens,
     };
     Ok((
         parse_action(&raw)?,

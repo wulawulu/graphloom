@@ -1039,17 +1039,27 @@ actual type
 
 ## 11.1 结构
 
-```rust
-pub(crate) struct QueryRuntime {
-    pub config: GraphRagConfig,
-    pub models: ModelRegistry,
-    pub table_provider: Arc<dyn TableProvider>,
-    pub vector_store: Arc<dyn VectorStore>,
-    pub prompts: PromptRepository,
-    pub callbacks: Arc<dyn QueryCallbacks>,
-    pub project_root: PathBuf,
-}
+当前实现把运行时分为长期快照与请求态：
+
+```text
+┌──────────────────────── QueryEngine snapshot ────────────────────────┐
+│ method-keyed async once cells                                        │
+│  ├─ adapted Parquet data + QueryDataIndex                            │
+│  ├─ completion / embedding models + tokenizer                        │
+│  ├─ compiled prompts                                                  │
+│  └─ validated vector connection/schema                               │
+└──────────────────────────────┬────────────────────────────────────────┘
+                               │ Arc<QueryEngine>
+                 ┌─────────────┴─────────────┐
+                 ▼                           ▼
+       request A orchestration     request B orchestration
+       query/history/callbacks     query/history/callbacks
+       usage/context/stream        usage/context/stream
 ```
+
+每个 method/data key 在首次准备时成为显式 snapshot；该 key 的索引更新后由调用方重新创建
+engine，不自动监听文件变化。尚未首次查询的方法仍在首次准备时读取当时的索引文件。
+callback、conversation history、usage、streaming 与 DRIFT traversal 不得进入长期缓存。
 
 Global Search 虽不使用向量表，也不应强制连接 LanceDB。
 
@@ -1071,13 +1081,13 @@ enum QueryVectorStoreService {
 * 只检查所需表；
 * 只连接所需向量后端；
 * 加载 method 对应 Prompt；
-* 组装 callback chain；
+* 每次请求组装 callback chain；
 * 不创建 cache；
 * 不修改 index 产物。
 
 ## 11.3 Method Requirements
 
-建议：
+公开 capability introspection：
 
 ```rust
 pub(crate) struct QueryRequirements {
@@ -1090,6 +1100,9 @@ pub(crate) struct QueryRequirements {
 ```
 
 测试必须证明 Basic Search 不实例化不需要的模型、表和 Prompt。
+
+`QueryRequirements` 不作为泛型 runtime loader。各 method 保持明确的 typed loading code，
+exact-set tests 负责锁定矩阵；runtime 不使用脆弱的集合长度检查。
 
 ## 11.4 Query preflight
 

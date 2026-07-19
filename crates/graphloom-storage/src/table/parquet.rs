@@ -68,6 +68,10 @@ impl TableProvider for ParquetTableProvider {
             })
     }
 
+    async fn read_optional_dataframe(&self, table_name: &str) -> Result<Option<DataFrame>> {
+        self.read_optional(table_name).await
+    }
+
     async fn write_dataframe(&self, table_name: &str, dataframe: DataFrame) -> Result<()> {
         let object = Self::table_object(table_name)?;
         let bytes = run_blocking("writing parquet table", move || {

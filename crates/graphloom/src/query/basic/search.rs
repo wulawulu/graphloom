@@ -2,39 +2,20 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-use futures_util::{StreamExt, stream};
-use graphloom_llm::{ChatMessage, CompletionRequest, CompletionStream, Tokenizer};
+use futures_util::StreamExt;
+use graphloom_llm::{ChatMessage, CompletionRequest};
 use serde::Serialize;
 
 use super::super::{
-    BasicQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryResult, QueryUsage,
-    QueryUsageCategory, Result, SearchMethod,
+    BasicQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryResult, Result, SearchMethod,
+    result::count_completion_input,
+    streaming::{CompletionStreamState, completion_event_stream},
 };
 
 #[derive(Debug, Serialize)]
 struct BasicPromptContext<'a> {
     context_data: &'a str,
     response_type: &'a str,
-}
-
-struct BasicStreamState {
-    provider: CompletionStream,
-    context: super::super::QueryContext,
-    response: String,
-    started: Instant,
-    prompt_tokens: usize,
-    build_context_usage: QueryUsageCategory,
-    tokenizer: Arc<dyn Tokenizer>,
-    callbacks: Arc<dyn super::super::QueryCallbacks>,
-    completion_model_id: String,
-    phase: BasicStreamPhase,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BasicStreamPhase {
-    Context,
-    Tokens,
-    Completed,
 }
 
 pub(crate) async fn basic_search(
@@ -90,19 +71,16 @@ pub(crate) async fn basic_search_streaming(
             prompt: "basic_search_system_prompt.txt",
             source: Box::new(source),
         })?;
-    let prompt_tokens = runtime
-        .basic_context
-        .tokenizer
-        .count(&rendered)
-        .map_err(|source| QueryError::QueryContext {
-            method: SearchMethod::Basic,
-            operation: "count Basic Search prompt tokens",
-            message: source.to_string(),
-        })?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
         ChatMessage::user(query),
     ]);
+    let prompt_tokens = count_completion_input(
+        runtime.basic_context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Basic,
+        "count Basic Search completion input tokens",
+    )?;
     request
         .apply_call_args(&runtime.completion_config.call_args)
         .and_then(|()| {
@@ -125,99 +103,23 @@ pub(crate) async fn basic_search_streaming(
             model: runtime.completion_model_id.clone(),
             source: Box::new(source),
         })?;
-    let state = BasicStreamState {
+    let state = CompletionStreamState {
         provider,
         context: built.context,
-        response: String::new(),
         started,
+        categories: BTreeMap::from([("build_context".to_owned(), built.usage)]),
+        completion_category: "response",
         prompt_tokens,
-        build_context_usage: built.usage,
         tokenizer: Arc::clone(&runtime.basic_context.tokenizer),
         callbacks: runtime.callbacks,
         completion_model_id: runtime.completion_model_id,
-        phase: BasicStreamPhase::Context,
+        method: SearchMethod::Basic,
+        consume_operation: "consume Basic Search completion stream",
+        output_count_operation: "count Basic Search output tokens",
+        output_count_is_context_error: false,
+        notify_reduce_end: false,
     };
-    Ok(Box::pin(stream::unfold(Some(state), |state| async move {
-        next_event(state).await
-    })))
-}
-
-async fn next_event(
-    state: Option<BasicStreamState>,
-) -> Option<(Result<QueryEvent>, Option<BasicStreamState>)> {
-    let mut state = state?;
-    match state.phase {
-        BasicStreamPhase::Context => {
-            state.phase = BasicStreamPhase::Tokens;
-            Some((Ok(QueryEvent::Context(state.context.clone())), Some(state)))
-        }
-        BasicStreamPhase::Tokens => loop {
-            match state.provider.next().await {
-                Some(Ok(chunk)) => {
-                    let content = chunk
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.delta.content.as_deref())
-                        .unwrap_or_default();
-                    if content.is_empty() {
-                        continue;
-                    }
-                    state.response.push_str(content);
-                    state.callbacks.on_llm_new_token(content);
-                    return Some((Ok(QueryEvent::Token(content.to_owned())), Some(state)));
-                }
-                Some(Err(source)) => {
-                    let error = QueryError::QueryCompletion {
-                        method: SearchMethod::Basic,
-                        operation: "consume Basic Search completion stream",
-                        model: state.completion_model_id.clone(),
-                        source: Box::new(source),
-                    };
-                    return Some((Err(error), None));
-                }
-                None => {
-                    state.phase = BasicStreamPhase::Completed;
-                    return Some(completed_event(state));
-                }
-            }
-        },
-        BasicStreamPhase::Completed => Some(completed_event(state)),
-    }
-}
-
-fn completed_event(state: BasicStreamState) -> (Result<QueryEvent>, Option<BasicStreamState>) {
-    let output_tokens = match state.tokenizer.count(&state.response) {
-        Ok(value) => value,
-        Err(source) => {
-            return (
-                Err(QueryError::QueryCompletion {
-                    method: SearchMethod::Basic,
-                    operation: "count Basic Search output tokens",
-                    model: state.completion_model_id,
-                    source: Box::new(source),
-                }),
-                None,
-            );
-        }
-    };
-    let usage = QueryUsage::from_categories(BTreeMap::from([
-        ("build_context".to_owned(), state.build_context_usage),
-        (
-            "response".to_owned(),
-            QueryUsageCategory {
-                llm_calls: 1,
-                prompt_tokens: state.prompt_tokens,
-                output_tokens,
-            },
-        ),
-    ]));
-    let result = QueryResult {
-        response: state.response,
-        context: state.context,
-        elapsed: state.started.elapsed(),
-        usage,
-    };
-    (Ok(QueryEvent::Completed(result)), None)
+    Ok(completion_event_stream(state))
 }
 
 #[cfg(test)]
@@ -226,8 +128,8 @@ mod tests {
 
     use async_trait::async_trait;
     use graphloom_llm::{
-        CompletionChunk, CompletionModel, CompletionResponse, EmbeddingModel, MockEmbeddingModel,
-        ModelConfig,
+        CompletionChunk, CompletionModel, CompletionResponse, CompletionStream, EmbeddingModel,
+        MockEmbeddingModel, ModelConfig, Tokenizer,
     };
     use graphloom_vectors::{
         LanceDbVectorStore, VectorDocument, VectorIndexSchema, VectorStore, VectorStoreConfig,
@@ -407,7 +309,7 @@ mod tests {
             .await
             .expect("prompt");
         BasicQueryRuntime {
-            basic_context: BasicContextBuilder {
+            basic_context: Arc::new(BasicContextBuilder {
                 config: BasicSearchConfig {
                     k: 2,
                     max_context_tokens: usize::MAX,
@@ -419,7 +321,7 @@ mod tests {
                 vector_store,
                 vector_schema: schema,
                 tokenizer,
-            },
+            }),
             completion_model,
             completion_model_id: "completion".to_owned(),
             completion_config,
@@ -502,8 +404,12 @@ mod tests {
 
         let result = completed.expect("completed result");
         assert_eq!(result.response, "first answer");
-        assert_eq!(result.usage.llm_calls, 1);
-        assert_eq!(result.usage.categories["build_context"].llm_calls, 0);
+        assert_eq!(result.usage.llm_calls, 2);
+        assert_eq!(result.usage.categories["build_context"].llm_calls, 1);
+        assert_eq!(
+            result.usage.categories["response"].prompt_tokens,
+            request.messages[0].content.as_str().len() + "What happened?".len()
+        );
         assert_eq!(result.usage.categories["response"].llm_calls, 1);
         assert_eq!(result.usage.output_tokens, "first answer".len());
     }

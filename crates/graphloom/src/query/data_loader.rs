@@ -52,9 +52,11 @@ impl QueryDataLoader {
         dynamic: bool,
     ) -> Result<GlobalQueryData> {
         let method = SearchMethod::Global;
-        let entities = self.required("entities", method).await?;
-        let communities = self.required("communities", method).await?;
-        let reports = self.required("community_reports", method).await?;
+        let (entities, communities, reports) = tokio::try_join!(
+            self.required("entities", method),
+            self.required("communities", method),
+            self.required("community_reports", method),
+        )?;
         Ok(GlobalQueryData {
             entities: read_indexer_entities(&entities, &communities, community_level, method)?,
             reports: read_indexer_reports(
@@ -77,12 +79,14 @@ impl QueryDataLoader {
     /// Returns a typed Query error when another required table is absent or invalid.
     pub async fn load_local(&self, community_level: i64) -> Result<LocalQueryData> {
         let method = SearchMethod::Local;
-        let entities = self.required("entities", method).await?;
-        let communities = self.required("communities", method).await?;
-        let reports = self.required("community_reports", method).await?;
-        let text_units = self.required("text_units", method).await?;
-        let relationships = self.required("relationships", method).await?;
-        let covariates = self.optional("covariates", method).await?;
+        let (entities, communities, reports, text_units, relationships, covariates) = tokio::try_join!(
+            self.required("entities", method),
+            self.required("communities", method),
+            self.required("community_reports", method),
+            self.required("text_units", method),
+            self.required("relationships", method),
+            self.optional("covariates", method),
+        )?;
         Ok(LocalQueryData {
             entities: read_indexer_entities(&entities, &communities, community_level, method)?,
             reports: read_indexer_reports(&reports, &communities, community_level, false, method)?,
@@ -103,11 +107,13 @@ impl QueryDataLoader {
     /// Returns a typed Query error when a required table is absent or invalid.
     pub async fn load_drift(&self, community_level: i64) -> Result<DriftQueryData> {
         let method = SearchMethod::Drift;
-        let entities = self.required("entities", method).await?;
-        let communities = self.required("communities", method).await?;
-        let reports = self.required("community_reports", method).await?;
-        let text_units = self.required("text_units", method).await?;
-        let relationships = self.required("relationships", method).await?;
+        let (entities, communities, reports, text_units, relationships) = tokio::try_join!(
+            self.required("entities", method),
+            self.required("communities", method),
+            self.required("community_reports", method),
+            self.required("text_units", method),
+            self.required("relationships", method),
+        )?;
         Ok(DriftQueryData {
             entities: read_indexer_entities(&entities, &communities, community_level, method)?,
             reports: read_indexer_reports(&reports, &communities, community_level, false, method)?,
@@ -118,17 +124,19 @@ impl QueryDataLoader {
     }
 
     async fn required(&self, table: &'static str, method: SearchMethod) -> Result<DataFrame> {
-        if !self.has(table, method).await? {
-            return Err(QueryError::MissingQueryTable {
-                method,
-                operation: "load query data",
-                table,
-            });
-        }
         self.table_provider
             .read_dataframe(table)
             .await
-            .map_err(|source| table_io_error(method, table, "read query table", source))
+            .map_err(|source| match source {
+                graphloom_storage::StorageError::MissingTable { .. } => {
+                    QueryError::MissingQueryTable {
+                        method,
+                        operation: "load query data",
+                        table,
+                    }
+                }
+                source => table_io_error(method, table, "read query table", source),
+            })
     }
 
     async fn optional(
@@ -136,17 +144,10 @@ impl QueryDataLoader {
         table: &'static str,
         method: SearchMethod,
     ) -> Result<Option<DataFrame>> {
-        if !self.has(table, method).await? {
-            return Ok(None);
-        }
-        self.required(table, method).await.map(Some)
-    }
-
-    async fn has(&self, table: &'static str, method: SearchMethod) -> Result<bool> {
         self.table_provider
-            .has(table)
+            .read_optional_dataframe(table)
             .await
-            .map_err(|source| table_io_error(method, table, "check query table", source))
+            .map_err(|source| table_io_error(method, table, "read optional query table", source))
     }
 }
 

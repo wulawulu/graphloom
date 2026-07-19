@@ -30,6 +30,12 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   full validation and then runs workflows directly against the configured
   output, so API callers do not need to run CLI validation first. Completed
   writes are not rolled back if a later workflow fails.
+- `graphloom::query::QueryEngine` is the reusable Query API for services, agents, and REPLs.
+  It lazily prepares each requested method and reuses its immutable models, tokenizer, prompts,
+  adapted Parquet data, and vector connection. Each method/data key becomes a snapshot on its first
+  query; create a new engine after replacing files already prepared by that engine.
+  `Arc<QueryEngine>` supports concurrent requests; callbacks, history, usage, traversal, and
+  streaming state remain request-local.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` loads project
   configuration and performs CLI validation before dry-run output or indexing.
@@ -160,11 +166,45 @@ Global map/rating output, DRIFT actions, and usage data do not enter stdout.
 Without `--verbose`, successful Query stderr is empty; stdout contains only the
 answer. Query lifecycle diagnostics are appended to `logs/query.log`.
 
-`--data <path>` overrides only the producer Parquet table location. It is
+`--data <directory>` overrides only the producer Parquet table location. It is
 resolved from the process working directory, while LanceDB continues to use
 `vector_store.db_uri` from project settings. Query is strictly read-only: it
 does not write Parquet, mutate vector records, create a Query cache, or run an
 index workflow.
+
+For repeated library queries:
+
+```rust,no_run
+use std::{path::PathBuf, sync::Arc};
+
+use graphloom::{
+    GraphRagConfig,
+    query::{QueryEngine, QueryOptions, SearchMethod},
+};
+
+# async fn example(config: GraphRagConfig) -> graphloom::Result<()> {
+let root = PathBuf::from("./demo");
+let engine = Arc::new(QueryEngine::load(config, &root).await?);
+let options = QueryOptions::new(root, "What are the main facts?".into(), SearchMethod::Basic);
+let result = engine.query(options).await?;
+assert!(!result.response.is_empty());
+# Ok(())
+# }
+```
+
+```text
+QueryEngine snapshot
+├── Basic resources ─┐
+├── Local resources ─┼── lazy, immutable, shared across requests
+├── Global resources ┤
+└── DRIFT resources ─┘
+          │
+          ├── request A: query + callbacks + history + usage + stream state
+          └── request B: query + callbacks + history + usage + stream state
+```
+
+Callbacks execute synchronously on the async token path and must not block. A common adapter is a
+callback that uses `tokio::sync::mpsc::Sender::try_send` to hand owned events to a dedicated worker.
 
 ## Skip Optional Validation
 

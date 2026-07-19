@@ -6,8 +6,13 @@ use super::{MapSearchResult, QueryContext};
 
 /// Callbacks invoked during Query orchestration.
 ///
-/// Implementations must not panic. A callback panic follows Rust's normal panic
-/// semantics and cannot be converted into a provider-neutral Query error.
+/// Methods run synchronously on async orchestration and token-consumption paths. Implementations
+/// must return quickly and must not perform blocking I/O. Send work through a bounded channel to a
+/// dedicated task when persistence or network access is required. `GraphLoom` never invokes user
+/// callbacks while holding an internal lock.
+///
+/// Implementations must not panic. A callback panic follows Rust's normal panic semantics and
+/// cannot be converted into a provider-neutral Query error.
 pub trait QueryCallbacks: Send + Sync + std::fmt::Debug {
     /// Context construction completed.
     fn on_context(&self, _context: &QueryContext) {}
