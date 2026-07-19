@@ -226,21 +226,11 @@ fn parse_existing_root(value: &Path) -> Result<PathBuf, String> {
 )]
 fn parse_existing_data_path(value: &Path) -> Result<PathBuf, String> {
     let path = canonicalize_from_current_dir(value, "data path")?;
-    if path.is_dir() {
-        std::fs::read_dir(&path).map_err(|source| {
-            format!(
-                "data directory is not readable {}: {source}",
-                path.display()
-            )
-        })?;
-    } else if path.is_file() {
-        open_readable_file(&path)?;
-    } else {
-        return Err(format!(
-            "data path must be a file or directory: {}",
-            path.display()
-        ));
+    if !path.is_dir() {
+        return Err("data path must be a readable index output directory".to_owned());
     }
+    std::fs::read_dir(&path)
+        .map_err(|source| format!("data directory is not readable: {source}"))?;
     Ok(path)
 }
 
@@ -254,17 +244,6 @@ fn canonicalize_from_current_dir(value: &Path, description: &str) -> Result<Path
     };
     path.canonicalize()
         .map_err(|source| format!("{description} does not exist or cannot be resolved: {source}"))
-}
-
-#[allow(
-    clippy::disallowed_types,
-    reason = "clap value parsers are synchronous; opening without reading verifies \
-              Click-compatible file readability without loading an unbounded external file"
-)]
-fn open_readable_file(path: &Path) -> Result<(), String> {
-    std::fs::File::open(path)
-        .map(drop)
-        .map_err(|source| format!("data file is not readable {}: {source}", path.display()))
 }
 
 #[allow(
@@ -445,9 +424,11 @@ mod tests {
                 .canonicalize()
                 .expect("canonical data directory")
         );
+        let file_error =
+            parse_existing_data_path(data_file_path).expect_err("data file must be rejected");
         assert_eq!(
-            parse_existing_data_path(data_file_path).expect("existing data file"),
-            data_file_path.canonicalize().expect("canonical data file")
+            file_error,
+            "data path must be a readable index output directory"
         );
         assert!(parse_existing_root(data_file_path).is_err());
         assert!(parse_existing_data_path(&fixture.path().join("missing")).is_err());

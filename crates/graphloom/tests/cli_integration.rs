@@ -288,7 +288,7 @@ fn test_should_report_missing_query_before_default_root_writability() {
 }
 
 #[tokio::test]
-async fn test_should_accept_existing_data_file_then_return_runtime_exit_one() {
+async fn test_should_reject_existing_data_file_during_argument_parsing() {
     let project = TempDir::new().expect("project");
     init_project(project.path());
     let data_file = project.path().join("existing-data-file");
@@ -310,16 +310,13 @@ async fn test_should_accept_existing_data_file_then_return_runtime_exit_one() {
         .output()
         .expect("data file Query");
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = normalize_cli_text(&output.stderr);
-    assert!(stderr.contains("requires table text_units"));
-    assert!(!stderr.contains("Usage:"));
-    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
-        .await
-        .expect("runtime failure log");
-    assert!(log.contains("query run started"));
-    assert!(log.contains("query run failed"));
+    assert!(stderr.contains("data path must be a readable index output directory"));
+    assert!(stderr.contains("Usage:"));
+    assert!(!stderr.contains(data_file.to_str().expect("UTF-8 data file")));
+    assert!(!project.path().join("logs").exists());
 }
 
 #[tokio::test]

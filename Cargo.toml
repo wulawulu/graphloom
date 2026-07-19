@@ -8,8 +8,8 @@ authors = ["wulawulu<wutuobangbang@gmail.com>"]
 edition = "2024"
 license = "MIT"
 documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+repository = "https://github.com/wulawulu/graphloom"
+homepage = "https://github.com/wulawulu/graphloom"
 readme = "README.md"
 
 [workspace.dependencies]
@@ -45,7 +45,7 @@ tempfile = "3.23.0"
 text-splitter = { version = "0.32.0", features = ["tiktoken-rs"] }
 thiserror = "2.0.18"
 tiktoken-rs = "0.12.0"
-tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread"] }
+tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync"] }
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.5"
