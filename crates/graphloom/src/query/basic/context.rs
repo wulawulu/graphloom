@@ -11,7 +11,7 @@ use polars_core::prelude::{DataFrame, NamedFrom, Series};
 
 use super::super::{
     QueryContext, QueryContextRecords, QueryContextText, QueryError, QueryUsageCategory, Result,
-    SearchMethod, TextUnit,
+    SearchMethod, TextUnit, result::resolve_embedding_prompt_tokens,
 };
 use crate::BasicSearchConfig;
 
@@ -84,20 +84,14 @@ impl BasicContextBuilder {
                 model: self.embedding_model_id.clone(),
                 source: Box::new(source),
             })?;
-        let provider_prompt_tokens =
-            usize::try_from(response.usage.prompt_tokens).unwrap_or(usize::MAX);
-        let prompt_tokens = if provider_prompt_tokens == 0 {
-            self.tokenizer
-                .count(query)
-                .map_err(|source| QueryError::QueryEmbedding {
-                    method: SearchMethod::Basic,
-                    operation: "count Basic Search embedding input tokens",
-                    model: self.embedding_model_id.clone(),
-                    source: Box::new(source),
-                })?
-        } else {
-            provider_prompt_tokens
-        };
+        let prompt_tokens = resolve_embedding_prompt_tokens(
+            response.usage.prompt_tokens,
+            query,
+            self.tokenizer.as_ref(),
+            SearchMethod::Basic,
+            "count Basic Search embedding input tokens",
+            &self.embedding_model_id,
+        )?;
         let vector = response
             .into_embeddings()
             .into_iter()
@@ -461,6 +455,26 @@ mod tests {
         assert_eq!(
             vector_queries.lock().expect("queries").as_slice(),
             &[(vec![0.25, 0.75], 2, false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_fallback_to_tokenizer_for_zero_basic_embedding_usage() {
+        let (builder, _, _, _, _) = builder(
+            vec![text_unit("A", "0", "source")],
+            vec![result("A", 1.0)],
+            usize::MAX,
+        );
+
+        let built = builder.build("zero usage").await.expect("context");
+
+        assert_eq!(
+            built.usage,
+            QueryUsageCategory {
+                llm_calls: 1,
+                prompt_tokens: "zero usage".len(),
+                output_tokens: 0,
+            }
         );
     }
 

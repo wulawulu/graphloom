@@ -33,7 +33,10 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 - `graphloom::query::QueryEngine` is the reusable Query API for services, agents, and REPLs.
   It lazily prepares each requested method and reuses its immutable models, tokenizer, prompts,
   adapted Parquet data, and vector connection. Each method/data key becomes a snapshot on its first
-  query; create a new engine after replacing files already prepared by that engine.
+  query; Global static and dynamic selection are separate snapshots because their adapted report
+  sets differ. Create a new engine after replacing files already prepared by that engine.
+  Per-request `project_root` must resolve to the engine's existing project directory, and relative
+  data overrides resolve from that root.
   `Arc<QueryEngine>` supports concurrent requests; callbacks, history, usage, traversal, and
   streaming state remain request-local.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and

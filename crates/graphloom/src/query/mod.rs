@@ -117,6 +117,10 @@ impl FromStr for SearchMethod {
 #[non_exhaustive]
 pub struct QueryOptions {
     /// Project root used for relative paths and prompts.
+    ///
+    /// The one-shot APIs use this root directly. When executing through [`QueryEngine`], it must
+    /// resolve to the same existing directory used to load that engine; engines cannot query
+    /// across projects.
     pub project_root: PathBuf,
     /// Original query text.
     pub query: String,
@@ -125,7 +129,9 @@ pub struct QueryOptions {
     /// Optional Parquet table storage override.
     ///
     /// Absolute paths are used directly. Relative paths supplied by library callers are resolved
-    /// against [`Self::project_root`]. The CLI canonicalizes `--data` against the process current
+    /// against the active project root. For [`QueryEngine`], that is the root supplied to
+    /// [`QueryEngine::load`]; the required root equality makes it equivalent to
+    /// [`Self::project_root`]. The CLI canonicalizes `--data` against the process current
     /// directory before constructing these options.
     pub data_dir: Option<PathBuf>,
     /// Maximum community hierarchy level.

@@ -13,7 +13,7 @@ use polars_core::prelude::{NamedFrom, Series};
 use super::super::{
     CommunityReport, ConversationHistory, Covariate, Entity, QueryContext, QueryContextRecords,
     QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory, Relationship, Result,
-    SearchMethod, TextUnit, context::ContextTable,
+    SearchMethod, TextUnit, context::ContextTable, result::resolve_embedding_prompt_tokens,
 };
 use crate::LocalSearchConfig;
 
@@ -184,8 +184,14 @@ impl LocalContextBuilder {
                     model: self.embedding_model_id.clone(),
                     source: Box::new(source),
                 })?;
-            let prompt_tokens =
-                usize::try_from(response.usage.prompt_tokens).map_or(usize::MAX, |value| value);
+            let prompt_tokens = resolve_embedding_prompt_tokens(
+                response.usage.prompt_tokens,
+                query,
+                self.tokenizer.as_ref(),
+                self.method,
+                "count Local Search entity mapping embedding input tokens",
+                &self.embedding_model_id,
+            )?;
             let vector = response
                 .into_embeddings()
                 .into_iter()
@@ -960,6 +966,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingEmbedding {
         inputs: Arc<Mutex<Vec<Vec<String>>>>,
+        prompt_tokens: u64,
     }
 
     #[async_trait]
@@ -975,8 +982,8 @@ mod tests {
             let mut response =
                 EmbeddingResponse::vectors_for_test("embedding", vec![vec![0.2, 0.8]]);
             response.usage = EmbeddingUsage {
-                prompt_tokens: 7,
-                total_tokens: 7,
+                prompt_tokens: self.prompt_tokens,
+                total_tokens: self.prompt_tokens,
                 extra: BTreeMap::new(),
             };
             Ok(response)
@@ -1141,6 +1148,7 @@ mod tests {
                 index,
                 embedding_model: Arc::new(RecordingEmbedding {
                     inputs: Arc::clone(&embedding_inputs),
+                    prompt_tokens: 7,
                 }),
                 embedding_model_id: "embedding".to_owned(),
                 vector_store: Arc::new(RecordingStore {
@@ -1305,6 +1313,30 @@ mod tests {
         assert_eq!(
             *fixture.searches.lock().expect("searches"),
             vec![(vec![0.2, 0.8], 4, false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_fallback_to_tokenizer_for_zero_local_embedding_usage() {
+        let mut fixture = fixture(20_000, &["entity-a"]);
+        fixture.builder.embedding_model = Arc::new(RecordingEmbedding {
+            inputs: Arc::clone(&fixture.embedding_inputs),
+            prompt_tokens: 0,
+        });
+
+        let (_, usage) = fixture
+            .builder
+            .map_entities("zero usage", &[], &[])
+            .await
+            .expect("entity mapping");
+
+        assert_eq!(
+            usage,
+            QueryUsageCategory {
+                llm_calls: 1,
+                prompt_tokens: "zero usage".len(),
+                output_tokens: 0,
+            }
         );
     }
 

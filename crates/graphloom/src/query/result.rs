@@ -126,11 +126,89 @@ pub(crate) fn count_completion_input(
     })
 }
 
+pub(crate) fn resolve_embedding_prompt_tokens(
+    provider_prompt_tokens: u64,
+    input: &str,
+    tokenizer: &dyn Tokenizer,
+    method: SearchMethod,
+    operation: &'static str,
+    model_id: &str,
+) -> Result<usize> {
+    let provider_prompt_tokens = usize::try_from(provider_prompt_tokens).unwrap_or(usize::MAX);
+    if provider_prompt_tokens > 0 {
+        return Ok(provider_prompt_tokens);
+    }
+    tokenizer
+        .count(input)
+        .map_err(|source| QueryError::QueryEmbedding {
+            method,
+            operation,
+            model: model_id.to_owned(),
+            source: Box::new(source),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{QueryUsage, QueryUsageCategory};
+    use graphloom_llm::{LlmError, Tokenizer};
+
+    use super::{QueryUsage, QueryUsageCategory, resolve_embedding_prompt_tokens};
+    use crate::query::SearchMethod;
+
+    #[derive(Debug)]
+    struct ByteTokenizer;
+
+    impl Tokenizer for ByteTokenizer {
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            Ok(text.bytes().map(u32::from).collect())
+        }
+
+        fn decode(&self, tokens: &[u32]) -> graphloom_llm::Result<String> {
+            let bytes = tokens
+                .iter()
+                .map(|token| {
+                    u8::try_from(*token).map_err(|source| LlmError::Tokenizer {
+                        encoding_model: "bytes".to_owned(),
+                        message: source.to_string(),
+                    })
+                })
+                .collect::<graphloom_llm::Result<Vec<_>>>()?;
+            String::from_utf8(bytes).map_err(|source| LlmError::Tokenizer {
+                encoding_model: "bytes".to_owned(),
+                message: source.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn test_should_resolve_embedding_usage_with_provider_or_tokenizer_fallback() {
+        assert_eq!(
+            resolve_embedding_prompt_tokens(
+                9,
+                "ignored",
+                &ByteTokenizer,
+                SearchMethod::Basic,
+                "test provider usage",
+                "embedding",
+            )
+            .expect("provider usage"),
+            9
+        );
+        assert_eq!(
+            resolve_embedding_prompt_tokens(
+                0,
+                "fallback",
+                &ByteTokenizer,
+                SearchMethod::Drift,
+                "test fallback usage",
+                "embedding",
+            )
+            .expect("fallback usage"),
+            "fallback".len()
+        );
+    }
 
     #[test]
     fn test_should_saturate_category_merges_and_top_level_totals() {

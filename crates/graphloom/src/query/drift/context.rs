@@ -13,7 +13,7 @@ use crate::{
     DriftSearchConfig,
     query::{
         CommunityReport, QueryError, QueryUsageCategory, Result, SearchMethod,
-        local::LocalContextBuilder,
+        local::LocalContextBuilder, result::resolve_embedding_prompt_tokens,
     },
 };
 
@@ -210,17 +210,14 @@ impl DriftContextBuilder {
                 model: self.embedding_model_id.clone(),
                 source: Box::new(source),
             })?;
-        let provider_embedding_tokens =
-            usize::try_from(embedding_response.usage.prompt_tokens).unwrap_or(usize::MAX);
-        let embedding_tokens = if provider_embedding_tokens == 0 {
-            count(
-                &*self.tokenizer,
-                expanded_query,
-                "count DRIFT expanded query embedding input",
-            )?
-        } else {
-            provider_embedding_tokens
-        };
+        let embedding_tokens = resolve_embedding_prompt_tokens(
+            embedding_response.usage.prompt_tokens,
+            expanded_query,
+            self.tokenizer.as_ref(),
+            SearchMethod::Drift,
+            "count DRIFT expanded query embedding input",
+            &self.embedding_model_id,
+        )?;
         let embedding = embedding_response
             .into_embeddings()
             .into_iter()

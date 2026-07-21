@@ -198,33 +198,7 @@ impl VectorStore for LanceDbVectorStore {
             .execute()
             .await?;
 
-        let Some(batch) = stream.try_next().await? else {
-            return Ok(None);
-        };
-        if batch.num_rows() == 0 {
-            return Ok(None);
-        }
-        let ids = batch
-            .column_by_name(&schema.id_field)
-            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| VectorError::InvalidDocument {
-                index_name: schema.index_name.clone(),
-                message: format!("id field {} is not Utf8", schema.id_field),
-            })?;
-        let vectors = batch
-            .column_by_name(&schema.vector_field)
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
-            .ok_or_else(|| VectorError::InvalidDocument {
-                index_name: schema.index_name.clone(),
-                message: format!("vector field {} is not FixedSizeList", schema.vector_field),
-            })?;
-        if ids.is_null(0) {
-            return Ok(None);
-        }
-        Ok(Some(VectorDocument {
-            id: ids.value(0).to_owned(),
-            vector: vector_value(schema, vectors, 0)?,
-        }))
+        filtered_document_from_stream(&mut stream, schema).await
     }
 
     async fn similarity_search_by_vector(
@@ -294,6 +268,42 @@ fn validate_search_query(schema: &VectorIndexSchema, query_vector: &[f32], k: us
         });
     }
     Ok(())
+}
+
+async fn filtered_document_from_stream<S>(
+    stream: &mut S,
+    schema: &VectorIndexSchema,
+) -> Result<Option<VectorDocument>>
+where
+    S: futures_util::TryStream<Ok = RecordBatch, Error = lancedb::Error> + Unpin,
+{
+    while let Some(batch) = stream.try_next().await? {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let ids = batch
+            .column_by_name(&schema.id_field)
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| VectorError::InvalidDocument {
+                index_name: schema.index_name.clone(),
+                message: format!("id field {} is not Utf8", schema.id_field),
+            })?;
+        let vectors = batch
+            .column_by_name(&schema.vector_field)
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+            .ok_or_else(|| VectorError::InvalidDocument {
+                index_name: schema.index_name.clone(),
+                message: format!("vector field {} is not FixedSizeList", schema.vector_field),
+            })?;
+        if ids.is_null(0) {
+            continue;
+        }
+        return Ok(Some(VectorDocument {
+            id: ids.value(0).to_owned(),
+            vector: vector_value(schema, vectors, 0)?,
+        }));
+    }
+    Ok(None)
 }
 
 #[allow(
@@ -888,6 +898,41 @@ mod tests {
             .await
             .expect_err("stored vector dimension mismatch");
         assert!(error.to_string().contains("size 3"));
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_empty_filtered_batches_before_matching_document() {
+        let index_schema = schema("empty_batches", 2);
+        let mut reader = documents_reader(
+            &index_schema,
+            &[VectorDocument {
+                id: "matching".to_owned(),
+                vector: vec![0.25, 0.75],
+            }],
+        )
+        .expect("document reader");
+        let full_batch = reader
+            .next()
+            .expect("one batch")
+            .expect("valid matching batch")
+            .project(&[0, 1])
+            .expect("filtered projection");
+        let empty_batch = full_batch.slice(0, 0);
+        let mut stream = futures_util::stream::iter(vec![
+            Ok::<_, lancedb::Error>(empty_batch.clone()),
+            Ok(empty_batch),
+            Ok(full_batch),
+        ]);
+
+        assert_eq!(
+            filtered_document_from_stream(&mut stream, &index_schema)
+                .await
+                .expect("filtered batches"),
+            Some(VectorDocument {
+                id: "matching".to_owned(),
+                vector: vec![0.25, 0.75],
+            })
+        );
     }
 
     #[tokio::test]

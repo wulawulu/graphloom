@@ -1059,6 +1059,12 @@ actual type
 
 每个 method/data key 在首次准备时成为显式 snapshot；该 key 的索引更新后由调用方重新创建
 engine，不自动监听文件变化。尚未首次查询的方法仍在首次准备时读取当时的索引文件。
+Global static 与 dynamic selection 的 report adaptation 不同，因此是两个独立 snapshot key。
+每次请求的 project root 必须 canonicalize 到 engine load root；相对 data override 以该 root
+解析，engine 不允许跨 project 查询。成功解析到同一目录的 data override 共享 snapshot；
+无法解析的 override 不进入长期资源缓存，而是直接执行正常 runtime loading，由 runtime
+返回原有 typed error，后续请求会重新解析该路径。若 unresolved 请求在加载时恰好变为有效
+并成功完成，该次 runtime 仍不缓存；下一次请求通过 canonical key 建立正式 snapshot。
 callback、conversation history、usage、streaming 与 DRIFT traversal 不得进入长期缓存。
 
 Global Search 虽不使用向量表，也不应强制连接 LanceDB。

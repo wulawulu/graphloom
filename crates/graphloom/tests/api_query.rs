@@ -136,7 +136,7 @@ async fn mount_drift_query_stub() -> MockServer {
             "object": "list",
             "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0]}],
             "model": "embed-test",
-            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+            "usage": {"prompt_tokens": 0, "total_tokens": 0}
         })))
         .mount(&server)
         .await;
@@ -578,7 +578,7 @@ async fn write_dynamic_global_tables(root: &Path) -> Vec<std::path::PathBuf> {
             Series::new("level".into(), [0_i64, 0, 0, 0]).into(),
             Series::new(
                 "title".into(),
-                ["Community 0", "Community 1", "Community 2", "Community 3"],
+                ["Shared", "Shared", "Community 2", "Community 3"],
             )
             .into(),
             Series::new("parent".into(), [-1_i64, -1, -1, -1]).into(),
@@ -775,6 +775,80 @@ fn global_options(root: &Path, query_text: &str) -> QueryOptions {
         query_text.to_owned(),
         SearchMethod::Global,
     )
+}
+
+#[derive(Debug)]
+struct GlobalSnapshotOutcome {
+    result: graphloom::query::QueryResult,
+    callbacks: Vec<String>,
+    report_ids: Vec<String>,
+    batches: Vec<String>,
+}
+
+async fn run_global_snapshot(
+    engine: &QueryEngine,
+    root: &Path,
+    dynamic: bool,
+) -> GlobalSnapshotOutcome {
+    let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let mut options = global_options(root, "What are the themes?");
+    options.dynamic_community_selection = dynamic;
+    options.callbacks.push(callbacks.clone());
+    let result = engine.query(options).await.expect("Global snapshot query");
+    let report_ids = global_report_ids(&result);
+    let QueryContextText::Composite(text) = &result.context.text else {
+        panic!("expected Global composite context");
+    };
+    let QueryContextText::Batches(batches) = &text["map"] else {
+        panic!("expected Global map batches");
+    };
+    let batches = batches.clone();
+    let callback_events = callbacks.events.lock().expect("Global callbacks").clone();
+    GlobalSnapshotOutcome {
+        result,
+        callbacks: callback_events,
+        report_ids,
+        batches,
+    }
+}
+
+fn global_report_ids(result: &graphloom::query::QueryResult) -> Vec<String> {
+    let QueryContextRecords::Named(records) = &result.context.records else {
+        panic!("expected named Global records");
+    };
+    let QueryContextRecords::Batches(batches) = &records["map"] else {
+        panic!("expected Global report batches");
+    };
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column("id")
+                .expect("Global report id column")
+                .str()
+                .expect("Global report string ids")
+                .iter()
+                .flatten()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn assert_global_snapshot_eq(actual: &GlobalSnapshotOutcome, expected: &GlobalSnapshotOutcome) {
+    assert_eq!(actual.result.response, expected.result.response);
+    assert_eq!(actual.result.usage, expected.result.usage);
+    assert_eq!(
+        format!("{:?}", actual.result.context.text),
+        format!("{:?}", expected.result.context.text)
+    );
+    assert_eq!(
+        format!("{:?}", actual.result.context.records),
+        format!("{:?}", expected.result.context.records)
+    );
+    assert_eq!(actual.report_ids, expected.report_ids);
+    assert_eq!(actual.batches, expected.batches);
+    assert_eq!(actual.callbacks, expected.callbacks);
 }
 
 fn expect_stream_error(result: graphloom::Result<QueryEventStream>) -> GraphLoomError {
@@ -1368,8 +1442,10 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         ["action", "build_context", "primer", "reduce"]
     );
     assert_eq!(result.usage.categories["build_context"].llm_calls, 2);
+    assert!(result.usage.categories["build_context"].prompt_tokens > 0);
     assert_eq!(result.usage.categories["primer"].llm_calls, 1);
     assert_eq!(result.usage.categories["action"].llm_calls, 2);
+    assert!(result.usage.categories["action"].prompt_tokens > 0);
     assert_eq!(result.usage.categories["reduce"].llm_calls, 1);
     assert_eq!(
         result.usage.llm_calls,
@@ -1829,6 +1905,102 @@ async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn test_should_isolate_static_and_dynamic_global_snapshots_in_both_query_orders() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_dynamic_global_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.global_search.max_context_tokens = 10_000;
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+
+    let fresh_static_engine = QueryEngine::load(config.clone(), project.path())
+        .await
+        .expect("fresh static engine");
+    let fresh_static = run_global_snapshot(&fresh_static_engine, project.path(), false).await;
+    let fresh_dynamic_engine = QueryEngine::load(config.clone(), project.path())
+        .await
+        .expect("fresh dynamic engine");
+    let fresh_dynamic = run_global_snapshot(&fresh_dynamic_engine, project.path(), true).await;
+    assert_ne!(fresh_static.report_ids, fresh_dynamic.report_ids);
+    assert_eq!(fresh_static.report_ids.len(), 3);
+    assert_eq!(fresh_dynamic.report_ids.len(), 4);
+
+    let static_first_engine = QueryEngine::load(config.clone(), project.path())
+        .await
+        .expect("static-first engine");
+    let static_first = run_global_snapshot(&static_first_engine, project.path(), false).await;
+    let dynamic_second = run_global_snapshot(&static_first_engine, project.path(), true).await;
+    assert_global_snapshot_eq(&static_first, &fresh_static);
+    assert_global_snapshot_eq(&dynamic_second, &fresh_dynamic);
+
+    let dynamic_first_engine = QueryEngine::load(config, project.path())
+        .await
+        .expect("dynamic-first engine");
+    let dynamic_first = run_global_snapshot(&dynamic_first_engine, project.path(), true).await;
+    let static_second = run_global_snapshot(&dynamic_first_engine, project.path(), false).await;
+    assert_global_snapshot_eq(&dynamic_first, &fresh_dynamic);
+    assert_global_snapshot_eq(&static_second, &fresh_static);
+}
+
+#[tokio::test]
+async fn test_should_revalidate_dynamic_schema_after_static_snapshot() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    let output = project.path().join("output");
+    write_dynamic_global_tables(&output).await;
+    let provider = ParquetTableProvider::new(&output).expect("Parquet provider");
+    let mut reports = provider
+        .read_dataframe("community_reports")
+        .await
+        .expect("community reports");
+    reports
+        .replace(
+            "title",
+            Series::new(
+                "title".into(),
+                [None, Some("Report 1"), Some("Report 2"), Some("Report 3")],
+            )
+            .into(),
+        )
+        .expect("dynamic-only invalid report field");
+    provider
+        .write_dataframe("community_reports", reports)
+        .await
+        .expect("write dynamic-only invalid reports");
+
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let engine = QueryEngine::load(config, project.path())
+        .await
+        .expect("Global engine");
+    run_global_snapshot(&engine, project.path(), false).await;
+
+    let mut dynamic = global_options(project.path(), "What are the themes?");
+    dynamic.dynamic_community_selection = true;
+    let error = engine
+        .query(dynamic)
+        .await
+        .expect_err("dynamic schema must be revalidated");
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                *source,
+                QueryError::InvalidQueryTable {
+                    method: SearchMethod::Global,
+                    ..
+                }
+            )
+    ));
 }
 
 #[tokio::test]
