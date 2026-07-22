@@ -747,6 +747,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "graphrag" },
     { name = "lancedb" },
+    { name = "litellm" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pytest" },
@@ -762,6 +763,7 @@ dev = [
 requires-dist = [
     { name = "graphrag", specifier = "==3.1.0" },
     { name = "lancedb", specifier = "==0.24.3" },
+    { name = "litellm", specifier = "==1.86.2" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "pyarrow", specifier = "==22.0.0" },
     { name = "pytest", specifier = "==9.1.1" },

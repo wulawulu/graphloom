@@ -28,6 +28,32 @@ test-compat:
 		pytest -q tests/compat
 	@cargo test -p graphloom-llm --test cache_compat
 
+test-query-record-replay:
+	@env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		pytest -q tests/compat/test_llm_cache_proxy.py tests/compat/test_query_record_replay.py
+
+llm-cache-proxy:
+	@env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		python tests/compat/llm_cache_proxy.py \
+		--cassette "$(CASSETTE)" \
+		--completion-provider "$(or $(COMPLETION_PROVIDER),deepseek)" \
+		--embedding-provider "$(or $(EMBEDDING_PROVIDER),ollama)" \
+		$(if $(COMPLETION_API_BASE),--completion-api-base "$(COMPLETION_API_BASE)",) \
+		$(if $(EMBEDDING_API_BASE),--embedding-api-base "$(EMBEDDING_API_BASE)",)
+
+query-record-replay:
+	@TARGET_DIR="$$(cargo metadata --no-deps --format-version 1 | \
+		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"; \
+	env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		python tests/compat/query_record_replay.py \
+		--case "$(CASE)" \
+		--query "$(QUERY)" \
+		--method "$(or $(METHOD),all)" \
+		--graphloom-bin "$$TARGET_DIR/debug/graphloom"
+
 test-all:
 	@cargo nextest run --all-features
 
@@ -60,4 +86,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-compat test-all bench-query check-agent-sync release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay llm-cache-proxy query-record-replay test-all bench-query check-agent-sync release update-submodule

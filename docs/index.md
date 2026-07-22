@@ -3,6 +3,7 @@
 ## Compatibility
 
 - [Python GraphRAG compatibility testing](python-compatibility-testing.md)
+- [Query LLM record/replay compatibility](query-record-replay.md)
 
 ## Optimization backlog
 

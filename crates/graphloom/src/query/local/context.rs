@@ -299,7 +299,10 @@ impl LocalContextBuilder {
         selected_entities: &[&Entity],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
-        if selected_entities.is_empty() || self.reports.is_empty() {
+        if selected_entities.is_empty() {
+            return Ok(None);
+        }
+        if self.reports.is_empty() {
             return Ok(None);
         }
         let mut matches = Vec::<(String, usize)>::new();
@@ -315,6 +318,12 @@ impl LocalContextBuilder {
                 }
             }
         }
+        if matches.is_empty() {
+            return Ok(Some(Section {
+                text: "[]".to_owned(),
+                table: ContextTable::new(["id", "title", "content"], Vec::new()),
+            }));
+        }
         let mut selected = matches
             .into_iter()
             .filter_map(|(community_id, count)| {
@@ -326,6 +335,12 @@ impl LocalContextBuilder {
                     .map(|report| (report, count))
             })
             .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Ok(Some(Section {
+                text: "[]".to_owned(),
+                table: ContextTable::new(["id", "title", "content"], Vec::new()),
+            }));
+        }
         selected.sort_by(|(left, left_matches), (right, right_matches)| {
             right_matches.cmp(left_matches).then_with(|| {
                 right
@@ -352,7 +367,10 @@ impl LocalContextBuilder {
             "build Local Reports context",
         )?;
         if table.is_empty() {
-            return Ok(None);
+            return Ok(Some(Section {
+                text: "[]".to_owned(),
+                table,
+            }));
         }
         Ok(Some(Section {
             text: table.render_csv_section(
@@ -1434,20 +1452,20 @@ mod tests {
     }
 
     #[test]
-    fn test_should_skip_community_without_report_and_stop_at_record_boundary() {
+    fn test_should_render_empty_community_list_and_stop_at_record_boundary() {
         let mut fixture = fixture(20_000, &[]);
         fixture
             .builder
             .reports
             .retain(|report| report.community_id != "3");
         let carol = vec![&fixture.builder.entities[2]];
-        assert!(
-            fixture
-                .builder
-                .build_community_context(&carol, 20_000)
-                .expect("missing report context")
-                .is_none()
-        );
+        let missing = fixture
+            .builder
+            .build_community_context(&carol, 20_000)
+            .expect("missing report context")
+            .expect("upstream empty community list");
+        assert_eq!(missing.text, "[]");
+        assert!(missing.table.is_empty());
 
         let alice = vec![&fixture.builder.entities[0]];
         let header = "-----Reports-----\nid|title|content\n";
@@ -1505,13 +1523,13 @@ mod tests {
                 .get(0),
             Some("0")
         );
-        assert!(
-            fixture
-                .builder
-                .build_community_context(&selected, budget - 1)
-                .expect("under-budget Local Reports")
-                .is_none()
-        );
+        let under_budget = fixture
+            .builder
+            .build_community_context(&selected, budget - 1)
+            .expect("under-budget Local Reports")
+            .expect("upstream empty community list");
+        assert_eq!(under_budget.text, "[]");
+        assert!(under_budget.table.is_empty());
     }
 
     #[tokio::test]
@@ -1564,6 +1582,26 @@ mod tests {
                 "sources"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_upstream_empty_community_list_text() {
+        let fixture = fixture(1, &["entity-a"]);
+
+        let built = fixture
+            .builder
+            .build("question", None)
+            .await
+            .expect("Local context whose community reports exceed the budget");
+
+        let QueryContextText::Text(text) = &built.context.text else {
+            panic!("expected text context");
+        };
+        assert!(text.starts_with("[]\n\n-----Entities-----"));
+        let QueryContextRecords::Tables(records) = &built.context.records else {
+            panic!("expected Local tables");
+        };
+        assert_eq!(records["reports"].height(), 0);
     }
 
     #[tokio::test]
