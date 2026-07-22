@@ -97,6 +97,39 @@ impl PromptKind {
         }
     }
 
+    /// Return the embedded Chinese `GraphRAG`-compatible template.
+    pub(crate) const fn chinese_template(self) -> &'static str {
+        match self {
+            Self::ExtractGraph => include_str!("defaults/zh/extract_graph.txt"),
+            Self::SummarizeDescriptions => {
+                include_str!("defaults/zh/summarize_descriptions.txt")
+            }
+            Self::ExtractClaims => include_str!("defaults/zh/extract_claims.txt"),
+            Self::CommunityReportGraph => {
+                include_str!("defaults/zh/community_report_graph.txt")
+            }
+            Self::CommunityReportText => {
+                include_str!("defaults/zh/community_report_text.txt")
+            }
+            Self::BasicSearch => include_str!("defaults/zh/basic_search_system_prompt.txt"),
+            Self::DriftSearch => include_str!("defaults/zh/drift_search_system_prompt.txt"),
+            Self::DriftReduce => include_str!("defaults/zh/drift_reduce_prompt.txt"),
+            Self::GlobalSearchMap => {
+                include_str!("defaults/zh/global_search_map_system_prompt.txt")
+            }
+            Self::GlobalSearchReduce => {
+                include_str!("defaults/zh/global_search_reduce_system_prompt.txt")
+            }
+            Self::GlobalSearchKnowledge => {
+                include_str!("defaults/zh/global_search_knowledge_system_prompt.txt")
+            }
+            Self::LocalSearch => include_str!("defaults/zh/local_search_system_prompt.txt"),
+            Self::QuestionGeneration => {
+                include_str!("defaults/zh/question_gen_system_prompt.txt")
+            }
+        }
+    }
+
     /// Return variables supplied by the workflow for this prompt.
     pub(crate) const fn variables(self) -> &'static [&'static str] {
         match self {
@@ -204,6 +237,11 @@ mod tests {
             assert!(
                 !kind.default_template().trim().is_empty(),
                 "{} must have a default template",
+                kind.filename(),
+            );
+            assert!(
+                !kind.chinese_template().trim().is_empty(),
+                "{} must have a Chinese template",
                 kind.filename(),
             );
         }

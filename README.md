@@ -51,6 +51,8 @@ The `graphloom` crate is both the Rust library and the command-line binary.
 
 ```bash
 graphloom init --root ./demo
+# Use GraphRAG-compatible Chinese prompts instead of the default English prompts:
+graphloom init --root ./demo-zh --language chinese
 ```
 
 This creates:
@@ -65,6 +67,8 @@ demo/
 
 The default prompts are embedded in the binary and are based on Microsoft
 GraphRAG 3.1.0 prompt content under the MIT License.
+English is selected by default. Pass `--language chinese` (or `zh`/`zh-cn`)
+to initialize the corresponding Chinese prompt set.
 GraphLoom prompt templates use Tera/Jinja double-brace syntax, such as
 `{{ input_text }}`. The canonical community-report prompt is
 `prompts/community_report_graph.txt` and `prompts/community_report_text.txt`.

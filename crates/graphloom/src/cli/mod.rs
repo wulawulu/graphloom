@@ -7,7 +7,7 @@ pub mod index;
 pub mod init;
 pub mod query;
 
-pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs, QueryArgs};
+pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, QueryArgs};
 pub use error::{CliError, Result};
 pub use index::run as run_index;
 pub use init::init_project;

@@ -1,0 +1,121 @@
+
+-目标-
+给定一个可能与此活动相关的文本文档和一组实体类型列表，从文本中识别所有这些类型的实体，以及已识别实体之间的所有关系。
+ 
+-步骤-
+1. 识别所有实体。对于每个已识别实体，提取以下信息：
+- entity_name: 实体名称；英文实体使用大写，中文实体保持原文规范名称
+- entity_type: 以下类型之一：[{{ entity_types }}]
+- entity_description: 对实体属性和活动的全面描述
+将每个实体格式化为 ("entity"<|><entity_name><|><entity_type><|><entity_description>)
+ 
+2. 从步骤 1 中识别出的实体里，识别所有彼此 *明确相关* 的 (source_entity, target_entity) 实体对。
+对于每一对相关实体，提取以下信息：
+- source_entity: 源实体名称，按步骤 1 中识别出的名称填写
+- target_entity: 目标实体名称，按步骤 1 中识别出的名称填写
+- relationship_description: 解释你为什么认为源实体和目标实体彼此相关
+- relationship_strength: 一个数值分数，表示源实体与目标实体之间关系的强度
+ 将每条关系格式化为 ("relationship"<|><source_entity><|><target_entity><|><relationship_description><|><relationship_strength>)
+ 
+3. 用中文将步骤 1 和 2 中识别出的所有实体和关系作为一个单一列表返回。使用 **##** 作为列表分隔符。专有名词、实体名称、实体类型和分隔符保持原格式。
+ 
+4. 完成后，输出 <|COMPLETE|>
+ 
+######################
+-示例-
+######################
+示例 1:
+Entity_types: ORGANIZATION,PERSON
+Text:
+Verdantis 的 Central Institution 计划在周一和周四开会，该机构计划于周四太平洋夏令时间下午 1:30 发布最新政策决定，随后举行新闻发布会，Central Institution 主席 Martin Smith 将回答问题。投资者预计 Market Strategy Committee 会将其基准利率维持在 3.5%-3.75% 的区间内。
+######################
+Output:
+("entity"<|>CENTRAL INSTITUTION<|>ORGANIZATION<|>Central Institution 是 Verdantis 的联邦储备机构，计划在周一和周四处理利率相关事项)
+##
+("entity"<|>MARTIN SMITH<|>PERSON<|>Martin Smith 是 Central Institution 的主席)
+##
+("entity"<|>MARKET STRATEGY COMMITTEE<|>ORGANIZATION<|>Market Strategy Committee 是 Central Institution 的委员会，负责就利率和 Verdantis 货币供应增长作出关键决策)
+##
+("relationship"<|>MARTIN SMITH<|>CENTRAL INSTITUTION<|>Martin Smith 是 Central Institution 的主席，并将在新闻发布会上回答问题<|>9)
+<|COMPLETE|>
+
+######################
+示例 2:
+Entity_types: ORGANIZATION
+Text:
+TechGlobal (TG) 的股票在周四 Global Exchange 首日交易中飙升。但 IPO 专家警告称，这家半导体公司在公开市场的首次亮相，并不能说明其他新上市公司会有怎样的表现。
+
+TechGlobal 曾是一家上市公司，2014 年被 Vision Holdings 私有化。这家成熟的芯片设计公司称，其技术驱动了 85% 的高端智能手机。
+######################
+Output:
+("entity"<|>TECHGLOBAL<|>ORGANIZATION<|>TechGlobal 是一家已在 Global Exchange 上市的公司，其技术驱动了 85% 的高端智能手机)
+##
+("entity"<|>VISION HOLDINGS<|>ORGANIZATION<|>Vision Holdings 是一家曾拥有 TechGlobal 的公司)
+##
+("relationship"<|>TECHGLOBAL<|>VISION HOLDINGS<|>Vision Holdings 自 2014 年起曾拥有 TechGlobal<|>5)
+<|COMPLETE|>
+
+######################
+示例 3:
+Entity_types: ORGANIZATION,GEO,PERSON
+Text:
+五名在 Firuzabad 被关押 8 年、并被广泛视为人质的 Aurelians 正在回家前往 Aurelia 的路上。
+
+由 Quintara 策划的交换在 80 亿美元 Firuzi 资金被转入 Quintara 首都 Krohaara 的金融机构后最终完成。
+
+这次交换在 Firuzabad 首都 Tiruzia 启动，导致四名男子和一名女子登上一架包机前往 Krohaara；他们同时也是 Firuzi 国民。
+
+他们受到 Aurelian 高级官员欢迎，现在正在前往 Aurelia 首都 Cashion 的路上。
+
+这些 Aurelians 包括 39 岁商人 Samuel Namara，他一直被关押在 Tiruzia 的 Alhamia Prison；还包括 59 岁记者 Durke Bataglani 和 53 岁环保人士 Meggie Tazbah，后者同时拥有 Bratinas 国籍。
+######################
+Output:
+("entity"<|>FIRUZABAD<|>GEO<|>Firuzabad 曾将 Aurelians 作为人质关押)
+##
+("entity"<|>AURELIA<|>GEO<|>Aurelia 是寻求释放人质的国家)
+##
+("entity"<|>QUINTARA<|>GEO<|>Quintara 是促成以资金交换人质协议的国家)
+##
+##
+("entity"<|>TIRUZIA<|>GEO<|>Tiruzia 是 Firuzabad 的首都，也是 Aurelians 被关押的地点)
+##
+("entity"<|>KROHAARA<|>GEO<|>Krohaara 是 Quintara 的首都)
+##
+("entity"<|>CASHION<|>GEO<|>Cashion 是 Aurelia 的首都)
+##
+("entity"<|>SAMUEL NAMARA<|>PERSON<|>Samuel Namara 是曾被关押在 Tiruzia 的 Alhamia Prison 的 Aurelian)
+##
+("entity"<|>ALHAMIA PRISON<|>GEO<|>Alhamia Prison 是位于 Tiruzia 的监狱)
+##
+("entity"<|>DURKE BATAGLANI<|>PERSON<|>Durke Bataglani 是曾被扣为人质的 Aurelian 记者)
+##
+("entity"<|>MEGGIE TAZBAH<|>PERSON<|>Meggie Tazbah 是拥有 Bratinas 国籍的环保人士，曾被扣为人质)
+##
+("relationship"<|>FIRUZABAD<|>AURELIA<|>Firuzabad 与 Aurelia 就人质交换进行了谈判<|>2)
+##
+("relationship"<|>QUINTARA<|>AURELIA<|>Quintara 促成了 Firuzabad 与 Aurelia 之间的人质交换<|>2)
+##
+("relationship"<|>QUINTARA<|>FIRUZABAD<|>Quintara 促成了 Firuzabad 与 Aurelia 之间的人质交换<|>2)
+##
+("relationship"<|>SAMUEL NAMARA<|>ALHAMIA PRISON<|>Samuel Namara 曾被关押在 Alhamia Prison<|>8)
+##
+("relationship"<|>SAMUEL NAMARA<|>MEGGIE TAZBAH<|>Samuel Namara 和 Meggie Tazbah 在同一次人质释放中被交换<|>2)
+##
+("relationship"<|>SAMUEL NAMARA<|>DURKE BATAGLANI<|>Samuel Namara 和 Durke Bataglani 在同一次人质释放中被交换<|>2)
+##
+("relationship"<|>MEGGIE TAZBAH<|>DURKE BATAGLANI<|>Meggie Tazbah 和 Durke Bataglani 在同一次人质释放中被交换<|>2)
+##
+("relationship"<|>SAMUEL NAMARA<|>FIRUZABAD<|>Samuel Namara 曾在 Firuzabad 被扣为人质<|>2)
+##
+("relationship"<|>MEGGIE TAZBAH<|>FIRUZABAD<|>Meggie Tazbah 曾在 Firuzabad 被扣为人质<|>2)
+##
+("relationship"<|>DURKE BATAGLANI<|>FIRUZABAD<|>Durke Bataglani 曾在 Firuzabad 被扣为人质<|>2)
+<|COMPLETE|>
+
+######################
+-真实数据-
+######################
+Entity_types: {{ entity_types }}
+Text: {{ input_text }}
+######################
+Output:

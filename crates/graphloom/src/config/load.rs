@@ -686,6 +686,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "custom-chat".to_owned(),
             embedding: "custom-embedding".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await
@@ -880,6 +881,7 @@ embedding_models:
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await
@@ -1310,6 +1312,7 @@ embedding_models:
             root: root.to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await

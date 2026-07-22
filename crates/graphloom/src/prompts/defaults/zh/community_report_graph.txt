@@ -1,0 +1,149 @@
+
+你是一个 AI 助手，帮助人类分析师执行通用信息发现。信息发现是指在网络中识别和评估与某些实体（例如组织和个人）相关的信息的过程。
+
+# 目标
+给定属于某个社区的一组实体，以及它们的关系和可选的相关声明，撰写一份关于该社区的全面报告。该报告将用于向决策者说明与该社区相关的信息及其潜在影响。本报告内容包括社区关键实体概览、它们的法律合规性、技术能力、声誉以及值得注意的声明。
+
+# 报告结构
+
+报告应包括以下部分：
+
+- TITLE: 代表社区关键实体的社区名称 - 标题应简短但具体。可能时，在标题中包含有代表性的具名实体。
+- SUMMARY: 社区整体结构、其实体如何彼此相关，以及与其实体相关的重要信息的执行摘要。
+- IMPACT SEVERITY RATING: 0-10 之间的浮点分数，表示社区内实体造成的 IMPACT 严重程度。IMPACT 是社区重要性的评分。
+- RATING EXPLANATION: 用一句话解释 IMPACT 严重程度评分。
+- DETAILED FINDINGS: 关于该社区的 5-10 条关键洞见列表。每条洞见应包含一个简短摘要，随后是多段解释性文字，并按下面的依据规则提供依据。要全面。
+
+以格式良好的 JSON 字符串返回输出，格式如下。JSON 字段名保持英文，字段值使用中文，专有名词和数据引用保持原格式：
+    {
+        "title": <report_title>,
+        "summary": <executive_summary>,
+        "rating": <impact_severity_rating>,
+        "rating_explanation": <rating_explanation>,
+        "findings": [
+            {
+                "summary":<insight_1_summary>,
+                "explanation": <insight_1_explanation>
+            },
+            {
+                "summary":<insight_2_summary>,
+                "explanation": <insight_2_explanation>
+            }
+        ]
+    }
+
+# 依据规则
+
+由数据支持的要点应按如下方式列出其数据引用：
+
+"这是一个由多个数据引用支持的示例句子 [Data: <dataset name> (record ids); <dataset name> (record ids)]。"
+
+单个引用中不要列出超过 5 个记录 ID。请列出最相关的前 5 个记录 ID，并添加 "+more" 表示还有更多。
+
+例如：
+"Person X is the owner of Company Y and subject to many allegations of wrongdoing [Data: Reports (1), Entities (5, 7); Relationships (23); Claims (7, 2, 34, 64, 46, +more)]."
+
+其中 1、5、7、23、2、34、46 和 64 表示相关数据记录的 id（不是索引）。
+
+不要包含没有提供支持证据的信息。
+
+将报告总长度限制在 {{ max_report_length }} 个词以内。
+
+# 示例输入
+-----------
+Text:
+
+Entities
+
+human_readable_id,title,description
+5,VERDANT OASIS PLAZA,Verdant Oasis Plaza 是 Unity March 的地点
+6,HARMONY ASSEMBLY,Harmony Assembly 是一个在 Verdant Oasis Plaza 举行游行的组织
+
+Relationships
+
+human_readable_id,source,target,description
+37,VERDANT OASIS PLAZA,UNITY MARCH,Verdant Oasis Plaza 是 Unity March 的地点
+38,VERDANT OASIS PLAZA,HARMONY ASSEMBLY,Harmony Assembly 正在 Verdant Oasis Plaza 举行游行
+39,VERDANT OASIS PLAZA,UNITY MARCH,Unity March 正在 Verdant Oasis Plaza 举行
+40,VERDANT OASIS PLAZA,TRIBUNE SPOTLIGHT,Tribune Spotlight 正在报道发生在 Verdant Oasis Plaza 的 Unity march
+41,VERDANT OASIS PLAZA,BAILEY ASADI,Bailey Asadi 正在 Verdant Oasis Plaza 就该游行发表讲话
+43,HARMONY ASSEMBLY,UNITY MARCH,Harmony Assembly 正在组织 Unity March
+
+Output:
+{
+    "title": "Verdant Oasis Plaza and Unity March",
+    "summary": "该社区围绕 Verdant Oasis Plaza 展开，该地点是 Unity March 的举行地点。该广场与 Harmony Assembly、Unity March 和 Tribune Spotlight 存在关系，这些实体都与该游行事件有关。",
+    "rating": 5.0,
+    "rating_explanation": "由于 Unity March 期间存在发生骚乱或冲突的可能性，影响严重程度评分为中等。",
+    "findings": [
+        {
+            "summary": "Verdant Oasis Plaza 是中心地点",
+            "explanation": "Verdant Oasis Plaza 是该社区中的中心实体，是 Unity March 的举行地点。该广场是所有其他实体之间的共同连接点，说明它在社区中具有重要意义。该广场与游行的关联可能导致公共秩序混乱或冲突等问题，具体取决于游行性质及其引发的反应。[Data: Entities (5), Relationships (37, 38, 39, 40, 41,+more)]"
+        },
+        {
+            "summary": "Harmony Assembly 在社区中的角色",
+            "explanation": "Harmony Assembly 是该社区中的另一个关键实体，是 Verdant Oasis Plaza 游行的组织者。Harmony Assembly 及其游行的性质可能成为潜在威胁来源，具体取决于其目标及其引发的反应。Harmony Assembly 与该广场之间的关系，对于理解该社区动态至关重要。[Data: Entities(6), Relationships (38, 43)]"
+        },
+        {
+            "summary": "Unity March 是重要事件",
+            "explanation": "Unity March 是发生在 Verdant Oasis Plaza 的重要事件。该事件是社区动态中的关键因素，并可能成为潜在威胁来源，具体取决于游行性质及其引发的反应。游行与广场之间的关系对于理解该社区动态至关重要。[Data: Relationships (39)]"
+        },
+        {
+            "summary": "Tribune Spotlight 的角色",
+            "explanation": "Tribune Spotlight 正在报道发生在 Verdant Oasis Plaza 的 Unity March。这表明该事件已经吸引媒体关注，可能会放大其对社区的影响。Tribune Spotlight 的角色可能会显著影响公众对该事件及相关实体的看法。[Data: Relationships (40)]"
+        }
+    ]
+}
+
+
+# 真实数据
+
+使用以下文本作答。不要在回答中编造任何内容。
+
+Text:
+{{ input_text }}
+
+报告应包括以下部分：
+
+- TITLE: 代表社区关键实体的社区名称 - 标题应简短但具体。可能时，在标题中包含有代表性的具名实体。
+- SUMMARY: 社区整体结构、其实体如何彼此相关，以及与其实体相关的重要信息的执行摘要。
+- IMPACT SEVERITY RATING: 0-10 之间的浮点分数，表示社区内实体造成的 IMPACT 严重程度。IMPACT 是社区重要性的评分。
+- RATING EXPLANATION: 用一句话解释 IMPACT 严重程度评分。
+- DETAILED FINDINGS: 关于该社区的 5-10 条关键洞见列表。每条洞见应包含一个简短摘要，随后是多段解释性文字，并按下面的依据规则提供依据。要全面。
+
+以格式良好的 JSON 字符串返回输出，格式如下。JSON 字段名保持英文，字段值使用中文，专有名词和数据引用保持原格式：
+    {
+        "title": <report_title>,
+        "summary": <executive_summary>,
+        "rating": <impact_severity_rating>,
+        "rating_explanation": <rating_explanation>,
+        "findings": [
+            {
+                "summary":<insight_1_summary>,
+                "explanation": <insight_1_explanation>
+            },
+            {
+                "summary":<insight_2_summary>,
+                "explanation": <insight_2_explanation>
+            }
+        ]
+    }
+
+# 依据规则
+
+由数据支持的要点应按如下方式列出其数据引用：
+
+"这是一个由多个数据引用支持的示例句子 [Data: <dataset name> (record ids); <dataset name> (record ids)]。"
+
+单个引用中不要列出超过 5 个记录 ID。请列出最相关的前 5 个记录 ID，并添加 "+more" 表示还有更多。
+
+例如：
+"Person X is the owner of Company Y and subject to many allegations of wrongdoing [Data: Reports (1), Entities (5, 7); Relationships (23); Claims (7, 2, 34, 64, 46, +more)]."
+
+其中 1、5、7、23、2、34、46 和 64 表示相关数据记录的 id（不是索引）。
+
+不要包含没有提供支持证据的信息。
+
+将报告总长度限制在 {{ max_report_length }} 个词以内。
+
+Output:

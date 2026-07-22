@@ -289,9 +289,24 @@ pub struct InitArgs {
         default_value = "text-embedding-3-large"
     )]
     pub embedding: String,
+    /// Language used for the initialized prompt templates.
+    #[arg(short = 'l', long = "language", value_enum, default_value = "english")]
+    pub language: PromptLanguage,
     /// Overwrite GraphLoom-managed files.
     #[arg(short = 'f', long = "force")]
     pub force: bool,
+}
+
+/// Languages available for project prompt templates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum PromptLanguage {
+    /// Original English `GraphRAG` prompts.
+    #[default]
+    #[value(alias = "en")]
+    English,
+    /// Chinese `GraphRAG`-compatible prompts.
+    #[value(alias = "zh", alias = "zh-cn")]
+    Chinese,
 }
 
 /// CLI indexing method.
@@ -348,7 +363,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Cli, Command, parse_existing_data_path, parse_existing_root, try_parse_cli_from_with_probe,
+        Cli, Command, PromptLanguage, parse_existing_data_path, parse_existing_root,
+        try_parse_cli_from_with_probe,
     };
 
     const QUERY_CLI_CONTRACT: &str =
@@ -373,6 +389,24 @@ mod tests {
             panic!("expected index command");
         };
         assert!(args.cache_enabled());
+    }
+
+    #[test]
+    fn test_should_parse_init_prompt_language_with_english_default() {
+        let cli = Cli::try_parse_from(["graphloom", "init"]).expect("default init arguments");
+        let Command::Init(args) = cli.command else {
+            panic!("expected init command");
+        };
+        assert_eq!(args.language, PromptLanguage::English);
+
+        for language in ["chinese", "zh", "zh-cn"] {
+            let cli = Cli::try_parse_from(["graphloom", "init", "--language", language])
+                .expect("Chinese init arguments");
+            let Command::Init(args) = cli.command else {
+                panic!("expected init command");
+            };
+            assert_eq!(args.language, PromptLanguage::Chinese);
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use transaction::execute_plan_with_hook;
 
 use crate::{
     cli::{
-        args::InitArgs,
+        args::{InitArgs, PromptLanguage},
         callbacks::ConsoleStageProgress,
         error::{CliError, Result},
     },
@@ -24,10 +24,14 @@ use crate::{
 const SETTINGS: &str = include_str!("../assets/settings.yaml");
 const DOTENV: &str = include_str!("../assets/dotenv");
 
-fn prompt_assets() -> impl Iterator<Item = (&'static str, &'static str)> {
-    PromptKind::all()
-        .iter()
-        .map(|kind| (kind.filename(), kind.default_template()))
+fn prompt_assets(language: PromptLanguage) -> impl Iterator<Item = (&'static str, &'static str)> {
+    PromptKind::all().iter().map(move |kind| {
+        let template = match language {
+            PromptLanguage::English => kind.default_template(),
+            PromptLanguage::Chinese => kind.chinese_template(),
+        };
+        (kind.filename(), template)
+    })
 }
 
 /// Initialize a `GraphLoom` project.
@@ -99,12 +103,13 @@ impl InitPlan {
                 },
             ],
         };
-        plan.files
-            .extend(prompt_assets().map(|(name, content)| ManagedFilePlan {
+        plan.files.extend(
+            prompt_assets(args.language).map(|(name, content)| ManagedFilePlan {
                 path: root.join("prompts").join(name),
                 content: (*content).to_owned(),
                 overwrite: args.force,
-            }));
+            }),
+        );
         plan.preflight().await?;
         Ok(plan)
     }
@@ -246,6 +251,7 @@ mod tests {
             root: root.to_path_buf(),
             model: "gpt-4.1".to_owned(),
             embedding: "text-embedding-3-large".to_owned(),
+            language: PromptLanguage::English,
             force,
         }
     }
@@ -261,7 +267,7 @@ mod tests {
         assert!(tempdir.path().join(".env").is_file());
         assert!(tempdir.path().join("input").is_dir());
         assert!(tempdir.path().join("prompts").is_dir());
-        for (name, content) in prompt_assets() {
+        for (name, content) in prompt_assets(PromptLanguage::English) {
             let path = tempdir.path().join("prompts").join(name);
             assert!(path.is_file());
             assert_eq!(
@@ -298,6 +304,44 @@ mod tests {
                 kind.default_template(),
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_initialize_and_compile_chinese_prompt_templates() {
+        let tempdir = CanonicalTempDir::new();
+        let mut init_args = args(tempdir.path(), false);
+        init_args.language = PromptLanguage::Chinese;
+        init_project(&init_args).await.expect("Chinese init");
+        let repository = crate::prompts::PromptRepository::new(tempdir.path());
+
+        for kind in PromptKind::all() {
+            let path = tempdir.path().join("prompts").join(kind.filename());
+            assert_eq!(
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .expect("Chinese prompt asset"),
+                kind.chinese_template(),
+            );
+            repository
+                .load(*kind, Some(&path))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{} should compile as Tera: {error}", kind.filename())
+                });
+        }
+
+        let report = tokio::fs::read_to_string(
+            tempdir
+                .path()
+                .join("prompts")
+                .join("community_report_graph.txt"),
+        )
+        .await
+        .expect("Chinese report prompt");
+        assert!(report.contains("{{ input_text }}"));
+        assert!(report.contains("{{ max_report_length }}"));
+        assert!(report.contains("\"title\": <report_title>"));
+        assert!(!report.contains("{{\n        \"title\""));
     }
 
     #[tokio::test]
@@ -361,8 +405,9 @@ mod tests {
     fn test_prompt_assets_should_include_every_prompt_kind() {
         for kind in PromptKind::all() {
             assert!(
-                prompt_assets().any(|(filename, content)| filename == kind.filename()
-                    && content == kind.default_template()),
+                prompt_assets(PromptLanguage::English)
+                    .any(|(filename, content)| filename == kind.filename()
+                        && content == kind.default_template()),
                 "{} is missing from init assets",
                 kind.filename(),
             );
@@ -378,6 +423,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: completion.to_owned(),
             embedding: embedding.to_owned(),
+            language: PromptLanguage::English,
             force: false,
         })
         .await
@@ -439,6 +485,7 @@ mod tests {
             root: root.clone(),
             model: "bad\nmodel".to_owned(),
             embedding: "embedding".to_owned(),
+            language: PromptLanguage::English,
             force: false,
         })
         .await
@@ -548,6 +595,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "replacement-model".to_owned(),
             embedding: "replacement-embedding".to_owned(),
+            language: PromptLanguage::English,
             force: true,
         })
         .await

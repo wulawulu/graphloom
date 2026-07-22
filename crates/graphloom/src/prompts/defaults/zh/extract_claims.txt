@@ -1,0 +1,52 @@
+
+-目标活动-
+你是一个智能助手，帮助人类分析师分析文本文档中针对某些实体提出的声明。
+
+-目标-
+给定一个可能与此活动相关的文本文档、一个实体规范和一个声明描述，提取所有符合实体规范的实体，以及针对这些实体的所有声明。
+
+-步骤-
+1. 提取所有符合预定义实体规范的具名实体。实体规范可以是实体名称列表，也可以是实体类型列表。
+2. 对于步骤 1 中识别出的每个实体，提取与该实体相关的所有声明。声明需要符合指定的声明描述，并且该实体应是声明的主体。
+对于每条声明，提取以下信息：
+- Subject: 作为声明主体的实体名称；英文实体使用大写，中文实体保持原文规范名称。主体实体是执行声明中所述行动的实体。Subject 必须是步骤 1 中识别出的具名实体之一。
+- Object: 作为声明客体的实体名称；英文实体使用大写，中文实体保持原文规范名称。客体实体是报告/处理声明中所述行动，或受该行动影响的实体。如果客体实体未知，使用 **NONE**。
+- Claim Type: 声明的总体类别；英文类别使用大写，中文类别使用简短名词短语。以一种可在多个文本输入中重复使用的方式命名，使相似声明共享同一种声明类型。
+- Claim Status: **TRUE**、**FALSE** 或 **SUSPECTED**。TRUE 表示声明已确认，FALSE 表示声明被发现为假，SUSPECTED 表示声明未验证。
+- Claim Description: 详细描述，解释该声明背后的推理，并包含所有相关证据和引用。
+- Claim Date: 声明提出的期间 (start_date, end_date)。start_date 和 end_date 都应使用 ISO-8601 格式。如果声明是在单一日期而不是日期范围提出的，则 start_date 和 end_date 设置为同一日期。如果日期未知，返回 **NONE**。
+- Claim Source Text: 原文中与该声明相关的 **所有** 引文列表。
+
+将每条声明格式化为 (<subject_entity><|><object_entity><|><claim_type><|><claim_status><|><claim_start_date><|><claim_end_date><|><claim_description><|><claim_source>)
+
+3. 用中文将步骤 1 和 2 中识别出的所有声明作为一个单一列表返回。使用 **##** 作为列表分隔符。专有名词、状态值、日期和分隔符保持原格式。
+
+4. 完成后，输出 <|COMPLETE|>
+
+-示例-
+示例 1:
+实体规范: organization
+声明描述: 与实体相关的危险信号
+文本: 根据 2022/01/10 的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款。该公司归 Person C 所有，而 Person C 在 2015 年被怀疑参与腐败活动。
+输出:
+
+(COMPANY A<|>GOVERNMENT AGENCY B<|>反竞争行为<|>TRUE<|>2022-01-10T00:00:00<|>2022-01-10T00:00:00<|>根据 2022/01/10 发布的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款，因此被认定涉及反竞争行为<|>根据 2022/01/10 发布的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款。)
+<|COMPLETE|>
+
+示例 2:
+实体规范: Company A, Person C
+声明描述: 与实体相关的危险信号
+文本: 根据 2022/01/10 的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款。该公司归 Person C 所有，而 Person C 在 2015 年被怀疑参与腐败活动。
+输出:
+
+(COMPANY A<|>GOVERNMENT AGENCY B<|>反竞争行为<|>TRUE<|>2022-01-10T00:00:00<|>2022-01-10T00:00:00<|>根据 2022/01/10 发布的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款，因此被认定涉及反竞争行为<|>根据 2022/01/10 发布的一篇文章，Company A 在参与 Government Agency B 发布的多个公共招标时因串通投标被罚款。)
+##
+(PERSON C<|>NONE<|>腐败<|>SUSPECTED<|>2015-01-01T00:00:00<|>2015-12-30T00:00:00<|>Person C 在 2015 年被怀疑参与腐败活动<|>该公司归 Person C 所有，而 Person C 在 2015 年被怀疑参与腐败活动)
+<|COMPLETE|>
+
+-真实数据-
+使用以下输入作答。
+实体规范: {{ entity_specs }}
+声明描述: {{ claim_description }}
+文本: {{ input_text }}
+输出:

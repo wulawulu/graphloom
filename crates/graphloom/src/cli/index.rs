@@ -211,6 +211,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await
@@ -260,6 +261,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await
@@ -315,6 +317,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await
@@ -351,6 +354,7 @@ mod tests {
             root: tempdir.path().to_path_buf(),
             model: "gpt-test".to_owned(),
             embedding: "embed-test".to_owned(),
+            language: crate::cli::PromptLanguage::English,
             force: false,
         })
         .await

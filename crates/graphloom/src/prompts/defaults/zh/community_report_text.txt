@@ -1,0 +1,95 @@
+
+你是一个 AI 助手，帮助人类分析师执行通用信息发现。
+信息发现是指在网络中识别和评估与某些实体（例如组织和个人）相关的信息的过程。
+
+# 目标
+给定属于某个社区的一组实体，以及它们的关系和可选的相关声明，撰写一份关于该社区的全面报告。
+该报告将用于向决策者说明与该社区相关的信息及其潜在影响。
+本报告内容包括社区关键实体概览、它们的核心属性或能力、它们之间的连接，以及值得注意的声明。
+尽可能保留具体时间信息，以便你的最终用户能够构建事件时间线。
+
+# 报告结构
+报告应包括以下部分：
+- TITLE: 代表社区关键实体的社区名称 - 标题应简短但具体。可能时，在标题中包含有代表性的具名实体。避免在标题中包含 'eligibility assessment' 或 'eligibility assessment report' 这类短语。
+- SUMMARY: 社区整体结构、其实体如何彼此相关，以及重要的项目特定或资格相关洞见的执行摘要。
+- IMPORTANCE RATING: 0-10 之间的浮点分数，表示社区内实体的重要性。
+- RATING EXPLANATION: 用一句话解释重要性评分。
+- DETAILED FINDINGS: 关于该社区的 5-10 条关键洞见列表。每条洞见应包含一个简短摘要，随后是多段解释性文字，并按下面的依据规则提供依据。要全面。
+- DATE RANGE: 一个日期范围 (YYYY-MM-DD)，格式为 [START, END]，对应用于构建报告的文本单元和中间报告的日期范围。
+
+以格式良好的 JSON 字符串返回输出。不要使用任何不必要的转义序列。输出应是一个可由 json.loads 解析的单一 JSON 对象。JSON 字段名保持英文，字段值使用中文，专有名词和数据引用保持原格式。
+    {
+        "title": "<report_title>",
+        "summary": "<executive_summary>",
+        "rating": <importance_rating>,
+        "rating_explanation": "<rating_explanation>",
+        "findings": [{"summary":"<insight_1_summary>", "explanation": "<insight_1_explanation"}, {"summary":"<insight_2_summary>", "explanation": "<insight_2_explanation"}],
+		"date_range": ["<date range start>", "<date range end>"],
+
+    }
+
+# 依据规则
+由数据支持的要点应按如下方式列出其数据引用：
+
+"这是一个由多个数据引用支持的示例句子 [Data: <dataset name> (record ids), <dataset name> (record ids)]。"
+
+单个引用中不要列出超过 5 个记录 ID。请列出最相关的前 5 个记录 ID，并添加 "+more" 表示还有更多。
+
+例如：
+"Person X resolved a major issue with project Y [Data: Sources (1, 5),  Date_Range ((2001, 05, 12), (2001, 05, 14))]. He also made major updates to the database of app Y [Data: Reports (2, 4), Sources (7, 23, 2, 34, 46, +more), Date_Range ((2001, 05, 15), (2001, 05, 18))""
+
+其中 1、2、4、5、7、23、2、34 和 46 表示相关数据记录的 id（不是索引）。
+
+将报告总长度限制在 {{ max_report_length }} 个词以内。
+
+# 示例输入
+-----------
+SOURCES
+id, text
+1, Text: From: compliance.office@enron.com To: management.team@enron.com Cc: legal.team@enron.com, risk@enron.com Date: Wed, 12 Jul 2000 08:30:00 -0600 (CST) Subject: Quick Update on Compliance & Risk Efforts
+2, 关于 Compliance 和 Risk Management 最新进展的快速更新。Risk Management 正在加强工作 — 他们自今年年初以来一直在收紧我们的财务风险评估和缓释策略。
+3, 截至 2000 年中期，他们的努力是让我们在财务上保持稳固并符合最新市场法规的关键。这对我们的战略规划至关重要，并帮助我们保持领先。
+5, Legal 正在确保我们合规 — Legal Compliance 团队正在确保我们的所有运营都达到法律标准。他们尤其关注自 2000 年第二季度以来改善我们的公司治理和合同管理。这对保持我们的运营顺畅且合法健全至关重要。
+9, 协同工作 — Risk Management 和 Legal Compliance 自 2000 年第二季度开始以来同步得比以往更好。他们正在确保我们的策略不仅有效，而且完全合规。这种协调对我们的综合治理方法至关重要。
+10, 你的看法？— 这些更新如何影响你所在的领域？有关于如何做得更好的想法吗？请联系你的部门负责人。
+11, 感谢你保持参与。让我们继续推动更好、更聪明的工作方式。致意，Jane Doe
+
+Output:
+
+{
+    "title": "截至 2000 年 7 月的 Enron 合规与风险管理概览",
+    "summary": "本报告深入分析 Enron 关注合规与风险管理的关键部门，说明这些实体如何在组织框架内互动，以维护监管标准并有效管理财务风险。该信息与公司在 2000 年中期左右的运营相关。",
+    "rating": 9.2,
+    "rating_explanation": "较高的重要性评分反映了 Risk Management 和 Legal Compliance Departments 在确保 Enron 遵守财务和法律法规方面发挥的关键作用，这对维护公司的完整性和运营稳定性至关重要。",
+    "findings": [
+        {
+            "summary": "Risk Management 的运营范围",
+            "explanation": "Enron 的 Risk Management Department 在识别、评估和缓释财务风险方面发挥关键作用。自 2000 年初以来被强调的主动方法，有助于保护 Enron 免受潜在财务风险影响，并确保持续遵守不断变化的市场法规。有效的风险管理不仅防止财务异常，也支持公司的战略决策过程。
+
+[Data: Sources (2, 3), Date_Range ((2000, 01, 01), (2000, 07, 12))]"
+        },
+        {
+            "summary": "Legal Compliance 与治理",
+            "explanation": "Legal Compliance Department 确保 Enron 的所有运营都遵守监管机构设定的法律标准。自 2000 年第二季度开始，其对公司治理和合同管理的关注对于维护 Enron 的声誉和运营合法性至关重要，尤其是在管理复杂合同和公司协议方面。他们的努力突显了维护高法律标准和伦理实践的承诺。
+
+[Data: Source (5), Date_Range ((2000, 04, 01), (2000, 07, 12))]"
+        },
+        {
+            "summary": "为合规进行的跨部门协作",
+            "explanation": "Risk Management 和 Legal Compliance Departments 之间自 2000 年第二季度建立的协作，确保风险缓释策略在法律上健全，并确保合规措施考虑财务风险。这种协同对整体治理至关重要，并在 Enron 将风险管理与法律合规策略整合方面发挥了重要作用。该时期加强的跨部门合作，对于使公司策略与监管要求保持一致具有关键作用。
+
+[Data: Sources (9), Date_Range ((2000, 04, 01), (2000, 07, 12))]"
+        }
+    ],
+    "date_range": ["2000-01-01", "2000-07-12"]
+}
+
+
+# 真实数据
+
+使用以下文本作答。不要在回答中编造任何内容。
+
+Text:
+{{ input_text }}
+
+Output:

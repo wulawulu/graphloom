@@ -375,9 +375,6 @@ mod tests {
     #[test]
     fn test_should_render_all_builtin_prompt_contracts() {
         for kind in PromptKind::all() {
-            let template =
-                PromptTemplate::try_new(*kind, kind.default_template(), PromptSource::BuiltIn)
-                    .expect("built-in template should compile");
             let values = match kind {
                 PromptKind::ExtractGraph => serde_json::json!({
                     "entity_types": "person",
@@ -429,11 +426,18 @@ mod tests {
                 }),
             };
 
-            let rendered = template
-                .bind(&values)
-                .and_then(|prompt| prompt.render())
-                .unwrap_or_else(|error| panic!("{} failed to render: {error}", kind.filename()));
-            assert!(!rendered.trim().is_empty());
+            for template_content in [kind.default_template(), kind.chinese_template()] {
+                let template =
+                    PromptTemplate::try_new(*kind, template_content, PromptSource::BuiltIn)
+                        .expect("built-in template should compile");
+                let rendered = template
+                    .bind(&values)
+                    .and_then(|prompt| prompt.render())
+                    .unwrap_or_else(|error| {
+                        panic!("{} failed to render: {error}", kind.filename())
+                    });
+                assert!(!rendered.trim().is_empty());
+            }
         }
     }
 
