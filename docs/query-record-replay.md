@@ -73,6 +73,28 @@ All original content is retained in JSONL and its difference is reported with `a
 Different keys may call LiteLLM concurrently. Concurrent misses for the same key are coalesced into
 one upstream call.
 
+DRIFT also shuffles every layer's incomplete follow-up actions before taking
+`drift_k_followups`. Two GraphRAG runs are therefore not guaranteed to execute the same subset. In
+the default production-random mode, `driftBehavior` reconstructs each side's action graph from the
+observed Primer and action responses. It strictly compares HyDE and Primer contracts, the Primer
+answer/score/follow-up multiset, request parameters, and aligned candidate sets. Per side it verifies
+that each selected action is an incomplete candidate, that the selection has
+`min(incomplete_action_count, drift_k_followups)` unique entries, that action embedding inputs match
+the selected queries, and that traversal does not exceed `n_depth`. Different valid subsets are
+reported as `expected nondeterminism`; candidate mismatches, illegal or duplicate selections,
+selection-count errors, depth errors, and request-contract mismatches still fail the run. Once valid
+random branches diverge, downstream Local context, state, Reduce input, and final text may differ
+without failing the default-mode comparison.
+
+Strict message-by-message DRIFT comparison uses the shared scripted positional trajectory in
+`tests/compat/fixtures/query/drift_random_trajectory.json`. Python monkeypatches report selection and
+`random.shuffle`; Rust injects a crate-private `ScriptedDriftRandom`. The script fixes the HyDE
+report and every depth's permutation, fails if it is exhausted or invalid, and locks selected
+queries, action state nodes/edges, usage, Reduce answers, Local messages, and request parameters.
+The trajectory records positions rather than a seed because Python and Rust do not promise the same
+PRNG or shuffle algorithm for equal seeds. Normal production entry points continue to instantiate
+`SystemDriftRandom`.
+
 Provider adaptation happens only after the request has been keyed and observed. In particular,
 unsupported embedding fields may be dropped by LiteLLM, and DeepSeek `json_schema` is sent upstream
 as `json_object`; the cassette and comparison transcript still retain the original request.

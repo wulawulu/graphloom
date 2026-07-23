@@ -1,5 +1,7 @@
 //! DRIFT report hydration, HyDE expansion, and in-memory cosine ranking.
 
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use graphloom_llm::{
@@ -19,20 +21,100 @@ use crate::{
 
 /// Random choices required by GraphRAG DRIFT.
 pub(super) trait DriftRandom: Send {
-    fn choose_report(&mut self, len: usize) -> usize;
-    fn shuffle_actions(&mut self, actions: &mut [usize]);
+    fn choose_report(&mut self, len: usize) -> Result<usize>;
+    fn shuffle_actions(&mut self, actions: &mut [usize]) -> Result<()>;
 }
 
 #[derive(Debug, Default)]
 pub(super) struct SystemDriftRandom;
 
 impl DriftRandom for SystemDriftRandom {
-    fn choose_report(&mut self, len: usize) -> usize {
-        rand::thread_rng().gen_range(0..len)
+    fn choose_report(&mut self, len: usize) -> Result<usize> {
+        Ok(rand::thread_rng().gen_range(0..len))
     }
 
-    fn shuffle_actions(&mut self, actions: &mut [usize]) {
+    fn shuffle_actions(&mut self, actions: &mut [usize]) -> Result<()> {
         actions.shuffle(&mut rand::thread_rng());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct ScriptedDriftRandom {
+    report_indices: VecDeque<usize>,
+    action_orders: VecDeque<Vec<usize>>,
+}
+
+#[cfg(test)]
+impl ScriptedDriftRandom {
+    pub(super) fn new(
+        report_indices: impl IntoIterator<Item = usize>,
+        action_orders: impl IntoIterator<Item = Vec<usize>>,
+    ) -> Self {
+        Self {
+            report_indices: report_indices.into_iter().collect(),
+            action_orders: action_orders.into_iter().collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl DriftRandom for ScriptedDriftRandom {
+    fn choose_report(&mut self, len: usize) -> Result<usize> {
+        let index = self
+            .report_indices
+            .pop_front()
+            .ok_or_else(|| scripted_random_error("scripted DRIFT report trajectory exhausted"))?;
+        if index >= len {
+            return Err(scripted_random_error(&format!(
+                "scripted DRIFT report index {index} is outside {len}"
+            )));
+        }
+        Ok(index)
+    }
+
+    fn shuffle_actions(&mut self, actions: &mut [usize]) -> Result<()> {
+        let order = self
+            .action_orders
+            .pop_front()
+            .ok_or_else(|| scripted_random_error("scripted DRIFT action trajectory exhausted"))?;
+        if order.len() != actions.len() {
+            return Err(scripted_random_error(&format!(
+                "scripted DRIFT action order has {} entries for {} candidates",
+                order.len(),
+                actions.len()
+            )));
+        }
+        let mut seen = vec![false; actions.len()];
+        for &index in &order {
+            let Some(slot) = seen.get_mut(index) else {
+                return Err(scripted_random_error(&format!(
+                    "scripted DRIFT action index {index} is outside {}",
+                    actions.len()
+                )));
+            };
+            if *slot {
+                return Err(scripted_random_error(&format!(
+                    "scripted DRIFT action index {index} is duplicated"
+                )));
+            }
+            *slot = true;
+        }
+        let original = actions.to_vec();
+        for (target, source) in actions.iter_mut().zip(order) {
+            *target = original[source];
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn scripted_random_error(message: &str) -> QueryError {
+    QueryError::QueryContext {
+        method: SearchMethod::Drift,
+        operation: "consume scripted DRIFT random trajectory",
+        message: message.to_owned(),
     }
 }
 
@@ -139,7 +221,7 @@ impl DriftContextBuilder {
                 message: "no community reports are available".to_owned(),
             });
         }
-        let chosen = random.choose_report(self.reports.len());
+        let chosen = random.choose_report(self.reports.len())?;
         let template = self
             .reports
             .get(chosen)
@@ -512,6 +594,37 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn test_should_consume_scripted_report_indices() {
+        let mut random = ScriptedDriftRandom::new([2, 0], []);
+
+        assert_eq!(random.choose_report(3).expect("first report"), 2);
+        assert_eq!(random.choose_report(3).expect("second report"), 0);
+    }
+
+    #[test]
+    fn test_should_fail_for_exhausted_or_invalid_scripted_report_trajectory() {
+        let mut exhausted = ScriptedDriftRandom::new([], []);
+        let exhausted_error = exhausted
+            .choose_report(3)
+            .expect_err("exhausted report trajectory");
+        assert!(
+            exhausted_error
+                .to_string()
+                .contains("scripted DRIFT report trajectory exhausted")
+        );
+
+        let mut invalid = ScriptedDriftRandom::new([3], []);
+        let invalid_error = invalid
+            .choose_report(3)
+            .expect_err("out-of-range report trajectory");
+        assert!(
+            invalid_error
+                .to_string()
+                .contains("report index 3 is outside 3")
+        );
     }
 
     #[tokio::test]

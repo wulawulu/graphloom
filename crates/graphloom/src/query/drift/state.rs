@@ -96,8 +96,10 @@ impl DriftQueryState {
         &self.nodes
     }
 
-    pub(super) fn edges(&self) -> &[DriftEdge] {
-        &self.edges
+    pub(super) fn edges_in_graph_order(&self) -> Vec<&DriftEdge> {
+        let mut edges = self.edges.iter().enumerate().collect::<Vec<_>>();
+        edges.sort_by_key(|(position, edge)| (edge.source, *position));
+        edges.into_iter().map(|(_, edge)| edge).collect()
     }
 
     pub(super) fn to_json(&self) -> Result<String> {
@@ -113,7 +115,7 @@ impl DriftQueryState {
                     "output_tokens": node.metadata.usage.output_tokens,
                 },
             })).collect::<Vec<_>>(),
-            "edges": self.edges.iter().map(|edge| json!({
+            "edges": self.edges_in_graph_order().into_iter().map(|edge| json!({
                 "source": edge.source,
                 "target": edge.target,
                 "weight": edge.weight,
@@ -235,5 +237,51 @@ mod tests {
 
         assert_eq!(state.incomplete_ids(), [none]);
         assert_eq!(state.reduce_answers(), ["   ", "real answer"]);
+    }
+
+    #[test]
+    fn test_should_serialize_edges_in_networkx_source_node_order() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            90.0,
+            &["first".to_owned(), "second".to_owned()],
+        );
+        state
+            .apply(
+                2,
+                DriftActionResponse {
+                    answer: Some("second answer".to_owned()),
+                    score: 80.0,
+                    follow_up_queries: vec!["second child".to_owned()],
+                },
+                DriftActionMetadata::default(),
+            )
+            .expect("apply second node first");
+        state
+            .apply(
+                1,
+                DriftActionResponse {
+                    answer: Some("first answer".to_owned()),
+                    score: 80.0,
+                    follow_up_queries: vec!["first child".to_owned()],
+                },
+                DriftActionMetadata::default(),
+            )
+            .expect("apply first node second");
+
+        let value: Value =
+            serde_json::from_str(&state.to_json().expect("state JSON")).expect("valid JSON");
+
+        assert_eq!(
+            value["edges"],
+            json!([
+                {"source": 0, "target": 1, "weight": 1.0},
+                {"source": 0, "target": 2, "weight": 1.0},
+                {"source": 1, "target": 4, "weight": 1.0},
+                {"source": 2, "target": 3, "weight": 1.0},
+            ])
+        );
     }
 }

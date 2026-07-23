@@ -70,6 +70,7 @@ class ObservedRequest:
     endpoint: str
     body: dict[str, Any]
     cache_status: str
+    response_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,7 +190,7 @@ class CachingProxyEngine:
         ordinal = self._reserve_ordinal()
         cached = self._cache.get(key)
         if cached is not None:
-            self._observe(ordinal, key, endpoint, payload, "hit")
+            self._observe(ordinal, key, endpoint, payload, "hit", cached.response)
             return cached.response
 
         with self._state_lock:
@@ -203,14 +204,21 @@ class CachingProxyEngine:
             if not flight.event.wait(timeout=300):
                 raise ProxyError(504, "timed out waiting for identical request")
             if flight.error is not None:
-                self._observe(ordinal, key, endpoint, payload, "upstreamError")
+                self._observe(ordinal, key, endpoint, payload, "upstreamError", None)
                 raise flight.error
             cached = self._cache.get(key)
             if cached is None:
                 raise ProxyError(
                     502, "identical upstream request produced no cache entry"
                 )
-            self._observe(ordinal, key, endpoint, payload, "coalescedHit")
+            self._observe(
+                ordinal,
+                key,
+                endpoint,
+                payload,
+                "coalescedHit",
+                cached.response,
+            )
             return cached.response
 
         try:
@@ -218,11 +226,11 @@ class CachingProxyEngine:
             if len(response.body) > MAX_RESPONSE_BYTES:
                 raise ProxyError(502, "upstream response exceeds 64 MiB")
             stored = self._cache.put(CacheEntry(key, endpoint, payload, response))
-            self._observe(ordinal, key, endpoint, payload, "miss")
+            self._observe(ordinal, key, endpoint, payload, "miss", stored.response)
             return stored.response
         except ProxyError as error:
             flight.error = error
-            self._observe(ordinal, key, endpoint, payload, "upstreamError")
+            self._observe(ordinal, key, endpoint, payload, "upstreamError", None)
             raise
         except Exception as error:
             detail = _safe_error_detail(error, authorization)
@@ -231,7 +239,7 @@ class CachingProxyEngine:
                 f"LiteLLM request failed: {type(error).__name__}: {detail}",
             )
             flight.error = public
-            self._observe(ordinal, key, endpoint, payload, "upstreamError")
+            self._observe(ordinal, key, endpoint, payload, "upstreamError", None)
             raise public from error
         finally:
             with self._state_lock:
@@ -263,6 +271,7 @@ class CachingProxyEngine:
         endpoint: str,
         payload: dict[str, Any],
         cache_status: str,
+        response: ProxyResponse | None,
     ) -> None:
         observation = ObservedRequest(
             ordinal=ordinal,
@@ -271,9 +280,37 @@ class CachingProxyEngine:
             endpoint=endpoint,
             body=payload,
             cache_status=cache_status,
+            response_content=_completion_response_content(endpoint, response),
         )
         with self._state_lock:
             self._observations.append(observation)
+
+
+def _completion_response_content(
+    endpoint: str,
+    response: ProxyResponse | None,
+) -> str | None:
+    if response is None or endpoint.endswith("/embeddings"):
+        return None
+    try:
+        if response.content_type.startswith("text/event-stream"):
+            chunks: list[str] = []
+            for line in response.body.decode("utf-8").splitlines():
+                if not line.startswith("data: "):
+                    continue
+                data = line.removeprefix("data: ")
+                if data == "[DONE]":
+                    continue
+                payload = json.loads(data)
+                content = payload["choices"][0]["delta"].get("content")
+                if isinstance(content, str):
+                    chunks.append(content)
+            return "".join(chunks)
+        payload = json.loads(response.body)
+        content = payload["choices"][0]["message"].get("content")
+        return content if isinstance(content, str) else None
+    except (IndexError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 class LiteLlmBackend:

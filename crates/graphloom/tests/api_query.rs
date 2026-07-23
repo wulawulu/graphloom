@@ -1620,7 +1620,12 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
     );
     let actions = completions
         .iter()
-        .filter(|body| body["response_format"]["type"] == "json_object")
+        .filter(|body| {
+            body.get("response_format").is_none()
+                && body["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("'follow_up_queries': List[str]"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(actions.len(), 3);
     assert!(actions.iter().all(|body| {
@@ -1643,6 +1648,9 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
                 && !body["messages"][0]["content"]
                     .as_str()
                     .is_some_and(|content| content.starts_with("Create a hypothetical answer"))
+                && !body["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("'follow_up_queries': List[str]"))
         })
         .collect::<Vec<_>>();
     assert_eq!(reduce.len(), 3);
@@ -1656,7 +1664,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
             .iter()
             .map(|body| body["stream"].as_bool().expect("reduce stream flag"))
             .collect::<Vec<_>>(),
-        [false, false, true]
+        [true, true, true]
     );
     assert!(reduce.iter().all(|body| {
         body["messages"][0]["content"]

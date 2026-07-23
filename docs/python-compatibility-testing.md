@@ -184,6 +184,15 @@ Assertions cover:
 - DRIFT: HyDE completion, expanded-query embedding, structured primer, Local
   action, and final reduce.
 
+DRIFT has two complementary compatibility layers. The ordinary CLI/record-replay layer keeps
+GraphRAG's production randomness and validates candidate multisets, legal unique selection,
+selection count, depth, and request contracts; different legal action subsets are diagnosed as
+expected nondeterminism. The strict layer reads
+`fixtures/query/drift_random_trajectory.json`: GraphRAG monkeypatches report selection and positional
+shuffle, while GraphLoom injects a crate-private scripted random implementation. This permits exact
+Local request, state graph, usage, Reduce-input, and final-request assertions without assuming that
+Python and Rust produce the same shuffle from a shared seed.
+
 `fixtures/query/query_interop_request_contract.json` is the reviewed,
 checked-in request contract observed from the isolated PyPI
 `graphrag==3.1.0` baseline. Ordinary tests only read it. For every consumer,

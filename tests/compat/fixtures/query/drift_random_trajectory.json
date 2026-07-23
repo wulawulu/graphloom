@@ -1,0 +1,33 @@
+{
+  "report_indices": [0],
+  "action_orders": [
+    [2, 0, 1],
+    [1, 2, 0]
+  ],
+  "expected_selected_queries": [
+    ["Q3", "Q1"],
+    ["C3", "C1"]
+  ],
+  "expected_node_queries": [
+    "root",
+    "Q1",
+    "Q2",
+    "Q3",
+    "C3",
+    "C1"
+  ],
+  "expected_edges": [
+    {"source": 0, "target": 1, "weight": 1.0},
+    {"source": 0, "target": 2, "weight": 1.0},
+    {"source": 0, "target": 3, "weight": 1.0},
+    {"source": 1, "target": 5, "weight": 1.0},
+    {"source": 3, "target": 4, "weight": 1.0}
+  ],
+  "expected_reduce_answers": [
+    "Primer",
+    "answer-Q1",
+    "answer-Q3",
+    "answer-C3",
+    "answer-C1"
+  ]
+}

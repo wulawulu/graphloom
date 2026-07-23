@@ -101,6 +101,11 @@ DRIFT_HYDE_PROMPT = (
     .read_text(encoding="utf-8")
     .removesuffix("\n")
 )
+DRIFT_RANDOM_TRAJECTORY = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "query" / "drift_random_trajectory.json"
+    ).read_text(encoding="utf-8")
+)
 QUERY_CLI_CONTRACT = json.loads(
     (
         Path(__file__).parent / "fixtures" / "query" / "query_cli_contract.json"
@@ -1639,7 +1644,10 @@ def test_graphrag_3_1_drift_hyde_prompt_and_embedding_golden(
     reports = [_report("0", 1.0, "# Template\nFacts.")]
     completion = RecordingDriftCompletion([("", None)])
     embedding = RecordingEmbedding()
-    monkeypatch.setattr("secrets.choice", lambda values: values[0])
+    monkeypatch.setattr(
+        "secrets.choice",
+        lambda values: values[DRIFT_RANDOM_TRAJECTORY["report_indices"][0]],
+    )
     processor = PrimerQueryProcessor(
         chat_model=completion,
         text_embedder=embedding,
@@ -1681,7 +1689,10 @@ def test_graphrag_3_1_drift_ranking_and_stable_tie_golden(
     completion = RecordingDriftCompletion([("expanded", None)])
     embedding = RecordingEmbedding()
     embedding.embedding = lambda input: SimpleNamespace(first_embedding=[1.0, 0.0])
-    monkeypatch.setattr("secrets.choice", lambda values: values[0])
+    monkeypatch.setattr(
+        "secrets.choice",
+        lambda values: values[DRIFT_RANDOM_TRAJECTORY["report_indices"][0]],
+    )
     builder = object.__new__(DRIFTSearchContextBuilder)
     builder.reports = reports
     builder.model = completion
@@ -1826,6 +1837,118 @@ def test_graphrag_3_1_drift_action_repair_and_state_identity_golden() -> None:
     )
     assert primer_action.answer == ""
     assert primer_action.follow_ups == ["next"]
+
+
+def test_graphrag_3_1_drift_scripted_multidepth_trajectory_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay positional shuffles without relying on a cross-language seed."""
+
+    class ContextBuilder:
+        config = SimpleNamespace(n_depth=2, drift_k_followups=2)
+
+        async def build_context(
+            self, _query: str
+        ) -> tuple[pd.DataFrame, dict[str, int]]:
+            return pd.DataFrame({"full_content": ["Report"]}), {
+                "llm_calls": 0,
+                "prompt_tokens": 0,
+                "output_tokens": 0,
+            }
+
+    class Primer:
+        async def search(self, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                response=[
+                    {
+                        "intermediate_answer": "Primer",
+                        "score": 80,
+                        "follow_up_queries": ["Q1", "Q2", "Q3"],
+                    }
+                ],
+                llm_calls=1,
+                prompt_tokens=2,
+                output_tokens=3,
+            )
+
+    class Local:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def search(self, **kwargs: Any) -> SimpleNamespace:
+            query = kwargs["query"]
+            self.queries.append(query)
+            followups = {"Q3": ["C3"], "Q1": ["C1"]}.get(query, [])
+            return SimpleNamespace(
+                response=json.dumps(
+                    {
+                        "response": f"answer-{query}",
+                        "score": 90,
+                        "follow_up_queries": followups,
+                    }
+                ),
+                context_data={"query": query},
+                prompt_tokens=4,
+                output_tokens=5,
+            )
+
+    def run() -> tuple[list[str], list[list[str]], dict[str, Any]]:
+        orders = iter(DRIFT_RANDOM_TRAJECTORY["action_orders"])
+        selected_orders: list[list[str]] = []
+
+        def scripted_shuffle(actions: list[DriftAction]) -> None:
+            order = next(orders)
+            assert sorted(order) == list(range(len(actions)))
+            original = list(actions)
+            actions[:] = [original[index] for index in order]
+            selected_orders.append([action.query for action in actions[:2]])
+
+        monkeypatch.setattr(
+            "graphrag.query.structured_search.drift_search.state.random.shuffle",
+            scripted_shuffle,
+        )
+        local = Local()
+        search = object.__new__(DRIFTSearch)
+        search.context_builder = ContextBuilder()
+        search.query_state = QueryState()
+        search.primer = Primer()
+        search.callbacks = []
+        search.local_search = local
+
+        result = asyncio.run(search.search("root", reduce=False))
+
+        return local.queries, selected_orders, result.response
+
+    first_queries, first_selected, first_state = run()
+    second_queries, second_selected, second_state = run()
+
+    assert first_selected == DRIFT_RANDOM_TRAJECTORY["expected_selected_queries"]
+    assert second_selected == first_selected
+    assert set(first_queries) == {"Q3", "Q1", "C3", "C1"}
+    assert set(second_queries) == set(first_queries)
+    assert second_state == first_state
+    assert [node["query"] for node in first_state["nodes"]] == (
+        DRIFT_RANDOM_TRAJECTORY["expected_node_queries"]
+    )
+    assert first_state["edges"] == DRIFT_RANDOM_TRAJECTORY["expected_edges"]
+    assert [
+        node["answer"] for node in first_state["nodes"] if node["answer"]
+    ] == DRIFT_RANDOM_TRAJECTORY["expected_reduce_answers"]
+    completed = [
+        node
+        for node in first_state["nodes"]
+        if node["query"] in {"Q1", "Q3", "C3", "C1"}
+    ]
+    assert all(
+        node["metadata"]
+        == {
+            "llm_calls": 1,
+            "prompt_tokens": 4,
+            "output_tokens": 5,
+            "context_data": {"query": node["query"]},
+        }
+        for node in completed
+    )
 
 
 def test_graphrag_3_1_drift_reduce_python_list_representation_golden() -> None:

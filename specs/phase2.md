@@ -2546,6 +2546,12 @@ Basic/Local/Global 固定 fixture 应做到 context text 精确相等。
 
 DRIFT 对注入固定 RNG 的 fixture 做精确相等。
 
+默认真实随机模式不要求两端单次运行选择相同的 follow-up 子集，但必须比较 Primer 候选
+multiset、每层 incomplete 候选、`min(incomplete, drift_k_followups)` 选择数量、选择来源、
+去重和 `n_depth`。两个合法子集不同属于 expected nondeterminism；候选集合、非法 action、
+重复 action、数量、深度或请求契约不一致仍必须失败。严格逐消息比较使用跨语言共享的显式
+位置轨迹分别 monkeypatch Python 和注入 Rust 私有 RNG；不得假设相同 seed 会产生相同 shuffle。
+
 ## 23.4 Python 互操作
 
 必须覆盖两个方向。

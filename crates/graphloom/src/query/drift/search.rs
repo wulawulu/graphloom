@@ -5,7 +5,6 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use futures_util::{StreamExt, stream};
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, CompletionStream, Tokenizer};
 use serde::Serialize;
-use serde_json::json;
 
 use super::{
     action::{DriftActionMetadata, DriftActionResponse},
@@ -47,55 +46,21 @@ pub(crate) async fn drift_search(
     query: &str,
     response_type: &str,
 ) -> Result<QueryResult> {
-    validate_query(query)?;
-    let started = Instant::now();
-    let mut random = SystemDriftRandom;
-    let prepared = prepare(&runtime, query, &mut random).await?;
-    let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
-    let mut request = CompletionRequest::new(vec![
-        ChatMessage::system(rendered),
-        ChatMessage::user(query),
-    ]);
-    let prompt_tokens = count_completion_input(
-        runtime.context.tokenizer.as_ref(),
-        &request.messages,
-        SearchMethod::Drift,
-        "count DRIFT reduce completion input tokens",
-    )?;
-    apply_reduce_request(&runtime, &mut request, false)?;
-    runtime
-        .callbacks
-        .on_reduce_response_start(&prepared.state_context);
-    let response = runtime
-        .context
-        .completion_model
-        .complete(request)
-        .await
-        .map_err(|source| completion_error(&runtime, "complete DRIFT reduce response", source))?;
-    let answer = response
-        .content()
-        .map_err(|source| completion_error(&runtime, "read DRIFT reduce response", source))?
-        .to_owned();
-    runtime.callbacks.on_reduce_response_end(&answer);
-    let output_tokens = count(
-        &*runtime.context.tokenizer,
-        &answer,
-        "count DRIFT reduce output",
-    )?;
-    let mut categories = prepared.usage;
-    categories.insert(
-        "reduce".to_owned(),
-        QueryUsageCategory {
-            llm_calls: 1,
-            prompt_tokens,
-            output_tokens,
-        },
-    );
-    Ok(QueryResult {
-        response: answer,
-        context: prepared.context,
-        elapsed: started.elapsed(),
-        usage: QueryUsage::from_categories(categories),
+    let mut events = drift_search_streaming(runtime, query, response_type).await?;
+    while let Some(event) = events.next().await {
+        if let QueryEvent::Completed(result) = event? {
+            return Ok(result);
+        }
+    }
+    Err(QueryError::QueryCompletion {
+        method: SearchMethod::Drift,
+        operation: "aggregate DRIFT Search stream",
+        model: "unknown".to_owned(),
+        source: Box::new(graphloom_llm::LlmError::InvalidResponse {
+            model_instance: "unknown".to_owned(),
+            operation: "query stream",
+            message: "stream ended without a completed event".to_owned(),
+        }),
     })
 }
 
@@ -188,7 +153,7 @@ async fn run_depths(
 ) -> Result<QueryUsageCategory> {
     let mut total = QueryUsageCategory::default();
     for _ in 0..runtime.context.config.n_depth {
-        let selected = select_actions(state, random, runtime.context.config.drift_k_followups);
+        let selected = select_actions(state, random, runtime.context.config.drift_k_followups)?;
         if selected.is_empty() {
             break;
         }
@@ -225,11 +190,11 @@ fn select_actions(
     state: &DriftQueryState,
     random: &mut dyn DriftRandom,
     limit: usize,
-) -> Vec<usize> {
+) -> Result<Vec<usize>> {
     let mut selected = state.incomplete_ids();
-    random.shuffle_actions(&mut selected);
+    random.shuffle_actions(&mut selected)?;
     selected.truncate(limit);
-    selected
+    Ok(selected)
 }
 
 async fn run_action(
@@ -290,7 +255,7 @@ async fn run_action(
                 .context
                 .config
                 .local_search_llm_max_gen_completion_tokens;
-            request.response_format = Some(json!({"type": "json_object"}));
+            request.response_format = None;
             request.stream = Some(true);
             request.validate()
         })
@@ -401,7 +366,7 @@ fn build_query_context(
     let edge_table = ContextTable::new(
         ["source", "target", "weight"],
         state
-            .edges()
+            .edges_in_graph_order()
             .iter()
             .map(|edge| {
                 vec![
@@ -720,20 +685,32 @@ fn stream_error(state: &DriftStreamState, message: &str) -> QueryError {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::{DriftQueryState, python_list_repr, python_string_repr, select_actions};
-    use crate::query::drift::context::DriftRandom;
+    use crate::query::{
+        QueryUsageCategory,
+        drift::{
+            action::{DriftActionMetadata, DriftActionResponse},
+            context::{DriftRandom, ScriptedDriftRandom, SystemDriftRandom},
+        },
+    };
 
-    #[derive(Debug)]
-    struct ReverseRandom;
+    #[derive(Debug, Deserialize)]
+    struct ScriptedTrajectory {
+        report_indices: Vec<usize>,
+        action_orders: Vec<Vec<usize>>,
+        expected_selected_queries: Vec<Vec<String>>,
+        expected_node_queries: Vec<String>,
+        expected_edges: serde_json::Value,
+        expected_reduce_answers: Vec<String>,
+    }
 
-    impl DriftRandom for ReverseRandom {
-        fn choose_report(&mut self, _: usize) -> usize {
-            0
-        }
-
-        fn shuffle_actions(&mut self, actions: &mut [usize]) {
-            actions.reverse();
-        }
+    fn scripted_trajectory() -> ScriptedTrajectory {
+        serde_json::from_str(include_str!(
+            "../../../../../tests/compat/fixtures/query/drift_random_trajectory.json"
+        ))
+        .expect("shared DRIFT random trajectory")
     }
 
     #[test]
@@ -754,8 +731,218 @@ mod tests {
             1.0,
             &["one".to_owned(), "two".to_owned(), "three".to_owned()],
         );
+        let mut random = ScriptedDriftRandom::new([], [vec![2, 1, 0], vec![2, 1, 0]]);
 
-        assert_eq!(select_actions(&state, &mut ReverseRandom, 2), [3, 2]);
-        assert_eq!(select_actions(&state, &mut ReverseRandom, 2), [3, 2]);
+        assert_eq!(
+            select_actions(&state, &mut random, 2).expect("first scripted selection"),
+            [3, 2]
+        );
+        assert_eq!(
+            select_actions(&state, &mut random, 2).expect("second scripted selection"),
+            [3, 2]
+        );
+    }
+
+    #[test]
+    fn test_should_limit_selection_and_only_return_incomplete_actions() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            1.0,
+            &["one".to_owned(), "two".to_owned(), "three".to_owned()],
+        );
+        let incomplete = state.incomplete_ids();
+        let mut random = ScriptedDriftRandom::new([], [vec![1, 2, 0]]);
+
+        let selected = select_actions(&state, &mut random, 2).expect("scripted selection");
+
+        assert_eq!(selected.len(), incomplete.len().min(2));
+        assert!(selected.iter().all(|id| incomplete.contains(id)));
+    }
+
+    #[test]
+    fn test_should_consume_scripted_orders_across_depths() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "Primer".to_owned(),
+            80.0,
+            &["Q1".to_owned(), "Q2".to_owned(), "Q3".to_owned()],
+        );
+        let trajectory = scripted_trajectory();
+        let mut random = ScriptedDriftRandom::new(
+            trajectory.report_indices.clone(),
+            trajectory.action_orders.clone(),
+        );
+
+        for expected in &trajectory.expected_selected_queries {
+            let selected = select_actions(&state, &mut random, 2).expect("depth selection");
+            let selected_queries = selected
+                .iter()
+                .filter_map(|id| state.query(*id))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(selected_queries.as_slice(), expected.as_slice());
+            for id in selected {
+                let query = state.query(id).expect("selected query").to_owned();
+                let follow_up_queries = match query.as_str() {
+                    "Q3" => vec!["C3".to_owned()],
+                    "Q1" => vec!["C1".to_owned()],
+                    _ => Vec::new(),
+                };
+                state
+                    .apply(
+                        id,
+                        DriftActionResponse {
+                            answer: Some(format!("answer-{query}")),
+                            score: 90.0,
+                            follow_up_queries,
+                        },
+                        DriftActionMetadata {
+                            usage: QueryUsageCategory {
+                                llm_calls: 1,
+                                prompt_tokens: 4,
+                                output_tokens: 5,
+                            },
+                            context: None,
+                        },
+                    )
+                    .expect("apply scripted action");
+            }
+        }
+
+        let state_json: serde_json::Value =
+            serde_json::from_str(&state.to_json().expect("scripted state JSON"))
+                .expect("valid scripted state JSON");
+        let node_queries = state
+            .nodes()
+            .iter()
+            .map(|node| node.query.clone())
+            .collect::<Vec<_>>();
+        let reduce_answers = state
+            .reduce_answers()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(node_queries, trajectory.expected_node_queries);
+        assert_eq!(state_json["edges"], trajectory.expected_edges);
+        assert_eq!(reduce_answers, trajectory.expected_reduce_answers);
+        for node in state
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.query.as_str(), "Q1" | "Q3" | "C3" | "C1"))
+        {
+            assert_eq!(
+                node.metadata.usage,
+                QueryUsageCategory {
+                    llm_calls: 1,
+                    prompt_tokens: 4,
+                    output_tokens: 5,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_fail_when_scripted_action_trajectory_is_exhausted() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            1.0,
+            &["one".to_owned()],
+        );
+        let mut random = ScriptedDriftRandom::new([], []);
+
+        let error = select_actions(&state, &mut random, 1)
+            .expect_err("exhausted trajectory must not use system randomness");
+
+        assert!(
+            error
+                .to_string()
+                .contains("scripted DRIFT action trajectory exhausted")
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_scripted_action_order() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            1.0,
+            &["one".to_owned(), "two".to_owned()],
+        );
+        let mut random = ScriptedDriftRandom::new([], [vec![0, 0]]);
+
+        let error = select_actions(&state, &mut random, 2)
+            .expect_err("duplicate trajectory index must fail");
+
+        assert!(error.to_string().contains("action index 0 is duplicated"));
+    }
+
+    #[test]
+    fn test_should_keep_system_random_available_for_production() {
+        let mut random = SystemDriftRandom;
+        let mut actions = [7];
+
+        assert_eq!(random.choose_report(1).expect("single report selection"), 0);
+        random
+            .shuffle_actions(&mut actions)
+            .expect("single action shuffle");
+        assert_eq!(actions, [7]);
+    }
+
+    #[test]
+    fn test_should_generate_the_same_action_graph_for_the_same_trajectory() {
+        fn run() -> String {
+            let mut state = DriftQueryState::default();
+            state.add_root(
+                "root".to_owned(),
+                "primer".to_owned(),
+                90.0,
+                &["one".to_owned(), "two".to_owned()],
+            );
+            let mut random = ScriptedDriftRandom::new([], [vec![1, 0]]);
+            let selected =
+                select_actions(&state, &mut random, 1).expect("scripted graph selection");
+            let selected_id = selected
+                .first()
+                .copied()
+                .expect("one scripted graph action");
+            state
+                .apply(
+                    selected_id,
+                    DriftActionResponse {
+                        answer: Some("action".to_owned()),
+                        score: 80.0,
+                        follow_up_queries: vec!["child".to_owned()],
+                    },
+                    DriftActionMetadata::default(),
+                )
+                .expect("apply scripted graph action");
+            state.to_json().expect("scripted state JSON")
+        }
+
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn test_should_deduplicate_equal_queries_before_scripted_selection() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            1.0,
+            &["same".to_owned(), "same".to_owned()],
+        );
+        let mut random = ScriptedDriftRandom::new([], [vec![0]]);
+
+        let selected = select_actions(&state, &mut random, 20)
+            .expect("duplicate query selection must follow GraphRAG identity");
+
+        assert_eq!(selected, [1]);
+        assert_eq!(state.edges_in_graph_order().len(), 2);
     }
 }

@@ -24,6 +24,7 @@ from llm_cache_proxy import (
     LiteLlmBackend,
     ProxyResponse,
     UpstreamRoute,
+    _completion_response_content,
     request_key,
 )
 
@@ -120,6 +121,27 @@ def test_should_cache_and_reload_exact_response_without_secret(tmp_path: Path) -
     assert reloaded is not None
     assert reloaded.response == first
     assert "secret-not-persisted" not in path.read_text()
+
+
+def test_should_observe_nonstream_and_stream_completion_content() -> None:
+    nonstream = ProxyResponse(
+        200,
+        "application/json",
+        json.dumps({"choices": [{"message": {"content": "answer"}}]}).encode(),
+    )
+    stream = ProxyResponse(
+        200,
+        "text/event-stream",
+        (
+            b'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":" two"}}]}\n\n'
+            b"data: [DONE]\n\n"
+        ),
+    )
+
+    assert _completion_response_content("/v1/chat/completions", nonstream) == "answer"
+    assert _completion_response_content("/v1/chat/completions", stream) == "one two"
+    assert _completion_response_content("/v1/embeddings", nonstream) is None
 
 
 def test_should_reuse_response_when_only_transport_fields_differ(
