@@ -168,12 +168,13 @@ impl QueryRuntimeFactory {
         let method = SearchMethod::Local;
         validate_local_requirements(project, options)?;
         let data = load_local_data(project, options).await?;
-        let index = Arc::new(QueryDataIndex::new(
+        let index = Arc::new(QueryDataIndex::new_with_single_covariate_group(
             &data.entities,
             &data.reports,
             &data.text_units,
             &data.relationships,
             &data.covariates,
+            "claims",
         ));
         let models = create_local_models(project, model_factory)?;
         let vectors = open_local_vectors(project).await?;

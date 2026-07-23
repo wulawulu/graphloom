@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -469,9 +469,10 @@ impl LocalContextBuilder {
                     ),
                 );
             }
-            for name in &self.index.covariate_types {
+            for (name, group_positions) in &self.index.covariate_groups {
                 let section = self.build_covariate_context_from_positions(
                     name,
+                    group_positions,
                     &covariate_positions,
                     max_tokens,
                 )?;
@@ -574,13 +575,14 @@ impl LocalContextBuilder {
     fn build_covariate_context_from_positions(
         &self,
         name: &str,
+        group_positions: &HashSet<usize>,
         positions: &[usize],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
         let candidates = positions
             .iter()
+            .filter(|index| group_positions.contains(index))
             .filter_map(|index| self.covariates.get(*index))
-            .filter(|covariate| covariate.covariate_type == name)
             .map(|covariate| {
                 vec![
                     covariate.short_id.clone().unwrap_or_default(),
@@ -593,7 +595,7 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        if candidates.is_empty() {
+        if group_positions.is_empty() {
             return Ok(None);
         }
         let table = self.fit_delimited_rows(
@@ -1584,6 +1586,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_should_group_all_runtime_covariates_under_claims() {
+        let fixture = fixture(20_000, &[]);
+        let index = QueryDataIndex::new_with_single_covariate_group(
+            &fixture.builder.entities,
+            &fixture.builder.reports,
+            &fixture.builder.text_units,
+            &fixture.builder.relationships,
+            &fixture.builder.covariates,
+            "claims",
+        );
+
+        let [(name, positions)] = index.covariate_groups.as_slice() else {
+            panic!("expected one runtime covariate group");
+        };
+        assert_eq!(name, "claims");
+        assert_eq!(positions.len(), fixture.builder.covariates.len());
+        assert!((0..fixture.builder.covariates.len()).all(|index| positions.contains(&index)));
+    }
+
     #[tokio::test]
     async fn test_should_preserve_upstream_empty_community_list_text() {
         let fixture = fixture(1, &["entity-a"]);
@@ -1857,11 +1879,40 @@ mod tests {
             .expect("relationship section")
             .expect("Alice relationships");
         let covariate_positions = fixture.builder.index.covariates_by_subject["Alice"].clone();
+        let (claim_name, claim_group_positions) = fixture
+            .builder
+            .index
+            .covariate_groups
+            .first()
+            .cloned()
+            .expect("claims group");
         let claim = fixture
             .builder
-            .build_covariate_context_from_positions("claims", &covariate_positions, 20_000)
+            .build_covariate_context_from_positions(
+                &claim_name,
+                &claim_group_positions,
+                &covariate_positions,
+                20_000,
+            )
             .expect("claim context")
             .expect("Alice claim");
+        let (fact_name, fact_group_positions) = fixture
+            .builder
+            .index
+            .covariate_groups
+            .get(1)
+            .cloned()
+            .expect("facts group");
+        let fact = fixture
+            .builder
+            .build_covariate_context_from_positions(
+                &fact_name,
+                &fact_group_positions,
+                &covariate_positions,
+                20_000,
+            )
+            .expect("fact context")
+            .expect("header-only facts");
         let one_tokens = fixture
             .builder
             .count(&entity_text, "test entity count")
@@ -1877,6 +1928,12 @@ mod tests {
                     .builder
                     .count(&claim.text, "test claim count")
                     .expect("claim tokens"),
+            )
+            .saturating_add(
+                fixture
+                    .builder
+                    .count(&fact.text, "test fact count")
+                    .expect("fact tokens"),
             );
         drop(selected);
         fixture.builder.config.max_context_tokens = one_tokens;

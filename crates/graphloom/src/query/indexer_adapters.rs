@@ -135,7 +135,7 @@ pub fn read_indexer_covariates(
     let mut rows = Vec::with_capacity(dataframe.height());
     for row in 0..dataframe.height() {
         rows.push(Covariate {
-            id: required_stringish(dataframe, row, "id", method, "covariates")?,
+            id: required_graphrag_stringish(dataframe, row, "id", method, "covariates")?,
             short_id: optional_stringish(
                 dataframe,
                 row,
@@ -143,8 +143,14 @@ pub fn read_indexer_covariates(
                 method,
                 "covariates",
             )?,
-            subject_id: required_string(dataframe, row, "subject_id", method, "covariates")?,
-            covariate_type: required_string(dataframe, row, "type", method, "covariates")?,
+            subject_id: required_graphrag_string(
+                dataframe,
+                row,
+                "subject_id",
+                method,
+                "covariates",
+            )?,
+            covariate_type: required_graphrag_string(dataframe, row, "type", method, "covariates")?,
             object_id: optional_string(dataframe, row, "object_id", method, "covariates")?,
             status: optional_string(dataframe, row, "status", method, "covariates")?,
             start_date: optional_string(dataframe, row, "start_date", method, "covariates")?,
@@ -698,7 +704,31 @@ fn required_string(
     })
 }
 
-fn required_stringish(
+fn required_graphrag_string(
+    dataframe: &DataFrame,
+    row: usize,
+    name: &str,
+    method: SearchMethod,
+    table: &'static str,
+) -> Result<String> {
+    let (value, actual) = required_value(dataframe, row, name, method, table, "string")?;
+    match value {
+        AnyValue::Null => Ok("None".to_owned()),
+        value => string_value(value).ok_or_else(|| {
+            invalid_value(
+                method,
+                table,
+                name,
+                "string",
+                &actual,
+                row,
+                "value is not UTF-8",
+            )
+        }),
+    }
+}
+
+fn required_graphrag_stringish(
     dataframe: &DataFrame,
     row: usize,
     name: &str,
@@ -706,6 +736,9 @@ fn required_stringish(
     table: &'static str,
 ) -> Result<String> {
     let (value, actual) = required_value(dataframe, row, name, method, table, "string or integer")?;
+    if matches!(value, AnyValue::Null) {
+        return Ok("None".to_owned());
+    }
     stringish_value(&value).ok_or_else(|| {
         invalid_value(
             method,
@@ -714,7 +747,7 @@ fn required_stringish(
             "string or integer",
             &actual,
             row,
-            "value is null or incompatible",
+            "value is incompatible",
         )
     })
 }
@@ -1797,6 +1830,20 @@ mod tests {
         assert_eq!(covariate.start_date, None);
         assert_eq!(covariate.end_date, None);
         assert_eq!(covariate.description, None);
+
+        let covariates_with_null_required_values = df!(
+            "id" => [Some("claim-1"), None],
+            "subject_id" => [Some("entity-1"), None],
+            "type" => [Some("claim"), None],
+        )
+        .expect("covariates with null required values");
+        let covariate =
+            read_indexer_covariates(&covariates_with_null_required_values, SearchMethod::Local)
+                .expect("GraphRAG coerces null required covariate values")
+                .remove(1);
+        assert_eq!(covariate.id, "None");
+        assert_eq!(covariate.subject_id, "None");
+        assert_eq!(covariate.covariate_type, "None");
 
         text_units
             .replace("text", Series::new("text".into(), [1_i64]).into())

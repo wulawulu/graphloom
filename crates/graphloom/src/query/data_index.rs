@@ -1,6 +1,6 @@
 //! Immutable lookup indexes over adapted Query data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{CommunityReport, Covariate, Entity, Relationship, TextUnit};
 
@@ -16,7 +16,7 @@ pub(crate) struct QueryDataIndex {
     pub(crate) text_unit_by_id: HashMap<String, usize>,
     pub(crate) relationships_by_entity: HashMap<String, Vec<usize>>,
     pub(crate) covariates_by_subject: HashMap<String, Vec<usize>>,
-    pub(crate) covariate_types: Vec<String>,
+    pub(crate) covariate_groups: Vec<(String, HashSet<usize>)>,
 }
 
 impl QueryDataIndex {
@@ -63,17 +63,19 @@ impl QueryDataIndex {
         }
 
         let mut covariates_by_subject = HashMap::<String, Vec<usize>>::new();
-        let mut covariate_types = Vec::new();
+        let mut covariate_groups = Vec::<(String, HashSet<usize>)>::new();
         for (index, covariate) in covariates.iter().enumerate() {
             covariates_by_subject
                 .entry(covariate.subject_id.clone())
                 .or_default()
                 .push(index);
-            if !covariate_types
-                .iter()
-                .any(|value| value == &covariate.covariate_type)
+            if let Some((_, positions)) = covariate_groups
+                .iter_mut()
+                .find(|(name, _)| name == &covariate.covariate_type)
             {
-                covariate_types.push(covariate.covariate_type.clone());
+                positions.insert(index);
+            } else {
+                covariate_groups.push((covariate.covariate_type.clone(), HashSet::from([index])));
             }
         }
 
@@ -84,7 +86,23 @@ impl QueryDataIndex {
             text_unit_by_id,
             relationships_by_entity,
             covariates_by_subject,
-            covariate_types,
+            covariate_groups,
         }
+    }
+
+    pub(crate) fn new_with_single_covariate_group(
+        entities: &[Entity],
+        reports: &[CommunityReport],
+        text_units: &[TextUnit],
+        relationships: &[Relationship],
+        covariates: &[Covariate],
+        group_name: &str,
+    ) -> Self {
+        let mut index = Self::new(entities, reports, text_units, relationships, covariates);
+        index.covariate_groups = vec![(
+            group_name.to_owned(),
+            (0..covariates.len()).collect::<HashSet<_>>(),
+        )];
+        index
     }
 }
