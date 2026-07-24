@@ -46,21 +46,55 @@ pub(crate) async fn drift_search(
     query: &str,
     response_type: &str,
 ) -> Result<QueryResult> {
-    let mut events = drift_search_streaming(runtime, query, response_type).await?;
-    while let Some(event) = events.next().await {
-        if let QueryEvent::Completed(result) = event? {
-            return Ok(result);
-        }
-    }
-    Err(QueryError::QueryCompletion {
-        method: SearchMethod::Drift,
-        operation: "aggregate DRIFT Search stream",
-        model: "unknown".to_owned(),
-        source: Box::new(graphloom_llm::LlmError::InvalidResponse {
-            model_instance: "unknown".to_owned(),
-            operation: "query stream",
-            message: "stream ended without a completed event".to_owned(),
-        }),
+    validate_query(query)?;
+    let started = Instant::now();
+    let mut random = SystemDriftRandom;
+    let prepared = prepare(&runtime, query, &mut random).await?;
+    let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
+    let mut request = CompletionRequest::new(vec![
+        ChatMessage::system(rendered),
+        ChatMessage::user(query),
+    ]);
+    let prompt_tokens = count_completion_input(
+        runtime.context.tokenizer.as_ref(),
+        &request.messages,
+        SearchMethod::Drift,
+        "count DRIFT reduce completion input tokens",
+    )?;
+    apply_reduce_request(&runtime, &mut request, false)?;
+    runtime
+        .callbacks
+        .on_reduce_response_start(&prepared.state_context);
+    let response = runtime
+        .context
+        .completion_model
+        .complete(request)
+        .await
+        .map_err(|source| completion_error(&runtime, "complete DRIFT reduce response", source))?;
+    let answer = response
+        .content()
+        .map_err(|source| completion_error(&runtime, "read DRIFT reduce response", source))?
+        .to_owned();
+    runtime.callbacks.on_reduce_response_end(&answer);
+    let output_tokens = count(
+        &*runtime.context.tokenizer,
+        &answer,
+        "count DRIFT reduce output",
+    )?;
+    let mut categories = prepared.usage;
+    categories.insert(
+        "reduce".to_owned(),
+        QueryUsageCategory {
+            llm_calls: 1,
+            prompt_tokens,
+            output_tokens,
+        },
+    );
+    Ok(QueryResult {
+        response: answer,
+        context: prepared.context,
+        elapsed: started.elapsed(),
+        usage: QueryUsage::from_categories(categories),
     })
 }
 

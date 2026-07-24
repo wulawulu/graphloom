@@ -86,14 +86,17 @@ selection-count errors, depth errors, and request-contract mismatches still fail
 random branches diverge, downstream Local context, state, Reduce input, and final text may differ
 without failing the default-mode comparison.
 
-Strict message-by-message DRIFT comparison uses the shared scripted positional trajectory in
-`tests/compat/fixtures/query/drift_random_trajectory.json`. Python monkeypatches report selection and
-`random.shuffle`; Rust injects a crate-private `ScriptedDriftRandom`. The script fixes the HyDE
-report and every depth's permutation, fails if it is exhausted or invalid, and locks selected
-queries, action state nodes/edges, usage, Reduce answers, Local messages, and request parameters.
-The trajectory records positions rather than a seed because Python and Rust do not promise the same
-PRNG or shuffle algorithm for equal seeds. Normal production entry points continue to instantiate
-`SystemDriftRandom`.
+The shared positional trajectory in
+`tests/compat/fixtures/query/drift_random_trajectory.json` is a deterministic state-transition
+check, not an end-to-end CLI request comparison. GraphRAG monkeypatches `random.shuffle`; GraphLoom
+injects a crate-private `ScriptedDriftRandom`. Each language independently asserts the same selected
+queries, state nodes and edges, and Reduce-answer golden. The Rust tests additionally reject
+exhausted or invalid report/action trajectories instead of falling back to system randomness.
+There is currently no shared cross-language golden for complete Local messages, Local context, or
+the Reduce request. Real CLI record/replay therefore continues to use default system randomness and
+the constraint-based comparison above. The trajectory records positions rather than a seed because
+Python and Rust do not promise the same PRNG or shuffle algorithm for equal seeds. Normal production
+entry points continue to instantiate `SystemDriftRandom`.
 
 Provider adaptation happens only after the request has been keyed and observed. In particular,
 unsupported embedding fields may be dropped by LiteLLM, and DeepSeek `json_schema` is sent upstream

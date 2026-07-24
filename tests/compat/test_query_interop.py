@@ -639,6 +639,36 @@ def _load_request_contract() -> dict[str, Any]:
     return contract
 
 
+def test_should_lock_graphloom_drift_action_request_contract() -> None:
+    """Keep the reviewed fixture synchronized with the production wire request."""
+    action = _load_request_contract()["request_templates"]["graphloom_action"]
+
+    assert action["message_roles"] == ["system", "user"]
+    assert action["response_format"] == {
+        "present": False,
+        "kind": "absent",
+        "value": None,
+    }
+    assert action["temperature"] == {
+        "present": True,
+        "kind": "number",
+        "value": 0.0,
+    }
+    assert isinstance(action["temperature"]["value"], float)
+    assert action["top_p"] == {
+        "present": True,
+        "kind": "number",
+        "value": 1.0,
+    }
+    assert isinstance(action["top_p"]["value"], float)
+    assert action["n"] == {"present": True, "kind": "integer", "value": 1}
+    assert action["stream"] == {
+        "present": True,
+        "kind": "boolean",
+        "value": True,
+    }
+
+
 def _assert_request_contract(
     requests: tuple[RecordedRequest, ...],
     method: str,

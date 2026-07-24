@@ -43,7 +43,11 @@ def _drift_requests(
     decorate_action_response: bool = False,
     fallback_first_action: bool = False,
     localized_reduce: bool = False,
+    action_followups: dict[str, list[str]] | None = None,
+    action_top_p_overrides: dict[int, float] | None = None,
 ) -> tuple[ObservedRequest, ...]:
+    action_followups = action_followups or {}
+    action_top_p_overrides = action_top_p_overrides or {}
     requests = [
         _observed(
             {
@@ -94,7 +98,7 @@ def _drift_requests(
             {
                 "response": f"answer-{query}",
                 "score": 90,
-                "follow_up_queries": [],
+                "follow_up_queries": action_followups.get(query, []),
             }
         )
         if decorate_action_response:
@@ -121,10 +125,12 @@ def _drift_requests(
                         {"role": "user", "content": query},
                     ],
                     "temperature": 0.0,
-                    "top_p": action_top_p,
+                    "top_p": action_top_p_overrides.get(
+                        action_index,
+                        action_top_p,
+                    ),
                     "n": 1,
                     "max_completion_tokens": 100,
-                    "response_format": {"type": "json_object"},
                     "stream": True,
                 },
                 ordinal,
@@ -288,7 +294,130 @@ def test_should_classify_valid_drift_branch_difference_as_expected_nondeterminis
     assert report["graphRag"]["layers"][0]["candidates"] == candidates
     assert report["graphRag"]["layers"][0]["selected"] == ["Q1", "Q4"]
     assert report["graphLoom"]["layers"][0]["selected"] == ["Q2", "Q3"]
-    assert "Candidate sets, selection count" in report["message"]
+    assert report["firstDivergenceDepth"] == 0
+    assert "candidate sets were compatible" in report["message"].lower()
+
+
+def test_should_allow_valid_drift_branch_to_change_action_and_layer_counts() -> None:
+    candidates = ["Q1", "Q2", "Q3", "Q4"]
+    graph_rag = _drift_requests(
+        candidates,
+        ["Q1", "Q2", "Q3", "Q4"],
+    )
+    graph_loom = _drift_requests(
+        candidates,
+        ["Q3", "Q4", "Q1", "Q2", "C1", "C2"],
+        action_followups={
+            "Q3": ["C1", "C2"],
+            "Q4": ["C3"],
+        },
+    )
+
+    report = compare_drift_behavior(
+        graph_rag,
+        graph_loom,
+        query="root",
+        drift_k_followups=2,
+        n_depth=3,
+    )
+
+    assert report["compatible"] is True
+    assert report["classification"] == "expected nondeterminism"
+    assert report["firstDivergenceDepth"] == 0
+    assert report["graphRag"]["layerCount"] == 2
+    assert report["graphLoom"]["layerCount"] == 3
+    assert report["graphRag"]["actionRequestCount"] == 4
+    assert report["graphLoom"]["actionRequestCount"] == 6
+
+
+def test_should_reject_excess_depth_after_valid_drift_branch() -> None:
+    candidates = ["Q1", "Q2", "Q3", "Q4"]
+    graph_rag = _drift_requests(candidates, ["Q1", "Q2", "Q3", "Q4"])
+    graph_loom = _drift_requests(
+        candidates,
+        ["Q3", "Q4", "Q1", "Q2", "C1", "C2", "C3"],
+        action_followups={
+            "Q3": ["C1", "C2"],
+            "Q4": ["C3"],
+        },
+    )
+
+    report = compare_drift_behavior(
+        graph_rag,
+        graph_loom,
+        query="root",
+        drift_k_followups=2,
+        n_depth=3,
+    )
+
+    assert report["compatible"] is False
+    assert report["classification"] == "depth mismatch"
+    assert any(error["code"] == "depth mismatch" for error in report["errors"])
+
+
+def test_should_reject_illegal_action_after_valid_drift_branch() -> None:
+    candidates = ["Q1", "Q2", "Q3", "Q4"]
+    graph_rag = _drift_requests(candidates, ["Q1", "Q2", "Q3", "Q4"])
+    graph_loom = _drift_requests(
+        candidates,
+        ["Q3", "Q4", "Q1", "Q9"],
+        action_followups={"Q3": ["C1"]},
+    )
+
+    report = compare_drift_behavior(
+        graph_rag,
+        graph_loom,
+        query="root",
+        drift_k_followups=2,
+        n_depth=3,
+    )
+
+    assert report["compatible"] is False
+    assert report["classification"] == "illegal selected action"
+    assert any(error["code"] == "illegal selected action" for error in report["errors"])
+
+
+def test_should_reject_action_contract_mismatch_after_valid_drift_branch() -> None:
+    candidates = ["Q1", "Q2", "Q3", "Q4"]
+    graph_rag = _drift_requests(candidates, ["Q1", "Q2", "Q3", "Q4"])
+    graph_loom = _drift_requests(
+        candidates,
+        ["Q3", "Q4", "Q1", "Q2", "C1", "C2"],
+        action_followups={"Q3": ["C1", "C2"]},
+        action_top_p_overrides={4: 0.5},
+    )
+
+    report = compare_drift_behavior(
+        graph_rag,
+        graph_loom,
+        query="root",
+        drift_k_followups=2,
+        n_depth=3,
+    )
+
+    assert report["compatible"] is False
+    assert report["classification"] == "request contract mismatch"
+    assert any(
+        error["code"] == "request contract mismatch" for error in report["errors"]
+    )
+
+
+def test_should_reject_layer_count_difference_before_random_branch() -> None:
+    candidates = ["Q1", "Q2", "Q3", "Q4"]
+    graph_rag = _drift_requests(candidates, ["Q1", "Q2", "Q3", "Q4"])
+    graph_loom = _drift_requests(candidates, ["Q1", "Q2"])
+
+    report = compare_drift_behavior(
+        graph_rag,
+        graph_loom,
+        query="root",
+        drift_k_followups=2,
+        n_depth=3,
+    )
+
+    assert report["compatible"] is False
+    assert report["classification"] == "depth mismatch"
+    assert report["firstDivergenceDepth"] is None
 
 
 def test_should_strictly_match_drift_when_scripted_trajectory_is_equal() -> None:

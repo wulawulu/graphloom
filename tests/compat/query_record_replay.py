@@ -243,6 +243,7 @@ def compare_drift_behavior(
         graph_rag_trace["operations"]["action"],
         graph_loom_trace["operations"]["action"],
         compare_messages=False,
+        compare_counts=False,
     )
     _compare_drift_stage_requests(
         errors,
@@ -278,30 +279,22 @@ def compare_drift_behavior(
             )
         )
 
-    selection_differs = False
+    first_divergence_depth: int | None = None
     paths_aligned = True
     graph_rag_layers = graph_rag_trace["layers"]
     graph_loom_layers = graph_loom_trace["layers"]
-    if len(graph_rag_layers) != len(graph_loom_layers):
-        errors.append(
-            _drift_error(
-                "depth mismatch",
-                (
-                    "DRIFT executed layer counts differ: "
-                    f"GraphRAG={len(graph_rag_layers)}, "
-                    f"GraphLoom={len(graph_loom_layers)}"
-                ),
-            )
-        )
     for graph_rag_layer, graph_loom_layer in zip(
         graph_rag_layers,
         graph_loom_layers,
         strict=False,
     ):
         depth = graph_rag_layer["depth"]
-        if paths_aligned and Counter(graph_rag_layer["candidates"]) != Counter(
+        if not paths_aligned:
+            continue
+        candidates_equal = Counter(graph_rag_layer["candidates"]) == Counter(
             graph_loom_layer["candidates"]
-        ):
+        )
+        if not candidates_equal:
             errors.append(
                 _drift_error(
                     "candidate set mismatch",
@@ -309,18 +302,40 @@ def compare_drift_behavior(
                     depth=depth,
                 )
             )
+            paths_aligned = False
+            continue
         if Counter(graph_rag_layer["selected"]) != Counter(
             graph_loom_layer["selected"]
         ):
-            selection_differs = True
+            if _drift_layer_selection_is_valid(
+                graph_rag_layer
+            ) and _drift_layer_selection_is_valid(graph_loom_layer):
+                first_divergence_depth = depth
             paths_aligned = False
 
+    if first_divergence_depth is None and len(graph_rag_layers) != len(
+        graph_loom_layers
+    ):
+        errors.append(
+            _drift_error(
+                "depth mismatch",
+                (
+                    "DRIFT executed layer counts differ before any valid random "
+                    f"branch divergence: GraphRAG={len(graph_rag_layers)}, "
+                    f"GraphLoom={len(graph_loom_layers)}"
+                ),
+            )
+        )
+
     compatible = not errors
-    if compatible and selection_differs:
+    expected_nondeterminism = compatible and first_divergence_depth is not None
+    if expected_nondeterminism:
         classification = "expected nondeterminism"
         message = (
             "DRIFT follow-up selection differs due to expected nondeterminism. "
-            "Candidate sets, selection count, and selection validity are compatible."
+            "Candidate sets were compatible before the first valid random branch "
+            "divergence. Both sides independently satisfy candidate, selection-count, "
+            "request-contract, embedding-input, and depth constraints."
         )
     elif compatible:
         classification = "strict match"
@@ -335,7 +350,8 @@ def compare_drift_behavior(
         "compatible": compatible,
         "classification": classification,
         "message": message,
-        "expectedNondeterminism": compatible and selection_differs,
+        "expectedNondeterminism": expected_nondeterminism,
+        "firstDivergenceDepth": first_divergence_depth,
         "driftKFollowups": drift_k_followups,
         "nDepth": n_depth,
         "graphRag": _public_drift_trace(graph_rag_trace),
@@ -429,13 +445,24 @@ def _build_drift_trace(
         }
         layers.append(layer)
         if len(layer_requests) != expected_count:
+            code = (
+                "depth mismatch"
+                if not layer_requests and action_cursor == len(actions)
+                else "selection count mismatch"
+            )
+            detail = (
+                f"{side} ended before depth {depth} while "
+                f"{len(incomplete)} incomplete actions remained"
+                if code == "depth mismatch"
+                else (
+                    f"{side} selected {len(layer_requests)} actions at depth {depth}; "
+                    f"expected {expected_count}"
+                )
+            )
             errors.append(
                 _drift_error(
-                    "selection count mismatch",
-                    (
-                        f"{side} selected {len(layer_requests)} actions at depth {depth}; "
-                        f"expected {expected_count}"
-                    ),
+                    code,
+                    detail,
                     side=side,
                     depth=depth,
                 )
@@ -542,6 +569,7 @@ def _compare_drift_stage_requests(
     graphloom: list[ObservedRequest],
     *,
     compare_messages: bool,
+    compare_counts: bool = True,
 ) -> None:
     if compare_messages:
         graph_rag_contracts = Counter(
@@ -573,7 +601,11 @@ def _compare_drift_stage_requests(
             json.dumps(_drift_request_contract(request), sort_keys=True)
             for request in graphloom
         )
-    if graph_rag_contracts != graph_loom_contracts:
+    if compare_counts:
+        contracts_equal = graph_rag_contracts == graph_loom_contracts
+    else:
+        contracts_equal = set(graph_rag_contracts) == set(graph_loom_contracts)
+    if not contracts_equal:
         errors.append(
             _drift_error(
                 "request contract mismatch",
@@ -741,6 +773,15 @@ def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _drift_layer_selection_is_valid(layer: dict[str, Any]) -> bool:
+    selected = layer["selected"]
+    return (
+        len(selected) == layer["expectedSelectionCount"]
+        and len(selected) == len(set(selected))
+        and all(query in layer["candidates"] for query in selected)
+    )
+
+
 def _drift_error(
     code: str,
     message: str,
@@ -760,6 +801,8 @@ def _public_drift_trace(trace: dict[str, Any]) -> dict[str, Any]:
     return {
         "primer": trace["primer"],
         "layers": trace["layers"],
+        "layerCount": len(trace["layers"]),
+        "actionRequestCount": len(trace["operations"]["action"]),
     }
 
 

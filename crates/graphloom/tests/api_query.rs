@@ -1664,7 +1664,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
             .iter()
             .map(|body| body["stream"].as_bool().expect("reduce stream flag"))
             .collect::<Vec<_>>(),
-        [true, true, true]
+        [false, false, true]
     );
     assert!(reduce.iter().all(|body| {
         body["messages"][0]["content"]
