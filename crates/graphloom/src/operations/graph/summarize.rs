@@ -117,7 +117,32 @@ pub(crate) async fn summarize_entities(
         summarized.push(result);
     }
     summarized.sort_by_key(|(index, _)| *index);
-    Ok(summarized.into_iter().map(|(_, row)| row).collect())
+    let summaries = summarized
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+    Ok(join_entity_summaries_by_title(rows, &summaries))
+}
+
+fn join_entity_summaries_by_title(
+    entities: &[EntityRow],
+    summaries: &[SummarizedEntityRow],
+) -> Vec<SummarizedEntityRow> {
+    let mut joined = Vec::new();
+    for entity in entities {
+        for summary in summaries {
+            if entity.title == summary.title {
+                joined.push(SummarizedEntityRow {
+                    title: entity.title.clone(),
+                    entity_type: entity.entity_type.clone(),
+                    description: summary.description.clone(),
+                    text_unit_ids: entity.text_unit_ids.clone(),
+                    frequency: entity.frequency,
+                });
+            }
+        }
+    }
+    joined
 }
 
 pub(crate) async fn summarize_relationships(
@@ -344,6 +369,85 @@ mod tests {
         assert_eq!(summarized[0].title, "B");
         assert_eq!(summarized[1].title, "A");
         assert_eq!(progress.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_should_reproduce_title_only_many_to_many_entity_summary_join() {
+        let entities = vec![
+            EntityRow {
+                title: "SAME".to_owned(),
+                entity_type: "person".to_owned(),
+                description: vec!["person description".to_owned()],
+                text_unit_ids: vec!["tu-person".to_owned()],
+                frequency: 2,
+            },
+            EntityRow {
+                title: "SAME".to_owned(),
+                entity_type: "organization".to_owned(),
+                description: vec!["organization description".to_owned()],
+                text_unit_ids: vec!["tu-organization".to_owned()],
+                frequency: 3,
+            },
+        ];
+        let summaries = vec![
+            SummarizedEntityRow {
+                title: "SAME".to_owned(),
+                entity_type: "person".to_owned(),
+                description: "person summary".to_owned(),
+                text_unit_ids: vec!["ignored-person".to_owned()],
+                frequency: 20,
+            },
+            SummarizedEntityRow {
+                title: "SAME".to_owned(),
+                entity_type: "organization".to_owned(),
+                description: "organization summary".to_owned(),
+                text_unit_ids: vec!["ignored-organization".to_owned()],
+                frequency: 30,
+            },
+        ];
+
+        let joined = join_entity_summaries_by_title(&entities, &summaries);
+
+        assert_eq!(joined.len(), 4);
+        assert_eq!(
+            joined
+                .iter()
+                .map(|row| (
+                    row.entity_type.as_str(),
+                    row.description.as_str(),
+                    row.text_unit_ids.clone(),
+                    row.frequency,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("person", "person summary", vec!["tu-person".to_owned()], 2,),
+                (
+                    "person",
+                    "organization summary",
+                    vec!["tu-person".to_owned()],
+                    2,
+                ),
+                (
+                    "organization",
+                    "person summary",
+                    vec!["tu-organization".to_owned()],
+                    3,
+                ),
+                (
+                    "organization",
+                    "organization summary",
+                    vec!["tu-organization".to_owned()],
+                    3,
+                ),
+            ]
+        );
+
+        let finalized = super::super::finalize_graph(&joined, &[]).expect("finalize entities");
+        assert_eq!(finalized.entities.len(), 1);
+        assert_eq!(finalized.entities[0].entity_type, "person");
+        assert_eq!(finalized.entities[0].description, "person summary");
+        assert_eq!(finalized.entities[0].text_unit_ids, vec!["tu-person"]);
+        assert_eq!(finalized.entities[0].frequency, 2);
     }
 
     #[test]
