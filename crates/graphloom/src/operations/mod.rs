@@ -6,3 +6,4 @@ pub(crate) mod covariates;
 pub(crate) mod embeddings;
 pub(crate) mod graph;
 pub(crate) mod text_units;
+pub(crate) mod update;

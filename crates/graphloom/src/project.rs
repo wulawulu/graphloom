@@ -34,6 +34,8 @@ pub struct ProjectPaths {
     pub input_dir: PathBuf,
     /// Output directory.
     pub output_dir: PathBuf,
+    /// Incremental update directory.
+    pub update_output_dir: PathBuf,
     /// Cache directory.
     pub cache_dir: PathBuf,
     /// Reporting directory.
@@ -52,6 +54,7 @@ impl ProjectPaths {
         let root = absolute_normalized(root)?;
         let input_dir = resolve_path(&root, &config.input_storage.base_dir);
         let output_dir = resolve_path(&root, &config.output_storage.base_dir);
+        let update_output_dir = resolve_path(&root, &config.update_output_storage.base_dir);
         let cache_dir = resolve_path(&root, &config.cache.storage.base_dir);
         let reporting_dir = resolve_path(&root, &config.reporting.base_dir);
         let vector_db_uri = resolve_path(&root, &config.vector_store.db_uri);
@@ -59,6 +62,7 @@ impl ProjectPaths {
             root,
             input_dir,
             output_dir,
+            update_output_dir,
             cache_dir,
             reporting_dir,
             vector_db_uri,
@@ -74,6 +78,62 @@ impl ProjectPaths {
     /// Returns an error if output overlaps the project, input, cache, or logs.
     pub fn validate_output_path_safety(&self) -> Result<()> {
         self.validate_output_path_safety_with_home(user_home_dir().as_deref())
+    }
+
+    /// Validate that update snapshots cannot overlap protected project paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when update storage is unsafe or overlaps any managed path.
+    pub fn validate_update_output_path_safety(&self) -> Result<()> {
+        self.validate_update_output_path_safety_with_home(user_home_dir().as_deref())
+    }
+
+    fn validate_update_output_path_safety_with_home(&self, home: Option<&Path>) -> Result<()> {
+        let update = resolve_path_rejecting_links(&self.update_output_dir)?;
+        let root = resolve_path_following_links(&self.root)?;
+        let input = resolve_path_following_links(&self.input_dir)?;
+        let output = resolve_path_rejecting_links(&self.output_dir)?;
+        let cache = resolve_path_following_links(&self.cache_dir)?;
+        let reporting = resolve_path_following_links(&self.reporting_dir)?;
+        let vector = resolve_path_rejecting_links(&self.vector_db_uri)?;
+
+        if update.resolved == root.resolved || root.resolved.starts_with(&update.resolved) {
+            return unsafe_update(
+                &self.update_output_dir,
+                "update output must not be project root or an ancestor of project root",
+            );
+        }
+        for (path, label) in [
+            (&input.resolved, "input"),
+            (&output.resolved, "output"),
+            (&cache.resolved, "cache"),
+            (&reporting.resolved, "logs"),
+            (&vector.resolved, "vector DB"),
+        ] {
+            if paths_overlap(&update.resolved, path)? {
+                return unsafe_update(
+                    &self.update_output_dir,
+                    &format!("update output must not overlap {label} directory"),
+                );
+            }
+        }
+        if is_filesystem_root(&update.resolved) {
+            return unsafe_update(
+                &self.update_output_dir,
+                "update output must not be filesystem root",
+            );
+        }
+        if let Some(home) = home {
+            let home = resolve_path_following_links(home)?;
+            if update.resolved == home.resolved || home.resolved.starts_with(&update.resolved) {
+                return unsafe_update(
+                    &self.update_output_dir,
+                    "update output must not be home directory or an ancestor of home directory",
+                );
+            }
+        }
+        Ok(())
     }
 
     fn validate_output_path_safety_with_home(&self, home: Option<&Path>) -> Result<()> {
@@ -200,6 +260,13 @@ impl LoadedProject {
 
 fn unsafe_output<T>(path: &Path, message: &str) -> Result<T> {
     Err(GraphLoomError::UnsafeOutputPath {
+        path: path.to_path_buf(),
+        message: message.to_owned(),
+    })
+}
+
+fn unsafe_update<T>(path: &Path, message: &str) -> Result<T> {
+    Err(GraphLoomError::UnsafeUpdatePath {
         path: path.to_path_buf(),
         message: message.to_owned(),
     })
@@ -334,6 +401,54 @@ mod tests {
 
         ProjectPaths::resolve(tempdir.path(), &config)
             .expect("separate sibling project directories should be allowed");
+    }
+
+    #[test]
+    fn test_should_reject_update_output_overlapping_final_output() {
+        let tempdir = CanonicalTempDir::new();
+        let mut config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+        config.update_output_storage.base_dir = "output/update".to_owned();
+
+        let paths = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect("standard path resolution should ignore update-only safety");
+        let error = paths
+            .validate_update_output_path_safety()
+            .expect_err("update output inside final output must fail");
+
+        assert!(matches!(error, GraphLoomError::UnsafeUpdatePath { .. }));
+        assert!(error.to_string().contains("overlap output"));
+    }
+
+    #[test]
+    fn test_should_reject_update_output_overlapping_input() {
+        let tempdir = CanonicalTempDir::new();
+        let mut config = config_with_paths("input", "output", "cache", "logs", "output/lancedb");
+        config.update_output_storage.base_dir = "input/update".to_owned();
+
+        let paths = ProjectPaths::resolve(tempdir.path(), &config)
+            .expect("standard path resolution should ignore update-only safety");
+        let error = paths
+            .validate_update_output_path_safety()
+            .expect_err("update output inside input must fail");
+
+        assert!(error.to_string().contains("overlap input"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_reject_symlinked_update_output() {
+        let tempdir = CanonicalTempDir::new();
+        let external = CanonicalTempDir::new();
+        std::os::unix::fs::symlink(external.path(), tempdir.path().join("update_output"))
+            .expect("update symlink");
+
+        let paths = ProjectPaths::resolve(tempdir.path(), &GraphRagConfig::default())
+            .expect("standard path resolution should ignore update-only safety");
+        let error = paths
+            .validate_update_output_path_safety()
+            .expect_err("update output symlink must fail");
+
+        assert!(error.to_string().contains("symlink"));
     }
 
     #[tokio::test]
@@ -581,6 +696,7 @@ mod tests {
         ProjectPaths {
             input_dir: resolve_path(&root, &config.input_storage.base_dir),
             output_dir: resolve_path(&root, &config.output_storage.base_dir),
+            update_output_dir: resolve_path(&root, &config.update_output_storage.base_dir),
             cache_dir: resolve_path(&root, &config.cache.storage.base_dir),
             reporting_dir: resolve_path(&root, &config.reporting.base_dir),
             vector_db_uri: resolve_path(&root, &config.vector_store.db_uri),

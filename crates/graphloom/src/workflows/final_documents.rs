@@ -8,7 +8,7 @@ use polars_core::prelude::DataFrame;
 use super::input_documents::{DocumentRow, documents_dataframe};
 use crate::{
     GraphRagConfig, IndexPipelineContext, IndexWorkflow, IndexWorkflowOutput, Result,
-    dataframe::{optional_string_at, row_to_static, string_value, usize_to_i64},
+    dataframe::{i64_column_value, optional_string_at, row_to_static, string_value},
 };
 
 /// `IndexWorkflow` name.
@@ -52,10 +52,11 @@ impl IndexWorkflow for CreateFinalDocumentsWorkflow {
             )?;
             let document = DocumentRow {
                 id: document_id.clone(),
-                human_readable_id: usize_to_i64(
+                human_readable_id: i64_column_value(
+                    &documents,
                     row_index,
-                    CREATE_FINAL_DOCUMENTS_WORKFLOW,
                     "human_readable_id",
+                    CREATE_FINAL_DOCUMENTS_WORKFLOW,
                 )?,
                 title: optional_string_at(&row, 2),
                 text: string_value(

@@ -1,6 +1,6 @@
 //! Runtime context for `GraphRAG` indexing workflows.
 
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use graphloom_cache::Cache;
 use graphloom_input::InputReader;
@@ -17,6 +17,7 @@ use crate::{IndexRunStats, IndexRuntimeServices, IndexWorkflowCallbacks, ModelRe
 #[non_exhaustive]
 pub struct IndexPipelineContext {
     services: IndexRuntimeServices,
+    update: Option<UpdateRuntimeState>,
     /// Current run statistics.
     pub stats: IndexRunStats,
     /// `IndexWorkflow` callbacks.
@@ -32,9 +33,33 @@ impl IndexPipelineContext {
     ) -> Self {
         Self {
             services,
+            update: None,
             stats: IndexRunStats::default(),
             callbacks,
         }
+    }
+
+    pub(crate) fn with_update_state(mut self, update: UpdateRuntimeState) -> Self {
+        self.update = Some(update);
+        self
+    }
+
+    pub(crate) fn update_state(
+        &self,
+        workflow: &'static str,
+    ) -> crate::Result<&UpdateRuntimeState> {
+        self.update
+            .as_ref()
+            .ok_or(crate::GraphLoomError::MissingUpdateContext { workflow })
+    }
+
+    pub(crate) fn update_state_mut(
+        &mut self,
+        workflow: &'static str,
+    ) -> crate::Result<&mut UpdateRuntimeState> {
+        self.update
+            .as_mut()
+            .ok_or(crate::GraphLoomError::MissingUpdateContext { workflow })
     }
 
     /// Return the prepared input reader.
@@ -53,6 +78,13 @@ impl IndexPipelineContext {
     #[must_use]
     pub fn output_table_provider(&self) -> &dyn TableProvider {
         self.services.output_table_provider.as_ref()
+    }
+
+    pub(crate) fn replace_output_table_provider(
+        &mut self,
+        provider: Arc<dyn TableProvider>,
+    ) -> Arc<dyn TableProvider> {
+        std::mem::replace(&mut self.services.output_table_provider, provider)
     }
 
     /// Return the cache provider when caching is enabled.
@@ -85,6 +117,24 @@ impl IndexPipelineContext {
     #[must_use]
     pub fn prompt_root(&self) -> std::path::PathBuf {
         self.project_root().to_path_buf()
+    }
+}
+
+/// Typed provider and mapping state for one incremental-update run.
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateRuntimeState {
+    pub(crate) timestamp: String,
+    pub(crate) previous_table_provider: Arc<dyn TableProvider>,
+    pub(crate) delta_table_provider: Arc<dyn TableProvider>,
+    pub(crate) final_table_provider: Arc<dyn TableProvider>,
+    pub(crate) entity_id_mapping: Option<BTreeMap<String, String>>,
+    pub(crate) community_id_mapping: Option<BTreeMap<i64, i64>>,
+}
+
+impl UpdateRuntimeState {
+    pub(crate) fn clear_temporary_state(&mut self) {
+        self.entity_id_mapping = None;
+        self.community_id_mapping = None;
     }
 }
 

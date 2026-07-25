@@ -212,6 +212,51 @@ pub enum GraphLoomError {
         message: String,
     },
 
+    /// Unsafe incremental-update storage path.
+    #[error("unsafe update output path {path}: {message}")]
+    UnsafeUpdatePath {
+        /// Update output path.
+        path: PathBuf,
+        /// Reason.
+        message: String,
+    },
+
+    /// An update-only workflow was invoked without update runtime state.
+    #[error("update runtime context is unavailable for workflow `{workflow}`")]
+    MissingUpdateContext {
+        /// Workflow requesting update state.
+        workflow: &'static str,
+    },
+
+    /// A required update identifier mapping is unavailable.
+    #[error("update {mapping} ID mapping is unavailable for workflow `{workflow}`")]
+    MissingUpdateIdMapping {
+        /// Entity or community.
+        mapping: &'static str,
+        /// Workflow requesting the mapping.
+        workflow: &'static str,
+    },
+
+    /// Incremental-update provider preparation or table copying failed.
+    #[error("update {operation} failed for {target}: {source}")]
+    UpdateProvider {
+        /// Provider operation.
+        operation: &'static str,
+        /// Table name, namespace, or path.
+        target: String,
+        /// Underlying failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Final vector refresh failed during an incremental update.
+    #[error("incremental vector update failed: {source}")]
+    UpdateVector {
+        /// Underlying embedding or vector error.
+        #[source]
+        source: Box<GraphLoomError>,
+    },
+
     /// Prompt template loading failed.
     #[error("failed to load {kind} prompt template {name} from {path}: {source}")]
     PromptLoad {

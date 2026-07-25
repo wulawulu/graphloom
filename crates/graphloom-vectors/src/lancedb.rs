@@ -1,6 +1,6 @@
 //! `LanceDB` vector store provider.
 
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, Int64Array, RecordBatch,
@@ -106,6 +106,26 @@ impl VectorStore for LanceDbVectorStore {
             self.connection.drop_table(&schema.index_name, &[]).await?;
         }
         self.create_indexed_table(schema).await?;
+        Ok(())
+    }
+
+    async fn append_documents(
+        &self,
+        schema: &VectorIndexSchema,
+        documents: &[VectorDocument],
+    ) -> Result<()> {
+        schema.validate()?;
+        if documents.is_empty() {
+            return Ok(());
+        }
+        validate_documents(schema, documents)?;
+        self.ensure_index(schema).await?;
+        let table = self.open_table(schema).await?;
+        table
+            .add(documents_reader(schema, documents)?)
+            .execute()
+            .await?;
+        ensure_vector_index(&table, schema).await?;
         Ok(())
     }
 
@@ -591,18 +611,11 @@ fn validate_table_schema(schema: &VectorIndexSchema, table_schema: &Schema) -> R
 }
 
 fn validate_documents(schema: &VectorIndexSchema, documents: &[VectorDocument]) -> Result<()> {
-    let mut ids = BTreeSet::new();
     for document in documents {
         if document.id.is_empty() {
             return Err(VectorError::InvalidDocument {
                 index_name: schema.index_name.clone(),
                 message: "document id must not be empty".to_owned(),
-            });
-        }
-        if !ids.insert(document.id.as_str()) {
-            return Err(VectorError::InvalidDocument {
-                index_name: schema.index_name.clone(),
-                message: format!("duplicate document id {} in one upsert", document.id),
             });
         }
         if document.vector.len() != schema.vector_size {
@@ -854,6 +867,78 @@ mod tests {
                 .expect("document")
                 .vector,
             vec![0.0, 1.0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_append_duplicate_ids_in_one_batch() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let index_schema = schema("duplicate_reports", 2);
+        let store = connect_store(&tempdir).await;
+        store.reset_index(&index_schema).await.expect("reset index");
+
+        store
+            .append_documents(
+                &index_schema,
+                &[
+                    VectorDocument {
+                        id: "same-content".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "same-content".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                ],
+            )
+            .await
+            .expect("append duplicate source rows");
+
+        assert_eq!(store.count(&index_schema).await.expect("count"), 2);
+        assert_eq!(
+            store.ids(&index_schema).await.expect("ids"),
+            vec!["same-content", "same-content"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_append_duplicate_ids_across_batches() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let index_schema = schema("duplicate_batches", 2);
+        let store = connect_store(&tempdir).await;
+        store.reset_index(&index_schema).await.expect("reset index");
+
+        store
+            .append_documents(
+                &index_schema,
+                &[
+                    VectorDocument {
+                        id: "duplicate".to_owned(),
+                        vector: vec![1.0, 0.0],
+                    },
+                    VectorDocument {
+                        id: "other".to_owned(),
+                        vector: vec![0.0, 1.0],
+                    },
+                ],
+            )
+            .await
+            .expect("first append");
+        store
+            .append_documents(
+                &index_schema,
+                &[VectorDocument {
+                    id: "duplicate".to_owned(),
+                    vector: vec![0.5, 0.5],
+                }],
+            )
+            .await
+            .expect("second append");
+
+        assert_eq!(store.count(&index_schema).await.expect("count"), 3);
+        assert_eq!(
+            store.ids(&index_schema).await.expect("ids"),
+            vec!["duplicate", "duplicate", "other"]
         );
     }
 

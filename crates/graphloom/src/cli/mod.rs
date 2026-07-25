@@ -6,12 +6,16 @@ pub mod error;
 pub mod index;
 pub mod init;
 pub mod query;
+pub mod update;
 
-pub use args::{Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, QueryArgs};
+pub use args::{
+    Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, QueryArgs, UpdateArgs,
+};
 pub use error::{CliError, Result};
 pub use index::run as run_index;
 pub use init::init_project;
 pub use query::run as run_query;
+pub use update::run as run_update;
 
 /// Run a parsed CLI command.
 ///
@@ -23,6 +27,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Init(args) => init_project(&args).await,
         Command::Index(args) => {
             run_index(&args).await?;
+            Ok(())
+        }
+        Command::Update(args) => {
+            run_update(&args).await?;
             Ok(())
         }
         Command::Query(args) => run_query(&args).await,

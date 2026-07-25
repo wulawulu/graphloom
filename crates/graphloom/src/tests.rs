@@ -64,6 +64,8 @@ fn test_should_deserialize_chunking_encoding_model_and_keep_future_sections() {
     assert_eq!(config.input_storage.base_dir, "input");
     assert_eq!(config.output_storage.storage_type, "file");
     assert_eq!(config.output_storage.base_dir, "output");
+    assert_eq!(config.update_output_storage.storage_type, "file");
+    assert_eq!(config.update_output_storage.base_dir, "update_output");
     assert_eq!(config.reporting.reporting_type, "file");
     assert_eq!(config.reporting.base_dir, "logs");
     assert_eq!(config.cache.cache_type, "json");
@@ -130,6 +132,9 @@ input_storage:
 output_storage:
   type: file
   base_dir: output_data
+update_output_storage:
+  type: file
+  base_dir: updates
 reporting:
   type: file
   base_dir: log_data
@@ -147,6 +152,7 @@ local_search:
     assert_eq!(config.input.input_type, "file");
     assert_eq!(config.input_storage.base_dir, "input_data");
     assert_eq!(config.output_storage.base_dir, "output_data");
+    assert_eq!(config.update_output_storage.base_dir, "updates");
     assert_eq!(config.reporting.base_dir, "log_data");
     assert_eq!(config.cache.cache_type, "none");
     assert_eq!(config.cache.storage.base_dir, "cache_data");
@@ -155,6 +161,25 @@ local_search:
         Some("prompts/custom_query.txt")
     );
     assert!(!config.sections.contains_key("local_search"));
+}
+
+#[test]
+fn test_should_deserialize_update_storage_in_camel_case() {
+    let config = serde_json::from_value::<GraphRagConfig>(json!({
+        "updateOutputStorage": {
+            "type": "file",
+            "baseDir": "custom_updates"
+        }
+    }))
+    .expect("camel-case update storage should deserialize");
+
+    assert_eq!(config.update_output_storage.storage_type, "file");
+    assert_eq!(config.update_output_storage.base_dir, "custom_updates");
+    let serialized = serde_json::to_value(&config).expect("config serialization");
+    assert_eq!(
+        serialized["updateOutputStorage"]["baseDir"],
+        "custom_updates"
+    );
 }
 
 #[test]
@@ -656,6 +681,46 @@ fn test_should_default_workflow_order_to_step9() {
     );
 }
 
+#[test]
+fn test_should_default_update_workflow_order_to_graphrag_standard_update() {
+    assert_eq!(
+        GraphRagConfig::default().update_workflow_order(),
+        vec![
+            "load_update_documents",
+            "create_base_text_units",
+            "create_final_documents",
+            "extract_graph",
+            "finalize_graph",
+            "extract_covariates",
+            "create_communities",
+            "create_final_text_units",
+            "create_community_reports",
+            "generate_text_embeddings",
+            "update_final_documents",
+            "update_entities_relationships",
+            "update_text_units",
+            "update_covariates",
+            "update_communities",
+            "update_community_reports",
+            "update_text_embeddings",
+            "update_clean_state",
+        ]
+    );
+}
+
+#[test]
+fn test_should_use_custom_workflows_exactly_for_update() {
+    let config = GraphRagConfig {
+        workflows: vec!["create_base_text_units".to_owned()],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        config.update_workflow_order(),
+        vec!["create_base_text_units"]
+    );
+}
+
 #[tokio::test]
 async fn test_should_run_create_community_reports_workflow() {
     let provider = Arc::new(MemoryTableProvider::new());
@@ -1079,7 +1144,7 @@ async fn test_should_fail_embedding_workflow_when_vector_capability_is_disabled(
     reason = "VectorStoreConfig is non_exhaustive outside graphloom-vectors and must be \
               customized after Default"
 )]
-async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_overwrite() {
+async fn test_should_append_duplicate_source_ids_across_flushes_like_graphrag() {
     let provider = Arc::new(MemoryTableProvider::new());
     provider
         .write_dataframe(
@@ -1126,14 +1191,14 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
     let pipeline = IndexPipelineFactory::new(registry)
         .standard(&config)
         .expect("step9 pipeline should build");
-    let error = pipeline
+    pipeline
         .run(&config, &mut context)
         .await
-        .expect_err("duplicate id should fail");
-
-    assert!(error.to_string().contains("text_unit_text"));
-    assert!(error.to_string().contains("duplicate"));
-    assert_eq!(model.inputs(), vec!["first".to_owned()]);
+        .expect("duplicate ids should be appended to the vector store");
+    assert_eq!(
+        model.inputs(),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
 
     let store = LanceDbVectorStore::connect(&config.vector_store)
         .await
@@ -1141,22 +1206,20 @@ async fn test_should_fail_step9_on_duplicate_source_id_across_flushes_without_ov
     let schema = config
         .vector_store
         .schema_for(crate::TEXT_UNIT_TEXT_EMBEDDING);
-    let document = store
-        .get_by_id(&schema, "duplicate")
-        .await
-        .expect("get duplicate")
-        .expect("first flush should remain committed");
-    assert_eq!(document.vector, vec![1.0, 0.0]);
+    assert_eq!(store.count(&schema).await.expect("vector count"), 2);
+    assert_eq!(
+        store.ids(&schema).await.expect("vector ids"),
+        vec!["duplicate", "duplicate"]
+    );
 
     let snapshots = provider
         .child(Some("embeddings"))
         .expect("snapshot namespace should open");
-    assert!(
-        !snapshots
-            .has(crate::TEXT_UNIT_TEXT_EMBEDDING)
-            .await
-            .expect("snapshot has should work")
-    );
+    let snapshot = snapshots
+        .read_dataframe(crate::TEXT_UNIT_TEXT_EMBEDDING)
+        .await
+        .expect("snapshot should retain both generated rows");
+    assert_eq!(snapshot.height(), 2);
 }
 
 #[tokio::test]

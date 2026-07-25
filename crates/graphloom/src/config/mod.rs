@@ -29,6 +29,7 @@ const DEFAULT_FILE_STORAGE_TYPE: &str = "file";
 const DEFAULT_JSON_CACHE_TYPE: &str = "json";
 const DEFAULT_INPUT_BASE_DIR: &str = "input";
 const DEFAULT_OUTPUT_BASE_DIR: &str = "output";
+const DEFAULT_UPDATE_OUTPUT_BASE_DIR: &str = "update_output";
 const DEFAULT_CACHE_BASE_DIR: &str = "cache";
 const DEFAULT_REPORTING_BASE_DIR: &str = "logs";
 const DEFAULT_MAX_GLEANINGS: usize = 1;
@@ -118,6 +119,10 @@ fn default_output_base_dir() -> String {
     DEFAULT_OUTPUT_BASE_DIR.to_owned()
 }
 
+fn default_update_output_base_dir() -> String {
+    DEFAULT_UPDATE_OUTPUT_BASE_DIR.to_owned()
+}
+
 fn default_cache_base_dir() -> String {
     DEFAULT_CACHE_BASE_DIR.to_owned()
 }
@@ -157,6 +162,13 @@ impl StorageConfig {
         Self {
             storage_type: default_file_storage_type(),
             base_dir: default_output_base_dir(),
+        }
+    }
+
+    fn update_output_default() -> Self {
+        Self {
+            storage_type: default_file_storage_type(),
+            base_dir: default_update_output_base_dir(),
         }
     }
 }
@@ -512,6 +524,12 @@ pub struct GraphRagConfig {
     /// Output storage config.
     #[serde(alias = "output_storage", default = "StorageConfig::output_default")]
     pub output_storage: StorageConfig,
+    /// Incremental-update snapshot and delta storage config.
+    #[serde(
+        alias = "update_output_storage",
+        default = "StorageConfig::update_output_default"
+    )]
+    pub update_output_storage: StorageConfig,
     /// Reporting config.
     pub reporting: ReportingConfig,
     /// Cache config.
@@ -569,6 +587,7 @@ impl Default for GraphRagConfig {
             input: InputConfig::default(),
             input_storage: StorageConfig::default(),
             output_storage: StorageConfig::output_default(),
+            update_output_storage: StorageConfig::update_output_default(),
             reporting: ReportingConfig::default(),
             cache: CacheConfig::default(),
             chunking: ChunkingConfig::default(),
@@ -602,6 +621,26 @@ impl GraphRagConfig {
         } else {
             self.workflows.clone()
         }
+    }
+
+    /// Return the configured workflow order or the standard incremental-update order.
+    #[must_use]
+    pub fn update_workflow_order(&self) -> Vec<String> {
+        if !self.workflows.is_empty() {
+            return self.workflows.clone();
+        }
+        std::iter::once(crate::workflows::LOAD_UPDATE_DOCUMENTS_WORKFLOW)
+            .chain(
+                crate::workflows::STANDARD_WORKFLOWS
+                    .iter()
+                    .copied()
+                    .filter(|workflow| {
+                        *workflow != crate::workflows::LOAD_INPUT_DOCUMENTS_WORKFLOW
+                    }),
+            )
+            .chain(crate::workflows::UPDATE_WORKFLOWS.iter().copied())
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Validate Step 9 configuration.

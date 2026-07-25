@@ -11,6 +11,7 @@ mod final_text_units;
 mod finalize_graph;
 mod generate_text_embeddings;
 pub(crate) mod input_documents;
+mod update;
 
 pub use base_text_units::{CREATE_BASE_TEXT_UNITS_WORKFLOW, CreateBaseTextUnitsWorkflow};
 pub use communities::{CREATE_COMMUNITIES_WORKFLOW, CreateCommunitiesWorkflow};
@@ -24,6 +25,7 @@ pub use generate_text_embeddings::{
     GENERATE_TEXT_EMBEDDINGS_WORKFLOW, GenerateTextEmbeddingsWorkflow,
 };
 pub use input_documents::{LOAD_INPUT_DOCUMENTS_WORKFLOW, LoadInputDocumentsWorkflow};
+pub use update::{LOAD_UPDATE_DOCUMENTS_WORKFLOW, UPDATE_WORKFLOWS, register_update_workflows};
 
 use crate::{IndexWorkflowRegistry, Result};
 

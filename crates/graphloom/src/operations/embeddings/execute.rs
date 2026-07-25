@@ -1,6 +1,6 @@
 //! Embedding execution, batching, and vector reconstitution.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use futures_util::{StreamExt, stream};
 use graphloom_chunking::{ChunkingError, split_text_on_tokens};
@@ -40,7 +40,7 @@ struct ApiBatchResult {
 /// # Errors
 ///
 /// Returns an error on invalid config, tokenizer/model failures, malformed
-/// provider responses, duplicate ids, or invalid vectors.
+/// provider responses, empty ids, or invalid vectors.
 pub(crate) async fn embed_text_rows(
     rows: &[EmbeddingSourceRow],
     config: &EmbeddingOperationConfig,
@@ -48,7 +48,7 @@ pub(crate) async fn embed_text_rows(
     tokenizer: Arc<dyn Tokenizer>,
 ) -> Result<EmbeddingBatchOutput> {
     validate_config(config)?;
-    validate_source_ids(rows, &config.embedding_name)?;
+    validate_source_ids(rows, config)?;
     let mut output = EmbeddingBatchOutput {
         attempted_rows: rows.len(),
         ..EmbeddingBatchOutput::default()
@@ -73,7 +73,7 @@ pub(crate) async fn embed_text_rows(
     .collect::<Result<Vec<_>>>()?;
     results.sort_by_key(|result| result.index);
 
-    let vectors_by_row = collect_row_vectors(rows.len(), &results)?;
+    let vectors_by_row = collect_row_vectors(rows.len(), &results, config.workflow_name)?;
     for (row_index, vectors) in vectors_by_row.into_iter().enumerate() {
         let Some(vector) = reconstitute_vectors(vectors, config, row_index)? else {
             output.skipped_rows = output.skipped_rows.saturating_add(1);
@@ -101,35 +101,39 @@ pub(crate) async fn embed_text_rows(
 
 fn validate_config(config: &EmbeddingOperationConfig) -> Result<()> {
     if config.batch_size == 0 {
-        return Err(invalid_data("batch_size must be greater than zero"));
+        return Err(invalid_data(
+            config.workflow_name,
+            "batch_size must be greater than zero",
+        ));
     }
     if config.batch_max_tokens <= config.chunk_overlap {
-        return Err(invalid_data(format!(
-            "batch_max_tokens {} must be greater than chunk_overlap {}",
-            config.batch_max_tokens, config.chunk_overlap
-        )));
+        return Err(invalid_data(
+            config.workflow_name,
+            format!(
+                "batch_max_tokens {} must be greater than chunk_overlap {}",
+                config.batch_max_tokens, config.chunk_overlap
+            ),
+        ));
     }
     if config.expected_vector_size == 0 {
         return Err(invalid_data(
+            config.workflow_name,
             "expected_vector_size must be greater than zero",
         ));
     }
     Ok(())
 }
 
-fn validate_source_ids(rows: &[EmbeddingSourceRow], embedding_name: &str) -> Result<()> {
-    let mut ids = BTreeSet::new();
+fn validate_source_ids(
+    rows: &[EmbeddingSourceRow],
+    config: &EmbeddingOperationConfig,
+) -> Result<()> {
     for row in rows {
         if row.id.is_empty() {
-            return Err(invalid_data(format!(
-                "{embedding_name} source row id must not be empty"
-            )));
-        }
-        if !ids.insert(row.id.as_str()) {
-            return Err(invalid_data(format!(
-                "{embedding_name} duplicate source id {}",
-                row.id
-            )));
+            return Err(invalid_data(
+                config.workflow_name,
+                format!("{} source row id must not be empty", config.embedding_name),
+            ));
         }
     }
     Ok(())
@@ -268,50 +272,69 @@ fn validate_response(
     response: &EmbeddingResponse,
 ) -> Result<Vec<Vec<f32>>> {
     if response.embeddings().len() != expected_count {
-        return Err(invalid_data(format!(
-            "{} batch {batch_index} expected {expected_count} embeddings, got {}",
-            config.embedding_name,
-            response.embeddings().len()
-        )));
+        return Err(invalid_data(
+            config.workflow_name,
+            format!(
+                "{} batch {batch_index} expected {expected_count} embeddings, got {}",
+                config.embedding_name,
+                response.embeddings().len()
+            ),
+        ));
     }
     let mut response_dimension = None;
     for (index, vector) in response.embeddings().enumerate() {
         if vector.is_empty() {
-            return Err(invalid_data(format!(
-                "{} batch {batch_index} vector {index} is empty",
-                config.embedding_name
-            )));
+            return Err(invalid_data(
+                config.workflow_name,
+                format!(
+                    "{} batch {batch_index} vector {index} is empty",
+                    config.embedding_name
+                ),
+            ));
         }
         if vector.iter().any(|value| !value.is_finite()) {
-            return Err(invalid_data(format!(
-                "{} batch {batch_index} vector {index} contains non-finite value",
-                config.embedding_name
-            )));
+            return Err(invalid_data(
+                config.workflow_name,
+                format!(
+                    "{} batch {batch_index} vector {index} contains non-finite value",
+                    config.embedding_name
+                ),
+            ));
         }
         if vector.iter().any(|value| value.abs() > f64::from(f32::MAX)) {
-            return Err(invalid_data(format!(
-                "{} batch {batch_index} vector {index} contains a value outside the f32 range",
-                config.embedding_name
-            )));
+            return Err(invalid_data(
+                config.workflow_name,
+                format!(
+                    "{} batch {batch_index} vector {index} contains a value outside the f32 range",
+                    config.embedding_name
+                ),
+            ));
         }
         match response_dimension {
             Some(dimension) if dimension != vector.len() => {
-                return Err(invalid_data(format!(
-                    "{} batch {batch_index} inconsistent dimensions: expected {dimension}, got {}",
-                    config.embedding_name,
-                    vector.len()
-                )));
+                return Err(invalid_data(
+                    config.workflow_name,
+                    format!(
+                        "{} batch {batch_index} inconsistent dimensions: expected {dimension}, \
+                         got {}",
+                        config.embedding_name,
+                        vector.len()
+                    ),
+                ));
             }
             None => response_dimension = Some(vector.len()),
             Some(_) => {}
         }
         if vector.len() != config.expected_vector_size {
-            return Err(invalid_data(format!(
-                "{} batch {batch_index} vector {index} expected dimension {}, got {}",
-                config.embedding_name,
-                config.expected_vector_size,
-                vector.len()
-            )));
+            return Err(invalid_data(
+                config.workflow_name,
+                format!(
+                    "{} batch {batch_index} vector {index} expected dimension {}, got {}",
+                    config.embedding_name,
+                    config.expected_vector_size,
+                    vector.len()
+                ),
+            ));
         }
     }
     #[allow(
@@ -325,23 +348,33 @@ fn validate_response(
     Ok(embeddings)
 }
 
-fn collect_row_vectors(row_count: usize, results: &[ApiBatchResult]) -> Result<Vec<Vec<Vec<f32>>>> {
+fn collect_row_vectors(
+    row_count: usize,
+    results: &[ApiBatchResult],
+    workflow_name: &'static str,
+) -> Result<Vec<Vec<Vec<f32>>>> {
     let mut vectors = vec![Vec::new(); row_count];
     for result in results {
         if result.row_indices.len() != result.embeddings.len() {
-            return Err(invalid_data(format!(
-                "batch {} has {} row indices but {} embeddings",
-                result.index,
-                result.row_indices.len(),
-                result.embeddings.len()
-            )));
+            return Err(invalid_data(
+                workflow_name,
+                format!(
+                    "batch {} has {} row indices but {} embeddings",
+                    result.index,
+                    result.row_indices.len(),
+                    result.embeddings.len()
+                ),
+            ));
         }
         for (row_index, vector) in result.row_indices.iter().zip(&result.embeddings) {
             let Some(row_vectors) = vectors.get_mut(*row_index) else {
-                return Err(invalid_data(format!(
-                    "batch {} produced out-of-range row index {}",
-                    result.index, row_index
-                )));
+                return Err(invalid_data(
+                    workflow_name,
+                    format!(
+                        "batch {} produced out-of-range row index {}",
+                        result.index, row_index
+                    ),
+                ));
             };
             row_vectors.push(vector.clone());
         }
@@ -366,41 +399,54 @@ fn reconstitute_vectors(
             let mut sums = vec![0.0f64; config.expected_vector_size];
             for vector in vectors {
                 if vector.len() != config.expected_vector_size {
-                    return Err(invalid_data(format!(
-                        "{} row {row_index} expected dimension {}, got {} during reconstitution",
-                        config.embedding_name,
-                        config.expected_vector_size,
-                        vector.len()
-                    )));
+                    return Err(invalid_data(
+                        config.workflow_name,
+                        format!(
+                            "{} row {row_index} expected dimension {}, got {} during \
+                             reconstitution",
+                            config.embedding_name,
+                            config.expected_vector_size,
+                            vector.len()
+                        ),
+                    ));
                 }
                 for (sum, value) in sums.iter_mut().zip(vector) {
                     *sum += f64::from(value);
                 }
             }
             let divisor = f64::from(u32::try_from(count).map_err(|_| {
-                invalid_data(format!(
-                    "{} row {row_index} has too many vector fragments",
-                    config.embedding_name,
-                ))
+                invalid_data(
+                    config.workflow_name,
+                    format!(
+                        "{} row {row_index} has too many vector fragments",
+                        config.embedding_name,
+                    ),
+                )
             })?);
             for sum in &mut sums {
                 *sum /= divisor;
             }
             let norm = sums.iter().map(|value| value * value).sum::<f64>().sqrt();
             if !norm.is_finite() || norm <= 0.0 {
-                return Err(invalid_data(format!(
-                    "{} row {row_index} averaged vector has invalid L2 norm {norm}",
-                    config.embedding_name
-                )));
+                return Err(invalid_data(
+                    config.workflow_name,
+                    format!(
+                        "{} row {row_index} averaged vector has invalid L2 norm {norm}",
+                        config.embedding_name
+                    ),
+                ));
             }
             let mut normalized = Vec::with_capacity(sums.len());
             for value in sums {
                 let normalized_value = value / norm;
                 if !normalized_value.is_finite() {
-                    return Err(invalid_data(format!(
-                        "{} row {row_index} normalized vector contains non-finite value",
-                        config.embedding_name
-                    )));
+                    return Err(invalid_data(
+                        config.workflow_name,
+                        format!(
+                            "{} row {row_index} normalized vector contains non-finite value",
+                            config.embedding_name
+                        ),
+                    ));
                 }
                 normalized.push(normalized_value as f32);
             }
@@ -409,9 +455,9 @@ fn reconstitute_vectors(
     }
 }
 
-fn invalid_data(message: impl Into<String>) -> GraphLoomError {
+fn invalid_data(workflow: &'static str, message: impl Into<String>) -> GraphLoomError {
     GraphLoomError::InvalidData {
-        workflow: "generate_text_embeddings",
+        workflow,
         message: message.into(),
     }
 }
@@ -499,6 +545,7 @@ mod tests {
 
     fn operation_config() -> EmbeddingOperationConfig {
         EmbeddingOperationConfig {
+            workflow_name: "generate_text_embeddings",
             batch_size: 2,
             batch_max_tokens: 4,
             concurrency: 2,
@@ -507,6 +554,32 @@ mod tests {
             model_instance_name: "text_embedding".to_owned(),
             embedding_name: "text_unit_text".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_calling_workflow_in_invalid_data_error() {
+        let error = embed_text_rows(
+            &[EmbeddingSourceRow {
+                id: String::new(),
+                text: "invalid".to_owned(),
+            }],
+            &EmbeddingOperationConfig {
+                workflow_name: "update_text_embeddings",
+                ..operation_config()
+            },
+            Arc::new(RecordingEmbeddingModel::new(Vec::new())),
+            Arc::new(CharTokenizer),
+        )
+        .await
+        .expect_err("empty source id should fail");
+
+        assert!(matches!(
+            error,
+            GraphLoomError::InvalidData {
+                workflow: "update_text_embeddings",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -571,64 +644,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_duplicate_source_ids_before_model_use() {
-        for rows in [
-            vec![
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: "first".to_owned(),
-                },
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: "second".to_owned(),
-                },
-            ],
-            vec![
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: "normal".to_owned(),
-                },
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: String::new(),
-                },
-            ],
-            vec![
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: String::new(),
-                },
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: "normal".to_owned(),
-                },
-            ],
-            vec![
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: String::new(),
-                },
-                EmbeddingSourceRow {
-                    id: "duplicate".to_owned(),
-                    text: "   ".to_owned(),
-                },
-            ],
-        ] {
-            let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
+    async fn test_should_preserve_duplicate_source_ids_for_compatible_upsert() {
+        let rows = vec![
+            EmbeddingSourceRow {
+                id: "duplicate".to_owned(),
+                text: "first".to_owned(),
+            },
+            EmbeddingSourceRow {
+                id: "duplicate".to_owned(),
+                text: "second".to_owned(),
+            },
+        ];
+        let model = Arc::new(RecordingEmbeddingModel::new(Vec::new()));
 
-            let error = embed_text_rows(
-                &rows,
-                &operation_config(),
-                model.clone(),
-                Arc::new(CharTokenizer),
-            )
-            .await
-            .expect_err("duplicate id should fail");
+        let output = embed_text_rows(
+            &rows,
+            &operation_config(),
+            model.clone(),
+            Arc::new(CharTokenizer),
+        )
+        .await
+        .expect("duplicate ids should remain observable to vector upsert");
 
-            assert!(error.to_string().contains("text_unit_text"));
-            assert!(error.to_string().contains("duplicate"));
-            assert_eq!(model.calls(), 0);
-        }
+        assert_eq!(model.calls(), 4);
+        assert_eq!(
+            output
+                .documents
+                .iter()
+                .map(|document| document.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["duplicate", "duplicate"]
+        );
     }
 
     #[derive(Debug)]

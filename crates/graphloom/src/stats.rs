@@ -8,6 +8,8 @@ use std::{collections::BTreeMap, time::Duration};
 pub struct IndexRunStats {
     /// Number of documents read.
     pub document_count: usize,
+    /// Number of newly detected documents in an incremental update.
+    pub update_document_count: usize,
     /// Number of text units created.
     pub text_unit_count: usize,
     /// Number of entities created.

@@ -57,6 +57,8 @@ pub enum Command {
     Init(InitArgs),
     /// Run standard indexing.
     Index(IndexArgs),
+    /// Update an existing knowledge graph index.
+    Update(UpdateArgs),
     /// Query a knowledge graph index.
     #[command(about = "Query a knowledge graph index.")]
     Query(QueryArgs),
@@ -347,6 +349,41 @@ pub struct IndexArgs {
 }
 
 impl IndexArgs {
+    /// Return whether cache is enabled for this run.
+    #[must_use]
+    pub fn cache_enabled(&self) -> bool {
+        self.cache && !self.no_cache
+    }
+}
+
+/// `graphloom update` arguments.
+#[derive(Debug, Clone, Parser)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "clap option structs intentionally mirror boolean command-line flags"
+)]
+pub struct UpdateArgs {
+    /// Project root directory.
+    #[arg(short = 'r', long = "root", default_value_os_t = default_root())]
+    pub root: PathBuf,
+    /// Indexing method.
+    #[arg(short = 'm', long = "method", default_value = "standard")]
+    pub method: IndexMethodArg,
+    /// Print more detailed progress.
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
+    /// Use LLM cache for this run.
+    #[arg(long = "cache", default_value_t = true, action = clap::ArgAction::SetTrue, overrides_with = "no_cache")]
+    pub cache: bool,
+    /// Disable LLM cache for this run.
+    #[arg(long = "no-cache", action = clap::ArgAction::SetTrue)]
+    pub no_cache: bool,
+    /// Skip optional external-resource preflight checks.
+    #[arg(long = "skip-validation")]
+    pub skip_validation: bool,
+}
+
+impl UpdateArgs {
     /// Return whether cache is enabled for this run.
     #[must_use]
     pub fn cache_enabled(&self) -> bool {

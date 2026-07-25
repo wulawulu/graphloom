@@ -92,8 +92,8 @@ impl TableProvider for ParquetTableProvider {
             .await?
             .into_iter()
             .filter_map(|key| {
-                key.strip_suffix(".parquet")
-                    .map(std::borrow::ToOwned::to_owned)
+                let table = key.strip_suffix(".parquet")?;
+                (!table.contains('/')).then(|| table.to_owned())
             })
             .collect::<Vec<_>>();
         tables.sort();
@@ -382,6 +382,27 @@ mod tests {
         assert_eq!(
             dataframe.column("embedding").expect("embedding").dtype(),
             &DataType::List(Box::new(DataType::Float32))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_list_only_tables_in_current_namespace() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let provider = ParquetTableProvider::new(tempdir.path()).expect("provider");
+        provider
+            .write_dataframe("documents", one_embedding_dataframe())
+            .await
+            .expect("root table");
+        provider
+            .child(Some("embeddings"))
+            .expect("snapshot provider")
+            .write_dataframe("entity_description", one_embedding_dataframe())
+            .await
+            .expect("snapshot table");
+
+        assert_eq!(
+            provider.list().await.expect("root table list"),
+            vec!["documents"]
         );
     }
 }

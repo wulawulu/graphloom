@@ -106,7 +106,7 @@ async fn run_with_model_factory(
     Ok(result)
 }
 
-async fn init_logging(
+pub(crate) async fn init_logging(
     reporting_dir: &Path,
     verbose: bool,
 ) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {

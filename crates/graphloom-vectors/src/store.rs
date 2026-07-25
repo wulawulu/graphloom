@@ -41,6 +41,17 @@ pub trait VectorStore: Send + Sync + Debug {
     /// Returns an error when the provider cannot reset or recreate the index.
     async fn reset_index(&self, schema: &VectorIndexSchema) -> Result<()>;
 
+    /// Append vector documents to an index without deduplicating by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation or provider write fails.
+    async fn append_documents(
+        &self,
+        schema: &VectorIndexSchema,
+        documents: &[VectorDocument],
+    ) -> Result<()>;
+
     /// Upsert vector documents into an index.
     ///
     /// # Errors

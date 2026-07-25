@@ -489,6 +489,14 @@ mod tests {
             panic!("hydration must be read-only")
         }
 
+        async fn append_documents(
+            &self,
+            _: &VectorIndexSchema,
+            _: &[VectorDocument],
+        ) -> graphloom_vectors::Result<()> {
+            panic!("hydration must be read-only")
+        }
+
         async fn upsert_documents(
             &self,
             _: &VectorIndexSchema,

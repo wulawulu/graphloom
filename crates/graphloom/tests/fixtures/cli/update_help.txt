@@ -1,0 +1,32 @@
+Update an existing knowledge graph index
+
+Usage: graphloom update [OPTIONS]
+
+Options:
+  -r, --root <ROOT>
+          Project root directory
+
+          [default: .]
+
+  -m, --method <METHOD>
+          Indexing method
+
+          Possible values:
+          - standard: Standard full indexing pipeline
+
+          [default: standard]
+
+  -v, --verbose
+          Print more detailed progress
+
+      --cache
+          Use LLM cache for this run
+
+      --no-cache
+          Disable LLM cache for this run
+
+      --skip-validation
+          Skip optional external-resource preflight checks
+
+  -h, --help
+          Print help (see a summary with '-h')

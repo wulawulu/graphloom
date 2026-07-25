@@ -12,6 +12,7 @@ pub(crate) struct EmbeddingSourceRow {
 /// Embedding operation configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmbeddingOperationConfig {
+    pub(crate) workflow_name: &'static str,
     pub(crate) batch_size: usize,
     pub(crate) batch_max_tokens: usize,
     pub(crate) concurrency: usize,

@@ -157,6 +157,23 @@ struct QueryFixture {
     vector_ids: Vec<String>,
 }
 
+#[tokio::test]
+async fn test_should_ignore_update_only_storage_validation_when_loading_query_engine() {
+    for unsupported in [false, true] {
+        let project = TempDir::new().expect("project");
+        let mut config = GraphRagConfig::default();
+        if unsupported {
+            config.update_output_storage.storage_type = "unsupported".to_owned();
+        } else {
+            config.update_output_storage.base_dir = "output/update".to_owned();
+        }
+
+        QueryEngine::load(config, project.path())
+            .await
+            .expect("unused update config must not block query engine loading");
+    }
+}
+
 #[derive(Debug, Default)]
 struct RecordingQueryCallbacks {
     events: Mutex<Vec<String>>,

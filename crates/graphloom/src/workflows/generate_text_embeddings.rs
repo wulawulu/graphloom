@@ -1,9 +1,6 @@
 //! Text embedding generation workflow.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -118,81 +115,101 @@ impl IndexWorkflow for GenerateTextEmbeddingsWorkflow {
         config: &GraphRagConfig,
         context: &mut IndexPipelineContext,
     ) -> Result<IndexWorkflowOutput> {
-        config
-            .validate_embed_text()
-            .map_err(|message| GraphLoomError::InvalidData {
-                workflow: GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                message,
-            })?;
-
-        let model = resolve_embedding_model(
-            context,
-            &config.embed_text.embedding_model_id,
-            &config.embed_text.model_instance_name,
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-        )?;
-        let encoding_model =
-            resolve_embedding_encoding_model(config, &config.embed_text.embedding_model_id);
-        let tokenizer: Arc<dyn graphloom_llm::Tokenizer> =
-            Arc::new(TiktokenTokenizer::new(encoding_model)?);
-        let vector_store = context.vector_store()?;
-        let field_map = embedding_fields();
-        let snapshot_provider = if config.snapshots.embeddings {
-            Some(context.output_table_provider().child(Some("embeddings"))?)
-        } else {
-            None
-        };
-        let dependencies = FieldDependencies {
-            vector_store,
-            model,
-            tokenizer,
-            snapshot_provider,
-        };
-        let mut summaries = Vec::new();
-        let mut input_rows = 0usize;
-        let mut output_rows = 0usize;
-
-        for embedding_name in &config.embed_text.names {
-            let field = field_map.get(embedding_name.as_str()).ok_or_else(|| {
-                GraphLoomError::InvalidData {
-                    workflow: GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                    message: format!("unsupported embedding name {embedding_name}"),
-                }
-            })?;
-            if !context
-                .output_table_provider()
-                .has(field.source_table)
-                .await?
-            {
-                context.callbacks.warning(
-                    GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                    &format!(
-                        "embedding {} source table {} is missing; skipping",
-                        field.name, field.source_table
-                    ),
-                );
-                continue;
-            }
-
-            let schema = config.vector_store.schema_for(field.name);
-            dependencies.vector_store.ensure_index(&schema).await?;
-            let summary = process_field(config, context, field, &schema, &dependencies).await?;
-            input_rows = input_rows.saturating_add(summary.input_rows);
-            output_rows = output_rows.saturating_add(summary.embedded_rows);
-            summaries.push(summary);
-        }
-
-        context.stats.embedding_count = context.stats.embedding_count.saturating_add(output_rows);
-        Ok(IndexWorkflowOutput {
-            result: summaries.iter().map(FieldSummary::value).collect(),
-            stop: false,
-            input_rows,
-            output_rows,
-        })
+        run_text_embeddings(GENERATE_TEXT_EMBEDDINGS_WORKFLOW, config, context).await
     }
 }
 
+pub(crate) async fn run_text_embeddings(
+    workflow_name: &'static str,
+    config: &GraphRagConfig,
+    context: &mut IndexPipelineContext,
+) -> Result<IndexWorkflowOutput> {
+    config
+        .validate_embed_text()
+        .map_err(|message| GraphLoomError::InvalidData {
+            workflow: workflow_name,
+            message,
+        })?;
+
+    let model = resolve_embedding_model(
+        context,
+        &config.embed_text.embedding_model_id,
+        &config.embed_text.model_instance_name,
+        workflow_name,
+    )?;
+    let encoding_model =
+        resolve_embedding_encoding_model(config, &config.embed_text.embedding_model_id);
+    let tokenizer: Arc<dyn graphloom_llm::Tokenizer> =
+        Arc::new(TiktokenTokenizer::new(encoding_model)?);
+    let vector_store = context.vector_store()?;
+    let field_map = embedding_fields();
+    let snapshot_provider = if config.snapshots.embeddings {
+        Some(context.output_table_provider().child(Some("embeddings"))?)
+    } else {
+        None
+    };
+    let dependencies = FieldDependencies {
+        vector_store,
+        model,
+        tokenizer,
+        snapshot_provider,
+    };
+    let mut summaries = Vec::new();
+    let mut input_rows = 0usize;
+    let mut output_rows = 0usize;
+
+    for embedding_name in &config.embed_text.names {
+        let field =
+            field_map
+                .get(embedding_name.as_str())
+                .ok_or_else(|| GraphLoomError::InvalidData {
+                    workflow: workflow_name,
+                    message: format!("unsupported embedding name {embedding_name}"),
+                })?;
+        if !context
+            .output_table_provider()
+            .has(field.source_table)
+            .await?
+        {
+            context.callbacks.warning(
+                workflow_name,
+                &format!(
+                    "embedding {} source table {} is missing; skipping",
+                    field.name, field.source_table
+                ),
+            );
+            continue;
+        }
+
+        let schema = config.vector_store.schema_for(field.name);
+        // GraphRAG 3.1.0's LanceDB `create_index` uses overwrite mode on
+        // every embedding pass, including both update passes.
+        dependencies.vector_store.reset_index(&schema).await?;
+        let summary = process_field(
+            workflow_name,
+            config,
+            context,
+            field,
+            &schema,
+            &dependencies,
+        )
+        .await?;
+        input_rows = input_rows.saturating_add(summary.input_rows);
+        output_rows = output_rows.saturating_add(summary.embedded_rows);
+        summaries.push(summary);
+    }
+
+    context.stats.embedding_count = context.stats.embedding_count.saturating_add(output_rows);
+    Ok(IndexWorkflowOutput {
+        result: summaries.iter().map(FieldSummary::value).collect(),
+        stop: false,
+        input_rows,
+        output_rows,
+    })
+}
+
 async fn process_field(
+    workflow_name: &'static str,
     config: &GraphRagConfig,
     context: &mut IndexPipelineContext,
     field: &EmbeddingField,
@@ -205,7 +222,7 @@ async fn process_field(
         .await?;
     let input_rows = source.len();
     let columns = source.column_names();
-    let indices = SourceIndices::new(field, &columns)?;
+    let indices = SourceIndices::new(workflow_name, field, &columns)?;
     let mut snapshot = match &dependencies.snapshot_provider {
         Some(provider) => Some(provider.open(field.name, true).await?),
         None => None,
@@ -213,6 +230,7 @@ async fn process_field(
 
     let result = process_field_inner(
         config,
+        workflow_name,
         context,
         field,
         schema,
@@ -241,7 +259,7 @@ async fn process_field(
                 && let Err(abort_error) = snapshot.abort().await
             {
                 context.callbacks.warning(
-                    GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                    workflow_name,
                     &format!(
                         "embedding {} snapshot abort failed after primary error: {abort_error}",
                         field.name
@@ -255,6 +273,7 @@ async fn process_field(
 
 async fn process_field_inner(
     config: &GraphRagConfig,
+    workflow_name: &'static str,
     context: &mut IndexPipelineContext,
     field: &EmbeddingField,
     schema: &VectorIndexSchema,
@@ -267,6 +286,7 @@ async fn process_field_inner(
         .saturating_mul(config.concurrent_requests.max(1))
         .max(1);
     let operation_config = EmbeddingOperationConfig {
+        workflow_name,
         batch_size: config.embed_text.batch_size,
         batch_max_tokens: config.embed_text.batch_max_tokens,
         concurrency: config.concurrent_requests.max(1),
@@ -289,19 +309,12 @@ async fn process_field_inner(
         index_name: schema.index_name.clone(),
     };
     let mut completed = 0usize;
-    let mut seen_source_ids = BTreeSet::new();
-
     while let Some(row) = rows.next().await {
-        let source_row = source_row(field, input.indices, &row?)?;
-        if !seen_source_ids.insert(source_row.id.clone()) {
-            return Err(invalid_data(
-                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                &format!("{} duplicate source id {}", field.name, source_row.id),
-            ));
-        }
+        let source_row = source_row(workflow_name, field, input.indices, &row?)?;
         buffer.push(source_row);
         if buffer.len() >= flush_size {
             flush_buffer(
+                workflow_name,
                 context,
                 &operation_config,
                 dependencies,
@@ -319,6 +332,7 @@ async fn process_field_inner(
     }
     if !buffer.is_empty() {
         flush_buffer(
+            workflow_name,
             context,
             &operation_config,
             dependencies,
@@ -333,15 +347,14 @@ async fn process_field_inner(
         )
         .await?;
     }
-    context.callbacks.progress(
-        GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-        completed,
-        Some(input.input_rows),
-    );
+    context
+        .callbacks
+        .progress(workflow_name, completed, Some(input.input_rows));
     Ok(summary)
 }
 
 async fn flush_buffer(
+    workflow_name: &'static str,
     context: &mut IndexPipelineContext,
     operation_config: &EmbeddingOperationConfig,
     dependencies: &FieldDependencies,
@@ -358,7 +371,7 @@ async fn flush_buffer(
     .await?;
     dependencies
         .vector_store
-        .upsert_documents(schema, &output.documents)
+        .append_documents(schema, &output.documents)
         .await?;
     if let Some(snapshot) = state.snapshot.as_mut()
         && !output.documents.is_empty()
@@ -400,11 +413,9 @@ async fn flush_buffer(
         .input_token_count
         .saturating_add(output.input_tokens);
     *state.completed = state.completed.saturating_add(output.attempted_rows);
-    context.callbacks.progress(
-        GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-        *state.completed,
-        Some(state.total),
-    );
+    context
+        .callbacks
+        .progress(workflow_name, *state.completed, Some(state.total));
     Ok(())
 }
 
@@ -415,29 +426,45 @@ struct SourceIndices {
 }
 
 impl SourceIndices {
-    fn new(field: &EmbeddingField, columns: &[String]) -> Result<Self> {
-        let id = find_column(columns, field.id_column)?;
+    fn new(
+        workflow_name: &'static str,
+        field: &EmbeddingField,
+        columns: &[String],
+    ) -> Result<Self> {
+        let id = find_column(workflow_name, columns, field.id_column)?;
         let mut text_columns = BTreeMap::new();
         for column in field.text_columns {
-            text_columns.insert(*column, find_column(columns, column)?);
+            text_columns.insert(*column, find_column(workflow_name, columns, column)?);
         }
         Ok(Self { id, text_columns })
     }
 }
 
 fn source_row(
+    workflow_name: &'static str,
     field: &EmbeddingField,
     indices: &SourceIndices,
     row: &Row<'static>,
 ) -> Result<EmbeddingSourceRow> {
-    let id = required_string(row, indices.id, field.name, field.id_column)?;
+    let id = required_string(workflow_name, row, indices.id, field.name, field.id_column)?;
     let text = match field.mapper {
-        TextMapper::Single(column) => {
-            nullable_string(row, indices.text_columns[column], field.name, column)?
-        }
+        TextMapper::Single(column) => nullable_string(
+            workflow_name,
+            row,
+            indices.text_columns[column],
+            field.name,
+            column,
+        )?,
         TextMapper::EntityDescription => {
-            let title = nullable_string(row, indices.text_columns["title"], field.name, "title")?;
+            let title = nullable_string(
+                workflow_name,
+                row,
+                indices.text_columns["title"],
+                field.name,
+                "title",
+            )?;
             let description = nullable_string(
+                workflow_name,
                 row,
                 indices.text_columns["description"],
                 field.name,
@@ -455,6 +482,7 @@ fn source_row(
 }
 
 fn required_string(
+    workflow_name: &'static str,
     row: &Row<'static>,
     index: usize,
     embedding_name: &str,
@@ -462,7 +490,7 @@ fn required_string(
 ) -> Result<String> {
     let value = row.0.get(index).ok_or_else(|| {
         invalid_data(
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            workflow_name,
             &format!("{embedding_name} column {column} is missing"),
         )
     })?;
@@ -471,13 +499,13 @@ fn required_string(
         AnyValue::StringOwned(value) => value.to_string(),
         AnyValue::Null => {
             return Err(invalid_data(
-                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                workflow_name,
                 &format!("{embedding_name} column {column} expected non-empty String, got Null"),
             ));
         }
         other => {
             return Err(invalid_data(
-                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+                workflow_name,
                 &format!(
                     "{embedding_name} column {column} expected non-empty String, got {other:?}"
                 ),
@@ -486,7 +514,7 @@ fn required_string(
     };
     if id.is_empty() {
         return Err(invalid_data(
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            workflow_name,
             &format!("{embedding_name} column {column} must not be empty"),
         ));
     }
@@ -494,6 +522,7 @@ fn required_string(
 }
 
 fn nullable_string(
+    workflow_name: &'static str,
     row: &Row<'static>,
     index: usize,
     embedding_name: &str,
@@ -501,7 +530,7 @@ fn nullable_string(
 ) -> Result<String> {
     let value = row.0.get(index).ok_or_else(|| {
         invalid_data(
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            workflow_name,
             &format!("{embedding_name} column {column} is missing"),
         )
     })?;
@@ -510,22 +539,17 @@ fn nullable_string(
         AnyValue::StringOwned(value) => Ok(value.to_string()),
         AnyValue::Null => Ok(String::new()),
         other => Err(invalid_data(
-            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
+            workflow_name,
             &format!("{embedding_name} column {column} expected String or Null, got {other:?}"),
         )),
     }
 }
 
-fn find_column(columns: &[String], column: &str) -> Result<usize> {
+fn find_column(workflow_name: &'static str, columns: &[String], column: &str) -> Result<usize> {
     columns
         .iter()
         .position(|name| name == column)
-        .ok_or_else(|| {
-            invalid_data(
-                GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
-                &format!("missing column {column}"),
-            )
-        })
+        .ok_or_else(|| invalid_data(workflow_name, &format!("missing column {column}")))
 }
 
 fn embeddings_dataframe(documents: &[VectorDocument]) -> Result<DataFrame> {
@@ -607,6 +631,7 @@ mod tests {
             text_columns: BTreeMap::from([("text", 1)]),
         };
         let error = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             text,
             &text_indices,
             &row(vec![AnyValue::String("tu-1"), AnyValue::Int64(7)]),
@@ -623,6 +648,7 @@ mod tests {
             text_columns: BTreeMap::from([("title", 1), ("description", 2)]),
         };
         let error = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             entity,
             &entity_indices,
             &row(vec![
@@ -635,6 +661,7 @@ mod tests {
         assert!(error.to_string().contains("title"));
 
         let error = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             entity,
             &entity_indices,
             &row(vec![
@@ -654,6 +681,7 @@ mod tests {
             text_columns: BTreeMap::from([("full_content", 1)]),
         };
         let error = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             community,
             &community_indices,
             &row(vec![AnyValue::String("report-1"), AnyValue::Int64(42)]),
@@ -674,6 +702,7 @@ mod tests {
         };
 
         let error = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             text,
             &indices,
             &row(vec![AnyValue::Int64(1), AnyValue::Null]),
@@ -682,6 +711,7 @@ mod tests {
         assert!(error.to_string().contains("expected non-empty String"));
 
         let source = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             text,
             &indices,
             &row(vec![AnyValue::String("tu-1"), AnyValue::Null]),
@@ -702,6 +732,7 @@ mod tests {
         };
 
         let title_only = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             entity,
             &indices,
             &row(vec![
@@ -714,6 +745,7 @@ mod tests {
         assert_eq!(title_only.text, "Alice:");
 
         let description_only = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             entity,
             &indices,
             &row(vec![
@@ -726,6 +758,7 @@ mod tests {
         assert_eq!(description_only.text, ":Engineer");
 
         let empty = source_row(
+            GENERATE_TEXT_EMBEDDINGS_WORKFLOW,
             entity,
             &indices,
             &row(vec![

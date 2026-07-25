@@ -15,6 +15,7 @@ use assert_cmd::Command;
 use graphloom::{
     ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphRagConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
+    api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
 };
 use graphloom_llm::{
     CachedModelResult, ChatMessage, CompletionRequest, CompletionResponse, EmbeddingRequest,
@@ -56,6 +57,83 @@ fn test_should_match_complete_query_help_snapshot() {
     let actual = normalize_help_text(&output.stdout);
     let expected = include_str!("fixtures/cli/query_help.txt").replace("\r\n", "\n");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_should_match_complete_update_help_snapshot() {
+    let output = graphloom_command()
+        .args(["update", "--help"])
+        .output()
+        .expect("update help");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let actual = normalize_help_text(&output.stdout);
+    let expected = include_str!("fixtures/cli/update_help.txt").replace("\r\n", "\n");
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_should_run_noop_update_from_cli() {
+    let project = TempDir::new().expect("project");
+    let input = project.path().join("input");
+    tokio::fs::create_dir_all(&input).await.expect("input");
+    tokio::fs::write(input.join("document.txt"), "alpha beta gamma")
+        .await
+        .expect("document");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec!["load_input_documents".to_owned()];
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: project.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("initial documents index");
+    config.workflows = vec!["load_update_documents".to_owned()];
+    tokio::fs::write(
+        project.path().join("settings.yaml"),
+        serde_yaml::to_string(&config).expect("settings YAML"),
+    )
+    .await
+    .expect("settings");
+
+    let output = graphloom_command()
+        .args([
+            "update",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--no-cache",
+            "--skip-validation",
+        ])
+        .output()
+        .expect("update command");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let stdout = normalize_cli_text(&output.stdout);
+    assert!(stdout.contains("Update completed successfully"));
+    assert!(stdout.contains("New documents: 0"));
+    let mut namespaces = tokio::fs::read_dir(project.path().join("update_output"))
+        .await
+        .expect("update output");
+    let timestamp = namespaces
+        .next_entry()
+        .await
+        .expect("namespace read")
+        .expect("timestamp namespace")
+        .path();
+    assert!(
+        timestamp
+            .join("previous")
+            .join("documents.parquet")
+            .is_file()
+    );
+    assert!(timestamp.join("delta").is_dir());
 }
 
 #[tokio::test]

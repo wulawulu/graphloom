@@ -5,7 +5,9 @@ use std::{
 
 use graphloom::{
     ALL_EMBEDDINGS, GraphRagConfig, IndexRunStats, IndexWorkflowCallbacks,
-    api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
+    api::{
+        BuildIndexOptions, CacheMode, IndexingMethod, UpdateIndexOptions, build_index, update_index,
+    },
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
@@ -71,6 +73,73 @@ async fn test_should_write_directly_without_touching_inactive_vector_store() {
         "preserve me"
     );
     assert_no_index_transaction_directories(tempdir.path()).await;
+}
+
+#[tokio::test]
+async fn test_should_create_previous_snapshot_and_stop_noop_update() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    let output = tempdir.path().join("output");
+    tokio::fs::create_dir_all(&input).await.expect("input dir");
+    tokio::fs::write(input.join("document.txt"), "alpha beta gamma")
+        .await
+        .expect("input document");
+    let mut config = GraphRagConfig::default();
+    config.workflows = vec!["load_input_documents".to_owned()];
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("initial documents index");
+    let before = tokio::fs::read(output.join("documents.parquet"))
+        .await
+        .expect("documents before update");
+    config.workflows = vec!["load_update_documents".to_owned()];
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    let result = update_index(
+        config,
+        UpdateIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: vec![callbacks.clone()],
+        },
+    )
+    .await
+    .expect("no-op update");
+
+    assert_eq!(result.stats.update_document_count, 0);
+    assert_eq!(result.stats.document_count, 1);
+    assert_eq!(callbacks.started(), vec!["load_update_documents"]);
+    assert_eq!(callbacks.completed(), vec!["load_update_documents"]);
+    assert_eq!(
+        tokio::fs::read(output.join("documents.parquet"))
+            .await
+            .expect("documents after update"),
+        before
+    );
+    let timestamps = update_timestamps(tempdir.path()).await;
+    assert_eq!(timestamps.len(), 1);
+    assert!(
+        timestamps[0]
+            .join("previous")
+            .join("documents.parquet")
+            .is_file()
+    );
+    assert!(timestamps[0].join("delta").is_dir());
+    assert!(
+        !timestamps[0]
+            .join("delta")
+            .join("documents.parquet")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -355,6 +424,160 @@ async fn test_should_build_standard_index_via_public_api() {
     let custom_schema = vector_config.schema_for("entity_description");
     assert_eq!(custom_schema.index_name, "custom_entity_descriptions");
     assert!(store.count(&custom_schema).await.expect("custom count") > 0);
+}
+
+#[tokio::test]
+async fn test_should_update_standard_index_via_public_api() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let input = tempdir.path().join("input");
+    tokio::fs::create_dir(&input).await.expect("input dir");
+    tokio::fs::write(
+        input.join("a.txt"),
+        "Alice works for Acme. Bob manages Acme.",
+    )
+    .await
+    .expect("input A");
+    let config = test_config(&server.uri());
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect("initial index");
+    let final_provider =
+        ParquetTableProvider::new(tempdir.path().join("output")).expect("final provider");
+    let old_entities = final_provider
+        .read_dataframe("entities")
+        .await
+        .expect("old entities");
+    let old_entity_ids = string_column_values(&old_entities, "id");
+    let old_entity_mapping = string_pair_mapping(&old_entities, "title", "id");
+    tokio::fs::write(
+        input.join("b.txt"),
+        "Alice and Bob collaborated on Project Atlas at Acme.",
+    )
+    .await
+    .expect("input B");
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    let result = update_index(
+        config.clone(),
+        UpdateIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Configured,
+            callbacks: vec![callbacks.clone()],
+        },
+    )
+    .await
+    .expect("incremental update");
+
+    assert_eq!(result.stats.update_document_count, 1);
+    assert_eq!(result.stats.document_count, 2);
+    assert_eq!(callbacks.started(), config.update_workflow_order());
+    assert_eq!(callbacks.completed(), config.update_workflow_order());
+    assert_update_artifacts(
+        tempdir.path(),
+        &config,
+        &old_entity_mapping,
+        &old_entity_ids,
+    )
+    .await;
+}
+
+async fn assert_update_artifacts(
+    project_root: &Path,
+    config: &GraphRagConfig,
+    old_entity_mapping: &std::collections::BTreeMap<String, String>,
+    old_entity_ids: &[String],
+) {
+    let timestamps = update_timestamps(project_root).await;
+    assert_eq!(timestamps.len(), 1);
+    let previous_provider =
+        ParquetTableProvider::new(timestamps[0].join("previous")).expect("previous provider");
+    let delta_provider =
+        ParquetTableProvider::new(timestamps[0].join("delta")).expect("delta provider");
+    let final_provider =
+        ParquetTableProvider::new(project_root.join("output")).expect("final provider");
+    for table in [
+        "documents",
+        "text_units",
+        "entities",
+        "relationships",
+        "communities",
+        "community_reports",
+    ] {
+        assert!(previous_provider.has(table).await.expect("previous table"));
+        assert!(delta_provider.has(table).await.expect("delta table"));
+        assert!(final_provider.has(table).await.expect("final table"));
+    }
+    let documents = final_provider
+        .read_dataframe("documents")
+        .await
+        .expect("final documents");
+    assert_eq!(documents.height(), 2);
+    assert_eq!(
+        documents
+            .column("human_readable_id")
+            .expect("document IDs")
+            .i64()
+            .expect("i64")
+            .into_no_null_iter()
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let final_entities = final_provider
+        .read_dataframe("entities")
+        .await
+        .expect("final entities");
+    assert_eq!(
+        &string_pair_mapping(&final_entities, "title", "id"),
+        old_entity_mapping
+    );
+    let delta_entities = delta_provider
+        .read_dataframe("entities")
+        .await
+        .expect("delta entities");
+    let delta_entity_ids = string_column_values(&delta_entities, "id");
+    assert!(
+        delta_entity_ids
+            .iter()
+            .all(|id| !old_entity_ids.contains(id)),
+        "delta entity UUIDs should differ from retained previous UUIDs"
+    );
+
+    let mut vector_config = config.vector_store.clone();
+    vector_config.db_uri = project_root
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .to_string();
+    let store = LanceDbVectorStore::connect(&vector_config)
+        .await
+        .expect("vector store");
+    let entity_schema = vector_config.schema_for("entity_description");
+    let vector_ids = store.ids(&entity_schema).await.expect("entity vector IDs");
+    assert!(old_entity_ids.iter().all(|id| vector_ids.contains(id)));
+    assert!(
+        delta_entity_ids.iter().all(|id| !vector_ids.contains(id)),
+        "GraphRAG 3.1.0 overwrites the delta entity collection during the final embedding pass"
+    );
 }
 
 #[tokio::test]
@@ -954,6 +1177,40 @@ extract_claims:
 "#
     ))
     .expect("config")
+}
+
+async fn update_timestamps(root: &Path) -> Vec<std::path::PathBuf> {
+    let update_root = root.join("update_output");
+    let mut entries = tokio::fs::read_dir(update_root)
+        .await
+        .expect("update output directory");
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await.expect("update entry") {
+        paths.push(entry.path());
+    }
+    paths.sort();
+    paths
+}
+
+fn string_column_values(dataframe: &polars_core::prelude::DataFrame, column: &str) -> Vec<String> {
+    let values = dataframe
+        .column(column)
+        .expect("string column")
+        .str()
+        .expect("string dtype");
+    (0..dataframe.height())
+        .filter_map(|index| values.get(index).map(str::to_owned))
+        .collect()
+}
+
+fn string_pair_mapping(
+    dataframe: &polars_core::prelude::DataFrame,
+    key: &str,
+    value: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let keys = string_column_values(dataframe, key);
+    let values = string_column_values(dataframe, value);
+    keys.into_iter().zip(values).collect()
 }
 
 async fn assert_standard_outputs(root: &std::path::Path, config: &GraphRagConfig) {

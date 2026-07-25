@@ -111,8 +111,20 @@ impl IndexPipelineFactory {
     ///
     /// Returns an error when a configured workflow is unknown.
     pub fn standard(&self, config: &GraphRagConfig) -> Result<IndexPipeline> {
-        let workflows = config
-            .workflow_order()
+        self.compile(config.workflow_order())
+    }
+
+    /// Compile the configured standard incremental-update pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured workflow is unknown.
+    pub fn update(&self, config: &GraphRagConfig) -> Result<IndexPipeline> {
+        self.compile(config.update_workflow_order())
+    }
+
+    fn compile(&self, workflows: Vec<String>) -> Result<IndexPipeline> {
+        let workflows = workflows
             .into_iter()
             .map(|name| {
                 let workflow = self.registry.resolve(&name)?;

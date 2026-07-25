@@ -1029,6 +1029,14 @@ mod tests {
             Ok(())
         }
 
+        async fn append_documents(
+            &self,
+            _schema: &VectorIndexSchema,
+            _documents: &[VectorDocument],
+        ) -> graphloom_vectors::Result<()> {
+            Ok(())
+        }
+
         async fn upsert_documents(
             &self,
             _schema: &VectorIndexSchema,

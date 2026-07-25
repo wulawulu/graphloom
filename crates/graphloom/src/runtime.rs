@@ -8,7 +8,9 @@ mod vector_store_factory;
 
 use std::{path::Path, sync::Arc};
 
+use chrono::Local;
 pub(crate) use factory::{DefaultIndexRuntimeFactory, IndexRuntimeFactory};
+use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
 use graphloom_vectors::VectorStore;
 pub(crate) use model_factory::validate_model_connectivity;
 pub use model_factory::{DefaultModelFactory, ModelFactory};
@@ -18,9 +20,10 @@ pub(crate) use services::{PreparedIndexServices, VectorStoreService};
 pub(crate) use vector_store_factory::{DefaultIndexVectorStoreFactory, IndexVectorStoreFactory};
 
 use crate::{
-    ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, IndexPipeline, IndexPipelineContext,
-    IndexPipelineFactory, IndexWorkflowCallbacks, IndexWorkflowRegistry, Result,
+    GraphLoomError, GraphRagConfig, IndexPipeline, IndexPipelineContext, IndexPipelineFactory,
+    IndexWorkflowCallbacks, IndexWorkflowRegistry, Result, context::UpdateRuntimeState,
     project::LoadedProject, register_standard_index_workflows,
+    workflows::register_update_workflows,
 };
 
 /// Runtime ready to execute standard indexing.
@@ -41,6 +44,7 @@ pub(crate) struct PreparedIndexRuntime {
     vector_store: Option<Arc<dyn VectorStore>>,
     callbacks: Arc<dyn IndexWorkflowCallbacks>,
     pipeline: IndexPipeline,
+    update_state: Option<UpdateRuntimeState>,
 }
 
 /// Build standard-index providers and pipeline without clearing output or resetting vectors.
@@ -88,7 +92,6 @@ pub(crate) async fn prepare_index_runtime_with_factory(
             .vector_store_factory()
             .create(&project.config.vector_store)
             .await?;
-        reset_managed_indices(store.as_ref(), &project.config).await?;
         Some(store)
     } else {
         None
@@ -101,16 +104,134 @@ pub(crate) async fn prepare_index_runtime_with_factory(
         vector_store,
         callbacks,
         pipeline,
+        update_state: None,
     })
 }
 
-async fn reset_managed_indices(store: &dyn VectorStore, config: &GraphRagConfig) -> Result<()> {
-    for embedding_name in ALL_EMBEDDINGS {
-        let schema = config.vector_store.schema_for(embedding_name);
-        store
-            .reset_index(&schema)
+/// Build update providers, copy final tables into `previous`, and prepare the update pipeline.
+///
+/// Managed vector indices are deliberately not reset.
+pub(crate) async fn prepare_update_runtime(
+    project: &LoadedProject,
+    cache_enabled: bool,
+    callbacks: Vec<Arc<dyn IndexWorkflowCallbacks>>,
+) -> Result<PreparedIndexRuntime> {
+    project.paths.validate_update_output_path_safety()?;
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry)?;
+    register_update_workflows(&mut registry)?;
+    let pipeline = IndexPipelineFactory::new(registry)
+        .update(&project.config)
+        .map_err(|source| GraphLoomError::RuntimeBuild {
+            source: Box::new(source),
+        })?;
+    let requirements = pipeline.requirements(&project.config)?;
+    let mut services = DefaultIndexRuntimeFactory
+        .create_services(project, &project.root, cache_enabled, &requirements)
+        .await?;
+    let final_provider = Arc::clone(&services.io.output_table_provider);
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let timestamp_root = project.paths.update_output_dir.join(&timestamp);
+    let previous_root = timestamp_root.join("previous");
+    let delta_root = timestamp_root.join("delta");
+    tokio::fs::create_dir_all(&previous_root)
+        .await
+        .map_err(|source| GraphLoomError::UpdateProvider {
+            operation: "create previous namespace",
+            target: previous_root.display().to_string(),
+            source: Box::new(source),
+        })?;
+    tokio::fs::create_dir_all(&delta_root)
+        .await
+        .map_err(|source| GraphLoomError::UpdateProvider {
+            operation: "create delta namespace",
+            target: delta_root.display().to_string(),
+            source: Box::new(source),
+        })?;
+    let previous_provider: Arc<dyn TableProvider> =
+        Arc::new(ParquetTableProvider::new(&previous_root).map_err(|source| {
+            GraphLoomError::UpdateProvider {
+                operation: "create previous table provider",
+                target: previous_root.display().to_string(),
+                source: Box::new(source),
+            }
+        })?);
+    let delta_provider: Arc<dyn TableProvider> =
+        Arc::new(ParquetTableProvider::new(&delta_root).map_err(|source| {
+            GraphLoomError::UpdateProvider {
+                operation: "create delta table provider",
+                target: delta_root.display().to_string(),
+                source: Box::new(source),
+            }
+        })?);
+    copy_previous_tables(final_provider.as_ref(), previous_provider.as_ref()).await?;
+    let delta_storage: Arc<dyn Storage> =
+        Arc::new(FileStorage::new(&delta_root).map_err(|source| {
+            GraphLoomError::UpdateProvider {
+                operation: "create delta output storage",
+                target: delta_root.display().to_string(),
+                source: Box::new(source),
+            }
+        })?);
+    services.io.output_storage = delta_storage;
+    services.io.output_table_provider = Arc::clone(&delta_provider);
+
+    let vector_store = if requirements.requires_vector_store() {
+        project.paths.validate_vector_path_safety()?;
+        Some(
+            DefaultIndexRuntimeFactory
+                .vector_store_factory()
+                .create(&project.config.vector_store)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let callbacks = crate::callbacks::callback_chain(callbacks);
+    callbacks.runtime_prepared();
+    Ok(PreparedIndexRuntime {
+        services,
+        vector_store,
+        callbacks,
+        pipeline,
+        update_state: Some(UpdateRuntimeState {
+            timestamp,
+            previous_table_provider: previous_provider,
+            delta_table_provider: delta_provider,
+            final_table_provider: final_provider,
+            entity_id_mapping: None,
+            community_id_mapping: None,
+        }),
+    })
+}
+
+async fn copy_previous_tables(
+    final_provider: &dyn TableProvider,
+    previous_provider: &dyn TableProvider,
+) -> Result<()> {
+    let tables = final_provider
+        .list()
+        .await
+        .map_err(|source| GraphLoomError::UpdateProvider {
+            operation: "list final tables",
+            target: "final output".to_owned(),
+            source: Box::new(source),
+        })?;
+    for table in tables {
+        let dataframe = final_provider
+            .read_dataframe(&table)
             .await
-            .map_err(|source| GraphLoomError::RuntimeBuild {
+            .map_err(|source| GraphLoomError::UpdateProvider {
+                operation: "read previous table",
+                target: table.clone(),
+                source: Box::new(source),
+            })?;
+        previous_provider
+            .write_dataframe(&table, dataframe)
+            .await
+            .map_err(|source| GraphLoomError::UpdateProvider {
+                operation: "copy previous table",
+                target: table,
                 source: Box::new(source),
             })?;
     }
@@ -125,8 +246,11 @@ impl PreparedIndexRuntime {
             Some(store) => VectorStoreService::Enabled(store),
             None => VectorStoreService::Disabled,
         };
-        let context =
+        let mut context =
             IndexPipelineContext::new(services.into_runtime_services(vector_store), self.callbacks);
+        if let Some(update_state) = self.update_state {
+            context = context.with_update_state(update_state);
+        }
 
         IndexRuntime {
             config,
@@ -204,6 +328,13 @@ mod runtime_factory_tests {
         }
         async fn reset_index(&self, _schema: &VectorIndexSchema) -> VectorResult<()> {
             self.resets.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn append_documents(
+            &self,
+            _schema: &VectorIndexSchema,
+            _documents: &[VectorDocument],
+        ) -> VectorResult<()> {
             Ok(())
         }
         async fn upsert_documents(
@@ -399,10 +530,7 @@ mod runtime_factory_tests {
         );
         assert_eq!(factory.output_storage.clear_calls.load(Ordering::SeqCst), 0);
         assert_eq!(factory.vector_factory.drops.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            factory.vector_factory.resets.load(Ordering::SeqCst),
-            crate::ALL_EMBEDDINGS.len()
-        );
+        assert_eq!(factory.vector_factory.resets.load(Ordering::SeqCst), 0);
         assert_eq!(runtime.context.project_root(), tempdir.path());
         assert!(
             !runtime
@@ -466,10 +594,7 @@ mod runtime_factory_tests {
         assert_eq!(vector_factory.calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.output_storage.clear_calls.load(Ordering::SeqCst), 0);
         assert_eq!(vector_factory.drops.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            vector_factory.resets.load(Ordering::SeqCst),
-            crate::ALL_EMBEDDINGS.len()
-        );
+        assert_eq!(vector_factory.resets.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -480,7 +605,11 @@ mod runtime_factory_tests {
         )
         .expect("chunk-only YAML should deserialize");
         config.vector_store.vector_size = 0;
-        config.vector_store.db_uri = "/".to_owned();
+        config.vector_store.db_uri = tempdir
+            .path()
+            .join("inactive-vectors")
+            .to_string_lossy()
+            .into_owned();
         let project =
             LoadedProject::from_config(tempdir.path(), config).expect("project should load");
         let vector_factory = Arc::new(MemoryVectorStoreFactory {

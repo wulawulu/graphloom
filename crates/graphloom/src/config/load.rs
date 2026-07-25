@@ -261,7 +261,13 @@ async fn validate_project(project: &LoadedProject, skip_optional: bool) -> Resul
     if skip_optional {
         return Ok(());
     }
-    validate_optional(project, &requirements, true).await
+    validate_optional(
+        project,
+        &requirements,
+        &active_workflows(&project.config),
+        true,
+    )
+    .await
 }
 
 /// Validate an index project before building or dry-running an index.
@@ -290,7 +296,54 @@ pub(crate) async fn validate_index_project_with_factory(
     let ValidationMode::Full { cache_enabled } = mode else {
         return Ok(());
     };
-    validate_optional(project, &requirements, cache_enabled).await?;
+    validate_optional(
+        project,
+        &requirements,
+        &active_workflows(&project.config),
+        cache_enabled,
+    )
+    .await?;
+    validate_model_connectivity(&project.config, &requirements, model_factory).await
+}
+
+/// Validate an incremental-update project before runtime preparation.
+///
+/// # Errors
+///
+/// Returns an error for unsupported, unsafe, or incomplete update settings.
+pub async fn validate_update_project(project: &LoadedProject, mode: ValidationMode) -> Result<()> {
+    validate_update_project_with_factory(project, mode, &DefaultModelFactory).await
+}
+
+pub(crate) async fn validate_update_project_with_factory(
+    project: &LoadedProject,
+    mode: ValidationMode,
+    model_factory: &dyn ModelFactory,
+) -> Result<()> {
+    validate_required(project)?;
+    validate_storage(
+        "update output",
+        &project.config.update_output_storage.storage_type,
+    )?;
+    project.paths.validate_update_output_path_safety()?;
+    probe_directory_writable(&project.paths.update_output_dir, "update output").await?;
+    let pipeline = build_update_pipeline(&project.config)?;
+    let requirements = pipeline.requirements(&project.config)?;
+    if requirements.requires_vector_store() {
+        project.paths.validate_vector_path_safety()?;
+    }
+    if matches!(mode, ValidationMode::SkipOptional) {
+        return Ok(());
+    }
+    let ValidationMode::Full { cache_enabled } = mode else {
+        return Ok(());
+    };
+    let active = project
+        .config
+        .update_workflow_order()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    validate_optional(project, &requirements, &active, cache_enabled).await?;
     validate_model_connectivity(&project.config, &requirements, model_factory).await
 }
 
@@ -320,9 +373,9 @@ fn validate_required(project: &LoadedProject) -> Result<()> {
 async fn validate_optional(
     project: &LoadedProject,
     requirements: &crate::IndexWorkflowRequirements,
+    active: &BTreeSet<String>,
     cache_enabled: bool,
 ) -> Result<()> {
-    let active = active_workflows(&project.config);
     if requirements.embedding_models().next().is_some() {
         project
             .config
@@ -337,7 +390,8 @@ async fn validate_optional(
     }
     validate_chunking_requirements(&project.config, requirements)?;
     validate_prompt_requirements(project, requirements).await?;
-    if active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW)
+    if (active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW)
+        || active.contains(crate::workflows::LOAD_UPDATE_DOCUMENTS_WORKFLOW))
         && !tokio::fs::try_exists(&project.paths.input_dir)
             .await
             .map_err(|source| GraphLoomError::Io {
@@ -353,7 +407,9 @@ async fn validate_optional(
             ),
         });
     }
-    if active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW) {
+    if active.contains(LOAD_INPUT_DOCUMENTS_WORKFLOW)
+        || active.contains(crate::workflows::LOAD_UPDATE_DOCUMENTS_WORKFLOW)
+    {
         let file_pattern = Regex::new(&project.config.input.file_pattern).map_err(|source| {
             GraphLoomError::InvalidModel {
                 model_id: "input.file_pattern".to_owned(),
@@ -528,6 +584,13 @@ pub(crate) fn build_index_pipeline(config: &GraphRagConfig) -> Result<crate::Ind
     let mut registry = IndexWorkflowRegistry::new();
     register_standard_index_workflows(&mut registry)?;
     crate::IndexPipelineFactory::new(registry).standard(config)
+}
+
+pub(crate) fn build_update_pipeline(config: &GraphRagConfig) -> Result<crate::IndexPipeline> {
+    let mut registry = IndexWorkflowRegistry::new();
+    register_standard_index_workflows(&mut registry)?;
+    crate::workflows::register_update_workflows(&mut registry)?;
+    crate::IndexPipelineFactory::new(registry).update(config)
 }
 
 pub(crate) fn validate_required_models(
@@ -724,6 +787,10 @@ mod tests {
         assert_eq!(project.config.input.input_type, "text");
         assert_eq!(project.config.input_storage.base_dir, "input");
         assert_eq!(project.config.output_storage.base_dir, "output");
+        assert_eq!(
+            project.config.update_output_storage.base_dir,
+            "update_output"
+        );
         assert_eq!(project.config.cache.storage.base_dir, "cache");
         assert_eq!(project.config.reporting.base_dir, "logs");
         assert_eq!(project.config.vector_store.vector_size, 3_072);
@@ -760,6 +827,10 @@ mod tests {
         assert!(!text.contains("dynamic-token-secret"));
         assert!(!text.contains("dynamic-password-secret"));
         assert!(text.contains("<redacted>"));
+        assert_eq!(
+            summary["updateOutputStorage"]["baseDir"],
+            serde_json::json!("update_output")
+        );
     }
 
     #[tokio::test]
