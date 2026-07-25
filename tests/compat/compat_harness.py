@@ -63,6 +63,56 @@ class RecordedRequest:
     present_fields: frozenset[str]
 
 
+def request_contract(
+    request: RecordedRequest,
+    *,
+    unordered_embedding_inputs: frozenset[str] = frozenset(),
+) -> tuple[object, ...]:
+    """Return the complete observable provider request contract.
+
+    Native hierarchical Leiden numbering can permute known community-report
+    rows inside one embedding batch. Callers supply those exact full-content
+    values; only matching batches are normalized. Request order, batch
+    boundaries, completion messages, and every provider parameter remain exact.
+    """
+    embedding_input = request.embedding_input
+    if (
+        request.operation == "embedding"
+        and embedding_input
+        and all(value in unordered_embedding_inputs for value in embedding_input)
+    ):
+        embedding_input = tuple(sorted(embedding_input))
+    return (
+        request.operation,
+        request.endpoint,
+        request.model,
+        request.message_roles,
+        request.system_prompt,
+        request.user_message,
+        _freeze_contract_value(request.response_format),
+        _freeze_contract_value(request.temperature),
+        _freeze_contract_value(request.top_p),
+        _freeze_contract_value(request.n),
+        _freeze_contract_value(request.max_tokens),
+        _freeze_contract_value(request.max_completion_tokens),
+        request.stream,
+        tuple(sorted(request.present_fields)),
+        embedding_input,
+    )
+
+
+def _freeze_contract_value(value: Any) -> object:
+    """Convert nested JSON-compatible request values to stable tuples."""
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_contract_value(item))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_contract_value(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class DelayedStream:
     """Synchronization points for one delayed SSE response."""
@@ -351,6 +401,30 @@ def run_graphrag_index(project: Path) -> CommandResult:
     )
 
 
+def run_graphloom_update(graphloom_bin: Path, project: Path) -> CommandResult:
+    """Run GraphLoom standard update without external connectivity preflight."""
+    return run_command(
+        [str(graphloom_bin), "update", "--root", str(project), "--skip-validation"],
+        cwd=project,
+    )
+
+
+def run_graphrag_update(project: Path) -> CommandResult:
+    """Run the pinned GraphRAG standard update in the active Python environment."""
+    return run_command(
+        [
+            sys.executable,
+            "-m",
+            "graphrag",
+            "update",
+            "--root",
+            str(project),
+            "--skip-validation",
+        ],
+        cwd=project,
+    )
+
+
 def run_graphrag_global_query(project: Path, query: str) -> CommandResult:
     """Run GraphRAG Global Search directly against a GraphLoom output directory."""
     return run_command(
@@ -519,8 +593,18 @@ def assert_reference_integrity(tables: dict[str, pd.DataFrame]) -> None:
     _assert_community_references(tables["communities"], tables["community_reports"])
 
 
-def canonical_index(output: Path) -> dict[str, list[dict[str, Any]]]:
-    """Convert one index to stable, UUID-independent semantic records."""
+def canonical_index(
+    output: Path,
+    *,
+    identity_sources: tuple[Path, ...] = (),
+) -> dict[str, list[dict[str, Any]]]:
+    """Convert one index to stable, UUID-independent semantic records.
+
+    Update outputs can intentionally retain delta UUID references that are no
+    longer present in the merged entity and relationship tables. Supplying the
+    delta provider as an identity source maps those observable stale references
+    by the same title or endpoint identity without discarding them.
+    """
     tables = load_tables(output)
     text_by_id = _value_map(tables["text_units"], "id", "human_readable_id")
     document_by_id = _value_map(tables["documents"], "id", "human_readable_id")
@@ -530,6 +614,28 @@ def canonical_index(output: Path) -> dict[str, list[dict[str, Any]]]:
         "id",
         "human_readable_id",
     )
+    entity_by_title = _value_map(tables["entities"], "title", "human_readable_id")
+    relationship_by_endpoints = {
+        (str(row["source"]), str(row["target"])): row["human_readable_id"]
+        for _, row in tables["relationships"].iterrows()
+    }
+    for source in identity_sources:
+        source_entities = pd.read_parquet(source / "entities.parquet")
+        source_relationships = pd.read_parquet(source / "relationships.parquet")
+        entity_by_id.update(
+            {
+                str(row["id"]): entity_by_title[str(row["title"])]
+                for _, row in source_entities.iterrows()
+            }
+        )
+        relationship_by_id.update(
+            {
+                str(row["id"]): relationship_by_endpoints[
+                    (str(row["source"]), str(row["target"]))
+                ]
+                for _, row in source_relationships.iterrows()
+            }
+        )
     covariate_by_id = _value_map(tables["covariates"], "id", "human_readable_id")
     community_by_id = {
         int(row["community"]): _community_identity(row, entity_by_id)

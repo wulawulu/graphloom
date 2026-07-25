@@ -81,8 +81,13 @@ async fn main() -> Result<()> {
     match arguments.as_slice() {
         [command, db_uri, manifest_path, dimension] if command == "export" => {
             let dimension = parse_dimension(dimension)?;
-            let manifest = export_manifest(db_uri, dimension).await?;
-            write_manifest(Path::new(manifest_path), &manifest).await
+            let manifest = export_manifest(db_uri, dimension, false).await?;
+            write_manifest(Path::new(manifest_path), &manifest, false).await
+        }
+        [command, db_uri, manifest_path, dimension] if command == "export-update" => {
+            let dimension = parse_dimension(dimension)?;
+            let manifest = export_manifest(db_uri, dimension, true).await?;
+            write_manifest(Path::new(manifest_path), &manifest, true).await
         }
         [command, manifest_path, db_uri] if command == "import" => {
             let manifest = read_manifest(Path::new(manifest_path)).await?;
@@ -91,7 +96,7 @@ async fn main() -> Result<()> {
         }
         [command, db_uri, dimension] if command == "inspect" => {
             let dimension = parse_dimension(dimension)?;
-            let manifest = export_manifest(db_uri, dimension).await?;
+            let manifest = export_manifest(db_uri, dimension, false).await?;
             let output =
                 serde_json::to_string_pretty(&manifest).map_err(|source| ManifestError::Json {
                     path: PathBuf::from("<stdout>"),
@@ -114,7 +119,11 @@ fn parse_dimension(value: &str) -> Result<usize> {
         })
 }
 
-async fn export_manifest(db_uri: &str, dimension: usize) -> Result<VectorManifest> {
+async fn export_manifest(
+    db_uri: &str,
+    dimension: usize,
+    allow_duplicate_ids: bool,
+) -> Result<VectorManifest> {
     let store = connect_store(db_uri, dimension).await?;
     let mut collections = Vec::with_capacity(COLLECTION_NAMES.len());
     for name in COLLECTION_NAMES {
@@ -143,7 +152,7 @@ async fn export_manifest(db_uri: &str, dimension: usize) -> Result<VectorManifes
         format_version: FORMAT_VERSION,
         collections,
     };
-    validate_manifest(&manifest)?;
+    validate_manifest(&manifest, allow_duplicate_ids)?;
     Ok(manifest)
 }
 
@@ -187,7 +196,7 @@ async fn validate_ann_semantics(
 }
 
 async fn import_manifest(db_uri: &str, manifest: &VectorManifest) -> Result<()> {
-    validate_manifest(manifest)?;
+    validate_manifest(manifest, false)?;
     let dimension = manifest
         .collections
         .first()
@@ -227,7 +236,7 @@ async fn connect_store(db_uri: &str, dimension: usize) -> Result<LanceDbVectorSt
     Ok(LanceDbVectorStore::connect(&config).await?)
 }
 
-fn validate_manifest(manifest: &VectorManifest) -> Result<()> {
+fn validate_manifest(manifest: &VectorManifest, allow_duplicate_ids: bool) -> Result<()> {
     if manifest.format_version != FORMAT_VERSION {
         return Err(ManifestError::InvalidManifest {
             message: format!(
@@ -263,11 +272,15 @@ fn validate_manifest(manifest: &VectorManifest) -> Result<()> {
                     message: format!("{} contains an empty id", collection.name),
                 });
             }
-            if previous_id.is_some_and(|previous| previous >= record.id.as_str()) {
+            if previous_id.is_some_and(|previous| {
+                previous > record.id.as_str()
+                    || (!allow_duplicate_ids && previous == record.id.as_str())
+            }) {
                 return Err(ManifestError::InvalidManifest {
                     message: format!(
-                        "{} records must have unique ids in ascending order",
-                        collection.name
+                        "{} records must have {}ids in ascending order",
+                        collection.name,
+                        if allow_duplicate_ids { "" } else { "unique " },
                     ),
                 });
             }
@@ -339,12 +352,16 @@ async fn read_manifest(path: &Path) -> Result<VectorManifest> {
         path: path.to_path_buf(),
         source,
     })?;
-    validate_manifest(&manifest)?;
+    validate_manifest(&manifest, false)?;
     Ok(manifest)
 }
 
-async fn write_manifest(path: &Path, manifest: &VectorManifest) -> Result<()> {
-    validate_manifest(manifest)?;
+async fn write_manifest(
+    path: &Path,
+    manifest: &VectorManifest,
+    allow_duplicate_ids: bool,
+) -> Result<()> {
+    validate_manifest(manifest, allow_duplicate_ids)?;
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| ManifestError::Json {
         path: path.to_path_buf(),
         source,
@@ -380,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_should_accept_versioned_sorted_finite_manifest() {
-        assert!(validate_manifest(&valid_manifest()).is_ok());
+        assert!(validate_manifest(&valid_manifest(), false).is_ok());
     }
 
     #[test]
@@ -388,7 +405,7 @@ mod tests {
         let mut manifest = valid_manifest();
         manifest.collections[0].name = "unknown".to_owned();
         assert!(matches!(
-            validate_manifest(&manifest),
+            validate_manifest(&manifest, false),
             Err(ManifestError::InvalidManifest { .. })
         ));
     }
@@ -401,20 +418,21 @@ mod tests {
             vector: vec![0.25, 0.75],
         });
         assert!(matches!(
-            validate_manifest(&manifest),
+            validate_manifest(&manifest, false),
             Err(ManifestError::InvalidManifest { .. })
         ));
+        assert!(validate_manifest(&manifest, true).is_ok());
     }
 
     #[test]
     fn test_should_reject_non_finite_or_wrong_dimension_vectors() {
         let mut non_finite = valid_manifest();
         non_finite.collections[0].records[0].vector[0] = f32::NAN;
-        assert!(validate_manifest(&non_finite).is_err());
+        assert!(validate_manifest(&non_finite, false).is_err());
 
         let mut wrong_dimension = valid_manifest();
         wrong_dimension.collections[0].records[0].vector.pop();
-        assert!(validate_manifest(&wrong_dimension).is_err());
+        assert!(validate_manifest(&wrong_dimension, false).is_err());
     }
 
     #[test]

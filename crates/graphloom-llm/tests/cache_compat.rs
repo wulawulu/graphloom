@@ -922,7 +922,6 @@ async fn test_should_send_completion_extra_fields_in_http_body() {
     let expected = serde_json::json!({
         "messages": [{"role": "user", "content": "extra"}],
         "model": "chat-test",
-        "stream": false,
         "reasoning_effort": "high",
         "provider_options": {"thinking": true}
     });

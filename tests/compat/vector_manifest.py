@@ -61,6 +61,31 @@ def export_graphrag_manifest(db_uri: Path) -> VectorManifest:
     return manifest
 
 
+def export_graphrag_update_manifest(db_uri: Path) -> VectorManifest:
+    """Export update records, including duplicate IDs preserved by GraphRAG."""
+    connection = lancedb.connect(db_uri)
+    table_names = set(connection.table_names())
+    assert table_names == set(COLLECTION_NAMES)
+    collections = []
+    for name in COLLECTION_NAMES:
+        rows = connection.open_table(name).to_arrow().select(["id", "vector"])
+        records = sorted(
+            (
+                {
+                    "id": str(row["id"]),
+                    "vector": [float(value) for value in row["vector"]],
+                }
+                for row in rows.to_pylist()
+            ),
+            key=lambda record: record["id"],
+        )
+        dimension = len(records[0]["vector"]) if records else 0
+        collections.append({"name": name, "dimension": dimension, "records": records})
+    manifest = {"format_version": FORMAT_VERSION, "collections": collections}
+    validate_update_manifest(manifest)
+    return manifest
+
+
 def import_graphrag_manifest(manifest: VectorManifest, db_uri: Path) -> None:
     """Materialize producer records with GraphRAG's official vector store."""
     validate_manifest(manifest)
@@ -117,6 +142,22 @@ def export_graphloom_manifest(
     return read_manifest(destination)
 
 
+def export_graphloom_update_manifest(
+    helper: Path,
+    db_uri: Path,
+    destination: Path,
+    dimension: int,
+) -> VectorManifest:
+    """Export update records while retaining duplicate observable IDs."""
+    _run_helper(
+        helper,
+        ["export-update", str(db_uri), str(destination), str(dimension)],
+    )
+    manifest = json.loads(destination.read_text(encoding="utf-8"))
+    validate_update_manifest(manifest)
+    return manifest
+
+
 def import_graphloom_manifest(
     helper: Path,
     manifest_path: Path,
@@ -171,9 +212,40 @@ def validate_manifest(manifest: VectorManifest) -> None:
             )
 
 
+def validate_update_manifest(manifest: VectorManifest) -> None:
+    """Validate a complete update manifest while allowing duplicate record IDs."""
+    assert set(manifest) == {"format_version", "collections"}
+    assert manifest.get("format_version") == FORMAT_VERSION
+    collections = manifest.get("collections")
+    assert isinstance(collections, list)
+    assert [item.get("name") for item in collections] == list(COLLECTION_NAMES)
+    for item in collections:
+        assert set(item) == {"name", "dimension", "records"}
+        dimension = item.get("dimension")
+        records = item.get("records")
+        assert type(dimension) is int and dimension > 0
+        assert isinstance(records, list)
+        ids = [record.get("id") for record in records]
+        assert ids == sorted(ids)
+        for record in records:
+            assert set(record) == {"id", "vector"}
+            assert isinstance(record.get("id"), str) and record["id"]
+            vector = record.get("vector")
+            assert isinstance(vector, list) and len(vector) == dimension
+            assert all(
+                type(value) in {int, float} and math.isfinite(value) for value in vector
+            )
+
+
 def collection(manifest: VectorManifest, name: str) -> dict[str, Any]:
     """Return a named validated collection."""
     validate_manifest(manifest)
+    return next(item for item in manifest["collections"] if item["name"] == name)
+
+
+def update_collection(manifest: VectorManifest, name: str) -> dict[str, Any]:
+    """Return a collection from a duplicate-preserving update manifest."""
+    validate_update_manifest(manifest)
     return next(item for item in manifest["collections"] if item["name"] == name)
 
 

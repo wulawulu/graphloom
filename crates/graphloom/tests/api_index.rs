@@ -4,13 +4,14 @@ use std::{
 };
 
 use graphloom::{
-    ALL_EMBEDDINGS, GraphRagConfig, IndexRunStats, IndexWorkflowCallbacks,
+    ALL_EMBEDDINGS, GraphLoomError, GraphRagConfig, IndexRunStats, IndexWorkflowCallbacks,
     api::{
         BuildIndexOptions, CacheMode, IndexingMethod, UpdateIndexOptions, build_index, update_index,
     },
 };
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
+use polars_core::df;
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
@@ -499,6 +500,267 @@ async fn test_should_update_standard_index_via_public_api() {
         &old_entity_ids,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_should_append_duplicate_embedding_ids_and_preserve_inactive_collections() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let output = tempdir.path().join("output");
+    let provider = ParquetTableProvider::new(&output).expect("output provider");
+    provider
+        .write_dataframe(
+            "entities",
+            df!(
+                "id" => ["duplicate", "other", "duplicate"],
+                "title" => ["Alice", "Bob", "Alice"],
+                "description" => ["first", "second", "third"],
+            )
+            .expect("entities dataframe"),
+        )
+        .await
+        .expect("entities table");
+    let mut config = test_config(&server.uri());
+    config.workflows = vec!["generate_text_embeddings".to_owned()];
+    config.embed_text.names = vec!["entity_description".to_owned()];
+    config.embed_text.batch_size = 2;
+    config.concurrent_requests = 1;
+    seed_managed_vectors(tempdir.path(), &config).await;
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: vec![callbacks.clone()],
+        },
+    )
+    .await
+    .expect("embedding workflow");
+
+    let store = vector_store_for(tempdir.path(), &config).await;
+    assert_eq!(
+        store
+            .ids(&config.vector_store.schema_for("entity_description"))
+            .await
+            .expect("entity ids"),
+        vec!["duplicate", "duplicate", "other"]
+    );
+    for name in ["community_full_content", "text_unit_text"] {
+        assert_eq!(
+            store
+                .ids(&config.vector_store.schema_for(name))
+                .await
+                .expect("inactive ids"),
+            vec![format!("old-{name}")]
+        );
+    }
+    assert!(callbacks.workflow_names_are("generate_text_embeddings"));
+}
+
+#[tokio::test]
+async fn test_should_not_reset_missing_embedding_source_or_send_embedding_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    config.workflows = vec!["generate_text_embeddings".to_owned()];
+    config.embed_text.names = vec!["community_full_content".to_owned()];
+    seed_managed_vectors(tempdir.path(), &config).await;
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: vec![callbacks.clone()],
+        },
+    )
+    .await
+    .expect("missing source should be skipped");
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request.url.path() == "/v1/embeddings"
+                    && !is_embedding_connectivity_request(request)
+            })
+            .count(),
+        0
+    );
+    let store = vector_store_for(tempdir.path(), &config).await;
+    assert_eq!(
+        store
+            .ids(&config.vector_store.schema_for("community_full_content"))
+            .await
+            .expect("community ids"),
+        vec!["old-community_full_content"]
+    );
+    assert!(callbacks.workflow_names_are("generate_text_embeddings"));
+    assert_eq!(callbacks.warnings(), vec!["generate_text_embeddings"]);
+}
+
+#[tokio::test]
+async fn test_should_not_reset_vectors_when_workflow_before_embeddings_fails() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config(&server.uri());
+    config.workflows = vec![
+        "create_final_documents".to_owned(),
+        "generate_text_embeddings".to_owned(),
+    ];
+    seed_managed_vectors(tempdir.path(), &config).await;
+
+    build_index(
+        config.clone(),
+        BuildIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: Vec::new(),
+        },
+    )
+    .await
+    .expect_err("first workflow should fail");
+
+    let store = vector_store_for(tempdir.path(), &config).await;
+    for name in ALL_EMBEDDINGS {
+        assert_eq!(
+            store
+                .ids(&config.vector_store.schema_for(name))
+                .await
+                .expect("preserved ids"),
+            vec![format!("old-{name}")]
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_should_isolate_update_only_storage_validation_from_standard_index() {
+    for unsupported in [false, true] {
+        let tempdir = TempDir::new().expect("tempdir");
+        tokio::fs::create_dir(tempdir.path().join("input"))
+            .await
+            .expect("input");
+        tokio::fs::write(tempdir.path().join("input/document.txt"), "Alice")
+            .await
+            .expect("document");
+        let mut config = GraphRagConfig::default();
+        config.workflows = vec!["load_input_documents".to_owned()];
+        if unsupported {
+            config.update_output_storage.storage_type = "unsupported".to_owned();
+        } else {
+            config.update_output_storage.base_dir = "output/update".to_owned();
+        }
+
+        build_index(
+            config.clone(),
+            BuildIndexOptions {
+                project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
+                cache_mode: CacheMode::Disabled,
+                callbacks: Vec::new(),
+            },
+        )
+        .await
+        .expect("unused update config must not block standard index");
+
+        config.workflows = vec!["load_update_documents".to_owned()];
+        let error = update_index(
+            config,
+            UpdateIndexOptions {
+                project_root: tempdir.path().to_path_buf(),
+                method: IndexingMethod::Standard,
+                cache_mode: CacheMode::Disabled,
+                callbacks: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("update-only validation must reject invalid update config");
+        if unsupported {
+            assert!(matches!(
+                error,
+                GraphLoomError::UnsupportedStorage {
+                    kind: "update output",
+                    ..
+                }
+            ));
+            assert!(!tempdir.path().join("update_output").exists());
+        } else {
+            assert!(matches!(error, GraphLoomError::UnsafeUpdatePath { .. }));
+            assert!(!tempdir.path().join("output/update").exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_should_report_update_embedding_callbacks_with_update_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let tempdir = TempDir::new().expect("tempdir");
+    let provider =
+        ParquetTableProvider::new(tempdir.path().join("output")).expect("output provider");
+    provider
+        .write_dataframe(
+            "entities",
+            df!(
+                "id" => ["entity-1"],
+                "title" => ["Alice"],
+                "description" => ["Engineer"],
+            )
+            .expect("entities dataframe"),
+        )
+        .await
+        .expect("entities table");
+    let mut config = test_config(&server.uri());
+    config.workflows = vec!["update_text_embeddings".to_owned()];
+    config.embed_text.names = vec![
+        "entity_description".to_owned(),
+        "community_full_content".to_owned(),
+    ];
+    let callbacks = Arc::new(RecordingCallbacks::default());
+
+    update_index(
+        config,
+        UpdateIndexOptions {
+            project_root: tempdir.path().to_path_buf(),
+            method: IndexingMethod::Standard,
+            cache_mode: CacheMode::Disabled,
+            callbacks: vec![callbacks.clone()],
+        },
+    )
+    .await
+    .expect("update embedding workflow");
+
+    assert_eq!(callbacks.started(), vec!["update_text_embeddings"]);
+    assert_eq!(callbacks.completed(), vec!["update_text_embeddings"]);
+    assert!(!callbacks.progress().is_empty());
+    assert_eq!(callbacks.warnings(), vec!["update_text_embeddings"]);
+    assert!(callbacks.workflow_names_are("update_text_embeddings"));
 }
 
 async fn assert_update_artifacts(
@@ -1092,6 +1354,8 @@ enum RuntimePreflightCase {
 struct RecordingCallbacks {
     started: Mutex<Vec<String>>,
     completed: Mutex<Vec<String>>,
+    progress: Mutex<Vec<String>>,
+    warnings: Mutex<Vec<String>>,
 }
 
 impl RecordingCallbacks {
@@ -1101,6 +1365,23 @@ impl RecordingCallbacks {
 
     fn completed(&self) -> Vec<String> {
         self.completed.lock().expect("completed lock").clone()
+    }
+
+    fn progress(&self) -> Vec<String> {
+        self.progress.lock().expect("progress lock").clone()
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        self.warnings.lock().expect("warnings lock").clone()
+    }
+
+    fn workflow_names_are(&self, expected: &str) -> bool {
+        self.started()
+            .into_iter()
+            .chain(self.completed())
+            .chain(self.progress())
+            .chain(self.warnings())
+            .all(|name| name == expected)
     }
 }
 
@@ -1116,6 +1397,20 @@ impl IndexWorkflowCallbacks for RecordingCallbacks {
         self.completed
             .lock()
             .expect("completed lock")
+            .push(workflow_name.to_owned());
+    }
+
+    fn progress(&self, workflow_name: &str, _completed: usize, _total: Option<usize>) {
+        self.progress
+            .lock()
+            .expect("progress lock")
+            .push(workflow_name.to_owned());
+    }
+
+    fn warning(&self, workflow_name: &str, _message: &str) {
+        self.warnings
+            .lock()
+            .expect("warnings lock")
             .push(workflow_name.to_owned());
     }
 }
@@ -1280,6 +1575,34 @@ async fn prepare_old_output_and_vector_at(
         )
         .await
         .expect("old vector");
+}
+
+async fn seed_managed_vectors(root: &Path, config: &GraphRagConfig) {
+    let store = vector_store_for(root, config).await;
+    for name in ALL_EMBEDDINGS {
+        store
+            .upsert_documents(
+                &config.vector_store.schema_for(name),
+                &[VectorDocument {
+                    id: format!("old-{name}"),
+                    vector: vec![1.0, 0.0, 0.0, 0.0],
+                }],
+            )
+            .await
+            .expect("seed managed vector");
+    }
+}
+
+async fn vector_store_for(root: &Path, config: &GraphRagConfig) -> LanceDbVectorStore {
+    let mut vector_config = config.vector_store.clone();
+    vector_config.db_uri = root
+        .join("output")
+        .join("lancedb")
+        .to_string_lossy()
+        .into_owned();
+    LanceDbVectorStore::connect(&vector_config)
+        .await
+        .expect("vector store")
 }
 
 async fn assert_old_vector_still_exists(root: &std::path::Path, config: &GraphRagConfig) {

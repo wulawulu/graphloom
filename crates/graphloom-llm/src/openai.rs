@@ -207,9 +207,6 @@ impl TryFrom<OpenAiCompletionRequest> for Value {
                 message: "completion request must serialize to an object".to_owned(),
             })?;
         object.insert("model".to_owned(), Value::String(value.model));
-        object
-            .entry("stream".to_owned())
-            .or_insert(Value::Bool(false));
         Ok(payload)
     }
 }
@@ -234,6 +231,9 @@ impl TryFrom<OpenAiEmbeddingRequest> for Value {
                 message: "embedding request must serialize to an object".to_owned(),
             })?;
         object.insert("model".to_owned(), Value::String(value.model));
+        object
+            .entry("encoding_format".to_owned())
+            .or_insert(Value::String("float".to_owned()));
         Ok(payload)
     }
 }
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(request["temperature"], 0.2);
         assert_eq!(request["top_p"], 0.9);
         assert_eq!(request["max_tokens"], 32);
-        assert_eq!(request["stream"], false);
+        assert!(request.get("stream").is_none());
     }
 
     #[test]
@@ -406,6 +406,7 @@ mod tests {
 
         assert_eq!(request["model"], "embed-test");
         assert_eq!(request["dimensions"], 8);
+        assert_eq!(request["encoding_format"], "float");
         assert_eq!(request["input"], serde_json::json!(["a", "b"]));
     }
 

@@ -75,17 +75,37 @@ pub(crate) fn concatenate_with_rebased_ids(
     previous: &DataFrame,
     delta: &DataFrame,
 ) -> Result<DataFrame> {
+    let mut previous = previous.clone();
     let mut delta = delta.clone();
-    let initial_id = max_human_readable_id(previous)?
+    align_null_columns(&mut previous, &mut delta)?;
+    let initial_id = max_human_readable_id(&previous)?
         .checked_add(1)
         .ok_or_else(|| {
             crate::dataframe::invalid_data(UPDATE_CONTEXT, "human_readable_id overflow")
         })?;
     let ids = sequential_ids(initial_id, delta.height())?;
     delta.with_column(Series::new("human_readable_id".into(), ids).into())?;
-    let mut merged = previous.clone();
+    let mut merged = previous;
     merged.vstack_mut(&delta)?;
     Ok(merged)
+}
+
+fn align_null_columns(previous: &mut DataFrame, delta: &mut DataFrame) -> Result<()> {
+    let column_names = previous.get_column_names_owned();
+    for name in column_names {
+        let previous_type = previous.column(name.as_str())?.dtype().clone();
+        let delta_type = delta.column(name.as_str())?.dtype().clone();
+        match (&previous_type, &delta_type) {
+            (DataType::Null, concrete) if concrete != &DataType::Null => {
+                previous.with_column(previous.column(name.as_str())?.cast(concrete)?)?;
+            }
+            (concrete, DataType::Null) if concrete != &DataType::Null => {
+                delta.with_column(delta.column(name.as_str())?.cast(concrete)?)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn merge_entities(
@@ -393,6 +413,8 @@ pub(crate) fn merge_community_reports(
     mapping: &BTreeMap<i64, i64>,
 ) -> Result<DataFrame> {
     let (mut previous, mut delta) = align_optional_columns(previous, delta)?;
+    normalize_findings_column(&mut previous)?;
+    normalize_findings_column(&mut delta)?;
     remap_integer_column(&mut delta, "community", mapping)?;
     remap_integer_column(&mut delta, "parent", mapping)?;
     cast_integer_column(&mut previous, "community")?;
@@ -404,6 +426,31 @@ pub(crate) fn merge_community_reports(
         .collect::<Vec<_>>();
     previous.with_column(Series::new("human_readable_id".into(), communities).into())?;
     Ok(previous.select(COMMUNITY_REPORTS_FINAL_COLUMNS.iter().copied())?)
+}
+
+fn normalize_findings_column(dataframe: &mut DataFrame) -> Result<()> {
+    if !matches!(dataframe.column("findings")?.dtype(), DataType::List(_)) {
+        return Ok(());
+    }
+    let findings = dataframe.column("findings")?.list()?;
+    let rows = (0..dataframe.height())
+        .map(|row_index| {
+            let row = findings.get_as_series(row_index).ok_or_else(|| {
+                crate::dataframe::invalid_data(
+                    UPDATE_CONTEXT,
+                    &format!("community report findings row {row_index} is null"),
+                )
+            })?;
+            let fields = row.struct_()?;
+            let summary = fields.field_by_name("summary")?;
+            let explanation = fields.field_by_name("explanation")?;
+            StructChunked::from_series("item".into(), row.len(), [summary, explanation].iter())
+                .map(StructChunked::into_series)
+                .map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    dataframe.with_column(Series::new("findings".into(), rows).into())?;
+    Ok(())
 }
 
 fn align_optional_columns(
@@ -665,6 +712,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["id", "human_readable_id", "value"]
         );
+    }
+
+    #[test]
+    fn test_should_promote_null_only_columns_for_cross_producer_concat() {
+        let previous = DataFrame::new(
+            1,
+            vec![
+                Series::new("id".into(), ["old"]).into(),
+                Series::new("human_readable_id".into(), [0_i64]).into(),
+                Series::new_null("raw_data".into(), 1).into(),
+            ],
+        )
+        .expect("previous");
+        let delta = df!(
+            "id" => ["new"],
+            "human_readable_id" => [0_i64],
+            "raw_data" => ["{\"source\":\"delta\"}"],
+        )
+        .expect("delta");
+
+        let merged = concatenate_with_rebased_ids(&previous, &delta).expect("merge");
+
+        assert_eq!(
+            merged.column("raw_data").expect("raw data").dtype(),
+            &DataType::String
+        );
+        let raw_data = merged
+            .column("raw_data")
+            .expect("raw data")
+            .str()
+            .expect("string");
+        assert_eq!(raw_data.get(0), None);
+        assert_eq!(raw_data.get(1), Some("{\"source\":\"delta\"}"));
     }
 
     #[test]
