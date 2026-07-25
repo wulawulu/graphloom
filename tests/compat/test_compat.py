@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import struct
 import sys
@@ -58,6 +59,14 @@ EXPECTED_COLUMNS = {
     "covariates": schemas.COVARIATES_FINAL_COLUMNS,
     "communities": schemas.COMMUNITIES_FINAL_COLUMNS,
     "community_reports": schemas.COMMUNITY_REPORTS_FINAL_COLUMNS,
+}
+GRAPHRAG_UPDATE_COLUMNS = {
+    name: (
+        [column for column in columns if column != "description"] + ["description"]
+        if name in {"entities", "relationships"}
+        else columns
+    )
+    for name, columns in EXPECTED_COLUMNS.items()
 }
 
 LIST_COLUMNS = {
@@ -340,21 +349,7 @@ def test_graphrag_data_reader_should_consume_graphloom_tables(
     compatibility_run: CompatibilityRun,
 ) -> None:
     """Exercise GraphRAG's own typed table reader against GraphLoom output."""
-    settings = compatibility_run.graphloom_project / "settings.yaml"
-    from graphrag.config.load_config import load_config
-
-    config = load_config(root_dir=compatibility_run.graphloom_project)
-    storage = create_storage(config.output_storage)
-    reader = DataReader(create_table_provider(config.table_provider, storage=storage))
-
-    async def read_all() -> None:
-        for name in STANDARD_TABLES:
-            frame = await getattr(reader, name)()
-            assert list(frame.columns) == EXPECTED_COLUMNS[name]
-            assert not frame.empty
-
-    assert settings.is_file()
-    asyncio.run(read_all())
+    assert_graphrag_data_reader_consumes_output(compatibility_run.graphloom_project)
 
 
 def test_graphloom_and_graphrag_indexes_should_be_semantically_equivalent(
@@ -487,6 +482,17 @@ def test_standard_update_should_match_graphrag_3_1(
         graphrag,
         graphrag_timestamp / "delta",
         update_collection(graphrag_manifest, "entity_description"),
+    )
+    assert_updated_output_schema(graphloom, graphrag)
+    assert_updated_output_schema(
+        graphrag,
+        graphloom,
+        require_canonical_order=False,
+    )
+    assert_graphrag_data_reader_consumes_output(graphloom)
+    _assert_graphloom_reader_consumes_output(
+        compatibility_run,
+        graphrag / "output",
     )
     _run_post_update_query_matrix(compatibility_run, graphloom, graphrag)
 
@@ -741,6 +747,21 @@ def test_cross_producer_parquet_should_support_bidirectional_native_updates(
         graphrag_native_consumer_timestamp / "delta",
         update_collection(graphrag_reference_manifest, "entity_description"),
     )
+    assert_updated_output_schema(graphloom_consumer, graphrag_reference)
+    assert_updated_output_schema(
+        graphrag_consumer,
+        graphloom_reference,
+        require_canonical_order=False,
+    )
+    _assert_physical_column_order_matches(
+        graphrag_consumer,
+        graphrag_reference,
+    )
+    assert_graphrag_data_reader_consumes_output(graphloom_consumer)
+    _assert_graphloom_reader_consumes_output(
+        compatibility_run,
+        graphrag_consumer / "output",
+    )
     _run_post_update_query_matrix(
         compatibility_run,
         graphloom_consumer,
@@ -760,6 +781,93 @@ def _copy_managed_parquet(producer: Path, consumer: Path) -> None:
             producer / "output" / f"{table}.parquet",
             output / f"{table}.parquet",
         )
+
+
+def assert_updated_output_schema(
+    project: Path,
+    reference_project: Path,
+    *,
+    require_canonical_order: bool = True,
+) -> None:
+    """Validate one final update schema against GraphRAG constants and a reference."""
+    output = project / "output"
+    reference_output = reference_project / "output"
+    for name in STANDARD_TABLES:
+        table = pq.read_table(output / f"{name}.parquet")
+        reference = pq.read_table(reference_output / f"{name}.parquet")
+        expected_columns = EXPECTED_COLUMNS[name]
+        if require_canonical_order:
+            assert table.column_names == expected_columns
+        else:
+            # GraphRAG 3.1.0's update merge appends entity and relationship
+            # descriptions at the end, even though its schema constants put
+            # them earlier. Lock that pinned physical order and compare logical
+            # schemas in canonical constant order without rewriting output.
+            assert table.column_names == GRAPHRAG_UPDATE_COLUMNS[name]
+        assert len(reference.column_names) == len(expected_columns)
+        assert set(reference.column_names) == set(expected_columns)
+        ordered = table.select(expected_columns)
+        ordered_reference = reference.select(expected_columns)
+        if require_canonical_order:
+            _assert_logical_arrow_schema(name, ordered, ordered_reference)
+        else:
+            _assert_logical_arrow_schema(name, ordered_reference, ordered)
+        for column in LIST_COLUMNS.get(name, ()):
+            data_type = ordered.schema.field(column).type
+            reference_type = ordered_reference.schema.field(column).type
+            if not _is_list_like(data_type):
+                raise AssertionError(
+                    f"{name}.{column} must remain an Arrow list, found {data_type}"
+                )
+            if not _is_list_like(reference_type):
+                raise AssertionError(
+                    f"{name}.{column} reference must remain an Arrow list, "
+                    f"found {reference_type}"
+                )
+            expected_type = EXPECTED_LOGICAL_LIST_TYPES[(name, column)]
+            assert _logical_arrow_type(data_type) == expected_type
+            assert _logical_arrow_type(reference_type) == expected_type
+
+
+def _assert_physical_column_order_matches(
+    project: Path,
+    reference_project: Path,
+) -> None:
+    """Keep cross-producer GraphRAG update layout identical to its native update."""
+    for name in STANDARD_TABLES:
+        table = pq.read_table(project / "output" / f"{name}.parquet")
+        reference = pq.read_table(reference_project / "output" / f"{name}.parquet")
+        assert table.column_names == reference.column_names
+
+
+def assert_graphrag_data_reader_consumes_output(project: Path) -> None:
+    """Read every final table through GraphRAG 3.1.0's typed DataReader."""
+    from graphrag.config.load_config import load_config
+
+    config = load_config(root_dir=project)
+    storage = create_storage(config.output_storage)
+    reader = DataReader(create_table_provider(config.table_provider, storage=storage))
+
+    async def read_all() -> None:
+        for name in STANDARD_TABLES:
+            frame = await getattr(reader, name)()
+            assert list(frame.columns) == EXPECTED_COLUMNS[name]
+            assert not frame.empty
+
+    asyncio.run(read_all())
+
+
+def _assert_graphloom_reader_consumes_output(
+    compatibility_run: CompatibilityRun,
+    output: Path,
+) -> None:
+    """Read every updated GraphRAG table through GraphLoom's Parquet provider."""
+    result = run_command([str(compatibility_run.table_reader_bin), str(output)])
+    projection = json.loads(result.stdout)
+    assert set(projection) == set(STANDARD_TABLES)
+    for name in STANDARD_TABLES:
+        assert projection[name]["columns"] == GRAPHRAG_UPDATE_COLUMNS[name]
+        assert projection[name]["rows"] > 0
 
 
 def _assert_old_uuid_references_preserved(previous: Path, final: Path) -> None:

@@ -45,6 +45,20 @@ def vector_manifest_bin() -> Path:
     return binary
 
 
+@pytest.fixture(scope="session")
+def table_reader_bin() -> Path:
+    """Resolve the built test-only GraphLoom Parquet reader probe."""
+    value = os.environ.get("GRAPHLOOM_TABLE_READER_BIN")
+    if not value:
+        pytest.fail(
+            "GRAPHLOOM_TABLE_READER_BIN must point to the built table reader helper"
+        )
+    binary = Path(value).resolve()
+    if not binary.is_file():
+        pytest.fail(f"GRAPHLOOM_TABLE_READER_BIN does not exist: {binary}")
+    return binary
+
+
 @pytest.fixture(scope="session", autouse=True)
 def require_isolated_python_distributions() -> dict[str, DistributionEvidence]:
     """Reject non-locked, editable, local, or neighboring Python imports."""
@@ -56,6 +70,7 @@ def compatibility_run(
     tmp_path_factory: pytest.TempPathFactory,
     graphloom_bin: Path,
     vector_manifest_bin: Path,
+    table_reader_bin: Path,
 ) -> CompatibilityRun:
     """Run both indexers once against the same deterministic fixture."""
     root = tmp_path_factory.mktemp("graphloom-compat")
@@ -77,6 +92,7 @@ def compatibility_run(
             graphrag_project=graphrag_project,
             graphloom_bin=graphloom_bin,
             vector_manifest_bin=vector_manifest_bin,
+            table_reader_bin=table_reader_bin,
             server=server,
         )
     finally:

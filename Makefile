@@ -16,6 +16,7 @@ test-integration:
 test-compat:
 	@cargo build -p graphloom
 	@cargo build -p graphloom-vectors --example compat_vector_manifest
+	@cargo build -p graphloom-storage --example compat_table_reader
 	@cargo test -p graphloom-vectors --example compat_vector_manifest
 	@env -u PYTHONPATH uv run --project tests/compat --locked ruff format --check tests/compat
 	@env -u PYTHONPATH uv run --project tests/compat --locked ruff check tests/compat
@@ -24,6 +25,7 @@ test-compat:
 	env -u PYTHONPATH PYTHONNOUSERSITE=1 \
 		GRAPHLOOM_BIN="$$TARGET_DIR/debug/graphloom" \
 		GRAPHLOOM_VECTOR_MANIFEST_BIN="$$TARGET_DIR/debug/examples/compat_vector_manifest" \
+		GRAPHLOOM_TABLE_READER_BIN="$$TARGET_DIR/debug/examples/compat_table_reader" \
 		uv run --project tests/compat --locked \
 		pytest -q tests/compat
 	@cargo test -p graphloom-llm --test cache_compat

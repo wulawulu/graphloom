@@ -130,6 +130,7 @@ class CompatibilityRun:
     graphrag_project: Path
     graphloom_bin: Path
     vector_manifest_bin: Path
+    table_reader_bin: Path
     server: FixtureModelServer
 
 
