@@ -100,7 +100,7 @@ Use this matrix:
   cargo audit
   ```
 
-- Documentation, specs, research memos, AGENTS/CLAUDE instructions, or skills changed without touching Rust-affecting inputs: proofread/render the changed Markdown where useful, verify touched links and indexes, run `make check-agent-sync` for AGENTS/CLAUDE/skill edits, and run skill frontmatter validation for changed skill folders.
+- Documentation, specs, research memos, agent instructions, or skills changed without touching Rust-affecting inputs: proofread/render the changed Markdown where useful, verify touched links and indexes, and run skill frontmatter validation for changed skill folders.
 
 If the project has a `Makefile` with relevant gates wired (`make check` / `make ci` / narrower targets), prefer that — keeps the gates discoverable.
 
