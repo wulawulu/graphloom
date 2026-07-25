@@ -7,6 +7,7 @@
 
 ## Optimization backlog
 
+- [GraphRAG 3.1.0 compatibility optimization opportunities](optimization-opportunities.md)
 - [社区报告层级上下文优化](community-report-hierarchical-context-optimization.md)
 
 ## Research

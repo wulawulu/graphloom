@@ -62,6 +62,49 @@ The existing Phase 1 gates remain intact:
 Producer Parquet is never copied or transformed for Query. Consumer commands
 pass the producer's original `output` directory through `--data`.
 
+## Paired incremental update
+
+The compatibility gate also creates fresh one-document indexes, adds the same
+second input, and runs `graphloom update` and the pinned `graphrag update`. It
+compares:
+
+- timestamped `previous` and `delta` providers;
+- all seven merged final tables using UUID-independent entity, relationship,
+  and community identities;
+- completion and embedding operation order and complete prompt-derived input;
+- final vector rows, including duplicate IDs created by repeated
+  content-addressed community reports;
+- retained old IDs and rebased human-readable document, text-unit, entity,
+  relationship, and community IDs.
+
+Opaque hierarchical Leiden cluster numbers can permute semantically equivalent
+community-report rows within one embedding batch. The gate preserves request
+order and batch boundaries, compares every presence-aware provider field, and
+normalizes only the input order inside an affected community-report embedding
+batch rather than treating opaque numeric labels as cross-language identities.
+
+Two additional cross-producer cases copy only the seven managed Parquet tables:
+GraphRAG standard output is updated by GraphLoom, and GraphLoom standard output
+is updated by GraphRAG. Each consumer starts with an empty native vector store;
+the final embedding pass creates native vectors. This proves Parquet update
+interoperability without claiming direct Python/Rust LanceDB directory
+compatibility.
+
+A separate no-op case clones already indexed projects and proves that both
+implementations create `previous` and an empty `delta`, stop after
+`load_update_documents`, emit zero model requests, leave final Parquet
+unchanged, and preserve the complete vector manifest.
+
+GraphRAG 3.1.0's LanceDB provider calls `create_index()` with
+`mode="overwrite"` for every embedded field. Consequently the delta pass
+temporarily replaces each final managed collection, and the final pass replaces
+it again; delta entity UUIDs are not stale final records in the observed
+3.1.0 LanceDB result. Each later flush appends unconditionally, so duplicate IDs
+within or across flushes remain duplicate rows. Missing source tables and
+unconfigured fields are not reset. The update-only manifest permits duplicate
+IDs because GraphRAG's final community-report source can contain repeated content hashes.
+The ordinary query interoperability manifest remains unique-ID validated.
+
 ## Canonical vector manifest
 
 `tests/compat/vector_manifest.py` and

@@ -22,8 +22,9 @@ cargo run -p graphloom -- --help
 The `graphloom` crate is both the Rust library and the command-line binary.
 
 - `graphloom::api` exposes programmatic indexing and Query entry points.
-  `build_index` runs standard indexing and returns structured workflow output
-  and pipeline stats. Read-only Query access is available through `query`,
+  `build_index` runs standard indexing, while `update_index` runs the GraphRAG
+  3.1.0 standard incremental-update pipeline. Both return structured workflow
+  output and pipeline stats. Read-only Query access is available through `query`,
   `query_stream`, `basic_search`, `basic_search_streaming`, `local_search`,
   `local_search_streaming`, `global_search`, `global_search_streaming`,
   `drift_search`, and `drift_search_streaming`. `build_index` always performs
@@ -40,7 +41,7 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   `Arc<QueryEngine>` supports concurrent requests; callbacks, history, usage, traversal, and
   streaming state remain request-local.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
-  exit codes to the API indexing layer. `graphloom index` loads project
+  exit codes to the API indexing layer. `graphloom index` and `graphloom update` load project
   configuration and performs CLI validation before dry-run output or indexing.
 - `graphloom init` is a CLI-only project scaffold command. It writes default
   settings, `.env`, `input/`, and prompt files, but is not part of the public
@@ -127,6 +128,74 @@ create_communities
 create_final_text_units
 create_community_reports
 generate_text_embeddings
+```
+
+## Update
+
+```bash
+graphloom update --root ./demo
+```
+
+`--method standard` is the default and only supported indexing method. The
+command first copies every current output table into a timestamped `previous`
+namespace, indexes only input titles absent from the previous `documents`
+table into `delta`, then runs GraphRAG 3.1.0's eight merge workflows:
+
+```text
+demo/update_output/
+└── 20260724-153000/
+    ├── previous/
+    └── delta/
+```
+
+The timestamp format is `%Y%m%d-%H%M%S`. To change the update root:
+
+```yaml
+update_output_storage:
+  type: file
+  base_dir: update_output
+```
+
+Incremental detection compares only document `title`: changed text under an
+existing title is ignored, and removed inputs do not delete indexed records.
+Even a no-op update creates the timestamp directory and copies `previous`;
+after `load_update_documents` reports zero new documents, no later workflow or
+model operation runs and final Parquet/vector data is unchanged.
+
+Updates are intentionally non-transactional, matching GraphRAG 3.1.0. Delta
+embeddings write directly into the configured final vector store before table
+merges finish. GraphRAG's LanceDB `create_index()` uses overwrite mode for each
+enabled embedding field whose source table exists. Subsequent flushes for that
+field append rows without ID-based merging, so duplicate IDs in one final source
+table remain duplicate vector rows even when they cross flush boundaries. The
+final embedding pass overwrites the delta pass collection with records from the
+merged tables. Unconfigured fields and configured fields with missing source
+tables are not reset. If a later workflow fails, `previous`, `delta`, completed
+final-table writes, and the vector state produced by the last completed
+embedding field remain available for diagnosis.
+
+The corresponding Rust API is:
+
+```rust,no_run
+use graphloom::{
+    GraphRagConfig,
+    api::{CacheMode, IndexingMethod, UpdateIndexOptions, update_index},
+};
+
+# async fn example(config: GraphRagConfig) -> graphloom::Result<()> {
+let result = update_index(
+    config,
+    UpdateIndexOptions {
+        project_root: "./demo".into(),
+        method: IndexingMethod::Standard,
+        cache_mode: CacheMode::Configured,
+        callbacks: Vec::new(),
+    },
+)
+.await?;
+println!("new documents: {}", result.stats.update_document_count);
+# Ok(())
+# }
 ```
 
 ## Dry Run
@@ -309,6 +378,11 @@ path semantics, including unresolved suffixes whose capitalization differs.
 Unix checks remain case-sensitive, and vector inside-output detection uses the
 same platform-specific semantics.
 
+`update_output_storage` is subject to the same symlink/reparse-point and
+filesystem-root protections. It must be disjoint from input, final output,
+cache, logs, and the vector database; neither update output nor final output
+may contain the other.
+
 Home-directory safety checks resolve the user home directory from `HOME`,
 `USERPROFILE`, or `HOMEDRIVE` plus `HOMEPATH`, in that priority order. Output
 and vector database paths may live under a normal project in the home directory,
@@ -327,7 +401,11 @@ baseline comes before GraphLoom-specific optimizations.
 
 The automated `make test-compat` gate runs GraphLoom and the uv-locked PyPI
 GraphRAG 3.1.0 package against one deterministic OpenAI-compatible HTTP server.
-It checks all seven standard Parquet tables through PyArrow, pandas, and
+It checks standard indexing and standard update, including `previous`, `delta`,
+final tables, complete provider request contracts, and canonical vector
+manifests. Bidirectional update cases copy only the seven producer Parquet
+tables, then let the other implementation build consumer-native vectors. The
+gate checks all seven standard Parquet tables through PyArrow, pandas, and
 GraphRAG's typed `DataReader`, compares UUID-independent index semantics and
 references, and verifies GraphLoom can reuse GraphRAG's `extract_graph` cache.
 Cache key and payload compatibility for the newer `79ab7c9...` protocol
@@ -356,19 +434,20 @@ compatibility between Python LanceDB 0.24.3 and Rust lancedb 0.31.0. That
 physical storage gap remains a separate hardening item. See the
 [compatibility test guide](docs/python-compatibility-testing.md).
 
-One known behavioral difference remains in `extract_graph`: when one title has
-multiple entity types, GraphLoom currently preserves `(title, type)` identity
-instead of reproducing GraphRAG's title-only summary join. Under the
-compatibility-first policy this is an implementation gap in the default mode;
-the semantically stricter behavior belongs behind a future explicit
-optimization mode. See the
-[extract_graph output study](docs/research/study-graphrag-extract-graph-output.md).
+The `extract_graph` entity path now reproduces GraphRAG's unusual two-stage
+behavior: extraction aggregates by `(title,type)`, summary rows lose `type`,
+and a title-only left join can form a many-to-many Cartesian product before
+`finalize_graph` keeps the first title. The semantically stricter one-to-one
+association remains documented only as a future optimization. See the
+[extract_graph output study](docs/research/study-graphrag-extract-graph-output.md)
+and [optimization backlog](docs/optimization-opportunities.md).
 
 ## Current Support
 
 Supported:
 
 - standard indexing
+- GraphRAG 3.1.0 standard incremental update through CLI and Rust API
 - UTF-8 text input
 - file storage
 - JSON file cache
@@ -384,7 +463,6 @@ Supported:
 
 Not yet supported:
 
-- update workflows
 - prompt-tuning CLI
 - Azure OpenAI or Azure managed identity
 - remote blob storage, CosmosDB, or Azure AI Search
