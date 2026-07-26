@@ -225,7 +225,102 @@ fn no_description() -> String {
 
 #[cfg(test)]
 mod tests {
+    use graphloom_llm::TiktokenTokenizer;
+
     use super::*;
+    use crate::operations::community_reports::build_local_contexts;
+
+    #[test]
+    fn test_should_default_only_null_entity_descriptions() {
+        let dataframe = df!(
+            "id" => ["entity-null", "entity-empty", "entity-text", "entity-space"],
+            "human_readable_id" => [1_i64, 2, 3, 4],
+            "title" => ["NULL", "EMPTY", "TEXT", "SPACE"],
+            "description" => [None, Some(""), Some("description"), Some(" ")],
+            "degree" => [4_i64, 3, 2, 1],
+        )
+        .expect("entity dataframe");
+
+        let rows = read_entity_context_rows(&dataframe).expect("entity rows");
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.description.as_str())
+                .collect::<Vec<_>>(),
+            ["No Description", "", "description", " "]
+        );
+    }
+
+    #[test]
+    fn test_should_default_only_null_relationship_descriptions() {
+        let dataframe = df!(
+            "id" => ["relationship-null", "relationship-empty", "relationship-text", "relationship-space"],
+            "human_readable_id" => [1_i64, 2, 3, 4],
+            "source" => ["A", "B", "C", "D"],
+            "target" => ["B", "C", "D", "A"],
+            "description" => [None, Some(""), Some("description"), Some(" ")],
+            "combined_degree" => [4_i64, 3, 2, 1],
+        )
+        .expect("relationship dataframe");
+
+        let rows = read_relationship_context_rows(&dataframe).expect("relationship rows");
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.description.as_str())
+                .collect::<Vec<_>>(),
+            ["No Description", "", "description", " "]
+        );
+    }
+
+    #[test]
+    fn test_should_render_null_as_default_and_preserve_empty_context_cells() {
+        let entities = df!(
+            "id" => ["marriage", "gift"],
+            "human_readable_id" => [61_i64, 62],
+            "title" => ["婚约", "送礼"],
+            "description" => [None, Some("")],
+            "degree" => [2_i64, 2],
+        )
+        .expect("entity dataframe");
+        let relationships = df!(
+            "id" => ["relationship"],
+            "human_readable_id" => [142_i64],
+            "source" => ["婚约"],
+            "target" => ["送礼"],
+            "description" => [None::<&str>],
+            "combined_degree" => [4_i64],
+        )
+        .expect("relationship dataframe");
+        let entities = read_entity_context_rows(&entities).expect("entity rows");
+        let relationships =
+            read_relationship_context_rows(&relationships).expect("relationship rows");
+        let communities = [CommunityInputRow {
+            community: 0,
+            level: 0,
+            parent: -1,
+            children: Vec::new(),
+            entity_ids: vec!["marriage".to_owned(), "gift".to_owned()],
+            period: String::new(),
+            size: 2,
+        }];
+        let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
+
+        let contexts = build_local_contexts(
+            &communities,
+            &entities,
+            &relationships,
+            &[],
+            &tokenizer,
+            8_000,
+        )
+        .expect("contexts");
+        let context = &contexts.get(&0).expect("community").context;
+
+        assert!(context.contains("61,婚约,No Description,2"));
+        assert!(context.contains("62,送礼,,2"));
+        assert!(context.contains("142,婚约,送礼,No Description,4"));
+    }
 
     #[test]
     fn test_should_write_community_report_schema_in_graphrag_order() {

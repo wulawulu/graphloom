@@ -1,0 +1,9 @@
+-----Entities-----
+human_readable_id,title,description,degree
+61,婚约,,2
+62,送礼,,2
+
+
+-----Relationships-----
+human_readable_id,source,target,description,combined_degree
+142,婚约,送礼,,4

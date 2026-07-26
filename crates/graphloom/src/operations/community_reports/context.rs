@@ -12,7 +12,6 @@ use super::{
 use crate::{Result, dataframe::invalid_data};
 
 const COMMUNITY_REPORTS_CONTEXT: &str = "create_community_reports";
-const NO_DESCRIPTION: &str = "No Description";
 
 #[derive(Debug, Clone)]
 struct LocalContextRecord {
@@ -112,16 +111,14 @@ pub(crate) fn build_local_contexts(
             let key = (title.clone(), row.community, row.entity.degree);
             let record = grouped.entry(key).or_insert_with(|| LocalContextRecord {
                 title: title.clone(),
-                entity: entity_with_default_description(&row.entity),
+                entity: row.entity.clone(),
                 relationships: Vec::new(),
             });
             if let Some(relationship) = source_first
                 .get(title.as_str())
                 .or_else(|| target_first.get(title.as_str()))
             {
-                record
-                    .relationships
-                    .push(relationship_with_default_description(relationship));
+                record.relationships.push((*relationship).clone());
             }
         }
 
@@ -298,31 +295,11 @@ fn csv_context_error(source: &impl std::fmt::Display) -> crate::GraphLoomError {
     )
 }
 
-fn entity_with_default_description(entity: &EntityContextRow) -> EntityContextRow {
-    let mut entity = entity.clone();
-    entity.description = description_or_default(&entity.description);
-    entity
-}
-
-fn relationship_with_default_description(
-    relationship: &RelationshipContextRow,
-) -> RelationshipContextRow {
-    let mut relationship = relationship.clone();
-    relationship.description = description_or_default(&relationship.description);
-    relationship
-}
-
-fn description_or_default(description: &str) -> String {
-    if description.is_empty() {
-        NO_DESCRIPTION.to_owned()
-    } else {
-        description.to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use graphloom_llm::{TiktokenTokenizer, Tokenizer};
+    use graphloom_llm::{
+        ChatMessage, CompletionRequest, TiktokenTokenizer, Tokenizer, completion_request_cache_key,
+    };
 
     use super::*;
 
@@ -364,6 +341,80 @@ mod tests {
              description,7\n20,BOB,\"quote \"\"and\"\", \
              comma\nline\",3\n\n\n-----Relationships-----\nhuman_readable_id,source,target,\
              description,combined_degree\n30,ALICE,BOB,works,10\n"
+        );
+    }
+
+    #[test]
+    fn test_should_preserve_empty_descriptions_in_graphrag_context() {
+        let tokenizer = WordCountTokenizer;
+        let contexts = build_local_contexts(
+            &[community(0, 0, vec!["marriage", "gift"])],
+            &[
+                entity_with_description("marriage", 61, "婚约", 2, ""),
+                entity_with_description("gift", 62, "送礼", 2, ""),
+            ],
+            &[relationship(142, "婚约", "送礼", "", 4)],
+            &[],
+            &tokenizer,
+            1_000,
+        )
+        .expect("contexts");
+
+        assert_eq!(
+            contexts.get(&0).expect("context").context,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/community_reports/empty_descriptions_context.txt"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_should_match_graphrag_key_for_minimal_empty_description_request() {
+        let prompt = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/community_reports/empty_descriptions_context.txt"
+        ));
+        let request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
+
+        assert_eq!(
+            completion_request_cache_key(&request).expect("cache key"),
+            "31ea235314d1b2f0b22f5eae33e351a888e545de305707bfb1f5d29499992bed_v4"
+        );
+    }
+
+    #[test]
+    fn test_should_render_entity_and_relationship_descriptions_verbatim() {
+        let entities = [
+            entity_with_description("empty", 1, "EMPTY", 3, ""),
+            entity_with_description("space", 2, "SPACE", 2, " "),
+            entity_with_description("text", 3, "TEXT", 1, "description"),
+        ];
+        let relationships = [
+            relationship(10, "EMPTY", "SPACE", "", 3),
+            relationship(11, "SPACE", "TEXT", " ", 2),
+            relationship(12, "TEXT", "EMPTY", "description", 1),
+        ];
+
+        assert_eq!(
+            render_entities_csv(&entities).expect("entity csv"),
+            concat!(
+                "-----Entities-----\n",
+                "human_readable_id,title,description,degree\n",
+                "1,EMPTY,,3\n",
+                "2,SPACE, ,2\n",
+                "3,TEXT,description,1\n",
+            )
+        );
+        assert_eq!(
+            render_relationships_csv(&relationships).expect("relationship csv"),
+            concat!(
+                "-----Relationships-----\n",
+                "human_readable_id,source,target,description,combined_degree\n",
+                "10,EMPTY,SPACE,,3\n",
+                "11,SPACE,TEXT, ,2\n",
+                "12,TEXT,EMPTY,description,1\n",
+            )
         );
     }
 
