@@ -594,6 +594,26 @@ def assert_reference_integrity(tables: dict[str, pd.DataFrame]) -> None:
     _assert_community_references(tables["communities"], tables["community_reports"])
 
 
+def assert_retained_input_ordinals_stable(previous: Path, final: Path) -> None:
+    """Verify retained document and text-unit ordinals within one producer."""
+    previous_tables = load_tables(previous)
+    final_tables = load_tables(final)
+    for name in ("documents", "text_units"):
+        final_by_id = {
+            str(row["id"]): _normalize(row["human_readable_id"])
+            for _, row in final_tables[name].iterrows()
+        }
+        for _, row in previous_tables[name].iterrows():
+            identifier = str(row["id"])
+            if identifier not in final_by_id:
+                raise AssertionError(f"retained {name} row is missing: {identifier}")
+            if final_by_id[identifier] != _normalize(row["human_readable_id"]):
+                raise AssertionError(
+                    f"retained {name} ordinal changed for {identifier}: "
+                    f"{row['human_readable_id']} -> {final_by_id[identifier]}"
+                )
+
+
 def canonical_index(
     output: Path,
     *,
@@ -605,10 +625,22 @@ def canonical_index(
     longer present in the merged entity and relationship tables. Supplying the
     delta provider as an identity source maps those observable stale references
     by the same title or endpoint identity without discarding them.
+
+    Document and text-unit ``human_readable_id`` values are producer-local
+    enumeration ordinals. Documents instead use their input semantics as an
+    identity, while text units use their document identity, text, and token
+    count. Lists and table records retain duplicate identities, so canonical
+    comparison remains multiset-sensitive.
     """
     tables = load_tables(output)
-    text_by_id = _value_map(tables["text_units"], "id", "human_readable_id")
-    document_by_id = _value_map(tables["documents"], "id", "human_readable_id")
+    document_by_id = {
+        str(row["id"]): _document_identity(row)
+        for _, row in tables["documents"].iterrows()
+    }
+    text_by_id = {
+        str(row["id"]): _text_unit_identity(row, document_by_id)
+        for _, row in tables["text_units"].iterrows()
+    }
     entity_by_id = _value_map(tables["entities"], "id", "human_readable_id")
     relationship_by_id = _value_map(
         tables["relationships"],
@@ -645,21 +677,13 @@ def canonical_index(
 
     result: dict[str, list[dict[str, Any]]] = {}
     result["documents"] = _sorted_records(
-        {
-            "human_readable_id": row["human_readable_id"],
-            "title": row["title"],
-            "text": row["text"],
-            "text_units": _map_list(row["text_unit_ids"], text_by_id),
-            "raw_data": row["raw_data"],
-        }
+        _document_identity(row)
+        | {"text_units": _map_list(row["text_unit_ids"], text_by_id)}
         for _, row in tables["documents"].iterrows()
     )
     result["text_units"] = _sorted_records(
-        {
-            "human_readable_id": row["human_readable_id"],
-            "text": row["text"],
-            "n_tokens": row["n_tokens"],
-            "document": document_by_id.get(str(row["document_id"])),
+        _text_unit_identity(row, document_by_id)
+        | {
             "entities": _map_list(row["entity_ids"], entity_by_id),
             "relationships": _map_list(row["relationship_ids"], relationship_by_id),
             "covariates": _map_list(row["covariate_ids"], covariate_by_id),
@@ -1097,6 +1121,26 @@ def _assert_community_references(
 
 def _value_map(frame: pd.DataFrame, key: str, value: str) -> dict[str, Any]:
     return {str(row[key]): _normalize(row[value]) for _, row in frame.iterrows()}
+
+
+def _document_identity(row: pd.Series) -> dict[str, Any]:
+    return {
+        "title": _normalize(row["title"]),
+        "text": _normalize(row["text"]),
+        "raw_data": _normalize(row["raw_data"]),
+    }
+
+
+def _text_unit_identity(
+    row: pd.Series,
+    document_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    document_id = str(row["document_id"])
+    return {
+        "document": document_by_id.get(document_id, f"<missing:{document_id}>"),
+        "text": _normalize(row["text"]),
+        "n_tokens": _normalize(row["n_tokens"]),
+    }
 
 
 def _community_identity(row: pd.Series, entity_by_id: dict[str, Any]) -> dict[str, Any]:

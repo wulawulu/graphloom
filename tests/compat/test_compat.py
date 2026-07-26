@@ -20,6 +20,7 @@ from compat_harness import (
     CompatibilityRun,
     RecordedRequest,
     assert_reference_integrity,
+    assert_retained_input_ordinals_stable,
     canonical_index,
     clone_project,
     convert_prompts_for_graphrag,
@@ -440,6 +441,14 @@ def test_standard_update_should_match_graphrag_3_1(
     assert "New documents: 1" in graphloom_result.stdout
     graphloom_timestamp = _single_update_timestamp(graphloom)
     graphrag_timestamp = _single_update_timestamp(graphrag)
+    assert_retained_input_ordinals_stable(
+        graphloom_timestamp / "previous",
+        graphloom / "output",
+    )
+    assert_retained_input_ordinals_stable(
+        graphrag_timestamp / "previous",
+        graphrag / "output",
+    )
     assert canonical_index(graphloom_timestamp / "previous") == initial_graphloom
     assert canonical_index(graphrag_timestamp / "previous") == initial_graphrag
     assert canonical_index(graphloom_timestamp / "previous") == canonical_index(
