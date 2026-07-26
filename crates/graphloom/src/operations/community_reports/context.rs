@@ -362,24 +362,37 @@ mod tests {
 
         assert_eq!(
             contexts.get(&0).expect("context").context,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/community_reports/empty_descriptions_context.txt"
-            ))
+            empty_descriptions_context_fixture()
         );
     }
 
     #[test]
     fn test_should_match_graphrag_key_for_minimal_empty_description_request() {
-        let prompt = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/community_reports/empty_descriptions_context.txt"
-        ));
+        let prompt = empty_descriptions_context_fixture();
         let request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
 
         assert_eq!(
             completion_request_cache_key(&request).expect("cache key"),
             "31ea235314d1b2f0b22f5eae33e351a888e545de305707bfb1f5d29499992bed_v4"
+        );
+    }
+
+    fn empty_descriptions_context_fixture() -> String {
+        normalize_fixture_newlines(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/community_reports/empty_descriptions_context.txt"
+        )))
+    }
+
+    fn normalize_fixture_newlines(text: &str) -> String {
+        text.replace("\r\n", "\n")
+    }
+
+    #[test]
+    fn test_should_normalize_windows_fixture_newlines_for_cache_keys() {
+        assert_eq!(
+            normalize_fixture_newlines("first\r\nsecond\r\n"),
+            "first\nsecond\n"
         );
     }
 
