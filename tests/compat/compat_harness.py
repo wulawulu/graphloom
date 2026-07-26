@@ -626,11 +626,12 @@ def canonical_index(
     delta provider as an identity source maps those observable stale references
     by the same title or endpoint identity without discarding them.
 
-    Document and text-unit ``human_readable_id`` values are producer-local
-    enumeration ordinals. Documents instead use their input semantics as an
-    identity, while text units use their document identity, text, and token
-    count. Lists and table records retain duplicate identities, so canonical
-    comparison remains multiset-sensitive.
+    Document, text-unit, and covariate ``human_readable_id`` values derive from
+    producer-local input enumeration. Documents instead use their input
+    semantics as an identity, text units use their document identity, text, and
+    token count, and covariates use their claim fields and text-unit identity.
+    Lists and table records retain duplicate identities, so canonical comparison
+    remains multiset-sensitive.
     """
     tables = load_tables(output)
     document_by_id = {
@@ -669,7 +670,10 @@ def canonical_index(
                 for _, row in source_relationships.iterrows()
             }
         )
-    covariate_by_id = _value_map(tables["covariates"], "id", "human_readable_id")
+    covariate_by_id = {
+        str(row["id"]): _covariate_identity(row, text_by_id)
+        for _, row in tables["covariates"].iterrows()
+    }
     community_by_id = {
         int(row["community"]): _community_identity(row, entity_by_id)
         for _, row in tables["communities"].iterrows()
@@ -715,22 +719,7 @@ def canonical_index(
         for _, row in tables["relationships"].iterrows()
     )
     result["covariates"] = _sorted_records(
-        {
-            key: row[key]
-            for key in (
-                "human_readable_id",
-                "covariate_type",
-                "type",
-                "description",
-                "subject_id",
-                "object_id",
-                "status",
-                "start_date",
-                "end_date",
-                "source_text",
-            )
-        }
-        | {"text_unit": text_by_id.get(str(row["text_unit_id"]))}
+        _covariate_identity(row, text_by_id)
         for _, row in tables["covariates"].iterrows()
     )
     result["communities"] = _sorted_records(
@@ -1141,6 +1130,27 @@ def _text_unit_identity(
         "text": _normalize(row["text"]),
         "n_tokens": _normalize(row["n_tokens"]),
     }
+
+
+def _covariate_identity(
+    row: pd.Series,
+    text_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    text_unit_id = str(row["text_unit_id"])
+    return {
+        key: _normalize(row[key])
+        for key in (
+            "covariate_type",
+            "type",
+            "description",
+            "subject_id",
+            "object_id",
+            "status",
+            "start_date",
+            "end_date",
+            "source_text",
+        )
+    } | {"text_unit": text_by_id.get(text_unit_id, f"<missing:{text_unit_id}>")}
 
 
 def _community_identity(row: pd.Series, entity_by_id: dict[str, Any]) -> dict[str, Any]:

@@ -69,11 +69,48 @@ def _text_units(
     ]
 
 
+def _covariates(
+    *,
+    ordinals: tuple[int, int] = (0, 1),
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "covariate-a",
+            "human_readable_id": ordinals[0],
+            "covariate_type": "claim",
+            "type": "TYPE",
+            "description": "Claim A",
+            "subject_id": "Subject A",
+            "object_id": "Object A",
+            "status": "TRUE",
+            "start_date": "NONE",
+            "end_date": "NONE",
+            "source_text": "Source A",
+            "text_unit_id": "text-unit-a",
+        },
+        {
+            "id": "covariate-b",
+            "human_readable_id": ordinals[1],
+            "covariate_type": "claim",
+            "type": "TYPE",
+            "description": "Claim B",
+            "subject_id": "Subject B",
+            "object_id": "Object B",
+            "status": "TRUE",
+            "start_date": "NONE",
+            "end_date": "NONE",
+            "source_text": "Source B",
+            "text_unit_id": "text-unit-b",
+        },
+    ]
+
+
 def _write_index(
     root: Path,
     *,
     documents: list[dict[str, Any]] | None = None,
     text_units: list[dict[str, Any]] | None = None,
+    covariates: list[dict[str, Any]] | None = None,
 ) -> None:
     root.mkdir(parents=True)
     tables = {
@@ -103,21 +140,25 @@ def _write_index(
                 "text_unit_ids",
             ]
         ),
-        "covariates": pd.DataFrame(
-            columns=[
-                "id",
-                "human_readable_id",
-                "covariate_type",
-                "type",
-                "description",
-                "subject_id",
-                "object_id",
-                "status",
-                "start_date",
-                "end_date",
-                "source_text",
-                "text_unit_id",
-            ]
+        "covariates": (
+            pd.DataFrame(covariates)
+            if covariates is not None
+            else pd.DataFrame(
+                columns=[
+                    "id",
+                    "human_readable_id",
+                    "covariate_type",
+                    "type",
+                    "description",
+                    "subject_id",
+                    "object_id",
+                    "status",
+                    "start_date",
+                    "end_date",
+                    "source_text",
+                    "text_unit_id",
+                ]
+            )
         ),
         "communities": pd.DataFrame(
             columns=[
@@ -249,6 +290,60 @@ def test_should_ignore_update_delta_document_ordinal(tmp_path: Path) -> None:
     _write_index(right, documents=right_documents, text_units=right_text_units)
 
     assert canonical_index(left) == canonical_index(right)
+
+
+def test_should_ignore_cross_producer_covariate_ordinals(tmp_path: Path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left_text_units = _text_units()
+    right_text_units = _text_units(ordinals=(1, 0))
+    left_text_units[0]["covariate_ids"] = ["covariate-a"]
+    left_text_units[1]["covariate_ids"] = ["covariate-b"]
+    right_text_units[0]["covariate_ids"] = ["covariate-a"]
+    right_text_units[1]["covariate_ids"] = ["covariate-b"]
+    _write_index(
+        left,
+        text_units=left_text_units,
+        covariates=_covariates(),
+    )
+    _write_index(
+        right,
+        documents=_documents(ordinals=(1, 0)),
+        text_units=right_text_units,
+        covariates=_covariates(ordinals=(1, 0)),
+    )
+
+    assert_reference_integrity(load_tables(left))
+    assert_reference_integrity(load_tables(right))
+    assert canonical_index(left) == canonical_index(right)
+
+
+def test_should_reject_covariate_linked_to_wrong_text_unit(tmp_path: Path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left_text_units = _text_units()
+    left_text_units[0]["covariate_ids"] = ["covariate-a"]
+    left_text_units[1]["covariate_ids"] = ["covariate-b"]
+    wrong_text_units = _text_units(ordinals=(1, 0))
+    wrong_text_units[0]["covariate_ids"] = ["covariate-b"]
+    wrong_text_units[1]["covariate_ids"] = ["covariate-a"]
+    wrong_covariates = _covariates(ordinals=(1, 0))
+    wrong_covariates[0]["text_unit_id"] = "text-unit-b"
+    wrong_covariates[1]["text_unit_id"] = "text-unit-a"
+    _write_index(
+        left,
+        text_units=left_text_units,
+        covariates=_covariates(),
+    )
+    _write_index(
+        right,
+        documents=_documents(ordinals=(1, 0)),
+        text_units=wrong_text_units,
+        covariates=wrong_covariates,
+    )
+
+    assert_reference_integrity(load_tables(right))
+    assert canonical_index(left) != canonical_index(right)
 
 
 def test_should_preserve_duplicate_text_unit_multiplicity(tmp_path: Path) -> None:
