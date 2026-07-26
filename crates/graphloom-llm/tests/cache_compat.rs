@@ -28,6 +28,8 @@ const COMPLETION_FIXTURE: &str = include_str!(
     "fixtures/graphrag/completion/\
      04ad9d031321cd7dc75fc1b9a3341700367369b97ec0168c51a16a1e076a1e3e_v4"
 );
+const EMPTY_COMPLETION_FIXTURE: &str =
+    include_str!("fixtures/graphrag/completion/empty_content_with_reasoning_v4");
 const EMBEDDING_FIXTURE: &str = include_str!(
     "fixtures/graphrag/embedding/\
      90c0451b04544c23e0c20382f46fb97d894a1ee4ff4a85f020be5635afb81bc7_v4"
@@ -589,6 +591,30 @@ fn test_should_decode_and_round_trip_real_graphrag_completion_cache_fixture() {
         Some("stop")
     );
     assert!(!typed.result.metrics.is_empty());
+    assert_eq!(
+        serde_json::to_value(typed).expect("encoded fixture"),
+        original
+    );
+}
+
+#[test]
+fn test_should_decode_empty_content_cache_fixture_without_using_reasoning() {
+    let original: Value = serde_json::from_str(EMPTY_COMPLETION_FIXTURE).expect("fixture JSON");
+    let typed: Outer<CompletionResponse> =
+        serde_json::from_value(original.clone()).expect("canonical completion cache");
+
+    assert_eq!(
+        typed
+            .result
+            .response
+            .content()
+            .expect("empty content is valid"),
+        ""
+    );
+    assert_eq!(
+        typed.result.response.reasoning_content(),
+        Some("minimal faithful reasoning payload")
+    );
     assert_eq!(
         serde_json::to_value(typed).expect("encoded fixture"),
         original

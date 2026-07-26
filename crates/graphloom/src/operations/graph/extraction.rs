@@ -269,6 +269,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_accept_empty_graph_extraction_response() {
+        let extraction_template = extraction_template().await;
+        let model = MockCompletionModel::new("mock", vec![String::new()]);
+        let text_unit = TextUnitInput {
+            id: "tu-empty".to_owned(),
+            text: "No graph facts were extracted.".to_owned(),
+        };
+
+        let (entities, relationships) = extract_text_unit_graph(
+            &model,
+            &extraction_template,
+            &[String::from("person")],
+            &text_unit,
+            0,
+        )
+        .await
+        .expect("empty extraction content is a valid per-text-unit result");
+
+        assert!(entities.is_empty());
+        assert!(relationships.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_should_extract_merge_and_filter_orphan_relationships() {
         let extraction_template = extraction_template().await;
         let model = MockCompletionModel::new(

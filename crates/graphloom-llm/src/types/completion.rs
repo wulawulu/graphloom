@@ -96,19 +96,23 @@ impl CompletionResponse {
         self.choices.first()
     }
 
-    /// Return the first choice's non-empty content.
+    /// Return the first choice's content using `GraphRAG` semantics.
+    ///
+    /// A present choice whose message content is either `None` or an empty
+    /// string produces an empty string. Provider reasoning content remains
+    /// available through [`Self::reasoning_content`] and is never substituted
+    /// for ordinary completion content.
     ///
     /// # Errors
     ///
-    /// Returns [`LlmError::InvalidResponse`] when no textual content exists.
+    /// Returns [`LlmError::InvalidResponse`] when the response has no choices.
     pub fn content(&self) -> Result<&str> {
         self.first_choice()
-            .and_then(|choice| choice.message.content.as_deref())
-            .filter(|content| !content.is_empty())
+            .map(|choice| choice.message.content.as_deref().unwrap_or_default())
             .ok_or_else(|| LlmError::InvalidResponse {
                 model_instance: self.model.clone(),
                 operation: "completion",
-                message: "missing choices[0].message.content".to_owned(),
+                message: "missing choices[0]".to_owned(),
             })
     }
 
@@ -151,5 +155,54 @@ impl CompletionResponse {
             extra: BTreeMap::new(),
             metadata: ModelCallMetadata::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompletionResponse;
+    use crate::LlmError;
+
+    #[test]
+    fn test_should_return_non_empty_completion_content_verbatim() {
+        let response = CompletionResponse::text_for_test("model", "answer");
+
+        assert_eq!(response.content().expect("content should exist"), "answer");
+    }
+
+    #[test]
+    fn test_should_accept_explicit_empty_completion_content() {
+        let response = CompletionResponse::text_for_test("model", "");
+
+        assert_eq!(response.content().expect("empty content is valid"), "");
+    }
+
+    #[test]
+    fn test_should_treat_null_completion_content_as_empty() {
+        let mut response = CompletionResponse::text_for_test("model", "ignored");
+        response.choices[0].message.content = None;
+
+        assert_eq!(response.content().expect("null content is valid"), "");
+    }
+
+    #[test]
+    fn test_should_reject_completion_without_choices() {
+        let mut response = CompletionResponse::text_for_test("model", "ignored");
+        response.choices.clear();
+
+        let error = response.content().expect_err("missing choice must fail");
+        assert!(matches!(
+            error,
+            LlmError::InvalidResponse { message, .. } if message == "missing choices[0]"
+        ));
+    }
+
+    #[test]
+    fn test_should_not_substitute_reasoning_for_empty_completion_content() {
+        let mut response = CompletionResponse::text_for_test("model", "");
+        response.choices[0].message.reasoning_content = Some("private reasoning".to_owned());
+
+        assert_eq!(response.content().expect("empty content is valid"), "");
+        assert_eq!(response.reasoning_content(), Some("private reasoning"));
     }
 }
