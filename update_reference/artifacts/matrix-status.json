@@ -1,0 +1,333 @@
+{
+  "versions": {
+    "graphloom_commit": "64a81e7b6c2bf1e238bfa1ff6e92579dabf3b3bb",
+    "graphloom_worktree": "completion empty-content and community-report empty-description fixes tested on the stated baseline",
+    "graphrag_commit": "79ab7c9ad586856e82635264c200d8a1eb3c63d9",
+    "graphrag_version": "3.1.0"
+  },
+  "effective_config_gate": {
+    "passed": true,
+    "report": "effective-config.json"
+  },
+  "reference_cache_builder": {
+    "initial_index_exit": 0,
+    "update_attempt_1_exit": 1,
+    "update_attempt_1_reason": "operator interrupt after the local proxy connection stopped making progress; partial cache retained",
+    "update_attempt_2_exit": 0,
+    "entries": {
+      "old_debug": 837,
+      "after_initial": 981,
+      "after_interrupted_update": 1329,
+      "frozen_final": 1547
+    },
+    "frozen_total_bytes": 59841404,
+    "frozen_manifest_sha256": "840704ca8ea5295903f639e59cc4ed5607ce4ab02b4d15f0f1ddd0208cd1b1fb",
+    "frozen_namespace_counts": {
+      "community_reporting": 179,
+      "extract_claims": 164,
+      "extract_graph": 164,
+      "summarize_descriptions": 904,
+      "text_embedding": 136
+    },
+    "initial_metrics": {
+      "completion": {
+        "attempted": 419,
+        "hits": 296,
+        "misses": 123
+      },
+      "embedding": {
+        "attempted": 32,
+        "hits": 9,
+        "misses": 23
+      }
+    },
+    "successful_update_attempt_metrics": {
+      "completion": {
+        "attempted": 508,
+        "hits": 348,
+        "misses": 160
+      },
+      "embedding": {
+        "attempted": 85,
+        "hits": 25,
+        "misses": 60
+      }
+    },
+    "update_unique_cache_entries_added_across_both_attempts": 566,
+    "metrics_note": "GraphRAG flushes aggregate metrics only on normal completion, so the interrupted attempt has exact unique-entry deltas and progress logs but no final attempted-request counter."
+  },
+  "lanes": {
+    "RR": {
+      "initial_exit": 0,
+      "initial_cache": {
+        "completion_hits": 418,
+        "completion_misses": 0,
+        "embedding_hits": 31,
+        "embedding_misses": 0,
+        "manifest_unchanged": true
+      },
+      "update_exit": 0,
+      "update_cache": {
+        "completion_hits": 507,
+        "completion_misses": 0,
+        "embedding_hits": 84,
+        "embedding_misses": 0,
+        "manifest_unchanged": true
+      },
+      "final_rows": {
+        "documents": 2,
+        "text_units": 58,
+        "entities": 346,
+        "relationships": 1089,
+        "communities": 94,
+        "community_reports": 93,
+        "covariates": 949
+      },
+      "final_vectors": {
+        "community_full_content": 93,
+        "entity_description": 346,
+        "text_unit_text": 58,
+        "dimension": 1024
+      }
+    },
+    "LL": {
+      "initial_exit": 0,
+      "initial_cache_hits": 449,
+      "initial_cache_misses": 0,
+      "initial_cache_manifest_unchanged": true,
+      "pre_fix_update_exit": 1,
+      "pre_fix_update_cache_hits_before_failure": 45,
+      "pre_fix_failure": "empty choices[0].message.content rejected by GraphLoom",
+      "post_fix_update_exit": 1,
+      "post_fix_exit_note": "operator interrupt immediately after the first newly discovered offline cache miss",
+      "post_fix_update_completion_hits_before_failure": 348,
+      "post_fix_update_completion_misses": 1,
+      "post_fix_update_embedding_hits": 0,
+      "post_fix_update_embedding_misses": 0,
+      "update_cache_manifest_unchanged": true,
+      "post_fix_empty_content_entry_hit": true,
+      "post_fix_completed_workflows": [
+        "load_update_documents",
+        "create_base_text_units",
+        "create_final_documents",
+        "extract_graph",
+        "finalize_graph",
+        "extract_covariates",
+        "create_communities",
+        "create_final_text_units"
+      ],
+      "post_fix_blocked_workflow": "create_community_reports",
+      "post_fix_failure": "GraphLoom generated community_reporting key 088ac5828f9a15a2110a7242c503909ffc1d8121230a720a8f1293201a86d1d2_v4, which is absent from the GraphRAG-only frozen reference cache",
+      "community_fix_update_exit": 0,
+      "community_fix_completion_hits": 507,
+      "community_fix_completion_misses": 0,
+      "community_fix_embedding_hits": 84,
+      "community_fix_embedding_misses": 0,
+      "community_fix_cache_manifest_unchanged": true,
+      "community_fix_old_request_absent": true,
+      "community_fix_reference_request_hit": true,
+      "community_fix_all_18_workflows_completed": true,
+      "community_fix_merge_completed": true,
+      "final_output_manifest_sha256": "c8707d90653ce272353242cf050b34280027d7febca4a594d01f1f3cb8042e57"
+    },
+    "RG": {
+      "copied_initial_manifest_sha256": "a6d871c4b208cca3bfd4d6f2c0ee6c64f4b039cded36977955cfb49e066eea51",
+      "copied_initial_matches_RR": true,
+      "pre_fix_update_exit": 1,
+      "pre_fix_update_cache_hits_before_failure": 26,
+      "pre_fix_update_cache_misses": 0,
+      "update_cache_manifest_unchanged": true,
+      "read_graphRAG_initial_state": true,
+      "pre_fix_failure": "same empty choices[0].message.content rejected by GraphLoom",
+      "post_fix_update_performed": false,
+      "post_fix_reason": "LL exposed a new community-report cache request-key mismatch; the lane matrix was stopped immediately as required",
+      "community_fix_update_exit": 0,
+      "community_fix_completion_hits": 507,
+      "community_fix_completion_misses": 0,
+      "community_fix_embedding_hits": 84,
+      "community_fix_embedding_misses": 0,
+      "community_fix_cache_manifest_unchanged": true,
+      "community_fix_old_request_absent": true,
+      "community_fix_reference_request_hit": true,
+      "community_fix_all_18_workflows_completed": true,
+      "community_fix_merge_completed": true,
+      "final_output_manifest_sha256": "a5d64a9209c0188c18d5bdc59224307d004682ca85f893cfaff5dddb9fbd42db"
+    }
+  },
+  "comparisons": {
+    "RR_initial_vs_LL_initial": {
+      "table_sets_equal": true,
+      "row_counts_equal": true,
+      "strict_storage_equal": false,
+      "canonical_semantic_equal_all_seven_tables": true,
+      "strict_vector_equal": false,
+      "semantic_vector_equal": true,
+      "max_vector_abs_delta": 1.3447952251777195e-08,
+      "semantic_vector_tolerance": 1e-07,
+      "reference_integrity_equal_and_valid": true
+    },
+    "RR_final_vs_LL_final": {
+      "performed": true,
+      "gate_passed": true,
+      "table_sets_equal": true,
+      "row_counts_equal": true,
+      "strict_storage_equal": false,
+      "canonical_semantic_equal_all_seven_tables": true,
+      "strict_vector_equal": false,
+      "semantic_vector_equal": true,
+      "max_vector_abs_delta": 1.4271163917278784e-08,
+      "semantic_vector_tolerance": 1e-07,
+      "reference_violation_multisets_equal": true,
+      "artifact": "final-rr-vs-ll-after-community-fix.json"
+    },
+    "RR_final_vs_RG_final": {
+      "performed": true,
+      "gate_passed": true,
+      "table_sets_equal": true,
+      "row_counts_equal": true,
+      "strict_storage_equal": false,
+      "canonical_semantic_equal_all_seven_tables": true,
+      "strict_vector_equal": false,
+      "semantic_vector_equal": true,
+      "max_vector_abs_delta": 1.4271163917278784e-08,
+      "semantic_vector_tolerance": 1e-07,
+      "reference_violation_multisets_equal": true,
+      "artifact": "final-rr-vs-rg-after-community-fix.json"
+    },
+    "GraphRAG_update_vs_GraphRAG_fresh_full_document": {
+      "performed": true,
+      "semantic_equal": false,
+      "fresh_rows": {
+        "documents": 1,
+        "text_units": 57,
+        "entities": 362,
+        "relationships": 1107,
+        "communities": 89,
+        "community_reports": 84,
+        "covariates": 1010
+      },
+      "update_rows": {
+        "documents": 2,
+        "text_units": 58,
+        "entities": 346,
+        "relationships": 1089,
+        "communities": 94,
+        "community_reports": 93,
+        "covariates": 949
+      },
+      "note": "The fresh lane preserves the original one-document chunk stream while update preserves the deliberate two-document split."
+    },
+    "GraphLoom_fresh_vs_GraphRAG_fresh": {
+      "performed": true,
+      "canonical_semantic_equal": true,
+      "semantic_vector_equal": true,
+      "strict_storage_equal": false
+    }
+  },
+  "blocking_cache_entry": {
+    "namespace": "extract_graph",
+    "key": "3383d9acf3268cea81c21a6621978f296b9acef5555c3dfe0e6c603d2298c68d_v4",
+    "content": "",
+    "reasoning_content_length": 18311,
+    "matching_completion_entries_with_empty_content": 1
+  },
+  "completion_response_fix": {
+    "implemented": true,
+    "choices_empty": "InvalidResponse",
+    "non_empty_content": "returned verbatim",
+    "empty_content": "returned as an empty string",
+    "null_content": "returned as an empty string",
+    "reasoning_content_fallback": false,
+    "wire_reasoning_content_preserved": true,
+    "original_blocking_entry_now_hits_and_continues": true
+  },
+  "post_fix_blocking_cache_request": {
+    "namespace": "community_reporting",
+    "key": "088ac5828f9a15a2110a7242c503909ffc1d8121230a720a8f1293201a86d1d2_v4",
+    "workflow": "create_community_reports",
+    "request_summary": "Chinese graph community-report prompt centered on 潘金莲, with 12 entity rows and 12 relationship rows",
+    "present_in_frozen_reference_cache": false,
+    "reference_cache_incomplete": false,
+    "classification": "GraphLoom/GraphRAG community-report request-content contract mismatch",
+    "closest_graphrag_key": "96f3ab334388bfef8549cf29e65352b6c4f95c7b444ee62e2c60e5608dc87099_v4",
+    "closest_prompt_similarity_ratio": 0.9978277734678045,
+    "exact_prompt_difference": {
+      "graphloom": [
+        "61,婚约,No Description,2",
+        "62,送礼,No Description,2"
+      ],
+      "graphrag": [
+        "61,婚约,,2",
+        "62,送礼,,2"
+      ]
+    },
+    "minimum_root_cause": "GraphLoom replaces empty entity descriptions with `No Description`; GraphRAG fillna replaces null only and preserves empty strings",
+    "graphloom_code": "crates/graphloom/src/operations/community_reports/context.rs:301-321",
+    "graphrag_code": "packages/graphrag/graphrag/index/workflows/create_community_reports.py:143-159",
+    "merge_reached": false,
+    "nearest_diff_artifact": "community-request-nearest-diff.json",
+    "fix_gate_artifact": "community-request-fix-gate.json",
+    "resolved": true,
+    "resolved_behavior": "null remains No Description; empty, whitespace, and non-empty descriptions are rendered verbatim",
+    "old_graphloom_key_no_longer_generated": true,
+    "graphrag_reference_key_hit_in_LL_and_RG": true
+  },
+  "final_reference_integrity": {
+    "equal_across_RR_LL_RG": true,
+    "violations": [
+      {
+        "table": "text_units",
+        "field": "relationship_ids",
+        "count": 249,
+        "canonical_unique_count": 70,
+        "canonical_values_sha256": "e16e2d2f39065e7c10f00f3be8f0562bce908d50dc14402e34b555ed445c1c0a"
+      },
+      {
+        "table": "communities",
+        "field": "entity_ids",
+        "count": 119,
+        "canonical_unique_count": 41,
+        "canonical_values_sha256": "60fad6f0fc61660c8acf44c59c01954a7fcab52a23982739f7809c08bb35ef91"
+      },
+      {
+        "table": "communities",
+        "field": "relationship_ids",
+        "count": 79,
+        "canonical_unique_count": 38,
+        "canonical_values_sha256": "a4a017058b2ecef3c634204bc439e6cf6ab659f25b6c1bcb575f90ea794d20df"
+      }
+    ]
+  },
+  "id_stability": {
+    "artifact": "id-stability-after-community-fix.json",
+    "RR_LL_RG_match": true,
+    "all_initial_parquet_ids_retained": true,
+    "all_initial_vector_ids_retained": true,
+    "retained_human_readable_ids_changed": 0
+  },
+  "classification": [
+    "the cached completion empty-content response incompatibility is fixed",
+    "the original empty-content cache entry is now consumed as an empty extraction",
+    "the community-report empty-description request incompatibility is fixed",
+    "LL and RG both complete every update and merge workflow offline with zero misses",
+    "initial index is semantically compatible",
+    "native and GraphRAG-to-GraphLoom handoff update results are canonically semantically compatible",
+    "strict Arrow storage differs",
+    "strict vector values differ by small numerical rounding and entity UUID identity; canonical vectors pass",
+    "GraphRAG reference orphan violations are reproduced with identical canonical multisets",
+    "all initial Parquet and vector IDs are retained in RR, LL, and RG"
+  ],
+  "scope": {
+    "configuration_and_fixture_specific": true,
+    "verified_paths": [
+      "GraphLoom native update",
+      "GraphRAG 3.1.0 initial index to GraphLoom update handoff"
+    ],
+    "unverified": [
+      "strict storage compatibility",
+      "GraphLoom to GraphRAG reverse handoff",
+      "other models, datasets, and configurations"
+    ]
+  },
+  "conclusion": "under this configuration and fixture, native and GraphRAG-to-GraphLoom handoff updates are canonically semantically compatible; strict Arrow/UUID/JSON-order/vector-rounding differences retained"
+}

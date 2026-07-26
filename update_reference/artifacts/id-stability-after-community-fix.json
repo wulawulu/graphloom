@@ -1,0 +1,295 @@
+{
+  "lanes": {
+    "RR": {
+      "parquet": {
+        "communities": {
+          "initial": 46,
+          "final": 94,
+          "retained": 46,
+          "removed": 0,
+          "added": 48,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "community_reports": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "covariates": {
+          "initial": 582,
+          "final": 949,
+          "retained": 582,
+          "removed": 0,
+          "added": 367,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "documents": {
+          "initial": 1,
+          "final": 2,
+          "retained": 1,
+          "removed": 0,
+          "added": 1,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "entities": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "relationships": {
+          "initial": 571,
+          "final": 1089,
+          "retained": 571,
+          "removed": 0,
+          "added": 518,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "text_units": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        }
+      },
+      "vectors": {
+        "community_full_content": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47
+        },
+        "entity_description": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160
+        },
+        "text_unit_text": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24
+        }
+      }
+    },
+    "LL": {
+      "parquet": {
+        "communities": {
+          "initial": 46,
+          "final": 94,
+          "retained": 46,
+          "removed": 0,
+          "added": 48,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "community_reports": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "covariates": {
+          "initial": 582,
+          "final": 949,
+          "retained": 582,
+          "removed": 0,
+          "added": 367,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "documents": {
+          "initial": 1,
+          "final": 2,
+          "retained": 1,
+          "removed": 0,
+          "added": 1,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "entities": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "relationships": {
+          "initial": 571,
+          "final": 1089,
+          "retained": 571,
+          "removed": 0,
+          "added": 518,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "text_units": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        }
+      },
+      "vectors": {
+        "community_full_content": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47
+        },
+        "entity_description": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160
+        },
+        "text_unit_text": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24
+        }
+      }
+    },
+    "RG": {
+      "parquet": {
+        "communities": {
+          "initial": 46,
+          "final": 94,
+          "retained": 46,
+          "removed": 0,
+          "added": 48,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "community_reports": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "covariates": {
+          "initial": 582,
+          "final": 949,
+          "retained": 582,
+          "removed": 0,
+          "added": 367,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "documents": {
+          "initial": 1,
+          "final": 2,
+          "retained": 1,
+          "removed": 0,
+          "added": 1,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "entities": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "relationships": {
+          "initial": 571,
+          "final": 1089,
+          "retained": 571,
+          "removed": 0,
+          "added": 518,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        },
+        "text_units": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24,
+          "retained_fraction": 1.0,
+          "retained_human_readable_id_changes": 0,
+          "retained_human_readable_id_change_examples": []
+        }
+      },
+      "vectors": {
+        "community_full_content": {
+          "initial": 46,
+          "final": 93,
+          "retained": 46,
+          "removed": 0,
+          "added": 47
+        },
+        "entity_description": {
+          "initial": 186,
+          "final": 346,
+          "retained": 186,
+          "removed": 0,
+          "added": 160
+        },
+        "text_unit_text": {
+          "initial": 34,
+          "final": 58,
+          "retained": 34,
+          "removed": 0,
+          "added": 24
+        }
+      }
+    }
+  }
+}

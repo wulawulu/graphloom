@@ -56,6 +56,24 @@ query-record-replay:
 		--method "$(or $(METHOD),all)" \
 		--graphloom-bin "$$TARGET_DIR/debug/graphloom"
 
+update-debug-audit:
+	@../graphrag/.venv/bin/python update_debug/audit_update_fixture.py \
+		--stage "$(or $(STAGE),preflight)"
+
+test-update-debug-audit:
+	@env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		pytest -q update_debug/test_audit_update_fixture.py
+
+update-reference-config-gate:
+	@TARGET_DIR="$$(cargo metadata --no-deps --format-version 1 | \
+		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"; \
+	../graphrag/.venv/bin/python update_reference/effective_config_gate.py \
+		--graphloom-root update_reference/template \
+		--graphrag-root ../graphrag/update_reference/template \
+		--graphloom-bin "$$TARGET_DIR/debug/graphloom" \
+		--output update_reference/artifacts/effective-config.json
+
 test-all:
 	@cargo nextest run --all-features
 
@@ -72,4 +90,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay llm-cache-proxy query-record-replay test-all bench-query release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay llm-cache-proxy query-record-replay update-debug-audit test-update-debug-audit update-reference-config-gate test-all bench-query release update-submodule

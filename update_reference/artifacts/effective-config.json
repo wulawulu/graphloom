@@ -1,0 +1,507 @@
+{
+  "compatible": true,
+  "failures": [],
+  "effective_fields": {
+    "completion_models.default_completion_model.model_provider": {
+      "graphloom": "deepseek",
+      "graphrag": "deepseek",
+      "equal": true
+    },
+    "completion_models.default_completion_model.model": {
+      "graphloom": "deepseek-v4-flash",
+      "graphrag": "deepseek-v4-flash",
+      "equal": true
+    },
+    "completion_models.default_completion_model.auth_method": {
+      "graphloom": "api_key",
+      "graphrag": "api_key",
+      "equal": true
+    },
+    "completion_models.default_completion_model.api_base": {
+      "graphloom": "http://127.0.0.1:9/v1",
+      "graphrag": "http://127.0.0.1:9/v1",
+      "equal": true
+    },
+    "completion_models.default_completion_model.retry.type": {
+      "graphloom": "exponential_backoff",
+      "graphrag": "exponential_backoff",
+      "equal": true
+    },
+    "completion_models.default_completion_model.retry.max_retries": {
+      "graphloom": 7,
+      "graphrag": 7,
+      "equal": true
+    },
+    "completion_models.default_completion_model.call_args": {
+      "graphloom": {},
+      "graphrag": {},
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.model_provider": {
+      "graphloom": "ollama",
+      "graphrag": "ollama",
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.model": {
+      "graphloom": "bge-m3",
+      "graphrag": "bge-m3",
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.auth_method": {
+      "graphloom": "api_key",
+      "graphrag": "api_key",
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.api_base": {
+      "graphloom": "http://127.0.0.1:9",
+      "graphrag": "http://127.0.0.1:9",
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.retry.type": {
+      "graphloom": "exponential_backoff",
+      "graphrag": "exponential_backoff",
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.retry.max_retries": {
+      "graphloom": 7,
+      "graphrag": 7,
+      "equal": true
+    },
+    "embedding_models.default_embedding_model.call_args": {
+      "graphloom": {},
+      "graphrag": {},
+      "equal": true
+    },
+    "concurrent_requests": {
+      "graphloom": 25,
+      "graphrag": 25,
+      "equal": true
+    },
+    "async_mode": {
+      "graphloom": "threaded",
+      "graphrag": "threaded",
+      "equal": true
+    },
+    "input.type": {
+      "graphloom": "text",
+      "graphrag": "text",
+      "equal": true
+    },
+    "input.file_pattern": {
+      "graphloom": ".*\\.txt$",
+      "graphrag": ".*\\.txt$",
+      "equal": true
+    },
+    "chunking.type": {
+      "graphloom": "tokens",
+      "graphrag": "tokens",
+      "equal": true
+    },
+    "chunking.size": {
+      "graphloom": 1200,
+      "graphrag": 1200,
+      "equal": true
+    },
+    "chunking.overlap": {
+      "graphloom": 100,
+      "graphrag": 100,
+      "equal": true
+    },
+    "chunking.encoding_model": {
+      "graphloom": "o200k_base",
+      "graphrag": "o200k_base",
+      "equal": true
+    },
+    "input_storage.type": {
+      "graphloom": "file",
+      "graphrag": "file",
+      "equal": true
+    },
+    "input_storage.base_dir": {
+      "graphloom": "input",
+      "graphrag": "input",
+      "equal": true
+    },
+    "output_storage.type": {
+      "graphloom": "file",
+      "graphrag": "file",
+      "equal": true
+    },
+    "output_storage.base_dir": {
+      "graphloom": "output",
+      "graphrag": "output",
+      "equal": true
+    },
+    "update_output_storage.type": {
+      "graphloom": "file",
+      "graphrag": "file",
+      "equal": true
+    },
+    "update_output_storage.base_dir": {
+      "graphloom": "update_output",
+      "graphrag": "update_output",
+      "equal": true
+    },
+    "reporting.type": {
+      "graphloom": "file",
+      "graphrag": "file",
+      "equal": true
+    },
+    "reporting.base_dir": {
+      "graphloom": "logs",
+      "graphrag": "logs",
+      "equal": true
+    },
+    "cache.type": {
+      "graphloom": "json",
+      "graphrag": "json",
+      "equal": true
+    },
+    "cache.storage.type": {
+      "graphloom": "file",
+      "graphrag": "file",
+      "equal": true
+    },
+    "cache.storage.base_dir": {
+      "graphloom": "cache",
+      "graphrag": "cache",
+      "equal": true
+    },
+    "vector_store.type": {
+      "graphloom": "lancedb",
+      "graphrag": "lancedb",
+      "equal": true
+    },
+    "vector_store.db_uri": {
+      "graphloom": "output/lancedb",
+      "graphrag": "output/lancedb",
+      "equal": true
+    },
+    "vector_store.vector_size": {
+      "graphloom": 1024,
+      "graphrag": 1024,
+      "equal": true
+    },
+    "embed_text.embedding_model_id": {
+      "graphloom": "default_embedding_model",
+      "graphrag": "default_embedding_model",
+      "equal": true
+    },
+    "embed_text.model_instance_name": {
+      "graphloom": "text_embedding",
+      "graphrag": "text_embedding",
+      "equal": true
+    },
+    "embed_text.batch_size": {
+      "graphloom": 16,
+      "graphrag": 16,
+      "equal": true
+    },
+    "embed_text.batch_max_tokens": {
+      "graphloom": 8191,
+      "graphrag": 8191,
+      "equal": true
+    },
+    "embed_text.names": {
+      "graphloom": [
+        "entity_description",
+        "community_full_content",
+        "text_unit_text"
+      ],
+      "graphrag": [
+        "entity_description",
+        "community_full_content",
+        "text_unit_text"
+      ],
+      "equal": true
+    },
+    "extract_graph.completion_model_id": {
+      "graphloom": "default_completion_model",
+      "graphrag": "default_completion_model",
+      "equal": true
+    },
+    "extract_graph.model_instance_name": {
+      "graphloom": "extract_graph",
+      "graphrag": "extract_graph",
+      "equal": true
+    },
+    "extract_graph.entity_types": {
+      "graphloom": [
+        "organization",
+        "person",
+        "geo",
+        "event"
+      ],
+      "graphrag": [
+        "organization",
+        "person",
+        "geo",
+        "event"
+      ],
+      "equal": true
+    },
+    "extract_graph.max_gleanings": {
+      "graphloom": 1,
+      "graphrag": 1,
+      "equal": true
+    },
+    "summarize_descriptions.completion_model_id": {
+      "graphloom": "default_completion_model",
+      "graphrag": "default_completion_model",
+      "equal": true
+    },
+    "summarize_descriptions.model_instance_name": {
+      "graphloom": "summarize_descriptions",
+      "graphrag": "summarize_descriptions",
+      "equal": true
+    },
+    "summarize_descriptions.max_length": {
+      "graphloom": 500,
+      "graphrag": 500,
+      "equal": true
+    },
+    "summarize_descriptions.max_input_tokens": {
+      "graphloom": 4000,
+      "graphrag": 4000,
+      "equal": true
+    },
+    "cluster_graph.max_cluster_size": {
+      "graphloom": 10,
+      "graphrag": 10,
+      "equal": true
+    },
+    "cluster_graph.use_lcc": {
+      "graphloom": true,
+      "graphrag": true,
+      "equal": true
+    },
+    "cluster_graph.seed": {
+      "graphloom": 3735928559,
+      "graphrag": 3735928559,
+      "equal": true
+    },
+    "extract_claims.enabled": {
+      "graphloom": true,
+      "graphrag": true,
+      "equal": true
+    },
+    "extract_claims.completion_model_id": {
+      "graphloom": "default_completion_model",
+      "graphrag": "default_completion_model",
+      "equal": true
+    },
+    "extract_claims.model_instance_name": {
+      "graphloom": "extract_claims",
+      "graphrag": "extract_claims",
+      "equal": true
+    },
+    "extract_claims.description": {
+      "graphloom": "Any claims or facts that could be relevant to information discovery.",
+      "graphrag": "Any claims or facts that could be relevant to information discovery.",
+      "equal": true
+    },
+    "extract_claims.max_gleanings": {
+      "graphloom": 1,
+      "graphrag": 1,
+      "equal": true
+    },
+    "community_reports.completion_model_id": {
+      "graphloom": "default_completion_model",
+      "graphrag": "default_completion_model",
+      "equal": true
+    },
+    "community_reports.model_instance_name": {
+      "graphloom": "community_reporting",
+      "graphrag": "community_reporting",
+      "equal": true
+    },
+    "community_reports.max_length": {
+      "graphloom": 2000,
+      "graphrag": 2000,
+      "equal": true
+    },
+    "community_reports.max_input_length": {
+      "graphloom": 8000,
+      "graphrag": 8000,
+      "equal": true
+    },
+    "snapshots.graphml": {
+      "graphloom": false,
+      "graphrag": false,
+      "equal": true
+    },
+    "snapshots.embeddings": {
+      "graphloom": false,
+      "graphrag": false,
+      "equal": true
+    }
+  },
+  "workflows": {
+    "graphloom_index": [
+      "load_input_documents",
+      "create_base_text_units",
+      "create_final_documents",
+      "extract_graph",
+      "finalize_graph",
+      "extract_covariates",
+      "create_communities",
+      "create_final_text_units",
+      "create_community_reports",
+      "generate_text_embeddings"
+    ],
+    "graphrag_index": [
+      "load_input_documents",
+      "create_base_text_units",
+      "create_final_documents",
+      "extract_graph",
+      "finalize_graph",
+      "extract_covariates",
+      "create_communities",
+      "create_final_text_units",
+      "create_community_reports",
+      "generate_text_embeddings"
+    ],
+    "graphloom_update": [
+      "load_update_documents",
+      "create_base_text_units",
+      "create_final_documents",
+      "extract_graph",
+      "finalize_graph",
+      "extract_covariates",
+      "create_communities",
+      "create_final_text_units",
+      "create_community_reports",
+      "generate_text_embeddings",
+      "update_final_documents",
+      "update_entities_relationships",
+      "update_text_units",
+      "update_covariates",
+      "update_communities",
+      "update_community_reports",
+      "update_text_embeddings",
+      "update_clean_state"
+    ],
+    "graphrag_update": [
+      "load_update_documents",
+      "create_base_text_units",
+      "create_final_documents",
+      "extract_graph",
+      "finalize_graph",
+      "extract_covariates",
+      "create_communities",
+      "create_final_text_units",
+      "create_community_reports",
+      "generate_text_embeddings",
+      "update_final_documents",
+      "update_entities_relationships",
+      "update_text_units",
+      "update_covariates",
+      "update_communities",
+      "update_community_reports",
+      "update_text_embeddings",
+      "update_clean_state"
+    ],
+    "index_equal": true,
+    "update_equal": true,
+    "static_override_absent": true
+  },
+  "prompts": {
+    "basic_search_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "80ff27892f4ce18fe19773b3d97da34ae8140219fee29b7d80fb625ef60e16e0",
+      "graphrag_sha256": "80ff27892f4ce18fe19773b3d97da34ae8140219fee29b7d80fb625ef60e16e0"
+    },
+    "community_report_graph.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "ed9d54af98eeef4703ccdfea9f3ffae9a94bee7dbd43b0872b885a83990a52d1",
+      "graphrag_sha256": "ed9d54af98eeef4703ccdfea9f3ffae9a94bee7dbd43b0872b885a83990a52d1"
+    },
+    "community_report_text.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "6ce98cd7b3e770cd157f1f49351acab5ec27f7f11e9da8db97035746cdfa7761",
+      "graphrag_sha256": "6ce98cd7b3e770cd157f1f49351acab5ec27f7f11e9da8db97035746cdfa7761"
+    },
+    "drift_reduce_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "ec49d890ba6bb2a2ae310bc742842a445ab33f7fb36b26f7e4ee39687ebc0356",
+      "graphrag_sha256": "ec49d890ba6bb2a2ae310bc742842a445ab33f7fb36b26f7e4ee39687ebc0356"
+    },
+    "drift_search_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "058fec01bd70bee114105e3e56229f9a032a667d9db512d7a8de976449ff8bdd",
+      "graphrag_sha256": "058fec01bd70bee114105e3e56229f9a032a667d9db512d7a8de976449ff8bdd"
+    },
+    "extract_claims.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "a3a0c1751a9454bcd7fee848ffd5c98e41afc42a66a7470ba7ddfa6d7ef8fe82",
+      "graphrag_sha256": "a3a0c1751a9454bcd7fee848ffd5c98e41afc42a66a7470ba7ddfa6d7ef8fe82"
+    },
+    "extract_graph.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "a2df79938af03a7e785122f61edccdcce43eedf30a24250c373133f6e3244ad6",
+      "graphrag_sha256": "a2df79938af03a7e785122f61edccdcce43eedf30a24250c373133f6e3244ad6"
+    },
+    "global_search_knowledge_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "fdff3b7315cc16237a69273d2ed987ca3ce7a29847e97b7f6e0444a771bbd44f",
+      "graphrag_sha256": "fdff3b7315cc16237a69273d2ed987ca3ce7a29847e97b7f6e0444a771bbd44f"
+    },
+    "global_search_map_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "daba51ec0971dd12ae9df710936f822fd62b7d093ab026aff571d2ad7c48a72d",
+      "graphrag_sha256": "daba51ec0971dd12ae9df710936f822fd62b7d093ab026aff571d2ad7c48a72d"
+    },
+    "global_search_reduce_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "92d96515e6e011a526f6c767117b5e5014835aa4adbbc7ed7bfefda1bac3592c",
+      "graphrag_sha256": "92d96515e6e011a526f6c767117b5e5014835aa4adbbc7ed7bfefda1bac3592c"
+    },
+    "local_search_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "f1f2039a3c90e2bc83e4c5801d57422e649ec77c1cdd3516905802fade96159a",
+      "graphrag_sha256": "f1f2039a3c90e2bc83e4c5801d57422e649ec77c1cdd3516905802fade96159a"
+    },
+    "question_gen_system_prompt.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "50db3de198adc00a2cf9a6e58f6fc16f3e9bbab9d2a0025a15a670f54ad09270",
+      "graphrag_sha256": "50db3de198adc00a2cf9a6e58f6fc16f3e9bbab9d2a0025a15a670f54ad09270"
+    },
+    "summarize_descriptions.txt": {
+      "graphloom_present": true,
+      "graphrag_present": true,
+      "equivalent": true,
+      "graphloom_converted_sha256": "03ac39ff29fd6d145019ead2cb1576639a2215dfcaa68ae0e0832b803add42f6",
+      "graphrag_sha256": "03ac39ff29fd6d145019ead2cb1576639a2215dfcaa68ae0e0832b803add42f6"
+    }
+  },
+  "notes": {
+    "graphloom_update_source": "crates/graphloom/src/config/mod.rs and workflows/mod.rs",
+    "graphrag_update_source": "graphrag/index/workflows/factory.py (3.1.0)",
+    "endpoint_mode": "formal lanes use identical isolated endpoint values; builder used the configured real endpoints",
+    "graphrag_drop_unsupported_params": true
+  }
+}

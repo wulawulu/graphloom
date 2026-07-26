@@ -1,0 +1,28 @@
+{
+  "graphloom_key": "088ac5828f9a15a2110a7242c503909ffc1d8121230a720a8f1293201a86d1d2_v4",
+  "graphrag_request_count": 48,
+  "graphloom_prompt_bytes": 11469,
+  "closest_graphrag_key": "96f3ab334388bfef8549cf29e65352b6c4f95c7b444ee62e2c60e5608dc87099_v4",
+  "closest_graphrag_prompt_bytes": 11441,
+  "similarity_ratio": 0.9978277734678045,
+  "exact_prompt_match": false,
+  "first_difference": {
+    "line": 111,
+    "graphloom": "61,婚约,No Description,2",
+    "graphrag": "61,婚约,,2"
+  },
+  "unified_diff": [
+    "--- graphloom",
+    "+++ graphrag",
+    "@@ -109,6 +109,6 @@",
+    " 116,秋菊,秋菊是西门庆用六两银子买来的上灶丫头，负责服侍潘金莲。她为人浊蠢，不谙事体，因此经常被潘金莲打骂。,3",
+    " 36,弹唱,潘金莲弹唱事件，她款弄冰弦，低声唱曲，西门庆听后欢喜,2",
+    "-61,婚约,No Description,2",
+    "-62,送礼,No Description,2",
+    "+61,婚约,,2",
+    "+62,送礼,,2",
+    " 93,潘金莲打相思卦,潘金莲用红绣鞋打相思卦盼西门庆的事件,2",
+    " 121,花园内楼下,实体“花园内楼下”是西门庆家中花园内楼下的一处居所，由三间房组成，被收拾出来给潘金莲居住。该处设有盆景，环境极为幽僻，白日间人迹罕至，是一个隐蔽清静的地方。,2"
+  ],
+  "unified_diff_truncated": false
+}

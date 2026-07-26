@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "pre_fix": {
+    "graphloom_key": "088ac5828f9a15a2110a7242c503909ffc1d8121230a720a8f1293201a86d1d2_v4",
+    "graphrag_key": "96f3ab334388bfef8549cf29e65352b6c4f95c7b444ee62e2c60e5608dc87099_v4",
+    "difference": [
+      {
+        "graphloom": "61,婚约,No Description,2",
+        "graphrag": "61,婚约,,2"
+      },
+      {
+        "graphloom": "62,送礼,No Description,2",
+        "graphrag": "62,送礼,,2"
+      }
+    ]
+  },
+  "semantics": {
+    "null": "No Description",
+    "empty_string": "",
+    "whitespace_only": "preserved verbatim",
+    "non_empty": "preserved verbatim",
+    "trim": false,
+    "applies_to": [
+      "entity description",
+      "relationship description"
+    ]
+  },
+  "post_fix": {
+    "LL": {
+      "old_graphloom_key_generated": false,
+      "graphrag_key_hit": true,
+      "completion_misses": 0,
+      "embedding_misses": 0,
+      "update_exit": 0
+    },
+    "RG": {
+      "old_graphloom_key_generated": false,
+      "graphrag_key_hit": true,
+      "completion_misses": 0,
+      "embedding_misses": 0,
+      "update_exit": 0
+    }
+  },
+  "frozen_cache_manifest_sha256": "840704ca8ea5295903f639e59cc4ed5607ce4ab02b4d15f0f1ddd0208cd1b1fb",
+  "frozen_cache_unchanged": true
+}
