@@ -1,0 +1,10 @@
+Example {n}:
+
+entity_types: [{entity_types}]
+text:
+{input_text}
+------------------------
+output:
+{output}
+#############################
+

@@ -1,0 +1,77 @@
+Generate custom graphrag prompts with your own data (i.e. auto templating).
+
+Usage: graphloom prompt-tune [OPTIONS]
+
+Options:
+  -r, --root <ROOT>
+          Project root directory
+
+          [default: .]
+
+  -v, --verbose
+          Run the prompt tuning pipeline with verbose logging
+
+      --domain <DOMAIN>
+          The domain your input data is related to. For example 'space science', 'microbiology', 'environmental news'. If not defined, a domain will be inferred from the input data.
+
+      --selection-method <SELECTION_METHOD>
+          The text chunk selection method.
+
+          Possible values:
+          - top:    Select the first `limit` chunks in document order
+          - random: Select `limit` chunks uniformly at random
+          - auto:   Select chunks closest to the embedding centroid
+
+          [default: random]
+
+      --n-subset-max <N_SUBSET_MAX>
+          The number of text chunks to embed when --selection-method=auto.
+
+          [default: 300]
+
+      --k <K>
+          The maximum number of documents to select from each centroid when --selection-method=auto.
+
+          [default: 15]
+
+      --limit <LIMIT>
+          The number of documents to load when --selection-method={random,top}.
+
+          [default: 15]
+
+      --max-tokens <MAX_TOKENS>
+          The max token count for prompt generation.
+
+          [default: 2000]
+
+      --min-examples-required <MIN_EXAMPLES_REQUIRED>
+          The minimum number of examples to generate/include in the entity extraction prompt.
+
+          [default: 2]
+
+      --chunk-size <CHUNK_SIZE>
+          The size of each example text chunk. Overrides chunking.size in the configuration file.
+
+          [default: 1200]
+
+      --overlap <OVERLAP>
+          The overlap size for chunking documents. Overrides chunking.overlap in the configuration file.
+
+          [default: 100]
+
+      --language <LANGUAGE>
+          The primary language used for inputs and outputs in graphrag prompts.
+
+      --discover-entity-types
+          Discover and extract unspecified entity types.
+
+      --no-discover-entity-types
+          Discover and extract unspecified entity types.
+
+  -o, --output <OUTPUT>
+          The directory to save prompts to, relative to the project root directory.
+
+          [default: prompts]
+
+  -h, --help
+          Print help (see a summary with '-h')

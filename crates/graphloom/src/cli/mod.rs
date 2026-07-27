@@ -5,15 +5,18 @@ pub mod callbacks;
 pub mod error;
 pub mod index;
 pub mod init;
+pub mod prompt_tune;
 pub mod query;
 pub mod update;
 
 pub use args::{
-    Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, QueryArgs, UpdateArgs,
+    Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, PromptTuneArgs,
+    PromptTuneSelectionMethod, QueryArgs, UpdateArgs,
 };
 pub use error::{CliError, Result};
 pub use index::run as run_index;
 pub use init::init_project;
+pub use prompt_tune::run as run_prompt_tune;
 pub use query::run as run_query;
 pub use update::run as run_update;
 
@@ -34,5 +37,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Query(args) => run_query(&args).await,
+        Command::PromptTune(args) => run_prompt_tune(&args).await,
     }
 }

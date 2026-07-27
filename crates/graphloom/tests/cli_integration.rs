@@ -73,6 +73,20 @@ fn test_should_match_complete_update_help_snapshot() {
     assert_eq!(actual, expected);
 }
 
+#[test]
+fn test_should_match_prompt_tune_help_snapshot() {
+    let output = graphloom_command()
+        .args(["prompt-tune", "--help"])
+        .output()
+        .expect("prompt-tune help");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let actual = normalize_help_text(&output.stdout);
+    let expected = include_str!("fixtures/cli/prompt_tune_help.txt").replace("\r\n", "\n");
+    assert_eq!(actual, expected);
+}
+
 #[tokio::test]
 async fn test_should_run_noop_update_from_cli() {
     let project = TempDir::new().expect("project");

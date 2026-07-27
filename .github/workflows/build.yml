@@ -43,7 +43,9 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Install Rust
-        run: rustup toolchain install stable --component llvm-tools-preview
+        run: |
+          rustup toolchain install stable --component llvm-tools-preview
+          rustup toolchain install nightly --component rustfmt
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: install nextest
@@ -55,7 +57,7 @@ jobs:
           version: "23.4"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check code format
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
       - name: Build all Rust targets
         run: cargo build --workspace --all-targets --all-features
       - name: Check the package for errors

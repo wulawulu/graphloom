@@ -12,3 +12,8 @@ pub use query::{
     basic_search, basic_search_streaming, drift_search, drift_search_streaming, global_search,
     global_search_streaming, local_search, local_search_streaming, query, query_stream,
 };
+
+pub use crate::prompt_tune::{
+    DocSelectionType, GenerateIndexingPromptsOptions, GeneratedIndexingPrompts,
+    generate_indexing_prompts,
+};

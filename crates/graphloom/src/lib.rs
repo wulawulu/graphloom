@@ -22,6 +22,7 @@ mod operations;
 mod path_safety;
 mod pipeline;
 mod project;
+pub mod prompt_tune;
 pub(crate) mod prompts;
 pub mod query;
 mod runtime;

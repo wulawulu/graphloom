@@ -284,6 +284,14 @@ pub enum GraphLoomError {
         message: String,
     },
 
+    /// Prompt tuning failed.
+    #[error("prompt tuning failed: {source}")]
+    PromptTune {
+        /// Underlying failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Missing input.
     #[error("missing input: {message}")]
     MissingInput {

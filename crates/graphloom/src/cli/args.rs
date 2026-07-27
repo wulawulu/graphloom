@@ -62,6 +62,12 @@ pub enum Command {
     /// Query a knowledge graph index.
     #[command(about = "Query a knowledge graph index.")]
     Query(QueryArgs),
+    /// Generate custom graphrag prompts with your own data (i.e. auto templating).
+    #[command(
+        name = "prompt-tune",
+        about = "Generate custom graphrag prompts with your own data (i.e. auto templating)."
+    )]
+    PromptTune(PromptTuneArgs),
 }
 
 /// `graphloom query` arguments.
@@ -309,6 +315,136 @@ pub enum PromptLanguage {
     /// Chinese `GraphRAG`-compatible prompts.
     #[value(alias = "zh", alias = "zh-cn")]
     Chinese,
+}
+
+/// CLI document selection method for prompt tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PromptTuneSelectionMethod {
+    /// Select the first `limit` chunks in document order.
+    Top,
+    /// Select `limit` chunks uniformly at random.
+    Random,
+    /// Select chunks closest to the embedding centroid.
+    Auto,
+}
+
+/// `graphloom prompt-tune` arguments.
+#[derive(Debug, Clone, Parser)]
+pub struct PromptTuneArgs {
+    /// Project root directory.
+    #[arg(short = 'r', long = "root", default_value_os_t = default_root())]
+    pub root: PathBuf,
+    /// Run the prompt tuning pipeline with verbose logging.
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
+    /// Domain description (auto-detected if omitted).
+    #[arg(
+        long = "domain",
+        help = "The domain your input data is related to. For example 'space science', \
+                'microbiology', 'environmental news'. If not defined, a domain will be inferred \
+                from the input data."
+    )]
+    pub domain: Option<String>,
+    /// The text chunk selection method.
+    #[arg(
+        long = "selection-method",
+        default_value = "random",
+        help = "The text chunk selection method."
+    )]
+    pub selection_method: PromptTuneSelectionMethod,
+    /// The number of text chunks to embed when --selection-method=auto.
+    #[arg(
+        long = "n-subset-max",
+        default_value_t = 300,
+        help = "The number of text chunks to embed when --selection-method=auto."
+    )]
+    pub n_subset_max: usize,
+    /// The maximum number of documents to select from each centroid when
+    /// --selection-method=auto.
+    #[arg(
+        long = "k",
+        default_value_t = 15,
+        help = "The maximum number of documents to select from each centroid when \
+                --selection-method=auto."
+    )]
+    pub k: usize,
+    /// The number of documents to load when --selection-method={random,top}.
+    #[arg(
+        long = "limit",
+        default_value_t = 15,
+        help = "The number of documents to load when --selection-method={random,top}."
+    )]
+    pub limit: usize,
+    /// The max token count for prompt generation.
+    #[arg(
+        long = "max-tokens",
+        default_value_t = 2000,
+        help = "The max token count for prompt generation."
+    )]
+    pub max_tokens: usize,
+    /// The minimum number of examples to generate/include in the entity extraction prompt.
+    #[arg(
+        long = "min-examples-required",
+        default_value_t = 2,
+        help = "The minimum number of examples to generate/include in the entity extraction \
+                prompt."
+    )]
+    pub min_examples_required: usize,
+    /// The size of each example text chunk. Overrides chunking.size in the configuration file.
+    #[arg(
+        long = "chunk-size",
+        default_value_t = 1200,
+        help = "The size of each example text chunk. Overrides chunking.size in the configuration \
+                file."
+    )]
+    pub chunk_size: usize,
+    /// The overlap size for chunking documents. Overrides chunking.overlap in the configuration
+    /// file.
+    #[arg(
+        long = "overlap",
+        default_value_t = 100,
+        help = "The overlap size for chunking documents. Overrides chunking.overlap in the \
+                configuration file."
+    )]
+    pub overlap: usize,
+    /// The primary language used for inputs and outputs in graphrag prompts.
+    #[arg(
+        long = "language",
+        help = "The primary language used for inputs and outputs in graphrag prompts."
+    )]
+    pub language: Option<String>,
+    /// Discover and extract unspecified entity types.
+    #[arg(
+        long = "discover-entity-types",
+        default_value_t = true,
+        action = clap::ArgAction::SetTrue,
+        overrides_with = "no_discover_entity_types",
+        help = "Discover and extract unspecified entity types."
+    )]
+    pub discover_entity_types: bool,
+    /// Do not discover entity types; use configured defaults.
+    #[arg(
+        long = "no-discover-entity-types",
+        action = clap::ArgAction::SetTrue,
+        help = "Discover and extract unspecified entity types."
+    )]
+    pub no_discover_entity_types: bool,
+    /// The directory to save prompts to, relative to the project root directory.
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "prompts",
+        help = "The directory to save prompts to, relative to the project root directory."
+    )]
+    pub output: PathBuf,
+}
+
+impl PromptTuneArgs {
+    /// Return whether entity type discovery is enabled.
+    #[must_use]
+    pub fn discover_entity_types_enabled(&self) -> bool {
+        self.discover_entity_types && !self.no_discover_entity_types
+    }
 }
 
 /// CLI indexing method.
