@@ -9,7 +9,7 @@ use crate::{GraphLoomError, Result};
 #[allow(dead_code, reason = "used by CLI and public API")]
 pub(crate) const EXTRACT_GRAPH_FILENAME: &str = "extract_graph.txt";
 
-// ---- base templates (GraphRAG 3.1.0 originals) -----------------------------
+// ---- base templates -------------------------------------------------------
 
 const GRAPH_EXTRACTION_PROMPT: &str = include_str!("../templates/extract_graph.txt");
 
@@ -27,7 +27,9 @@ fn counted(tokenizer: &dyn Tokenizer, text: &str) -> Result<usize> {
 
 /// Create an entity extraction prompt from the tuned components.
 ///
-/// # GraphRAG 3.1.0 token budget (exact match)
+/// # GraphRAG 3.1.0 token budget reference
+///
+/// GraphLoom uses logical unescaped text for token counting.
 ///
 /// ```python
 /// prompt = GRAPH_EXTRACTION_PROMPT  # raw, BEFORE .format()

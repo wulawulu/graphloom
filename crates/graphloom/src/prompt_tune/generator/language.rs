@@ -20,13 +20,11 @@ pub(crate) async fn detect_language(
 
     let response = model.complete(request).await.map_err(GraphLoomError::Llm)?;
     let content = response.content().map_err(GraphLoomError::Llm)?;
-    let trimmed = content.trim().to_owned();
-
-    if trimmed.is_empty() {
+    if content.trim().is_empty() {
         return Err(GraphLoomError::InvalidData {
             workflow: consumer,
             message: "language detection returned empty content".to_owned(),
         });
     }
-    Ok(trimmed)
+    Ok(content.to_owned())
 }

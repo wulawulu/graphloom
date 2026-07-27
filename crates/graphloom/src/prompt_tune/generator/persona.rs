@@ -19,13 +19,11 @@ pub(crate) async fn generate_persona(
 
     let response = model.complete(request).await.map_err(GraphLoomError::Llm)?;
     let content = response.content().map_err(GraphLoomError::Llm)?;
-    let trimmed = content.trim().to_owned();
-
-    if trimmed.is_empty() {
+    if content.trim().is_empty() {
         return Err(GraphLoomError::InvalidData {
             workflow: consumer,
             message: "persona generation returned empty content".to_owned(),
         });
     }
-    Ok(trimmed)
+    Ok(content.to_owned())
 }

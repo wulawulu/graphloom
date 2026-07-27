@@ -1,3 +1,4 @@
+
 The goal is to study the connections and relations between the entity types and their features in order to understand all available information from the text.
 The user's task is to {task}.
 As part of the analysis, you want to identify the entity types present in the following text.
@@ -37,4 +38,4 @@ REAL DATA: The following section is the real data. You should use only this real
 Task: {task}
 Text: {input_text}
 RESPONSE:
-{{<entity_types>}}
+{<entity_types>}

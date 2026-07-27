@@ -1,13 +1,11 @@
-//! Internal meta-prompts used by prompt-tuning generators.
+//! Internal GraphRAG prompt-tuning meta-prompts.
 //!
-//! These are the prompts sent TO the LLM during prompt tuning, NOT the
-//! final Tera templates that users run at indexing time.  They use
-//! Python-style `{variable}` placeholders resolved via Rust `format!`
-//! before the LLM call.
+//! The text assets store the final GraphLoom-side template representation.
+//! Named placeholders such as `{input_text}` are resolved with explicit
+//! replacement before the LLM request.
 //!
-//! All text matches GraphRAG 3.1.0 prompt content exactly, except that
-//! literal braces in example JSON are preserved through `format!`-safe
-//! escaping (`{{` / `}}`).
+//! Python-only `.format()` brace escapes from GraphRAG source templates are
+//! already normalized to the literal text GraphRAG sends to the model.
 
 // ---- domain ----------------------------------------------------------------
 
@@ -49,8 +47,10 @@ pub(crate) const UNTYPED_ENTITY_RELATIONSHIPS_GENERATION_PROMPT: &str =
 
 // ---- default task ----------------------------------------------------------
 
-pub(crate) const DEFAULT_TASK: &str = "Identify the relations and structure of the community of \
-                                       interest, specifically within the {domain} domain.";
+pub(crate) const DEFAULT_TASK: &str = concat!(
+    "\nIdentify the relations and structure of the community of interest, ",
+    "specifically within the {domain} domain.\n",
+);
 
 // ---- default constants -----------------------------------------------------
 
@@ -65,19 +65,6 @@ pub(crate) const N_SUBSET_MAX: usize = 300;
 pub(crate) const PROMPT_TUNING_MODEL_ID: &str = "default_completion_model";
 pub(crate) const MAX_EXAMPLES: usize = 5;
 
-// ---- template extraction helpers -------------------------------------------
-
-/// Replaces Python-style `{` and `}` in document text with Tera-safe `{{` and `}}`
-/// (but only when they aren't already doubled).  GraphRAG 3.1.0 does this before
-/// feeding chunks into `str.format()`.
-#[allow(
-    dead_code,
-    reason = "no longer needed; document braces are Tera-safe as-is"
-)]
-pub(crate) fn escape_doc_braces(text: &str) -> String {
-    text.replace('{', "{{").replace('}', "}}")
-}
-
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -85,6 +72,14 @@ pub(crate) fn escape_doc_braces(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_task_matches_graphrag_triple_quoted_bytes() {
+        assert_eq!(
+            DEFAULT_TASK.as_bytes(),
+            b"\nIdentify the relations and structure of the community of interest, specifically within the {domain} domain.\n",
+        );
+    }
 
     #[test]
     fn all_meta_prompt_assets_non_empty() {
@@ -174,5 +169,76 @@ mod tests {
     fn untyped_entity_relationships_prompt_has_placeholders() {
         assert!(UNTYPED_ENTITY_RELATIONSHIPS_GENERATION_PROMPT.contains("{input_text}"));
         assert!(UNTYPED_ENTITY_RELATIONSHIPS_GENERATION_PROMPT.contains("{language}"));
+    }
+
+    // ---- brace semantics (Python .format() normalization) ----
+
+    #[test]
+    fn persona_uses_single_braces_for_example_role() {
+        // After Python .format() normalization, {{role}} → {role}
+        assert!(GENERATE_PERSONA_PROMPT.contains("an expert {role}"));
+        assert!(!GENERATE_PERSONA_PROMPT.contains("{{{{role}}}}"));
+        assert!(!GENERATE_PERSONA_PROMPT.contains("{{role}}"));
+    }
+
+    #[test]
+    fn entity_types_uses_single_braces_for_output_marker() {
+        // After Python .format() normalization, {{<entity_types>}} → {<entity_types>}
+        assert!(ENTITY_TYPE_GENERATION_PROMPT.contains("{<entity_types>}"));
+        assert!(!ENTITY_TYPE_GENERATION_PROMPT.contains("{{<entity_types>}}"));
+    }
+
+    #[test]
+    fn entity_types_json_uses_single_braces_for_json_examples() {
+        // After Python .format() normalization, {{"entity_types":...}} → {"entity_types":...}
+        assert!(ENTITY_TYPE_GENERATION_JSON_PROMPT.contains("{\"entity_types\":"));
+        assert!(!ENTITY_TYPE_GENERATION_JSON_PROMPT.contains("{{\"entity_types\":"));
+    }
+
+    // ---- leading/trailing newlines ----
+
+    #[test]
+    fn all_prompts_start_with_newline_except_report_rating() {
+        // All GraphRAG prompt strings use triple-quoted """...""" which
+        // introduces a leading newline.
+        let prompts: &[(&str, &str)] = &[
+            ("GENERATE_DOMAIN_PROMPT", GENERATE_DOMAIN_PROMPT),
+            ("DETECT_LANGUAGE_PROMPT", DETECT_LANGUAGE_PROMPT),
+            ("GENERATE_PERSONA_PROMPT", GENERATE_PERSONA_PROMPT),
+            (
+                "ENTITY_TYPE_GENERATION_PROMPT",
+                ENTITY_TYPE_GENERATION_PROMPT,
+            ),
+            (
+                "ENTITY_TYPE_GENERATION_JSON_PROMPT",
+                ENTITY_TYPE_GENERATION_JSON_PROMPT,
+            ),
+            (
+                "GENERATE_COMMUNITY_REPORTER_ROLE_PROMPT",
+                GENERATE_COMMUNITY_REPORTER_ROLE_PROMPT,
+            ),
+            (
+                "ENTITY_RELATIONSHIPS_GENERATION_PROMPT",
+                ENTITY_RELATIONSHIPS_GENERATION_PROMPT,
+            ),
+            (
+                "UNTYPED_ENTITY_RELATIONSHIPS_GENERATION_PROMPT",
+                UNTYPED_ENTITY_RELATIONSHIPS_GENERATION_PROMPT,
+            ),
+        ];
+        for (name, content) in prompts {
+            assert!(
+                content.starts_with('\n'),
+                "{name} should start with \\n, got: {:?}",
+                &content[..content.len().min(40)]
+            );
+        }
+    }
+
+    #[test]
+    fn report_rating_starts_with_double_newline() {
+        // GENERATE_REPORT_RATING_PROMPT has a blank line after the opening
+        // triple-quote in the Python source, producing two leading newlines.
+        assert!(GENERATE_REPORT_RATING_PROMPT.starts_with("\n\n"));
     }
 }

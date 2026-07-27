@@ -1,3 +1,4 @@
+
 {persona}
 Given a sample text, help the user by creating a role definition that will be tasked with community analysis.
 Take a look at this example, determine its key parts, and using the domain provided and your expertise, create a new role definition for the provided inputs that follows the same pattern as the example.
