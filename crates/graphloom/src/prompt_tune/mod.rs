@@ -11,6 +11,8 @@ mod options;
 mod selection;
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 
 use std::{path::Path, sync::Arc};
@@ -26,6 +28,12 @@ use crate::{GraphLoomError, Result, runtime::ModelFactory};
 
 /// Operation identity prefix used for cache isolation.
 const CONSUMER_PREFIX: &str = "prompt_tune";
+
+/// Normalize discovered entity types: an empty list signals the caller to
+/// use the untyped entity extraction path.
+fn normalize_discovered_entity_types(types: Vec<String>) -> Option<Vec<String>> {
+    (!types.is_empty()).then_some(types)
+}
 
 /// Generate indexing prompts from project documents.
 ///
@@ -144,7 +152,7 @@ pub async fn generate_indexing_prompts(
         let types =
             generator::generate_entity_types(&llm, &domain, &persona, &docs, true, CONSUMER_PREFIX)
                 .await?;
-        if types.is_empty() { None } else { Some(types) }
+        normalize_discovered_entity_types(types)
     } else {
         None
     };

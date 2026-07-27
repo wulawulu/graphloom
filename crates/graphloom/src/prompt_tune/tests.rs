@@ -1,13 +1,16 @@
 //! Tests for prompt tuning templates and API.
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use graphloom_llm::TiktokenTokenizer;
 use tera::Tera;
 
-use super::generator::{
-    create_community_summarization_prompt, create_entity_summarization_prompt,
-    create_extract_graph_prompt,
+use super::{
+    generator::{
+        create_community_summarization_prompt, create_entity_summarization_prompt,
+        create_extract_graph_prompt, generate_entity_relationship_examples,
+    },
+    test_support::RecordingModel,
 };
 
 /// Verify a template string is valid Tera and contains the expected content.
@@ -432,4 +435,224 @@ async fn test_community_report_loads_binds_renders() {
         ],
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Untyped fallback: empty discovered types → untyped extract_graph path
+// ---------------------------------------------------------------------------
+
+/// Verify that an empty discovered entity type list selects the untyped path.
+#[test]
+fn empty_discovered_types_select_none() {
+    let result = super::normalize_discovered_entity_types(Vec::new());
+    assert_eq!(result, None);
+}
+
+/// Verify that non-empty discovered entity types are preserved.
+#[test]
+fn non_empty_discovered_types_select_typed() {
+    let types = vec!["person".to_owned()];
+    let result = super::normalize_discovered_entity_types(types.clone());
+    assert_eq!(result, Some(types));
+}
+
+// ---- template-level typed/untyped selection -------------------------------
+
+/// None selects the untyped extract-graph template.
+///
+/// Distinction: untyped template contains "Suggest several labels or categories"
+/// and does NOT mention entity_types.
+#[test]
+fn none_selects_untyped_extract_graph_template() {
+    let docs = vec!["doc".to_owned()];
+    let examples = vec!["output".to_owned()];
+    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
+
+    let prompt =
+        create_extract_graph_prompt(None, &docs, &examples, "English", 2000, &tokenizer, 2)
+            .expect("prompt");
+
+    // Untyped-only text
+    assert!(
+        prompt.contains("Suggest several labels or categories for the entity."),
+        "untyped template has its own entity description text"
+    );
+    assert!(
+        !prompt.contains("entity_types: ["),
+        "untyped template has no entity_types bracket"
+    );
+}
+
+/// Some types select the typed extract-graph template.
+///
+/// Distinction: typed template contains "One of the following types" and
+/// includes the entity_types inline.
+#[test]
+fn some_types_select_typed_extract_graph_template() {
+    let docs = vec!["doc".to_owned()];
+    let examples = vec!["output".to_owned()];
+    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
+
+    let types = vec!["person".to_owned(), "organization".to_owned()];
+
+    let prompt = create_extract_graph_prompt(
+        Some(&types),
+        &docs,
+        &examples,
+        "English",
+        2000,
+        &tokenizer,
+        2,
+    )
+    .expect("prompt");
+
+    // Typed-only text
+    assert!(
+        prompt.contains("One of the following types:"),
+        "typed template has entity type constraint text"
+    );
+    assert!(
+        prompt.contains("entity_types: [person, organization]"),
+        "typed template includes entity_types"
+    );
+}
+
+// ---- real-chain tests: typed/untyped through relationship generator --------
+
+/// Empty discovered types → None → untyped relationship request → untyped extract graph.
+///
+/// This test actually calls `generate_entity_relationship_examples` and
+/// `create_extract_graph_prompt` in sequence, proving the full path from
+/// empty entity types to untyped template assembly.
+#[tokio::test]
+async fn empty_discovered_types_drive_untyped_relationship_and_extract_graph() {
+    let normalized = super::normalize_discovered_entity_types(Vec::new());
+    assert_eq!(normalized, None);
+
+    let model = Arc::new(RecordingModel::new(vec![
+        r#"("entity"<|>ALICE<|>person<|>Alice)##<|COMPLETE|>"#.to_owned(),
+    ]));
+
+    let docs = vec!["doc".to_owned()];
+
+    // Step 1: relationship generation uses untyped prompt
+    let examples = generate_entity_relationship_examples(
+        &(model.clone() as Arc<dyn graphloom_llm::CompletionModel>),
+        "Expert.",
+        normalized.as_deref(),
+        &docs,
+        "English",
+        "test.chain",
+    )
+    .await
+    .expect("relationship generation");
+
+    // Step 2: extract graph uses untyped template
+    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
+    let prompt = create_extract_graph_prompt(
+        normalized.as_deref(),
+        &docs,
+        &examples,
+        "English",
+        2000,
+        &tokenizer,
+        1,
+    )
+    .expect("extract graph prompt");
+
+    // Untyped-specific evidence
+    assert!(
+        prompt.contains("Suggest several labels or categories for the entity."),
+        "untyped template selected"
+    );
+    assert!(
+        !prompt.contains("entity_types: ["),
+        "untyped template has no entity_types bracket"
+    );
+
+    // Verify the relationship request was recorded
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one relationship request");
+    assert_eq!(requests[0].response_format, None);
+    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(
+        requests[0].messages[0].role,
+        graphloom_llm::ChatRole::System
+    );
+    assert_eq!(requests[0].messages[1].role, graphloom_llm::ChatRole::User);
+    // Untyped relationship prompt does NOT contain entity_types string
+    assert!(
+        !requests[0].messages[1]
+            .content
+            .as_str()
+            .contains("entity_types:"),
+        "untyped relationship request has no entity_types field"
+    );
+}
+
+/// Non-empty types → Some → typed relationship request → typed extract graph.
+///
+/// This test actually calls `generate_entity_relationship_examples` and
+/// `create_extract_graph_prompt` in sequence, proving the full path from
+/// discovered entity types to typed template assembly.
+#[tokio::test]
+async fn non_empty_discovered_types_drive_typed_relationship_and_extract_graph() {
+    let types = vec!["person".to_owned(), "organization".to_owned()];
+    let normalized = super::normalize_discovered_entity_types(types);
+    assert!(normalized.is_some());
+
+    let model = Arc::new(RecordingModel::new(vec![
+        r#"("entity"<|>ALICE<|>person<|>Alice)##<|COMPLETE|>"#.to_owned(),
+    ]));
+
+    let docs = vec!["doc".to_owned()];
+
+    // Step 1: relationship generation uses typed prompt
+    let examples = generate_entity_relationship_examples(
+        &(model.clone() as Arc<dyn graphloom_llm::CompletionModel>),
+        "Expert.",
+        normalized.as_deref(),
+        &docs,
+        "English",
+        "test.chain",
+    )
+    .await
+    .expect("relationship generation");
+
+    // Step 2: extract graph uses typed template
+    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
+    let prompt = create_extract_graph_prompt(
+        normalized.as_deref(),
+        &docs,
+        &examples,
+        "English",
+        2000,
+        &tokenizer,
+        1,
+    )
+    .expect("extract graph prompt");
+
+    // Typed-specific evidence
+    assert!(
+        prompt.contains("One of the following types:"),
+        "typed template selected"
+    );
+    assert!(
+        prompt.contains("entity_types: [person, organization]"),
+        "typed template includes entity_types"
+    );
+
+    // Verify the relationship request was recorded
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one relationship request");
+    assert_eq!(requests[0].response_format, None);
+    assert_eq!(requests[0].messages.len(), 2);
+    // Typed relationship prompt contains entity_types string
+    assert!(
+        requests[0].messages[1]
+            .content
+            .as_str()
+            .contains("entity_types: person, organization"),
+        "typed relationship request contains entity_types"
+    );
 }
