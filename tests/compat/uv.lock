@@ -751,6 +751,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pytest" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
 
@@ -767,6 +768,7 @@ requires-dist = [
     { name = "pandas", specifier = "==2.3.3" },
     { name = "pyarrow", specifier = "==22.0.0" },
     { name = "pytest", specifier = "==9.1.1" },
+    { name = "python-dotenv", specifier = "==1.2.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
 ]
 

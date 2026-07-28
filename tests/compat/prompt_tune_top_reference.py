@@ -712,9 +712,15 @@ class ReplayEntry:
 class ReplayServer:
     """Concurrent OpenAI-compatible server keyed by exact logical messages."""
 
-    def __init__(self, scenario: str, entries: list[ReplayEntry]) -> None:
+    def __init__(
+        self,
+        scenario: str,
+        entries: list[ReplayEntry],
+        expected_model: str = "prompt-tune-compat",
+    ) -> None:
         self.scenario = scenario
         self.entries = entries
+        self.expected_model = expected_model
         self.errors: list[str] = []
         self._lock = threading.Lock()
         self._started = False
@@ -771,7 +777,7 @@ class ReplayServer:
                 raise ValueError(
                     f"unapproved GraphLoom request fields: {sorted(unknown_fields)}"
                 )
-            if payload.get("model") != "prompt-tune-compat":
+            if payload.get("model") != self.expected_model:
                 raise ValueError(f"unexpected model: {payload.get('model')!r}")
             messages = normalize_messages(payload.get("messages"))
             encoded = message_bytes(messages)
