@@ -1,0 +1,76 @@
+
+-Goal-
+Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract the following information:
+- entity_name: Name of the entity, capitalized
+- entity_type: One of the following types: [person, organization]
+- entity_description: Comprehensive description of the entity's attributes and activities
+Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description>)
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
+For each pair of related entities, extract the following information:
+- source_entity: name of the source entity, as identified in step 1
+- target_entity: name of the target entity, as identified in step 1
+- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
+- relationship_strength: an integer score between 1 to 10, indicating strength of the relationship between the source entity and target entity
+Format each relationship as ("relationship"<|><source_entity><|><target_entity><|><relationship_description><|><relationship_strength>)
+
+3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.
+
+4. If you have to translate into English, just translate the descriptions, nothing else!
+
+5. When finished, output <|COMPLETE|>.
+
+-Examples-
+######################
+
+Example 1:
+
+entity_types: [person, organization]
+text:
+Northstar Labs develops the Aurora sensor platform for coastal observatories. Alice Chen leads Northstar Labs and coordinates the Aurora engineering team.
+
+The Aurora platform exchanges telemetry with Beacon Systems through a documented interface
+------------------------
+output:
+  ("entity"<|>"NORTHSTAR LABS"<|>"organization"<|>"Developer of Aurora.")##("entity"<|>"ALICE CHEN"<|>"person"<|>"Leader of Northstar Labs.")##("relationship"<|>"ALICE CHEN"<|>"NORTHSTAR LABS"<|>"Alice leads Northstar Labs."<|>9)##<|COMPLETE|>  
+
+#############################
+
+
+Example 2:
+
+entity_types: [person, organization]
+text:
+. Beacon Systems validates each telemetry packet before archival.
+
+------------------------
+output:
+  ("entity"<|>"NORTHSTAR LABS"<|>"organization"<|>"Developer of Aurora.")##("entity"<|>"ALICE CHEN"<|>"person"<|>"Leader of Northstar Labs.")##("relationship"<|>"ALICE CHEN"<|>"NORTHSTAR LABS"<|>"Alice leads Northstar Labs."<|>9)##<|COMPLETE|>  
+
+#############################
+
+
+Example 3:
+
+entity_types: [person, organization]
+text:
+Orchid Research operates the Meridian analysis service for renewable-energy cooperatives. Mateo Silva directs Orchid Research and reviews Meridian forecasts.
+
+Meridian shares verified summaries with Harbor Cooperative.
+------------------------
+output:
+  ("entity"<|>"NORTHSTAR LABS"<|>"organization"<|>"Developer of Aurora.")##("entity"<|>"ALICE CHEN"<|>"person"<|>"Leader of Northstar Labs.")##("relationship"<|>"ALICE CHEN"<|>"NORTHSTAR LABS"<|>"Alice leads Northstar Labs."<|>9)##<|COMPLETE|>  
+
+#############################
+
+
+
+-Real Data-
+######################
+entity_types: [person, organization]
+text: {input_text}
+######################
+output:

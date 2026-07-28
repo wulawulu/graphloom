@@ -46,7 +46,8 @@ impl PromptTuneReplayRecord {
 /// Request-aware replay model for concurrent prompt-tune tests.
 ///
 /// Records match the complete canonical request, including every message role
-/// and byte of content. A request must match exactly one unconsumed record.
+/// and byte of content. Exact duplicates may declare multiplicity only when
+/// every matching record returns the same response bytes.
 #[derive(Debug)]
 pub(crate) struct PromptTuneReplayModel {
     records: Mutex<Vec<PromptTuneReplayRecord>>,

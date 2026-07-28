@@ -1,0 +1,3 @@
+Northstar Labs develops the Aurora sensor platform for coastal observatories. Alice Chen leads Northstar Labs and coordinates the Aurora engineering team.
+
+The Aurora platform exchanges telemetry with Beacon Systems through a documented interface. Beacon Systems validates each telemetry packet before archival.

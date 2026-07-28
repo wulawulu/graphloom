@@ -1,0 +1,190 @@
+{
+  "approved_differences": [
+    {
+      "classification": "approved implementation difference",
+      "field": "entity_types.response_format",
+      "graphloom": null,
+      "graphrag": "EntityTypesResponse",
+      "reason": "GraphLoom uses provider-neutral requests and client-side JSON extraction"
+    },
+    {
+      "classification": "equivalent disabled option",
+      "field": "entity_relationship.response_format_json_object",
+      "graphloom": "absent",
+      "graphrag": false,
+      "reason": "GraphRAG passes false to its model abstraction; both implementations emit no logical response format"
+    }
+  ],
+  "chunk_count": 4,
+  "document_count": 2,
+  "fixture_schema_version": 1,
+  "generation_command": "GRAPHRAG_API_KEY=compat-test-key uv run --project tests/compat --locked python tests/compat/prompt_tune_top_reference.py --update --graphrag-source ../graphrag --graphloom-bin \"$GRAPHLOOM_BIN\"",
+  "graphrag_commit": "7fc6607edda3d387d23e52ededbf8a75b6730f97",
+  "graphrag_version": "3.1.0",
+  "inputs": [
+    {
+      "path": "input/first.txt",
+      "sha256": "45252b512de78020a29421e0b6e63c5caaa0ec4f2b4538611026346340d6a1ed",
+      "utf8_length": 312
+    },
+    {
+      "path": "input/second.txt",
+      "sha256": "01dca61a3eeb88193ffdc86f9469c695ccf6c60825973626e0bbde287eb89855",
+      "utf8_length": 322
+    }
+  ],
+  "operation_request_counts": {
+    "community_report_rating": 1,
+    "community_reporter_role": 1,
+    "domain": 1,
+    "entity_relationship": 3,
+    "entity_types": 1,
+    "language": 1,
+    "persona": 1
+  },
+  "outputs": {
+    "community_report_graph.txt": {
+      "sha256": "0dd38058590bb9e3a48a02e96ff52c176fbd898be93174d92655108a24614884",
+      "utf8_length": 6445
+    },
+    "extract_graph.txt": {
+      "sha256": "98b57da68148d3c11a0eb59c7713c31e829e1cad6be0c5d63334130fc5b3a0f3",
+      "utf8_length": 3416
+    },
+    "summarize_descriptions.txt": {
+      "sha256": "29024ea72647952a5fa5c6d6416a78e72b7986467a7d73e7b6f0f75744213a16",
+      "utf8_length": 1117
+    }
+  },
+  "request_total": 9,
+  "requests": [
+    {
+      "messages_sha256": "9988688689383970a3af8a14097731714275d5915aa714b297c3a7b9558621d8",
+      "messages_utf8_length": 899,
+      "operation": "domain",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "b6a317e5e8603ca066fcb5882b7a5000153b9e7a891bbd82a727919f7cd6e6e2",
+      "messages_utf8_length": 909,
+      "operation": "language",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "b073129f34218085125bad12c5f9dd0c66f531dfd716d85cca2482d3743dd476",
+      "messages_utf8_length": 632,
+      "operation": "persona",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "43c5cd74089877343890969799fbeb363f988fabe224e8dcb8477fa1b221695d",
+      "messages_utf8_length": 7261,
+      "operation": "community_report_rating",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "8f2f9b9a25480cc1bf06dd7672e1d16f244521ebeb8c0cc8b305191926ce9610",
+      "messages_utf8_length": 3808,
+      "operation": "entity_types",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "bfb1f8ca126b9459cec9bf7c404f340858cf1966a2064de4a4acb8c89f4d2df1",
+      "messages_utf8_length": 21105,
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 0
+    },
+    {
+      "messages_sha256": "bfb1f8ca126b9459cec9bf7c404f340858cf1966a2064de4a4acb8c89f4d2df1",
+      "messages_utf8_length": 21105,
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 1
+    },
+    {
+      "messages_sha256": "bfb1f8ca126b9459cec9bf7c404f340858cf1966a2064de4a4acb8c89f4d2df1",
+      "messages_utf8_length": 21105,
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 2
+    },
+    {
+      "messages_sha256": "fce4c36da0d6fb50e50371c20870dc64de9d923eb21229008afbf4f1e7fe0a67",
+      "messages_utf8_length": 1647,
+      "operation": "community_reporter_role",
+      "producer_local_ordinal": 0
+    }
+  ],
+  "response_total": 9,
+  "responses": [
+    {
+      "operation": "domain",
+      "producer_local_ordinal": 0,
+      "response_sha256": "c2bb353fae17b7db431621dbea1ad36038e9c7c3ffa7a35bb73f174d491a6c72",
+      "response_utf8_length": 55
+    },
+    {
+      "operation": "language",
+      "producer_local_ordinal": 0,
+      "response_sha256": "ba118bf7fc9c1aedc1edb28a0aa86e0b43b681f222af6616e13c43be87815b06",
+      "response_utf8_length": 7
+    },
+    {
+      "operation": "persona",
+      "producer_local_ordinal": 0,
+      "response_sha256": "ddb7d8192044741135492db882a7c13b4b9eb119ee8df6c0f014b1e9dd4a8b7b",
+      "response_utf8_length": 231
+    },
+    {
+      "operation": "community_report_rating",
+      "producer_local_ordinal": 0,
+      "response_sha256": "ea0a95f11b35c134ceb2e4cc256fea84f94b5a246985328f2cf6216afdb015ed",
+      "response_utf8_length": 139
+    },
+    {
+      "operation": "entity_types",
+      "producer_local_ordinal": 0,
+      "response_sha256": "b00592f61b08af0de1182c44fbf60ed2e38b156540f5ad63e661903cc8eeb703",
+      "response_utf8_length": 60
+    },
+    {
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 0,
+      "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+      "response_utf8_length": 246
+    },
+    {
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 1,
+      "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+      "response_utf8_length": 246
+    },
+    {
+      "operation": "entity_relationship",
+      "producer_local_ordinal": 2,
+      "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+      "response_utf8_length": 246
+    },
+    {
+      "operation": "community_reporter_role",
+      "producer_local_ordinal": 0,
+      "response_sha256": "c539bae810fe1d7a78aedce402d8932fd36c4cc4911e5c9c7ec39df55971742b",
+      "response_utf8_length": 112
+    }
+  ],
+  "scenario": "typed",
+  "settings": {
+    "path": "settings.yaml",
+    "sha256": "6e34459c2739d422dd37e0fa505280b482bccfd6f2cc801879c9fe0911cc02fd",
+    "utf8_length": 2575
+  },
+  "top_selected_chunk_sha256": [
+    "17fe8630b4b1241b0e85be6db115a916c6ac3eb3aa1fe125d3b89ef6e23f95a5",
+    "b72cbaa870e78b6159c7aadedd180bb4c7301cbd480f46e1541312b17f77b0a4",
+    "a5144b7bc38c3ebf0e40ca49a1660bc0ee1f1f4a7c0534ec9a17bc80cc1c1559"
+  ],
+  "top_selected_count": 3,
+  "top_selected_ordinals": [
+    0,
+    1,
+    2
+  ]
+}

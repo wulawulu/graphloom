@@ -1,0 +1,74 @@
+[
+  {
+    "operation": "domain",
+    "producer_local_ordinal": 0,
+    "response": "technology organizations and professional collaboration",
+    "response_sha256": "c2bb353fae17b7db431621dbea1ad36038e9c7c3ffa7a35bb73f174d491a6c72",
+    "response_utf8_length": 55,
+    "scenario": "typed"
+  },
+  {
+    "operation": "language",
+    "producer_local_ordinal": 0,
+    "response": "English",
+    "response_sha256": "ba118bf7fc9c1aedc1edb28a0aa86e0b43b681f222af6616e13c43be87815b06",
+    "response_utf8_length": 7,
+    "scenario": "typed"
+  },
+  {
+    "operation": "persona",
+    "producer_local_ordinal": 0,
+    "response": "You are an exacting technology intelligence analyst who maps organizations, people, platforms, and operational relationships. You preserve source wording while explaining how collaboration and information exchange shape the domain.",
+    "response_sha256": "ddb7d8192044741135492db882a7c13b4b9eb119ee8df6c0f014b1e9dd4a8b7b",
+    "response_utf8_length": 231,
+    "scenario": "typed"
+  },
+  {
+    "operation": "community_report_rating",
+    "producer_local_ordinal": 0,
+    "response": "Assign a higher rating when the community materially influences shared technology, operational coordination, or professional collaboration.",
+    "response_sha256": "ea0a95f11b35c134ceb2e4cc256fea84f94b5a246985328f2cf6216afdb015ed",
+    "response_utf8_length": 139,
+    "scenario": "typed"
+  },
+  {
+    "operation": "entity_types",
+    "producer_local_ordinal": 0,
+    "response": "{\n  \"entity_types\": [\n    \"person\",\n    \"organization\"\n  ]\n}",
+    "response_sha256": "b00592f61b08af0de1182c44fbf60ed2e38b156540f5ad63e661903cc8eeb703",
+    "response_utf8_length": 60,
+    "scenario": "typed"
+  },
+  {
+    "operation": "entity_relationship",
+    "producer_local_ordinal": 0,
+    "response": "  (\"entity\"<|>\"NORTHSTAR LABS\"<|>\"organization\"<|>\"Developer of Aurora.\")##(\"entity\"<|>\"ALICE CHEN\"<|>\"person\"<|>\"Leader of Northstar Labs.\")##(\"relationship\"<|>\"ALICE CHEN\"<|>\"NORTHSTAR LABS\"<|>\"Alice leads Northstar Labs.\"<|>9)##<|COMPLETE|>  \n",
+    "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+    "response_utf8_length": 246,
+    "scenario": "typed"
+  },
+  {
+    "operation": "entity_relationship",
+    "producer_local_ordinal": 1,
+    "response": "  (\"entity\"<|>\"NORTHSTAR LABS\"<|>\"organization\"<|>\"Developer of Aurora.\")##(\"entity\"<|>\"ALICE CHEN\"<|>\"person\"<|>\"Leader of Northstar Labs.\")##(\"relationship\"<|>\"ALICE CHEN\"<|>\"NORTHSTAR LABS\"<|>\"Alice leads Northstar Labs.\"<|>9)##<|COMPLETE|>  \n",
+    "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+    "response_utf8_length": 246,
+    "scenario": "typed"
+  },
+  {
+    "operation": "entity_relationship",
+    "producer_local_ordinal": 2,
+    "response": "  (\"entity\"<|>\"NORTHSTAR LABS\"<|>\"organization\"<|>\"Developer of Aurora.\")##(\"entity\"<|>\"ALICE CHEN\"<|>\"person\"<|>\"Leader of Northstar Labs.\")##(\"relationship\"<|>\"ALICE CHEN\"<|>\"NORTHSTAR LABS\"<|>\"Alice leads Northstar Labs.\"<|>9)##<|COMPLETE|>  \n",
+    "response_sha256": "cade2da818ae84ab4eee0e21285dd6d033f1059918a8b43503d4e874e6f7b61a",
+    "response_utf8_length": 246,
+    "scenario": "typed"
+  },
+  {
+    "operation": "community_reporter_role",
+    "producer_local_ordinal": 0,
+    "response": "Technology ecosystem analyst reporting on organizations, people, platforms, and their documented collaborations.",
+    "response_sha256": "c539bae810fe1d7a78aedce402d8932fd36c4cc4911e5c9c7ec39df55971742b",
+    "response_utf8_length": 112,
+    "scenario": "typed"
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "chunk_ordinal": 0,
+    "chunk_sha256": "17fe8630b4b1241b0e85be6db115a916c6ac3eb3aa1fe125d3b89ef6e23f95a5",
+    "chunk_text": "Northstar Labs develops the Aurora sensor platform for coastal observatories. Alice Chen leads Northstar Labs and coordinates the Aurora engineering team.\n\nThe Aurora platform exchanges telemetry with Beacon Systems through a documented interface",
+    "chunk_token_count": 38,
+    "chunk_utf8_length": 246,
+    "document_path": "input/first.txt",
+    "selected_ordinal": 0,
+    "top_ordinal": 0
+  },
+  {
+    "chunk_ordinal": 1,
+    "chunk_sha256": "b72cbaa870e78b6159c7aadedd180bb4c7301cbd480f46e1541312b17f77b0a4",
+    "chunk_text": ". Beacon Systems validates each telemetry packet before archival.\n",
+    "chunk_token_count": 10,
+    "chunk_utf8_length": 66,
+    "document_path": "input/first.txt",
+    "selected_ordinal": 1,
+    "top_ordinal": 1
+  },
+  {
+    "chunk_ordinal": 0,
+    "chunk_sha256": "a5144b7bc38c3ebf0e40ca49a1660bc0ee1f1f4a7c0534ec9a17bc80cc1c1559",
+    "chunk_text": "Orchid Research operates the Meridian analysis service for renewable-energy cooperatives. Mateo Silva directs Orchid Research and reviews Meridian forecasts.\n\nMeridian shares verified summaries with Harbor Cooperative.",
+    "chunk_token_count": 38,
+    "chunk_utf8_length": 218,
+    "document_path": "input/second.txt",
+    "selected_ordinal": 2,
+    "top_ordinal": 2
+  }
+]
