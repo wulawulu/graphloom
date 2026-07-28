@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use graphloom_chunking::create_chunker;
 use graphloom_input::{FileInputReader, InputReader};
 
-use super::selection::{ChunkIdentity, select_chunks};
+use super::selection::{ChunkIdentity, escape_python_format_literal, select_chunks};
 use crate::{GraphLoomError, GraphRagConfig, Result};
 
 /// Load documents and chunk them for prompt tuning.
@@ -14,9 +14,8 @@ use crate::{GraphLoomError, GraphRagConfig, Result};
 /// Uses `FileInputReader` for reading and the project chunking config for
 /// splitting documents into prompt-tuning candidates.
 ///
-/// Document text is preserved as-is. Single braces `{` `}` are literal in
-/// Tera (only `{{` starts an expression), so JSON, LaTeX, and code fragments
-/// remain intact.
+/// Document braces are doubled after chunking, matching GraphRAG's protection
+/// for the generated prompt's later Python `.format()` call.
 ///
 /// # Errors
 ///
@@ -60,7 +59,7 @@ pub(crate) async fn load_docs_in_chunks(
 
             all_chunks.push(ChunkIdentity {
                 document_id: Arc::clone(&doc_id),
-                chunk_text: Arc::from(chunk.text),
+                chunk_text: Arc::from(escape_python_format_literal(&chunk.text)),
                 token_count,
                 chunk_ordinal: ordinal,
             });

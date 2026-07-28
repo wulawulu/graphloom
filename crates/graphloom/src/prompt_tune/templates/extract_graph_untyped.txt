@@ -1,3 +1,4 @@
+
 -Goal-
 Given a text document that is potentially relevant to this activity, first identify all entities needed from the text in order to capture the information and ideas in the text.
 Next, report all relationships among the identified entities.
@@ -29,6 +30,6 @@ Format each relationship as ("relationship"<|><source_entity><|><target_entity><
 
 -Real Data-
 ######################
-text: {{input_text}}
+text: {input_text}
 ######################
 output:

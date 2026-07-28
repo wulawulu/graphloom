@@ -105,19 +105,30 @@ fn build_template(
     content: impl Into<std::sync::Arc<str>>,
     source: PromptSource,
 ) -> Result<PromptTemplate> {
-    let content = content.into();
-    reject_legacy_single_brace_syntax(kind, &content, &source)?;
+    let content = convert_graphrag_format_syntax(kind, content.into());
     PromptTemplate::try_new(kind, content, source)
 }
 
-fn reject_legacy_single_brace_syntax(
+fn convert_graphrag_format_syntax(
     kind: PromptKind,
-    template: &str,
-    source: &PromptSource,
-) -> Result<()> {
-    for variable in kind.variables() {
+    content: std::sync::Arc<str>,
+) -> std::sync::Arc<str> {
+    if !kind
+        .variables()
+        .iter()
+        .any(|variable| has_single_brace_variable(&content, variable))
+    {
+        return content;
+    }
+
+    let mut converted = content.to_string();
+    let mut sentinels = Vec::with_capacity(kind.variables().len());
+    for (ordinal, variable) in kind.variables().iter().enumerate() {
         let legacy = format!("{{{variable}}}");
-        let mut remaining = template;
+        let sentinel = format!("\0GRAPHLOOM_GRAPHRAG_VARIABLE_{ordinal}\0");
+        let mut remaining = converted.as_str();
+        let mut rebuilt = String::with_capacity(converted.len() + sentinel.len());
+        let mut consumed: usize = 0;
         while let Some(index) = remaining.find(&legacy) {
             let after = index.saturating_add(legacy.len());
             let preceded_by_brace = index
@@ -126,20 +137,53 @@ fn reject_legacy_single_brace_syntax(
                 == Some(&b'{');
             let followed_by_brace = remaining.as_bytes().get(after) == Some(&b'}');
             if !preceded_by_brace && !followed_by_brace {
-                return Err(GraphLoomError::PromptRender {
-                    kind: kind.name(),
-                    name: kind.filename(),
-                    prompt_source: source.to_string(),
-                    message: format!(
-                        "prompt uses unsupported single-brace syntax `{legacy}`; GraphLoom \
-                         prompts use Tera syntax `{{{{ {variable} }}}}`"
-                    ),
-                });
+                rebuilt.push_str(&remaining[..index]);
+                rebuilt.push_str(&sentinel);
+                consumed = consumed.saturating_add(after);
+                remaining = &converted[consumed..];
+            } else {
+                let retain = after;
+                rebuilt.push_str(&remaining[..retain]);
+                consumed = consumed.saturating_add(retain);
+                remaining = &converted[consumed..];
             }
-            remaining = &remaining[after..];
         }
+        rebuilt.push_str(remaining);
+        converted = rebuilt;
+        sentinels.push((sentinel, format!("{{{{ {variable} }}}}")));
     }
-    Ok(())
+
+    converted = converted.replace("{{", "{").replace("}}", "}");
+    converted = escape_tera_delimiters(&converted);
+    for (sentinel, tera) in sentinels {
+        converted = converted.replace(&sentinel, &tera);
+    }
+    std::sync::Arc::from(converted)
+}
+
+fn escape_tera_delimiters(input: &str) -> String {
+    input
+        .replace("{{", "{{ \"{{\" }}")
+        .replace("{%", "{{ \"{%\" }}")
+        .replace("{#", "{{ \"{#\" }}")
+}
+
+fn has_single_brace_variable(template: &str, variable: &str) -> bool {
+    let legacy = format!("{{{variable}}}");
+    let mut remaining = template;
+    while let Some(index) = remaining.find(&legacy) {
+        let after = index.saturating_add(legacy.len());
+        let preceded_by_brace = index
+            .checked_sub(1)
+            .and_then(|previous| remaining.as_bytes().get(previous))
+            == Some(&b'{');
+        let followed_by_brace = remaining.as_bytes().get(after) == Some(&b'}');
+        if !preceded_by_brace && !followed_by_brace {
+            return true;
+        }
+        remaining = &remaining[after..];
+    }
+    false
 }
 
 #[cfg(test)]
@@ -239,21 +283,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_legacy_single_brace_prompt_syntax() {
+    async fn test_should_load_graphrag_single_brace_prompt_syntax() {
         let project = TempDir::new().expect("project");
         let path = project.path().join("legacy.txt");
-        tokio::fs::write(&path, "Text: {input_text}")
-            .await
-            .expect("legacy prompt");
+        tokio::fs::write(
+            &path,
+            "Example: {{\"name\": \"value\"}}\nText: {input_text}",
+        )
+        .await
+        .expect("legacy prompt");
 
-        let error = PromptRepository::new(project.path())
+        let template = PromptRepository::new(project.path())
             .load(PromptKind::ExtractGraph, Some(Path::new("legacy.txt")))
             .await
-            .expect_err("legacy syntax should fail");
-        let message = error.to_string();
+            .expect("GraphRAG prompt should load");
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice"
+            }))
+            .expect("bind GraphRAG prompt")
+            .render()
+            .expect("render GraphRAG prompt");
 
-        assert!(message.contains("{input_text}"));
-        assert!(message.contains("{{ input_text }}"));
+        assert_eq!(rendered, "Example: {\"name\": \"value\"}\nText: Alice");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 
 use graphloom_llm::Tokenizer;
 
-use super::super::selection::escape_tera_literal;
+use super::without_storage_lf;
 use crate::{GraphLoomError, Result};
 
 /// Canonical output filename.
@@ -11,7 +11,7 @@ pub(crate) const EXTRACT_GRAPH_FILENAME: &str = "extract_graph.txt";
 
 // ---- base templates -------------------------------------------------------
 
-const GRAPH_EXTRACTION_PROMPT: &str = include_str!("../templates/extract_graph.txt");
+const GRAPH_EXTRACTION_PROMPT_SOURCE: &str = include_str!("../templates/extract_graph.txt");
 
 const UNTYPED_GRAPH_EXTRACTION_PROMPT: &str =
     include_str!("../templates/extract_graph_untyped.txt");
@@ -73,19 +73,15 @@ pub(crate) fn create_extract_graph_prompt(
     tokenizer: &dyn Tokenizer,
     min_examples_required: usize,
 ) -> Result<String> {
-    // Tera escaping is only for the final template source.
-    // Token counting uses raw logical text so that JSON, code, and LaTeX
-    // contribute their true token count, not inflated Tera expressions.
-    let escape = escape_tera_literal;
-
     if let Some(types) = entity_types {
         // ---- typed extraction ----
+        let graph_extraction_prompt = without_storage_lf(GRAPH_EXTRACTION_PROMPT_SOURCE);
         // Token counting: use raw (unescaped) text for budget.
         // Entity types are counted per the GraphRAG 3.1.0 spec: tokenize
         // the raw template with {entity_types} placeholder present, plus
         // the raw entity types string.
         let raw_types_str = types.join(", ");
-        let prompt_tokens = counted(tokenizer, GRAPH_EXTRACTION_PROMPT)?;
+        let prompt_tokens = counted(tokenizer, graph_extraction_prompt)?;
         let entity_tokens = counted(tokenizer, &raw_types_str)?;
         let mut tokens_left: i64 =
             (max_token_count as i64) - (prompt_tokens as i64) - (entity_tokens as i64);
@@ -106,20 +102,20 @@ pub(crate) fn create_extract_graph_prompt(
                 break;
             }
 
-            // Build the actual template content with Tera escaping applied
-            let escaped_example = EXAMPLE_EXTRACTION_TEMPLATE
+            let formatted_example = EXAMPLE_EXTRACTION_TEMPLATE
                 .replace("{n}", &(i + 1).to_string())
-                .replace("{input_text}", &escape(input))
-                .replace("{entity_types}", &escape(&raw_types_str))
-                .replace("{output}", &escape(output));
-            examples_prompt.push_str(&escaped_example);
+                .replace("{input_text}", input)
+                .replace("{entity_types}", &raw_types_str)
+                .replace("{output}", output);
+            examples_prompt.push_str(&formatted_example);
+            examples_prompt.push('\n');
             tokens_left -= example_tokens;
         }
 
-        let final_prompt = GRAPH_EXTRACTION_PROMPT
+        let final_prompt = graph_extraction_prompt
             .replace("{examples}", &examples_prompt)
-            .replace("{entity_types}", &escape(&raw_types_str))
-            .replace("{language}", &escape(language));
+            .replace("{entity_types}", &raw_types_str)
+            .replace("{language}", language);
 
         Ok(final_prompt)
     } else {
@@ -141,18 +137,18 @@ pub(crate) fn create_extract_graph_prompt(
                 break;
             }
 
-            // Build escaped version for template
-            let escaped_example = UNTYPED_EXAMPLE_EXTRACTION_TEMPLATE
+            let formatted_example = UNTYPED_EXAMPLE_EXTRACTION_TEMPLATE
                 .replace("{n}", &(i + 1).to_string())
-                .replace("{input_text}", &escape(input))
-                .replace("{output}", &escape(output));
-            examples_prompt.push_str(&escaped_example);
+                .replace("{input_text}", input)
+                .replace("{output}", output);
+            examples_prompt.push_str(&formatted_example);
+            examples_prompt.push('\n');
             tokens_left -= example_tokens;
         }
 
         let final_prompt = UNTYPED_GRAPH_EXTRACTION_PROMPT
             .replace("{examples}", &examples_prompt)
-            .replace("{language}", &escape(language));
+            .replace("{language}", language);
 
         Ok(final_prompt)
     }
@@ -214,7 +210,11 @@ mod budget_tests {
         let entity_types = vec!["person".to_owned(), "org".to_owned()];
 
         // Raw template token count (with {entity_types} etc.) + entity_types string
-        let raw_tokens = counted(&tokenizer, GRAPH_EXTRACTION_PROMPT).unwrap();
+        let raw_tokens = counted(
+            &tokenizer,
+            without_storage_lf(GRAPH_EXTRACTION_PROMPT_SOURCE),
+        )
+        .unwrap();
         let et_tokens = counted(&tokenizer, "person, org").unwrap();
         let base = raw_tokens + et_tokens;
 

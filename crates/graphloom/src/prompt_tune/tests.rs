@@ -2,8 +2,7 @@
 
 use std::{num::NonZeroUsize, sync::Arc};
 
-use graphloom_llm::{CompletionModel, TiktokenTokenizer};
-use tera::Tera;
+use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, TiktokenTokenizer};
 
 use super::{
     generator::{
@@ -12,7 +11,7 @@ use super::{
         generate_community_reporter_role, generate_domain, generate_entity_relationship_examples,
         generate_persona,
     },
-    test_support::RecordingModel,
+    test_support::{PromptTuneReplayModel, PromptTuneReplayRecord, RecordingModel},
 };
 
 const RAW_COMPLETION_CASES: [&str; 5] = ["", "   ", "\n\t", "  value  ", "value\n"];
@@ -80,43 +79,127 @@ raw_text_generator_test!(reporter_role_preserves_raw_completion_content, Reporte
 
 #[tokio::test]
 async fn relationship_examples_preserve_raw_content_and_order() {
-    let expected = ["", " \n\t "];
-    let recording_model = Arc::new(RecordingModel::new(
-        expected
-            .iter()
-            .map(|content| (*content).to_owned())
-            .collect(),
-    ));
-    let model: Arc<dyn CompletionModel> = recording_model;
     let docs = vec!["first doc".to_owned(), "second doc".to_owned()];
+    let request = CompletionRequest::new(
+        std::iter::once(ChatMessage::system("persona"))
+            .chain(docs.iter().map(|doc| {
+                let user_message =
+                    include_str!("prompts/generate_entity_relationship_examples_untyped.txt")
+                        .replace("{input_text}", doc)
+                        .replace("{language}", "English");
+                ChatMessage::user(user_message)
+            }))
+            .collect(),
+    );
 
-    let actual = generate_entity_relationship_examples(
-        &model,
-        "persona",
-        None,
-        &docs,
-        "English",
-        "test.raw-content",
-    )
-    .await
-    .expect("relationship examples");
+    for expected in ["", " \n\t "] {
+        let records = docs
+            .iter()
+            .map(|_| PromptTuneReplayRecord::new(request.clone(), expected))
+            .collect();
+        let replay_model = Arc::new(PromptTuneReplayModel::new(records));
+        let model: Arc<dyn CompletionModel> = replay_model.clone();
 
-    assert_eq!(actual.len(), docs.len(), "one response per input document");
-    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-        assert_eq!(
-            actual.as_bytes(),
-            expected.as_bytes(),
-            "relationship response {index} changed content or order",
-        );
+        let actual = generate_entity_relationship_examples(
+            &model,
+            "persona",
+            None,
+            &docs,
+            "English",
+            "test.raw-content",
+        )
+        .await
+        .expect("relationship examples");
+
+        assert_eq!(actual.len(), docs.len(), "one response per input document");
+        for (index, actual) in actual.iter().enumerate() {
+            assert_eq!(
+                actual.as_bytes(),
+                expected.as_bytes(),
+                "relationship response {index} changed raw content",
+            );
+        }
+        replay_model.assert_exhausted();
     }
 }
 
-/// Verify a template string is valid Tera and contains the expected content.
-fn assert_valid_tera(
+#[tokio::test]
+async fn prompt_tune_replay_rejects_unknown_requests() {
+    let expected = CompletionRequest::new(vec![ChatMessage::user("known")]);
+    let replay =
+        PromptTuneReplayModel::new(vec![PromptTuneReplayRecord::new(expected, "response")]);
+
+    let error = replay
+        .complete(CompletionRequest::new(vec![ChatMessage::user("unknown")]))
+        .await
+        .expect_err("unknown request must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("no unconsumed exact request match")
+    );
+}
+
+#[tokio::test]
+async fn prompt_tune_replay_rejects_ambiguous_duplicate_responses() {
+    let request = CompletionRequest::new(vec![ChatMessage::user("same")]);
+    let replay = PromptTuneReplayModel::new(vec![
+        PromptTuneReplayRecord::new(request.clone(), "first"),
+        PromptTuneReplayRecord::new(request.clone(), "second"),
+    ]);
+
+    let error = replay
+        .complete(request)
+        .await
+        .expect_err("identical request with different responses must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("identical requests map to different responses")
+    );
+}
+
+#[tokio::test]
+async fn prompt_tune_replay_consumes_declared_multiplicity_once() {
+    let request = CompletionRequest::new(vec![
+        ChatMessage::system("persona"),
+        ChatMessage::user("shared request"),
+    ]);
+    let replay = PromptTuneReplayModel::new(vec![
+        PromptTuneReplayRecord::new(request.clone(), "same response"),
+        PromptTuneReplayRecord::new(request.clone(), "same response"),
+    ]);
+
+    for _ in 0..2 {
+        let response = replay
+            .complete(request.clone())
+            .await
+            .expect("declared request occurrence");
+        assert_eq!(
+            response.content().expect("completion content"),
+            "same response"
+        );
+    }
+    let error = replay
+        .complete(request)
+        .await
+        .expect_err("third request exceeds declared multiplicity");
+    assert!(
+        error
+            .to_string()
+            .contains("no unconsumed exact request match")
+    );
+    replay.assert_exhausted();
+}
+
+/// Verify a generated GraphRAG-format template's byte-level markers.
+fn assert_graphrag_template(
     template: &str,
     name: &str,
     expected_contains: &[&str],
-    forbidden_single_brace: &[&str],
+    forbidden_contains: &[&str],
 ) {
     for pattern in expected_contains {
         assert!(
@@ -124,24 +207,11 @@ fn assert_valid_tera(
             "{name}: should contain {pattern}"
         );
     }
-    for var_name in forbidden_single_brace {
-        // Strip all double-brace occurrences from the template, then check for single-brace.
-        let double = format!("{{{{{}}}}}", var_name); // {{input_text}}
-        let single = format!("{{{}}}", var_name); // {input_text}
-        let stripped = template.replace(&double, "");
+    for pattern in forbidden_contains {
         assert!(
-            !stripped.contains(&single),
-            "{name}: should NOT contain single-brace `{single}` (only Tera double-brace)"
+            !template.contains(pattern),
+            "{name}: should not contain {pattern}"
         );
-    }
-    let mut tera = Tera::default();
-    match tera.add_raw_template(name, template) {
-        Ok(_) => {}
-        Err(error) => {
-            // Print first 500 chars of template for debugging
-            let preview = &template[..template.len().min(500)];
-            panic!("{name} should compile as Tera: {error}\nTemplate preview:\n{preview}");
-        }
     }
 }
 
@@ -171,7 +241,7 @@ fn prompt_tune_request_assets_use_lf_line_endings() {
     }
 }
 
-/// Verify the generated extract_graph template includes required Tera variables.
+/// Verify the generated extract_graph template uses GraphRAG format variables.
 #[test]
 fn test_extract_graph_template_has_tera_input_text() {
     let docs = vec!["Doc one content.".to_owned(), "Doc two content.".to_owned()];
@@ -190,15 +260,15 @@ fn test_extract_graph_template_has_tera_input_text() {
     )
     .expect("extract graph");
 
-    assert_valid_tera(
+    assert_graphrag_template(
         &prompt,
         "extract_graph.txt",
-        &["{{input_text}}", "person", "organization"],
-        &["input_text"],
+        &["{input_text}", "person", "organization"],
+        &["{{input_text}}"],
     );
 }
 
-/// Verify the generated untyped extract_graph template is valid Tera.
+/// Verify the generated untyped extract_graph template uses GraphRAG syntax.
 #[test]
 fn test_untyped_extract_graph_template_is_valid_tera() {
     let docs = vec!["Doc one content.".to_owned()];
@@ -209,29 +279,29 @@ fn test_untyped_extract_graph_template_is_valid_tera() {
         create_extract_graph_prompt(None, &docs, &examples, "English", 2000, &tokenizer, 2)
             .expect("extract graph");
 
-    assert_valid_tera(
+    assert_graphrag_template(
         &prompt,
         "extract_graph.txt",
+        &["{input_text}"],
         &["{{input_text}}"],
-        &["input_text"],
     );
 }
 
-/// Verify the generated summarize_descriptions template is valid Tera.
+/// Verify the generated summarize_descriptions template uses GraphRAG syntax.
 #[test]
 fn test_summarize_descriptions_template_is_valid_tera() {
     let prompt =
         create_entity_summarization_prompt("You are an expert in data analysis.", "English");
 
-    assert_valid_tera(
+    assert_graphrag_template(
         &prompt,
         "summarize_descriptions.txt",
+        &["{entity_name}", "{description_list}"],
         &["{{entity_name}}", "{{description_list}}"],
-        &["entity_name", "description_list"],
     );
 }
 
-/// Verify the generated community_report_graph template is valid Tera.
+/// Verify the generated community_report_graph template uses GraphRAG syntax.
 #[test]
 fn test_community_report_template_is_valid_tera() {
     let prompt = create_community_summarization_prompt(
@@ -241,11 +311,11 @@ fn test_community_report_template_is_valid_tera() {
         "English",
     );
 
-    assert_valid_tera(
+    assert_graphrag_template(
         &prompt,
         "community_report_graph.txt",
-        &["{{input_text}}", "\"title\"", "\"summary\""],
-        &["input_text"],
+        &["{input_text}", "{{", "\"title\"", "\"summary\""],
+        &["{{input_text}}"],
     );
 }
 
@@ -278,12 +348,14 @@ fn test_token_budget_respects_min_examples() {
     assert!(!prompt.contains("Example 3:"));
 }
 
-// ---- extract_graph Tera literal safety ----
+// ---- GraphRAG Python-format literal contract ----
 
 #[test]
-fn test_extract_graph_preserves_doc_double_braces() {
+fn test_extract_graph_preserves_graphrag_escaped_document_braces() {
     let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-    let docs = vec!["User wrote: {{ variable }} in their text.".to_owned()];
+    let docs = vec![super::selection::escape_python_format_literal(
+        r#"JSON {"name":"Alice"} and \frac{a}{b}"#,
+    )];
     let examples = vec!["output".to_owned()];
     let entity_types = vec!["person".to_owned()];
 
@@ -298,123 +370,23 @@ fn test_extract_graph_preserves_doc_double_braces() {
     )
     .expect("prompt");
 
-    // The user's {{ variable }} must NOT be an executable Tera expression.
-    // After Tera escaping, the opening "{{" is converted to {{ "{{" }}.
-    assert!(!prompt.contains("{{ variable }}"));
-    // The runtime variable {{input_text}} must still be present.
-    assert!(prompt.contains("{{input_text}}"));
+    assert!(prompt.contains(r#"JSON {{"name":"Alice"}}"#));
+    assert!(prompt.contains(r#"\frac{{a}}{{b}}"#));
+    assert!(prompt.contains("{input_text}"));
+    assert!(!prompt.contains("{{input_text}}"));
 }
 
 #[test]
-fn test_extract_graph_preserves_tag_and_comment_in_docs() {
-    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-    let docs = vec!["{% if x %} do thing {# note #}".to_owned()];
-    let examples = vec!["output".to_owned()];
-
-    let prompt =
-        create_extract_graph_prompt(None, &docs, &examples, "English", 2000, &tokenizer, 2)
-            .expect("prompt");
-
-    assert!(!prompt.contains("{% if x %}"));
-    assert!(!prompt.contains("{# note #}"));
-    assert!(prompt.contains("{{input_text}}"));
-}
-
-#[test]
-fn test_extract_graph_preserves_example_output_delimiters() {
+fn test_extract_graph_preserves_raw_relationship_response_bytes() {
     let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
     let docs = vec!["simple doc".to_owned()];
-    // LLM-generated example output containing Tera delimiters
-    let examples = vec!["entity: {{ name }} {% raw %}content{% endraw %} {# meta #}".to_owned()];
-    let entity_types = vec!["org".to_owned()];
+    let examples = vec!["  response {{with}} braces  \n".to_owned()];
 
-    let prompt = create_extract_graph_prompt(
-        Some(&entity_types),
-        &docs,
-        &examples,
-        "English",
-        2000,
-        &tokenizer,
-        2,
-    )
-    .expect("prompt");
+    let prompt =
+        create_extract_graph_prompt(None, &docs, &examples, "English", 2000, &tokenizer, 1)
+            .expect("prompt");
 
-    // Example output delimiters must be escaped
-    assert!(!prompt.contains("{{ name }}"));
-    assert!(!prompt.contains("{% raw %}"));
-    assert!(!prompt.contains("{% endraw %}"));
-    assert!(!prompt.contains("{# meta #}"));
-    // Runtime variable preserved
-    assert!(prompt.contains("{{input_text}}"));
-}
-
-#[test]
-fn test_extract_graph_compiles_and_renders_with_tera() {
-    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-    let docs = vec!["Text with {{ var }} and {% tag %} and {# comment #}".to_owned()];
-    let examples = vec!["example {{ ex }}".to_owned()];
-    let entity_types = vec!["type_{{x}}".to_owned(), "org".to_owned()];
-
-    let template = create_extract_graph_prompt(
-        Some(&entity_types),
-        &docs,
-        &examples,
-        "English",
-        2000,
-        &tokenizer,
-        2,
-    )
-    .expect("prompt");
-
-    // Compile with Tera
-    let mut tera = Tera::default();
-    tera.add_raw_template("extract_graph.txt", &template)
-        .expect("must compile as Tera");
-
-    // Render with runtime input_text
-    let runtime_input = "Alice met Bob in New York.";
-    let mut context = tera::Context::new();
-    context.insert("input_text", runtime_input);
-
-    let rendered = tera
-        .render("extract_graph.txt", &context)
-        .expect("must render");
-
-    // Runtime variable was substituted
-    assert!(rendered.contains("Alice met Bob in New York."));
-    // User's Tera-like text is preserved literally
-    assert!(rendered.contains("{{ var }}"));
-    assert!(rendered.contains("{% tag %}"));
-    assert!(rendered.contains("{# comment #}"));
-    // Example output preserved
-    assert!(rendered.contains("{{ ex }}"));
-    // Entity types preserved
-    assert!(rendered.contains("type_{{x}}"));
-}
-
-#[test]
-fn test_extract_graph_entity_types_escaped() {
-    let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-    let docs = vec!["doc".to_owned()];
-    let examples = vec!["out".to_owned()];
-    let entity_types = vec!["{{bad_type}}".to_owned(), "{%other%}".to_owned()];
-
-    let prompt = create_extract_graph_prompt(
-        Some(&entity_types),
-        &docs,
-        &examples,
-        "English",
-        2000,
-        &tokenizer,
-        2,
-    )
-    .expect("prompt");
-
-    // Entity types escaped
-    assert!(!prompt.contains("{{bad_type}}"));
-    assert!(!prompt.contains("{%other%}"));
-    // Runtime variable preserved
-    assert!(prompt.contains("{{input_text}}"));
+    assert!(prompt.contains("  response {{with}} braces  \n"));
 }
 
 /// Verify chunk_size and overlap overrides use correct types.
@@ -474,7 +446,9 @@ async fn assert_prompt_loads_and_renders(
 #[tokio::test]
 async fn test_extract_graph_loads_binds_renders() {
     let tokenizer = TiktokenTokenizer::new("cl100k_base").expect("tokenizer");
-    let docs = vec!["Doc with {{ user_var }} and {% tag %} and {# comment #}".to_owned()];
+    let docs = vec![super::selection::escape_python_format_literal(
+        "Doc with {{ user_var }} and {% tag %} and {# comment #}",
+    )];
     let examples = vec!["example {{ ex }}".to_owned()];
     let entity_types = vec!["person".to_owned(), "type_{{x}}".to_owned()];
 
@@ -499,8 +473,8 @@ async fn test_extract_graph_loads_binds_renders() {
             "{{ user_var }}",
             "{% tag %}",
             "{# comment #}",
-            "{{ ex }}",
-            "type_{{x}}",
+            "{ ex }",
+            "type_{x}",
         ],
     )
     .await;
@@ -525,9 +499,9 @@ async fn test_summarize_descriptions_loads_binds_renders() {
         &[
             "Alice",
             "Engineer",
-            "{{ skill }}",
+            "{ skill }",
             "{% domain %}",
-            "{{ lang_var }}",
+            "{ lang_var }",
         ],
     )
     .await;
@@ -552,10 +526,10 @@ async fn test_community_report_loads_binds_renders() {
         }),
         &[
             "Community data here.",
-            "{{ template }}",
+            "{ template }",
             "{% syntax %}",
-            "{{ desc }}",
-            "{{ lang }}",
+            "{ desc }",
+            "{ lang }",
         ],
     )
     .await;

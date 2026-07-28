@@ -23,3 +23,9 @@ pub(crate) use language::detect_language;
 pub(crate) use meta_prompts::PROMPT_TUNING_MODEL_ID;
 pub(crate) use persona::generate_persona;
 pub(crate) use summarize_descriptions::create_entity_summarization_prompt;
+
+/// Remove the repository storage LF from GraphRAG constants whose Python
+/// triple-quoted value intentionally has no trailing newline.
+fn without_storage_lf(source: &str) -> &str {
+    source.strip_suffix('\n').unwrap_or(source)
+}

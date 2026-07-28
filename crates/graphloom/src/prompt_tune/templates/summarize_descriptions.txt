@@ -1,3 +1,4 @@
+
 {persona}
 Using your expertise, you're asked to generate a comprehensive summary of the data provided below.
 Given one or two entities, and a list of descriptions, all related to the same entity or group of entities.
@@ -10,7 +11,7 @@ Enrich it as much as you can with relevant information from the nearby text, thi
 If no answer is possible, or the description is empty, only convey information that is provided within the text.
 #######
 -Data-
-Entities: {{entity_name}}
-Description List: {{description_list}}
+Entities: {entity_name}
+Description List: {description_list}
 #######
 Output:

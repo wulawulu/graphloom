@@ -50,20 +50,20 @@ pub(crate) async fn generate_entity_relationship_examples(
             .collect()
     };
 
-    // Concurrently execute up to MAX_EXAMPLES requests, preserving input order
+    // GraphRAG 3.1.0 reuses one CompletionMessagesBuilder while constructing
+    // async calls. Because the coroutine bodies begin under asyncio.gather,
+    // every call observes the final accumulated message list. Preserve that
+    // request contract while collecting responses in producer order.
     let model = Arc::clone(model);
-    let persona_owned = persona.to_owned();
-    let handles: Vec<_> = messages
-        .into_iter()
-        .enumerate()
-        .map(|(i, msg)| {
+    let mut request_messages = Vec::with_capacity(messages.len() + 1);
+    request_messages.push(ChatMessage::system(persona));
+    request_messages.extend(messages.into_iter().map(ChatMessage::user));
+    let request = CompletionRequest::new(request_messages);
+    let handles: Vec<_> = (0..docs_slice.len())
+        .map(|i| {
             let model = Arc::clone(&model);
-            let persona = persona_owned.clone();
+            let request = request.clone();
             tokio::spawn(async move {
-                let request = CompletionRequest::new(vec![
-                    ChatMessage::system(persona),
-                    ChatMessage::user(msg),
-                ]);
                 let response = model.complete(request).await.map_err(GraphLoomError::Llm)?;
                 let content = response.content().map_err(GraphLoomError::Llm)?;
                 Ok::<_, GraphLoomError>((i, content.to_owned()))

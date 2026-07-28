@@ -272,26 +272,12 @@ fn argsort_f64(values: &[f64]) -> Vec<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Tera literal handling
+// GraphRAG Python-format literal handling
 // ---------------------------------------------------------------------------
 
-/// Escape external text for safe insertion as Tera template source.
-///
-/// Tera's three opening delimiters (`{{`, `{%`, `{#`) would be interpreted
-/// as template syntax if they appeared literally in the template file.
-/// We replace each delimiter so the rendered output reproduces the
-/// original text.
-///
-/// Single braces `{` `}` are already literal in Tera — JSON, LaTeX,
-/// and code fragments pass through unchanged.
-///
-/// Call this ONLY when embedding external text into Tera template source.
-/// Do NOT call this before counting tokens or building LLM requests.
-pub fn escape_tera_literal(input: &str) -> String {
-    input
-        .replace("{{", "{{ \"{{\" }}")
-        .replace("{%", "{{ \"{%\" }}")
-        .replace("{#", "{{ \"{#\" }}")
+/// Escape braces exactly as GraphRAG does before Python `.format()` assembly.
+pub fn escape_python_format_literal(input: &str) -> String {
+    input.replace('{', "{{").replace('}', "}}")
 }
 
 // ---------------------------------------------------------------------------
@@ -418,57 +404,19 @@ mod tests {
         assert!(values[indices[3]].is_nan());
     }
 
-    // ---- Tera escaping ----
+    // ---- GraphRAG Python-format escaping ----
 
     #[test]
-    fn test_escape_tera_preserves_json_braces() {
-        let input = r#"{"name":"Alice"}"#;
-        let escaped = escape_tera_literal(input);
-        assert_eq!(escaped, r#"{"name":"Alice"}"#);
-    }
+    fn test_escape_python_format_literal_doubles_every_brace() {
+        let cases = [
+            (r#"{"name":"Alice"}"#, r#"{{"name":"Alice"}}"#),
+            ("{{ user_supplied }}", "{{{{ user_supplied }}}}"),
+            ("{% if value %}", "{{% if value %}}"),
+            (r#"\frac{a}{b}"#, r#"\frac{{a}}{{b}}"#),
+        ];
 
-    #[test]
-    fn test_escape_tera_protects_double_braces() {
-        let input = "{{ user_supplied }}";
-        let escaped = escape_tera_literal(input);
-        assert!(!escaped.contains("{{ user_supplied }}"));
-        assert!(escaped.contains("{{ \"{{\" }}"));
-    }
-
-    #[test]
-    fn test_escape_tera_protects_tag() {
-        let input = "{% if malicious %}";
-        let escaped = escape_tera_literal(input);
-        assert!(!escaped.contains("{% if malicious %}"));
-        assert!(escaped.contains("{{ \"{%\" }}"));
-    }
-
-    #[test]
-    fn test_escape_tera_protects_comment() {
-        let input = "{# user comment #}";
-        let escaped = escape_tera_literal(input);
-        assert!(!escaped.contains("{# user comment #}"));
-        assert!(escaped.contains("{{ \"{#\" }}"));
-    }
-
-    #[test]
-    fn test_escape_tera_preserves_latex() {
-        let input = r#"\frac{a}{b}"#;
-        let escaped = escape_tera_literal(input);
-        assert_eq!(escaped, r#"\frac{a}{b}"#);
-    }
-
-    #[test]
-    fn test_escape_tera_preserves_code() {
-        let input = r#"fn main() { println!("x"); }"#;
-        let escaped = escape_tera_literal(input);
-        assert_eq!(escaped, r#"fn main() { println!("x"); }"#);
-    }
-
-    #[test]
-    fn test_escape_tera_handles_endraw() {
-        let input = "{% endraw %}";
-        let escaped = escape_tera_literal(input);
-        assert!(!escaped.contains("{% endraw %}"));
+        for (input, expected) in cases {
+            assert_eq!(escape_python_format_literal(input), expected);
+        }
     }
 }
