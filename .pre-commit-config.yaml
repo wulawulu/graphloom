@@ -12,9 +12,10 @@ repos:
       - id: check-symlinks
       - id: check-yaml
       - id: end-of-file-fixer
+        exclude: ^crates/graphloom/src/prompt_tune/(?:prompts|templates|fixtures)/.*\.txt$
       - id: mixed-line-ending
       - id: trailing-whitespace
-        exclude: ^crates/graphloom/src/prompts/defaults/zh/extract_graph\.txt$
+        exclude: ^(?:crates/graphloom/src/prompts/defaults/zh/extract_graph\.txt|crates/graphloom/src/prompt_tune/fixtures/entity_types_json_request\.txt)$
   - repo: https://github.com/psf/black
     rev: 25.1.0
     hooks:

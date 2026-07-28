@@ -1,1 +1,7 @@
+# Compatibility fixtures are byte-level contracts and must remain LF-only.
 tests/compat/fixtures/**/*.txt text eol=lf
+
+# Prompt-tune assets are LLM request byte sources and must remain LF-only.
+crates/graphloom/src/prompt_tune/prompts/**/*.txt text eol=lf
+crates/graphloom/src/prompt_tune/templates/**/*.txt text eol=lf
+crates/graphloom/src/prompt_tune/fixtures/**/*.txt text eol=lf

@@ -47,6 +47,32 @@ fn assert_valid_tera(
     }
 }
 
+#[test]
+fn prompt_tune_request_assets_use_lf_line_endings() {
+    let assets = [
+        (
+            "entity_types_json_request",
+            include_str!("fixtures/entity_types_json_request.txt"),
+        ),
+        (
+            "generate_entity_types_json",
+            include_str!("prompts/generate_entity_types_json.txt"),
+        ),
+        ("extract_graph", include_str!("templates/extract_graph.txt")),
+        (
+            "extract_graph_untyped",
+            include_str!("templates/extract_graph_untyped.txt"),
+        ),
+    ];
+
+    for (name, content) in assets {
+        assert!(
+            !content.as_bytes().contains(&b'\r'),
+            "{name} must use LF-only line endings",
+        );
+    }
+}
+
 /// Verify the generated extract_graph template includes required Tera variables.
 #[test]
 fn test_extract_graph_template_has_tera_input_text() {
