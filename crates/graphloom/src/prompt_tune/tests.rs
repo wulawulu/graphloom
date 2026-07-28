@@ -2,16 +2,114 @@
 
 use std::{num::NonZeroUsize, sync::Arc};
 
-use graphloom_llm::TiktokenTokenizer;
+use graphloom_llm::{CompletionModel, TiktokenTokenizer};
 use tera::Tera;
 
 use super::{
     generator::{
         create_community_summarization_prompt, create_entity_summarization_prompt,
-        create_extract_graph_prompt, generate_entity_relationship_examples,
+        create_extract_graph_prompt, detect_language, generate_community_report_rating,
+        generate_community_reporter_role, generate_domain, generate_entity_relationship_examples,
+        generate_persona,
     },
     test_support::RecordingModel,
 };
+
+const RAW_COMPLETION_CASES: [&str; 5] = ["", "   ", "\n\t", "  value  ", "value\n"];
+
+#[derive(Clone, Copy, Debug)]
+enum RawTextGenerator {
+    Domain,
+    Language,
+    Persona,
+    Rating,
+    ReporterRole,
+}
+
+async fn run_raw_text_generator(
+    generator: RawTextGenerator,
+    model: &Arc<dyn CompletionModel>,
+) -> crate::Result<String> {
+    let docs = vec!["doc".to_owned()];
+
+    match generator {
+        RawTextGenerator::Domain => generate_domain(model, &docs, "test.raw-content").await,
+        RawTextGenerator::Language => detect_language(model, &docs, "test.raw-content").await,
+        RawTextGenerator::Persona => generate_persona(model, "domain", "test.raw-content").await,
+        RawTextGenerator::Rating => {
+            generate_community_report_rating(model, "domain", "persona", &docs, "test.raw-content")
+                .await
+        }
+        RawTextGenerator::ReporterRole => {
+            generate_community_reporter_role(model, "domain", "persona", &docs, "test.raw-content")
+                .await
+        }
+    }
+}
+
+async fn assert_raw_completion_content_is_preserved(generator: RawTextGenerator) {
+    for expected in RAW_COMPLETION_CASES {
+        let recording_model = Arc::new(RecordingModel::new(vec![expected.to_owned()]));
+        let model: Arc<dyn CompletionModel> = recording_model;
+        let actual = run_raw_text_generator(generator, &model)
+            .await
+            .unwrap_or_else(|error| panic!("{generator:?} rejected {expected:?}: {error}"));
+
+        assert_eq!(
+            actual.as_bytes(),
+            expected.as_bytes(),
+            "{generator:?} changed completion content",
+        );
+    }
+}
+
+macro_rules! raw_text_generator_test {
+    ($name:ident, $generator:ident) => {
+        #[tokio::test]
+        async fn $name() {
+            assert_raw_completion_content_is_preserved(RawTextGenerator::$generator).await;
+        }
+    };
+}
+
+raw_text_generator_test!(domain_preserves_raw_completion_content, Domain);
+raw_text_generator_test!(language_preserves_raw_completion_content, Language);
+raw_text_generator_test!(persona_preserves_raw_completion_content, Persona);
+raw_text_generator_test!(rating_preserves_raw_completion_content, Rating);
+raw_text_generator_test!(reporter_role_preserves_raw_completion_content, ReporterRole);
+
+#[tokio::test]
+async fn relationship_examples_preserve_raw_content_and_order() {
+    let expected = ["", " \n\t "];
+    let recording_model = Arc::new(RecordingModel::new(
+        expected
+            .iter()
+            .map(|content| (*content).to_owned())
+            .collect(),
+    ));
+    let model: Arc<dyn CompletionModel> = recording_model;
+    let docs = vec!["first doc".to_owned(), "second doc".to_owned()];
+
+    let actual = generate_entity_relationship_examples(
+        &model,
+        "persona",
+        None,
+        &docs,
+        "English",
+        "test.raw-content",
+    )
+    .await
+    .expect("relationship examples");
+
+    assert_eq!(actual.len(), docs.len(), "one response per input document");
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            actual.as_bytes(),
+            expected.as_bytes(),
+            "relationship response {index} changed content or order",
+        );
+    }
+}
 
 /// Verify a template string is valid Tera and contains the expected content.
 fn assert_valid_tera(

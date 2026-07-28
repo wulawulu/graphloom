@@ -10,7 +10,7 @@ use crate::{GraphLoomError, Result};
 pub(crate) async fn generate_persona(
     model: &Arc<dyn CompletionModel>,
     domain: &str,
-    consumer: &'static str,
+    _consumer: &'static str,
 ) -> Result<String> {
     let formatted_task = DEFAULT_TASK.replace("{domain}", domain);
     let prompt = GENERATE_PERSONA_PROMPT.replace("{sample_task}", &formatted_task);
@@ -19,11 +19,5 @@ pub(crate) async fn generate_persona(
 
     let response = model.complete(request).await.map_err(GraphLoomError::Llm)?;
     let content = response.content().map_err(GraphLoomError::Llm)?;
-    if content.trim().is_empty() {
-        return Err(GraphLoomError::InvalidData {
-            workflow: consumer,
-            message: "persona generation returned empty content".to_owned(),
-        });
-    }
     Ok(content.to_owned())
 }

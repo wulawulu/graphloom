@@ -12,7 +12,7 @@ pub(crate) async fn generate_community_reporter_role(
     domain: &str,
     persona: &str,
     docs: &[String],
-    consumer: &'static str,
+    _consumer: &'static str,
 ) -> Result<String> {
     let docs_str = docs.join(" ");
     let prompt = GENERATE_COMMUNITY_REPORTER_ROLE_PROMPT
@@ -24,11 +24,5 @@ pub(crate) async fn generate_community_reporter_role(
 
     let response = model.complete(request).await.map_err(GraphLoomError::Llm)?;
     let content = response.content().map_err(GraphLoomError::Llm)?;
-    if content.trim().is_empty() {
-        return Err(GraphLoomError::InvalidData {
-            workflow: consumer,
-            message: "community reporter role returned empty content".to_owned(),
-        });
-    }
     Ok(content.to_owned())
 }
