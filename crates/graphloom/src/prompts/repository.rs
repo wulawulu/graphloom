@@ -1,6 +1,9 @@
 //! Project-scoped prompt template loading.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use super::{PromptKind, PromptSource, PromptTemplate, prompt::prompt_render_error};
 use crate::{GraphLoomError, Result};
@@ -60,18 +63,27 @@ impl PromptRepository {
         }
         let path = Path::new(configured);
         let resolved = self.resolve(path);
-        if tokio::fs::try_exists(&resolved)
-            .await
-            .map_err(|source| GraphLoomError::PromptLoad {
-                kind: kind.name(),
-                name: kind.filename(),
-                path: resolved.clone(),
-                source,
-            })?
-        {
-            return load_file(kind, resolved, PromptSource::Explicit).await;
+        match tokio::fs::try_exists(&resolved).await {
+            Ok(true) => return load_file(kind, resolved, PromptSource::Explicit).await,
+            Ok(false) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    ErrorKind::InvalidFilename | ErrorKind::InvalidInput
+                ) && is_inline_prompt(kind, configured) =>
+            {
+                return build_template(kind, configured, PromptSource::Inline);
+            }
+            Err(source) => {
+                return Err(GraphLoomError::PromptLoad {
+                    kind: kind.name(),
+                    name: kind.filename(),
+                    path: resolved,
+                    source,
+                });
+            }
         }
-        if configured.contains("{{") || configured.contains("{%") {
+        if is_inline_prompt(kind, configured) {
             return build_template(kind, configured, PromptSource::Inline);
         }
         load_file(kind, resolved, PromptSource::Explicit).await
@@ -117,7 +129,7 @@ fn convert_graphrag_format_syntax(
     content: std::sync::Arc<str>,
     source: &PromptSource,
 ) -> Result<std::sync::Arc<str>> {
-    if !contains_graphrag_field(kind, &content) {
+    if !contains_graphrag_known_root_field(kind, &content) {
         return Ok(content);
     }
 
@@ -152,7 +164,13 @@ enum GraphRagFormatPart {
     Field(String),
 }
 
-fn contains_graphrag_field(kind: PromptKind, template: &str) -> bool {
+fn is_inline_prompt(kind: PromptKind, configured: &str) -> bool {
+    configured.contains("{{")
+        || configured.contains("{%")
+        || contains_graphrag_known_root_field(kind, configured)
+}
+
+fn contains_graphrag_known_root_field(kind: PromptKind, template: &str) -> bool {
     let bytes = template.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -175,7 +193,9 @@ fn contains_graphrag_field(kind: PromptKind, template: &str) -> bool {
                 }
                 b'}' => {
                     let field = &template[field_start..cursor];
-                    if kind.variables().contains(&field) {
+                    if graphrag_field_root(field)
+                        .is_some_and(|root| kind.variables().contains(&root))
+                    {
                         return true;
                     }
                     index = cursor + 1;
@@ -189,6 +209,12 @@ fn contains_graphrag_field(kind: PromptKind, template: &str) -> bool {
         }
     }
     false
+}
+
+fn graphrag_field_root(field: &str) -> Option<&str> {
+    let root_end = field.find(['!', ':', '.', '[']).unwrap_or(field.len());
+    let root = field.get(..root_end)?;
+    is_simple_format_field(root).then_some(root)
 }
 
 fn scan_graphrag_format(template: &str) -> std::result::Result<Vec<GraphRagFormatPart>, String> {
@@ -343,6 +369,77 @@ mod tests {
             template.content(),
             "Inline {{ context_data }} / {{ response_type }}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_load_single_line_graphrag_inline_prompt() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(PromptKind::ExtractGraph, Some("Text: {input_text}"))
+            .await
+            .expect("single-line GraphRAG prompt should load inline");
+
+        assert_eq!(template.source(), &PromptSource::Inline);
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice",
+            }))
+            .expect("bind")
+            .render()
+            .expect("render");
+
+        assert_eq!(rendered, "Text: Alice");
+    }
+
+    #[tokio::test]
+    async fn test_should_load_single_line_graphrag_inline_prompt_with_two_fields() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("Text: {input_text}; Types: {entity_types}"),
+            )
+            .await
+            .expect("single-line GraphRAG prompt should load inline");
+
+        assert_eq!(template.source(), &PromptSource::Inline);
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": "person,organization",
+                "input_text": "Alice",
+            }))
+            .expect("bind")
+            .render()
+            .expect("render");
+
+        assert_eq!(rendered, "Text: Alice; Types: person,organization");
+    }
+
+    #[tokio::test]
+    async fn test_should_prefer_existing_path_over_graphrag_inline_syntax() {
+        let project = TempDir::new().expect("project");
+        let configured = "input_{input_text}.txt";
+        let path = project.path().join(configured);
+        tokio::fs::write(&path, "File: {{ input_text }}")
+            .await
+            .expect("explicit prompt");
+
+        let template = PromptRepository::new(project.path())
+            .load_configured(PromptKind::ExtractGraph, Some(configured))
+            .await
+            .expect("existing path should take precedence");
+
+        assert_eq!(template.source(), &PromptSource::Explicit(path));
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice",
+            }))
+            .expect("bind")
+            .render()
+            .expect("render");
+        assert_eq!(rendered, "File: Alice");
     }
 
     #[tokio::test]
@@ -553,6 +650,77 @@ mod tests {
                 }
                 other => panic!("expected PromptRender error, got {other:?}"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_complex_known_graphrag_fields() {
+        for field in [
+            "input_text!r",
+            "input_text:>10",
+            "entity_types[0]",
+            "input_text.value",
+        ] {
+            let project = TempDir::new().expect("project");
+            let content = format!("Value: {{{field}}}");
+            let error = PromptRepository::new(project.path())
+                .load_configured(PromptKind::ExtractGraph, Some(&content))
+                .await
+                .expect_err("known-root complex field should fail while loading");
+
+            match error {
+                GraphLoomError::PromptRender {
+                    prompt_source,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(prompt_source, PromptSource::Inline.to_string());
+                    assert!(message.contains("unsupported"), "{message}");
+                    assert!(message.contains(&format!("{{{field}}}")), "{message}");
+                }
+                other => panic!("expected PromptRender error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_unknown_complex_field_in_native_tera_mode() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("Value: {unknown!r}; Native: {{ input_text }}"),
+            )
+            .await
+            .expect("unknown complex field should not enable GraphRAG mode");
+
+        assert_eq!(template.source(), &PromptSource::Inline);
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice",
+            }))
+            .expect("bind")
+            .render()
+            .expect("render");
+        assert_eq!(rendered, "Value: {unknown!r}; Native: Alice");
+    }
+
+    #[test]
+    fn test_should_extract_graphrag_field_roots() {
+        for (field, expected) in [
+            ("input_text", Some("input_text")),
+            ("input_text!r", Some("input_text")),
+            ("input_text:>10", Some("input_text")),
+            ("input_text.value", Some("input_text")),
+            ("input_text[0]", Some("input_text")),
+            ("entity_types[0]", Some("entity_types")),
+            ("0", None),
+            ("", None),
+            ("!r", None),
+            ("unknown-name", None),
+        ] {
+            assert_eq!(graphrag_field_root(field), expected, "{field}");
         }
     }
 
