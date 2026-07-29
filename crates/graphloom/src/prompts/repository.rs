@@ -55,6 +55,9 @@ impl PromptRepository {
         let Some(configured) = configured else {
             return self.load(kind, None).await;
         };
+        if configured.contains('\n') {
+            return build_template(kind, configured, PromptSource::Inline);
+        }
         let path = Path::new(configured);
         let resolved = self.resolve(path);
         if tokio::fs::try_exists(&resolved)
@@ -68,7 +71,7 @@ impl PromptRepository {
         {
             return load_file(kind, resolved, PromptSource::Explicit).await;
         }
-        if configured.contains('\n') || configured.contains("{{") || configured.contains("{%") {
+        if configured.contains("{{") || configured.contains("{%") {
             return build_template(kind, configured, PromptSource::Inline);
         }
         load_file(kind, resolved, PromptSource::Explicit).await
