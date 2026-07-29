@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from prompt_tune_top_reference import (
+    FIXTURE_ROOT,
+    SCENARIOS,
     ReplayEntry,
     ReplayServer,
+    assert_accumulated_relationship_contract,
     message_bytes,
     sha256_bytes,
     verify_fixtures,
@@ -34,6 +38,15 @@ def _response(ordinal: int, content: str) -> dict[str, object]:
 
 def test_should_verify_committed_prompt_tune_top_byte_evidence() -> None:
     verify_fixtures(Path(os.environ["GRAPHLOOM_BIN"]))
+
+
+def test_should_verify_accumulated_relationship_record_multiplicity() -> None:
+    for scenario in SCENARIOS:
+        scenario_root = FIXTURE_ROOT / scenario
+        requests = json.loads((scenario_root / "requests.json").read_text("utf-8"))
+        responses = json.loads((scenario_root / "responses.json").read_text("utf-8"))
+
+        assert_accumulated_relationship_contract(scenario, requests, responses)
 
 
 def test_should_match_duplicate_requests_without_arrival_order_identity() -> None:

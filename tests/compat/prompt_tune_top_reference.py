@@ -66,32 +66,18 @@ ENTITY_TYPE_RESPONSES = {
     "typed": '{\n  "entity_types": [\n    "person",\n    "organization"\n  ]\n}',
     "untyped": '{\n  "entity_types": []\n}',
 }
-RELATIONSHIP_RESPONSES = {
+RELATIONSHIP_RESPONSE = {
     "typed": (
         '  ("entity"<|>"NORTHSTAR LABS"<|>"organization"<|>"Developer of Aurora.")'
         '##("entity"<|>"ALICE CHEN"<|>"person"<|>"Leader of Northstar Labs.")'
         '##("relationship"<|>"ALICE CHEN"<|>"NORTHSTAR LABS"<|>"Alice leads Northstar Labs."<|>9)'
-        "##<|COMPLETE|>  \n",
-        '("entity"<|>"BEACON SYSTEMS"<|>"organization"<|>"Telemetry validation partner.")'
-        '##("relationship"<|>"NORTHSTAR LABS"<|>"BEACON SYSTEMS"<|>"Aurora exchanges telemetry with Beacon."<|>8)'
-        "##<|COMPLETE|>",
-        '("entity"<|>"ORCHID RESEARCH"<|>"organization"<|>"Operator of Meridian.")'
-        '##("entity"<|>"MATEO SILVA"<|>"person"<|>"Director of Orchid Research.")'
-        '##("relationship"<|>"MATEO SILVA"<|>"ORCHID RESEARCH"<|>"Mateo directs Orchid Research."<|>9)'
-        "##<|COMPLETE|>",
+        "##<|COMPLETE|>  \n"
     ),
     "untyped": (
         '  ("entity"<|>"NORTHSTAR LABS"<|>"organization"<|>"Developer of Aurora.")'
         '##("entity"<|>"ALICE CHEN"<|>"person"<|>"Leader of Northstar Labs.")'
         '##("relationship"<|>"ALICE CHEN"<|>"NORTHSTAR LABS"<|>"Alice leads Northstar Labs."<|>9)'
-        "##<|COMPLETE|>  \n",
-        '("entity"<|>"BEACON SYSTEMS"<|>"organization"<|>"Telemetry validation partner.")'
-        '##("relationship"<|>"NORTHSTAR LABS"<|>"BEACON SYSTEMS"<|>"Aurora exchanges telemetry with Beacon."<|>8)'
-        "##<|COMPLETE|>",
-        '("entity"<|>"ORCHID RESEARCH"<|>"organization"<|>"Operator of Meridian.")'
-        '##("entity"<|>"MATEO SILVA"<|>"person"<|>"Director of Orchid Research.")'
-        '##("relationship"<|>"MATEO SILVA"<|>"ORCHID RESEARCH"<|>"Mateo directs Orchid Research."<|>9)'
-        "##<|COMPLETE|>",
+        "##<|COMPLETE|>  \n"
     ),
 }
 GENERATION_COMMAND = (
@@ -342,7 +328,7 @@ class GraphRagRecorder:
             # GraphRAG 3.1.0 reuses one mutable CompletionMessagesBuilder. Its
             # async calls therefore observe the same accumulated message list.
             # Identical request bytes deliberately map to identical responses.
-            response_content = RELATIONSHIP_RESPONSES[self._scenario][0]
+            response_content = RELATIONSHIP_RESPONSE[self._scenario]
             identity = sha256_bytes(self._selected_chunks[ordinal].encode("utf-8"))
         elif operation == "entity_types":
             response_content = ENTITY_TYPE_RESPONSES[self._scenario]
@@ -635,6 +621,47 @@ def build_manifest(
     }
 
 
+def assert_accumulated_relationship_contract(
+    scenario: str,
+    requests: list[dict[str, Any]],
+    responses: list[dict[str, Any]],
+) -> None:
+    """Require GraphRAG's three accumulated requests and responses to be identical."""
+    relationship_requests = [
+        request for request in requests if request["operation"] == "entity_relationship"
+    ]
+    relationship_responses = [
+        response
+        for response in responses
+        if response["operation"] == "entity_relationship"
+    ]
+    if len(relationship_requests) != 3:
+        raise AssertionError(
+            f"{scenario} relationship request multiplicity must be 3, "
+            f"got {len(relationship_requests)}"
+        )
+    if len(relationship_responses) != 3:
+        raise AssertionError(
+            f"{scenario} relationship response multiplicity must be 3, "
+            f"got {len(relationship_responses)}"
+        )
+
+    request_bytes = {
+        message_bytes(request["messages"]) for request in relationship_requests
+    }
+    if len(request_bytes) != 1:
+        raise AssertionError(
+            f"{scenario} accumulated relationship request messages must be byte-identical"
+        )
+    response_bytes = {
+        response["response"].encode("utf-8") for response in relationship_responses
+    }
+    if len(response_bytes) != 1:
+        raise AssertionError(
+            f"{scenario} accumulated relationship responses must be byte-identical"
+        )
+
+
 def update_fixtures(graphrag_source: Path) -> None:
     """Regenerate both scenarios from the fixed GraphRAG source archive."""
     changes: list[tuple[Path, str, str]] = []
@@ -655,6 +682,11 @@ def update_fixtures(graphrag_source: Path) -> None:
             selected = selected_chunk_records(all_chunks, selected_chunks, tokenizer)
             requests = [record.request_json() for record in records]
             responses = [record.response_json() for record in records]
+            assert_accumulated_relationship_contract(
+                scenario,
+                requests,
+                responses,
+            )
             outputs = dict(zip(OUTPUT_NAMES, output_values, strict=True))
             scenario_root = FIXTURE_ROOT / scenario
             write_if_changed(
@@ -969,6 +1001,7 @@ def verify_static_files(scenario: str) -> dict[str, Any]:
 
     requests = json.loads((scenario_root / "requests.json").read_text("utf-8"))
     responses = json.loads((scenario_root / "responses.json").read_text("utf-8"))
+    assert_accumulated_relationship_contract(scenario, requests, responses)
     selected = json.loads((scenario_root / "selected_chunks.json").read_text("utf-8"))
     if len(requests) != manifest["request_total"]:
         raise AssertionError(f"{scenario} request total mismatch")
