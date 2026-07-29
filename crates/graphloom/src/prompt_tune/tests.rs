@@ -483,7 +483,7 @@ async fn test_extract_graph_loads_binds_renders() {
 #[tokio::test]
 async fn test_summarize_descriptions_loads_binds_renders() {
     let prompt = create_entity_summarization_prompt(
-        "Expert with {{ skill }} and {% domain %} expertise.",
+        "Expert with {{ skill }} and {{% domain %}} expertise.",
         "English {{ lang_var }}",
     );
 
@@ -511,7 +511,7 @@ async fn test_summarize_descriptions_loads_binds_renders() {
 async fn test_community_report_loads_binds_renders() {
     let prompt = create_community_summarization_prompt(
         "Analyst with {{ template }} skill.",
-        "role with {% syntax %}",
+        "role with {{% syntax %}}",
         "rating {{ desc }}",
         "English {{ lang }}",
     );

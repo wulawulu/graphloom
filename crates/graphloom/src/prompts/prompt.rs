@@ -173,7 +173,11 @@ fn normalize_python_newlines(content: Arc<str>) -> Arc<str> {
     }
 }
 
-fn prompt_render_error(kind: PromptKind, source: &PromptSource, message: String) -> GraphLoomError {
+pub(super) fn prompt_render_error(
+    kind: PromptKind,
+    source: &PromptSource,
+    message: String,
+) -> GraphLoomError {
     GraphLoomError::PromptRender {
         kind: kind.name(),
         name: kind.filename(),

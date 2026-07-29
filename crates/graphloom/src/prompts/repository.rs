@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{PromptKind, PromptSource, PromptTemplate};
+use super::{PromptKind, PromptSource, PromptTemplate, prompt::prompt_render_error};
 use crate::{GraphLoomError, Result};
 
 /// Loads prompt templates for exactly one `GraphLoom` project root.
@@ -105,60 +105,35 @@ fn build_template(
     content: impl Into<std::sync::Arc<str>>,
     source: PromptSource,
 ) -> Result<PromptTemplate> {
-    let content = convert_graphrag_format_syntax(kind, content.into());
+    let content = convert_graphrag_format_syntax(kind, content.into(), &source)?;
     PromptTemplate::try_new(kind, content, source)
 }
 
 fn convert_graphrag_format_syntax(
     kind: PromptKind,
     content: std::sync::Arc<str>,
-) -> std::sync::Arc<str> {
-    if !kind
-        .variables()
-        .iter()
-        .any(|variable| has_single_brace_variable(&content, variable))
-    {
-        return content;
+    source: &PromptSource,
+) -> Result<std::sync::Arc<str>> {
+    if !contains_graphrag_field(kind, &content) {
+        return Ok(content);
     }
 
-    let mut converted = content.to_string();
-    let mut sentinels = Vec::with_capacity(kind.variables().len());
-    for (ordinal, variable) in kind.variables().iter().enumerate() {
-        let legacy = format!("{{{variable}}}");
-        let sentinel = format!("\0GRAPHLOOM_GRAPHRAG_VARIABLE_{ordinal}\0");
-        let mut remaining = converted.as_str();
-        let mut rebuilt = String::with_capacity(converted.len() + sentinel.len());
-        let mut consumed: usize = 0;
-        while let Some(index) = remaining.find(&legacy) {
-            let after = index.saturating_add(legacy.len());
-            let preceded_by_brace = index
-                .checked_sub(1)
-                .and_then(|previous| remaining.as_bytes().get(previous))
-                == Some(&b'{');
-            let followed_by_brace = remaining.as_bytes().get(after) == Some(&b'}');
-            if !preceded_by_brace && !followed_by_brace {
-                rebuilt.push_str(&remaining[..index]);
-                rebuilt.push_str(&sentinel);
-                consumed = consumed.saturating_add(after);
-                remaining = &converted[consumed..];
-            } else {
-                let retain = after;
-                rebuilt.push_str(&remaining[..retain]);
-                consumed = consumed.saturating_add(retain);
-                remaining = &converted[consumed..];
+    let parts = scan_graphrag_format(&content)
+        .map_err(|message| prompt_render_error(kind, source, message))?;
+    let mut converted = String::with_capacity(content.len());
+    for part in parts {
+        match part {
+            GraphRagFormatPart::Literal(literal) => {
+                converted.push_str(&escape_tera_delimiters(&literal));
+            }
+            GraphRagFormatPart::Field(field) => {
+                converted.push_str("{{ ");
+                converted.push_str(&field);
+                converted.push_str(" }}");
             }
         }
-        rebuilt.push_str(remaining);
-        converted = rebuilt;
-        sentinels.push((sentinel, format!("{{{{ {variable} }}}}")));
     }
-
-    converted = converted.replace("{{", "{").replace("}}", "}");
-    converted = escape_tera_delimiters(&converted);
-    for (sentinel, tera) in sentinels {
-        converted = converted.replace(&sentinel, &tera);
-    }
-    std::sync::Arc::from(converted)
+    Ok(std::sync::Arc::from(converted))
 }
 
 fn escape_tera_delimiters(input: &str) -> String {
@@ -168,22 +143,123 @@ fn escape_tera_delimiters(input: &str) -> String {
         .replace("{#", "{{ \"{#\" }}")
 }
 
-fn has_single_brace_variable(template: &str, variable: &str) -> bool {
-    let legacy = format!("{{{variable}}}");
-    let mut remaining = template;
-    while let Some(index) = remaining.find(&legacy) {
-        let after = index.saturating_add(legacy.len());
-        let preceded_by_brace = index
-            .checked_sub(1)
-            .and_then(|previous| remaining.as_bytes().get(previous))
-            == Some(&b'{');
-        let followed_by_brace = remaining.as_bytes().get(after) == Some(&b'}');
-        if !preceded_by_brace && !followed_by_brace {
-            return true;
+#[derive(Debug, PartialEq, Eq)]
+enum GraphRagFormatPart {
+    Literal(String),
+    Field(String),
+}
+
+fn contains_graphrag_field(kind: PromptKind, template: &str) -> bool {
+    let bytes = template.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'{' {
+            index += 1;
+            continue;
         }
-        remaining = &remaining[after..];
+        if bytes.get(index + 1) == Some(&b'{') {
+            index += 2;
+            continue;
+        }
+
+        let field_start = index + 1;
+        let mut cursor = field_start;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'{' => {
+                    index = cursor;
+                    break;
+                }
+                b'}' => {
+                    let field = &template[field_start..cursor];
+                    if kind.variables().contains(&field) {
+                        return true;
+                    }
+                    index = cursor + 1;
+                    break;
+                }
+                _ => cursor += 1,
+            }
+        }
+        if cursor == bytes.len() {
+            index = field_start;
+        }
     }
     false
+}
+
+fn scan_graphrag_format(template: &str) -> std::result::Result<Vec<GraphRagFormatPart>, String> {
+    let bytes = template.as_bytes();
+    let mut parts = Vec::new();
+    let mut literal = String::with_capacity(template.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if bytes.get(index + 1) == Some(&b'{') => {
+                literal.push('{');
+                index += 2;
+            }
+            b'{' => {
+                push_literal_part(&mut parts, &mut literal);
+                let field_start = index + 1;
+                let mut field_end = field_start;
+                while field_end < bytes.len() && bytes[field_end] != b'}' {
+                    if bytes[field_end] == b'{' {
+                        return Err(format!(
+                            "invalid GraphRAG format string: unmatched `{{` before field fragment \
+                             `{}`",
+                            &template[field_start..field_end]
+                        ));
+                    }
+                    field_end += 1;
+                }
+                if field_end == bytes.len() {
+                    return Err("invalid GraphRAG format string: unmatched `{`".to_owned());
+                }
+
+                let field = &template[field_start..field_end];
+                if !is_simple_format_field(field) {
+                    return Err(format!(
+                        "unsupported GraphRAG format field `{{{field}}}`; expected a simple \
+                         identifier matching [A-Za-z_][A-Za-z0-9_]*"
+                    ));
+                }
+                parts.push(GraphRagFormatPart::Field(field.to_owned()));
+                index = field_end + 1;
+            }
+            b'}' if bytes.get(index + 1) == Some(&b'}') => {
+                literal.push('}');
+                index += 2;
+            }
+            b'}' => {
+                return Err("invalid GraphRAG format string: unmatched `}`".to_owned());
+            }
+            _ => {
+                let character = template[index..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| "invalid UTF-8 character boundary".to_owned())?;
+                literal.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+
+    push_literal_part(&mut parts, &mut literal);
+    Ok(parts)
+}
+
+fn push_literal_part(parts: &mut Vec<GraphRagFormatPart>, literal: &mut String) {
+    if !literal.is_empty() {
+        parts.push(GraphRagFormatPart::Literal(std::mem::take(literal)));
+    }
+}
+
+fn is_simple_format_field(field: &str) -> bool {
+    let mut bytes = field.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -307,6 +383,199 @@ mod tests {
             .expect("render GraphRAG prompt");
 
         assert_eq!(rendered, "Example: {\"name\": \"value\"}\nText: Alice");
+    }
+
+    #[tokio::test]
+    async fn test_should_render_graphrag_known_format_fields() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("Text: {input_text}\nTypes: {entity_types}"),
+            )
+            .await
+            .expect("GraphRAG prompt should load");
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": "person,organization",
+                "input_text": "Alice"
+            }))
+            .expect("bind GraphRAG prompt")
+            .render()
+            .expect("render GraphRAG prompt");
+
+        assert_eq!(rendered, "Text: Alice\nTypes: person,organization");
+    }
+
+    #[tokio::test]
+    async fn test_should_render_graphrag_json_and_latex_literal_braces() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("JSON: {{\"name\":\"value\"}}\nLaTeX: \\frac{{a}}{{b}}\nText: {input_text}"),
+            )
+            .await
+            .expect("GraphRAG prompt should load");
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice"
+            }))
+            .expect("bind GraphRAG prompt")
+            .render()
+            .expect("render GraphRAG prompt");
+
+        assert_eq!(
+            rendered,
+            "JSON: {\"name\":\"value\"}\nLaTeX: \\frac{a}{b}\nText: Alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_render_graphrag_escaped_unknown_field_as_literal() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("Literal: {{unknown}}\nText: {input_text}"),
+            )
+            .await
+            .expect("GraphRAG prompt should load");
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice"
+            }))
+            .expect("bind GraphRAG prompt")
+            .render()
+            .expect("render GraphRAG prompt");
+
+        assert_eq!(rendered, "Literal: {unknown}\nText: Alice");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_unknown_graphrag_field_during_extraction_render() {
+        let project = TempDir::new().expect("project");
+        let path = project.path().join("extract_graph.txt");
+        tokio::fs::write(
+            &path,
+            "Unknown: {unknown}\nText: {input_text}\nTypes: {entity_types}",
+        )
+        .await
+        .expect("GraphRAG prompt");
+        let template = PromptRepository::new(project.path())
+            .load(
+                PromptKind::ExtractGraph,
+                Some(Path::new("extract_graph.txt")),
+            )
+            .await
+            .expect("GraphRAG prompt should load");
+
+        let error = template
+            .bind(&serde_json::json!({
+                "entity_types": "person,organization",
+                "input_text": "Alice"
+            }))
+            .expect("bind extraction context")
+            .render()
+            .expect_err("unknown GraphRAG field should fail during render");
+
+        match error {
+            GraphLoomError::PromptRender {
+                kind,
+                name,
+                prompt_source,
+                message,
+            } => {
+                assert_eq!(kind, "ExtractGraph");
+                assert_eq!(name, "extract_graph.txt");
+                assert_eq!(prompt_source, PromptSource::Explicit(path).to_string());
+                assert!(message.contains("unknown"), "{message}");
+            }
+            other => panic!("expected PromptRender error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_unmatched_graphrag_format_braces() {
+        for (template, expected_message) in [
+            ("Broken: {\nText: {input_text}", "unmatched `{`"),
+            ("Broken: }\nText: {input_text}", "unmatched `}`"),
+        ] {
+            let project = TempDir::new().expect("project");
+            let error = PromptRepository::new(project.path())
+                .load_configured(PromptKind::ExtractGraph, Some(template))
+                .await
+                .expect_err("unmatched GraphRAG brace should fail while loading");
+
+            match error {
+                GraphLoomError::PromptRender {
+                    kind,
+                    name,
+                    prompt_source,
+                    message,
+                } => {
+                    assert_eq!(kind, "ExtractGraph");
+                    assert_eq!(name, "extract_graph.txt");
+                    assert_eq!(prompt_source, PromptSource::Inline.to_string());
+                    assert!(message.contains(expected_message), "{message}");
+                }
+                other => panic!("expected PromptRender error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_unsupported_graphrag_format_fields() {
+        for field in [
+            "field!r",
+            "field:>10",
+            "object.name",
+            "items[0]",
+            "% syntax %",
+            "0",
+            "",
+        ] {
+            let project = TempDir::new().expect("project");
+            let content = format!("Unsupported: {{{field}}}\nText: {{input_text}}");
+            let error = PromptRepository::new(project.path())
+                .load_configured(PromptKind::ExtractGraph, Some(&content))
+                .await
+                .expect_err("complex GraphRAG field should fail while loading");
+
+            match error {
+                GraphLoomError::PromptRender { message, .. } => {
+                    assert!(message.contains(&format!("{{{field}}}")), "{message}");
+                }
+                other => panic!("expected PromptRender error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_native_tera_prompt_mode() {
+        let project = TempDir::new().expect("project");
+        let template = PromptRepository::new(project.path())
+            .load_configured(
+                PromptKind::ExtractGraph,
+                Some("Text: {{ input_text }}\nLiteral single brace: {not_python_mode}"),
+            )
+            .await
+            .expect("native Tera prompt should load");
+        let rendered = template
+            .bind(&serde_json::json!({
+                "entity_types": [],
+                "input_text": "Alice"
+            }))
+            .expect("bind native Tera prompt")
+            .render()
+            .expect("render native Tera prompt");
+
+        assert_eq!(
+            rendered,
+            "Text: Alice\nLiteral single brace: {not_python_mode}"
+        );
     }
 
     #[tokio::test]
