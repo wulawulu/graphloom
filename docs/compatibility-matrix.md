@@ -1,6 +1,6 @@
 # GraphRAG Compatibility Matrix
 
-Last reviewed: 2026-07-30
+Last reviewed: 2026-07-31
 
 Reference baseline: Microsoft GraphRAG 3.1.0, source commit
 `7fc6607edda3d387d23e52ededbf8a75b6730f97`
@@ -8,6 +8,16 @@ Reference baseline: Microsoft GraphRAG 3.1.0, source commit
 This document is the authoritative compatibility inventory for GraphLoom. It
 describes the tested contract, not a claim that the two projects have identical
 implementations, APIs, dependencies, or persisted bytes.
+
+## GraphLoom baseline identity
+
+The machine-readable contract is
+[`tests/compat/compatibility-baseline.toml`](../tests/compat/compatibility-baseline.toml).
+
+The annotated Git tag `graphrag-3.1.0-compat-v1` identifies the GraphLoom
+source snapshot for this compatibility baseline. Internal implementations may
+change after that snapshot, but changes to the supported contract remain
+subject to this matrix and the compatibility gate.
 
 ## Status definitions
 

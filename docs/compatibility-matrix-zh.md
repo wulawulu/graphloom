@@ -1,12 +1,21 @@
 # GraphRAG 兼容性矩阵
 
-最后审阅：2026-07-30
+最后审阅：2026-07-31
 
 参考基线：Microsoft GraphRAG 3.1.0，源码提交
 `7fc6607edda3d387d23e52ededbf8a75b6730f97`
 
 本文是 GraphLoom 兼容范围的权威清单。它描述已经验证的契约，并不表示两个
 项目的实现、API、依赖或持久化字节完全相同。
+
+## GraphLoom 基线身份
+
+机器可读合同位于
+[`tests/compat/compatibility-baseline.toml`](../tests/compat/compatibility-baseline.toml)。
+
+带注释的 Git tag `graphrag-3.1.0-compat-v1` 标识这份兼容基线对应的
+GraphLoom 源码快照。此后内部实现可以继续变化，但支持范围的变化仍必须受本矩阵
+和兼容门禁约束。
 
 ## 状态定义
 

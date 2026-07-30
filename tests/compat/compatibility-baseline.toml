@@ -1,0 +1,72 @@
+schema_version = 1
+profile = "graphrag-3.1.0"
+baseline_tag = "graphrag-3.1.0-compat-v1"
+
+[reference]
+implementation = "microsoft/graphrag"
+version = "3.1.0"
+source_commit = "7fc6607edda3d387d23e52ededbf8a75b6730f97"
+annotated_tag_object = "2077c4205add901e6594aced159fca81b7a6d522"
+
+[documents]
+matrix_en = "docs/compatibility-matrix.md"
+matrix_zh = "docs/compatibility-matrix-zh.md"
+optimization_backlog_en = "docs/optimization-opportunities.md"
+optimization_backlog_zh = "docs/optimization-opportunities-zh.md"
+test_guide_en = "docs/python-compatibility-testing.md"
+test_guide_zh = "docs/python-compatibility-testing-zh.md"
+
+[gate]
+make_target = "test-compat"
+python_project = "tests/compat"
+
+[contract]
+compatible = [
+    "C-01",
+    "C-02",
+    "C-03",
+    "C-04",
+    "C-05",
+    "C-06",
+    "C-07",
+    "C-08",
+    "C-09",
+    "C-10",
+    "C-11",
+    "C-12",
+    "C-13",
+    "C-14",
+    "C-15",
+]
+approved_differences = [
+    "AD-01",
+    "AD-02",
+    "AD-03",
+    "AD-04",
+    "AD-05",
+    "AD-06",
+    "AD-07",
+    "AD-08",
+]
+unsupported = [
+    "U-01",
+    "U-02",
+    "U-03",
+    "U-04",
+    "U-05",
+    "U-06",
+    "U-07",
+    "U-08",
+    "U-09",
+]
+pending_validation = [
+    "V-01",
+    "V-02",
+    "V-03",
+    "V-04",
+    "V-05",
+    "V-06",
+    "V-07",
+    "V-08",
+    "V-09",
+]
