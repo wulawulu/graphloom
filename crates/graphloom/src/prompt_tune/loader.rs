@@ -11,24 +11,39 @@ use crate::{GraphLoomError, GraphRagConfig, Result};
 
 /// Load documents and chunk them for prompt tuning.
 ///
-/// Uses `FileInputReader` for reading and the project chunking config for
-/// splitting documents into prompt-tuning candidates.
+/// Uses `FileInputReader` for reading and the configured embedding model's
+/// tokenizer for splitting documents into prompt-tuning candidates. GraphRAG
+/// 3.1.0 constructs the prompt-tune chunker from the embedding model even when
+/// the selection method does not call the embedding API.
 ///
 /// Document braces are doubled after chunking, matching GraphRAG's protection
 /// for the generated prompt's later Python `.format()` call.
 ///
 /// # Errors
 ///
-/// Returns an error when the input is empty, chunking config is invalid,
-/// or input documents cannot be read.
+/// Returns an error when the embedding model tokenizer is unavailable, the
+/// input is empty, chunking config is invalid, or input documents cannot be
+/// read.
 pub(crate) async fn load_docs_in_chunks(
     config: &GraphRagConfig,
     root: &Path,
     chunk_size: Option<usize>,
     overlap: Option<usize>,
 ) -> Result<Vec<ChunkIdentity>> {
-    // Build effective chunking config with optional overrides
+    let embedding_model_config = config
+        .embedding_models
+        .get(&config.embed_text.embedding_model_id)
+        .ok_or_else(|| GraphLoomError::InvalidModel {
+            model_id: config.embed_text.embedding_model_id.clone(),
+            message: "prompt tuning requires the configured embedding model tokenizer".to_owned(),
+        })?;
+
+    // GraphRAG passes create_embedding(...).tokenizer to create_chunker, so
+    // chunking.encoding_model does not control prompt-tune chunk boundaries.
     let mut chunking_config = config.chunking.clone();
+    chunking_config.encoding_model = embedding_model_config
+        .effective_tokenizer_encoding()
+        .to_owned();
     if let Some(size) = chunk_size {
         chunking_config.size = NonZeroUsize::new(size).ok_or_else(|| {
             GraphLoomError::Chunking(graphloom_chunking::ChunkingError::InvalidConfig(format!(

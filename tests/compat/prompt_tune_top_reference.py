@@ -225,9 +225,9 @@ def classify_operation(
     return matches[0]
 
 
-def input_files() -> list[Path]:
-    """Return fixture inputs in the explicit producer order."""
-    return sorted((FIXTURE_ROOT / "input").glob("*.txt"))
+def input_files(fixture_root: Path = FIXTURE_ROOT) -> list[Path]:
+    """Return inputs below one fixture root in explicit producer order."""
+    return sorted((fixture_root / "input").glob("*.txt"))
 
 
 @dataclass
@@ -468,14 +468,17 @@ async def run_graphrag_reference(
     return all_chunks, selected_chunks, recorder.records, outputs
 
 
-def source_for_chunk(chunk: str) -> tuple[str, int]:
+def source_for_chunk(chunk: str, fixture_root: Path = FIXTURE_ROOT) -> tuple[str, int]:
     """Resolve a chunk to one fixture-relative source and per-document ordinal."""
+    files = input_files(fixture_root)
+    if len(files) == 1:
+        return files[0].relative_to(fixture_root).as_posix(), 0
     matches: list[tuple[str, int]] = []
-    for path in input_files():
+    for path in files:
         text = path.read_text(encoding="utf-8")
         if chunk in text:
             matches.append(
-                (path.relative_to(FIXTURE_ROOT).as_posix(), text.index(chunk))
+                (path.relative_to(fixture_root).as_posix(), text.index(chunk))
             )
     if len(matches) != 1:
         raise ValueError(f"chunk must map to one input file, found {matches}")
@@ -484,13 +487,16 @@ def source_for_chunk(chunk: str) -> tuple[str, int]:
 
 
 def selected_chunk_records(
-    all_chunks: list[str], selected_chunks: list[str], tokenizer: Any
+    all_chunks: list[str],
+    selected_chunks: list[str],
+    tokenizer: Any,
+    fixture_root: Path = FIXTURE_ROOT,
 ) -> list[dict[str, Any]]:
     """Build stable selected chunk provenance in exact Top order."""
     per_document_ordinals: collections.Counter[str] = collections.Counter()
     all_metadata: list[tuple[str, int, int]] = []
     for global_ordinal, chunk in enumerate(all_chunks):
-        source, _offset = source_for_chunk(chunk)
+        source, _offset = source_for_chunk(chunk, fixture_root)
         chunk_ordinal = per_document_ordinals[source]
         per_document_ordinals[source] += 1
         all_metadata.append((source, chunk_ordinal, global_ordinal))

@@ -14,6 +14,7 @@ from prompt_tune_top_reference import (
     assert_accumulated_relationship_contract,
     message_bytes,
     sha256_bytes,
+    source_for_chunk,
     verify_fixtures,
 )
 
@@ -47,6 +48,21 @@ def test_should_verify_accumulated_relationship_record_multiplicity() -> None:
         responses = json.loads((scenario_root / "responses.json").read_text("utf-8"))
 
         assert_accumulated_relationship_contract(scenario, requests, responses)
+
+
+def test_should_attribute_tokenizer_normalized_chunks_to_single_input(
+    tmp_path: Path,
+) -> None:
+    input_directory = tmp_path / "input"
+    input_directory.mkdir()
+    (input_directory / "source.txt").write_text(
+        "原始文本", encoding="utf-8", newline="\n"
+    )
+
+    source, offset = source_for_chunk("tokenizer-normalized", tmp_path)
+
+    assert source == "input/source.txt"
+    assert offset == 0
 
 
 def test_should_match_duplicate_requests_without_arrival_order_identity() -> None:

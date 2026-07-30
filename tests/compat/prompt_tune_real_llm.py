@@ -92,16 +92,52 @@ def resolve_environment_reference(value: str) -> str | None:
 
 @dataclass
 class LiveSettings:
-    """Sanitized live completion configuration and report metadata."""
+    """Sanitized live model configuration and report metadata."""
 
     project_settings: dict[str, Any]
     provider: str
     model: str
     model_parameters: dict[str, Any]
+    embedding_provider: str
+    embedding_model: str
+
+
+def sanitize_live_model(
+    model_config: dict[str, Any],
+    *,
+    role: str,
+    literal_key_environment: str,
+) -> dict[str, Any]:
+    """Copy and validate one live model config without exposing credentials."""
+    sanitized = json.loads(json.dumps(model_config))
+    api_base = sanitized.get("api_base")
+    if isinstance(api_base, str):
+        parsed_api_base = urlsplit(api_base)
+        if parsed_api_base.hostname in {"127.0.0.1", "::1", "localhost"} and (
+            parsed_api_base.port == 9
+        ):
+            raise ValueError(
+                f"{role} api_base is the disabled loopback port 9 sentinel"
+            )
+
+    api_key = sanitized.get("api_key")
+    if isinstance(api_key, str):
+        environment_name = resolve_environment_reference(api_key)
+        if environment_name is None:
+            environment_name = literal_key_environment
+            os.environ[environment_name] = api_key
+            sanitized["api_key"] = f"${{{environment_name}}}"
+        if not os.environ.get(environment_name):
+            raise ValueError(
+                f"{role} credential environment variable is unset: {environment_name}"
+            )
+    elif sanitized.get("auth_method", "api_key") == "api_key":
+        raise ValueError(f"{role} model does not define an api_key reference")
+    return sanitized
 
 
 def build_live_settings(source: Path) -> LiveSettings:
-    """Combine a real completion model with the committed Top fixture settings."""
+    """Combine real source models with the committed prompt-tune settings."""
     if not source.is_file():
         raise FileNotFoundError(f"settings file does not exist: {source}")
     raw = yaml.safe_load(source.read_text("utf-8")) or {}
@@ -112,38 +148,42 @@ def build_live_settings(source: Path) -> LiveSettings:
         raw.get("extract_graph", {}).get("completion_model_id")
         or "default_completion_model"
     )
-    model_config = completion_models.get(model_id)
-    if not isinstance(model_config, dict):
+    raw_completion_config = completion_models.get(model_id)
+    if not isinstance(raw_completion_config, dict):
         raise ValueError(f"completion model {model_id!r} is not configured")
-    model_config = json.loads(json.dumps(model_config))
-    api_base = model_config.get("api_base")
-    if isinstance(api_base, str):
-        parsed_api_base = urlsplit(api_base)
-        if parsed_api_base.hostname in {"127.0.0.1", "::1", "localhost"} and (
-            parsed_api_base.port == 9
-        ):
-            raise ValueError(
-                "completion api_base is the disabled loopback port 9 sentinel"
-            )
-
-    api_key = model_config.get("api_key")
-    if isinstance(api_key, str):
-        environment_name = resolve_environment_reference(api_key)
-        if environment_name is None:
-            environment_name = "PROMPT_TUNE_REAL_LLM_API_KEY"
-            os.environ[environment_name] = api_key
-            model_config["api_key"] = f"${{{environment_name}}}"
-        if not os.environ.get(environment_name):
-            raise ValueError(
-                f"completion credential environment variable is unset: {environment_name}"
-            )
-    elif model_config.get("auth_method", "api_key") == "api_key":
-        raise ValueError("completion model does not define an api_key reference")
+    model_config = sanitize_live_model(
+        raw_completion_config,
+        role="completion",
+        literal_key_environment="PROMPT_TUNE_REAL_LLM_API_KEY",
+    )
 
     fixture_settings = yaml.safe_load(
         (FIXTURE_ROOT / "settings.yaml").read_text("utf-8")
     )
     fixture_settings["completion_models"] = {"default_completion_model": model_config}
+    raw_embedding_models = raw.get("embedding_models")
+    if isinstance(raw_embedding_models, dict) and raw_embedding_models:
+        embedding_model_id = (
+            raw.get("embed_text", {}).get("embedding_model_id")
+            or "default_embedding_model"
+        )
+        raw_embedding_config = raw_embedding_models.get(embedding_model_id)
+        if not isinstance(raw_embedding_config, dict):
+            raise ValueError(
+                f"embedding model {embedding_model_id!r} is not configured"
+            )
+        embedding_config = sanitize_live_model(
+            raw_embedding_config,
+            role="embedding",
+            literal_key_environment="PROMPT_TUNE_REAL_LLM_EMBEDDING_API_KEY",
+        )
+        fixture_settings["embedding_models"] = {
+            "default_embedding_model": embedding_config
+        }
+    else:
+        embedding_config = fixture_settings["embedding_models"][
+            "default_embedding_model"
+        ]
     model_parameters = {
         key: value
         for key, value in model_config.items()
@@ -160,7 +200,47 @@ def build_live_settings(source: Path) -> LiveSettings:
         provider=str(model_config.get("model_provider", "")),
         model=str(model_config.get("model", "")),
         model_parameters=redact(model_parameters),
+        embedding_provider=str(embedding_config.get("model_provider", "")),
+        embedding_model=str(embedding_config.get("model", "")),
     )
+
+
+def configure_chunking(
+    settings: LiveSettings,
+    *,
+    chunk_size: int,
+    overlap: int,
+    encoding_model: str,
+) -> LiveSettings:
+    """Apply explicit chunking parameters to sanitized live settings."""
+    if chunk_size < 1:
+        raise ValueError("chunk size must be positive")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be non-negative and smaller than chunk size")
+    if not encoding_model:
+        raise ValueError("encoding model must not be empty")
+    settings.project_settings["chunking"] = {
+        "type": "tokens",
+        "size": chunk_size,
+        "overlap": overlap,
+        "encoding_model": encoding_model,
+    }
+    return settings
+
+
+def configure_input_pattern(
+    settings: LiveSettings,
+    input_file_pattern: str,
+) -> LiveSettings:
+    """Apply one validated input file regex to both disposable projects."""
+    if not input_file_pattern:
+        raise ValueError("input file pattern must not be empty")
+    try:
+        re.compile(input_file_pattern)
+    except re.error as error:
+        raise ValueError(f"invalid input file pattern: {error}") from error
+    settings.project_settings["input"]["file_pattern"] = input_file_pattern
+    return settings
 
 
 @dataclass
@@ -206,13 +286,14 @@ class LiveRecord:
 
 
 class LiveRecordingModel:
-    """GraphRAG completion wrapper that records the actual model responses."""
+    """GraphRAG completion wrapper with request-aware single-flight recording."""
 
     def __init__(self, delegate: Any, selected_chunks: list[str]) -> None:
         self._delegate = delegate
         self._selected_chunks = selected_chunks
         self._records: list[LiveRecord] = []
         self._counts: collections.Counter[str] = collections.Counter()
+        self._inflight: dict[tuple[bytes, str | None, bool], asyncio.Task[Any]] = {}
 
     @property
     def records(self) -> list[LiveRecord]:
@@ -238,7 +319,18 @@ class LiveRecordingModel:
         operation = classify_operation(messages, response_format)
         ordinal = self._counts[operation]
         self._counts[operation] += 1
-        response = await self._delegate.completion_async(**kwargs)
+        request_key = (
+            message_bytes(messages),
+            response_format.__name__ if response_format is not None else None,
+            bool(kwargs.get("response_format_json_object")),
+        )
+        request_task = self._inflight.get(request_key)
+        if request_task is None:
+            request_task = asyncio.create_task(
+                self._delegate.completion_async(**kwargs)
+            )
+            self._inflight[request_key] = request_task
+        response = await request_task
         content = response.content
         if not isinstance(content, str):
             raise TypeError(f"{operation} completion content is not text")
@@ -257,7 +349,7 @@ class LiveRecordingModel:
             identity_source = "\n".join(self._selected_chunks)
         self._records.append(
             LiveRecord(
-                scenario="typed-live",
+                scenario="live",
                 operation=operation,
                 producer_local_ordinal=ordinal,
                 input_identity=sha256_bytes(identity_source.encode("utf-8")),
@@ -280,8 +372,16 @@ def write_bytes(path: Path, data: bytes) -> None:
 
 async def run_graphrag_live(
     project: Path,
+    *,
+    selection_method: str,
+    limit: int,
+    max_tokens: int,
+    discover_entity_types: bool,
+    min_examples_required: int,
+    n_subset_max: int,
+    k: int,
 ) -> tuple[list[str], list[str], list[LiveRecord], tuple[str, str, str], Any]:
-    """Run fixed GraphRAG Top prompt tuning against the configured live model."""
+    """Run GraphRAG prompt tuning against the configured live models."""
     import graphrag.api.prompt_tune as prompt_tune_api
     from graphrag.config.load_config import load_config
     from graphrag.prompt_tune.types import DocSelectionType
@@ -292,6 +392,11 @@ async def run_graphrag_live(
     original_loader = prompt_tune_api.load_docs_in_chunks
     original_create_completion = prompt_tune_api.create_completion
     recorder: LiveRecordingModel | None = None
+    selection_types = {
+        "top": DocSelectionType.TOP,
+        "random": DocSelectionType.RANDOM,
+        "auto": DocSelectionType.AUTO,
+    }
 
     async def recording_loader(**kwargs: Any) -> list[str]:
         chunks = await original_loader(**kwargs)
@@ -309,23 +414,28 @@ async def run_graphrag_live(
     prompt_tune_api.load_docs_in_chunks = recording_loader
     prompt_tune_api.create_completion = recording_factory
     try:
-        outputs = await prompt_tune_api.generate_indexing_prompts(
-            config=config,
-            limit=3,
-            selection_method=DocSelectionType.TOP,
-            max_tokens=2000,
-            discover_entity_types=True,
-            min_examples_required=2,
-            n_subset_max=300,
-            k=15,
-        )
         all_chunks = await original_loader(
             config=config,
-            limit=3,
+            limit=limit,
             select_method=DocSelectionType.ALL,
             logger=__import__("logging").getLogger("prompt-tune-real-llm"),
-            n_subset_max=300,
-            k=15,
+            n_subset_max=n_subset_max,
+            k=k,
+        )
+        if selection_method in {"random", "auto"} and len(all_chunks) != 1:
+            raise ValueError(
+                f"strict {selection_method} acceptance requires exactly one "
+                f"candidate chunk, found {len(all_chunks)}"
+            )
+        outputs = await prompt_tune_api.generate_indexing_prompts(
+            config=config,
+            limit=limit,
+            selection_method=selection_types[selection_method],
+            max_tokens=max_tokens,
+            discover_entity_types=discover_entity_types,
+            min_examples_required=min_examples_required,
+            n_subset_max=n_subset_max,
+            k=k,
         )
     finally:
         prompt_tune_api.load_docs_in_chunks = original_loader
@@ -359,10 +469,19 @@ def prepare_run_directory(output_root: Path, run_name: str, clean: bool) -> Path
     return run_directory
 
 
-def prepare_graphrag_project(project: Path, settings: dict[str, Any]) -> None:
-    """Create a sanitized local GraphRAG project using committed inputs."""
+def prepare_graphrag_project(
+    project: Path,
+    settings: dict[str, Any],
+    input_directory: Path = FIXTURE_ROOT / "input",
+) -> None:
+    """Create a sanitized local GraphRAG project using selected fixture inputs."""
+    input_directory = input_directory.resolve()
+    if not input_directory.is_dir():
+        raise FileNotFoundError(f"input directory does not exist: {input_directory}")
+    if not list(input_directory.glob("*.txt")):
+        raise ValueError(f"input directory has no .txt files: {input_directory}")
     project.mkdir(parents=True)
-    shutil.copytree(FIXTURE_ROOT / "input", project / "input")
+    shutil.copytree(input_directory, project / "input")
     write_bytes(
         project / "settings.yaml",
         yaml.safe_dump(
@@ -401,37 +520,68 @@ def run_graphloom_live_replay(
     graphloom_bin: Path,
     run_directory: Path,
     records: list[LiveRecord],
+    source_project: Path,
+    *,
+    model: str,
+    selection_method: str,
+    limit: int,
+    chunk_size: int,
+    overlap: int,
+    max_tokens: int,
+    discover_entity_types: bool,
+    min_examples_required: int,
+    n_subset_max: int,
+    k: int,
 ) -> dict[str, bytes]:
     """Replay exact live responses through GraphLoom and return output bytes."""
-    server = ReplayServer("typed-live", replay_entries(records))
+    entity_mode = "discovered" if discover_entity_types else "configured"
+    scenario = f"{selection_method}-{entity_mode}-live"
+    server = ReplayServer(scenario, replay_entries(records), expected_model=model)
     server.start()
     project = run_directory / "graphloom" / "project"
     try:
-        from prompt_tune_top_reference import copy_project
-
         project.parent.mkdir(parents=True)
-        copy_project(project, server.api_base)
+        shutil.copytree(source_project, project)
+        settings_path = project / "settings.yaml"
+        settings = yaml.safe_load(settings_path.read_text("utf-8"))
+        model_id = settings["extract_graph"]["completion_model_id"]
+        settings["completion_models"][model_id]["api_base"] = server.api_base
+        write_bytes(
+            settings_path,
+            yaml.safe_dump(
+                settings,
+                sort_keys=False,
+                allow_unicode=True,
+            ).encode("utf-8"),
+        )
+        command = [
+            str(graphloom_bin.resolve()),
+            "prompt-tune",
+            "--root",
+            str(project),
+            "--selection-method",
+            selection_method,
+            "--limit",
+            str(limit),
+            "--chunk-size",
+            str(chunk_size),
+            "--overlap",
+            str(overlap),
+            "--max-tokens",
+            str(max_tokens),
+            "--min-examples-required",
+            str(min_examples_required),
+            "--n-subset-max",
+            str(n_subset_max),
+            "--k",
+            str(k),
+            "--output",
+            "generated",
+        ]
+        if not discover_entity_types:
+            command.append("--no-discover-entity-types")
         result = subprocess.run(
-            [
-                str(graphloom_bin.resolve()),
-                "prompt-tune",
-                "--root",
-                str(project),
-                "--selection-method",
-                "top",
-                "--limit",
-                "3",
-                "--chunk-size",
-                "38",
-                "--overlap",
-                "0",
-                "--max-tokens",
-                "2000",
-                "--min-examples-required",
-                "2",
-                "--output",
-                "generated",
-            ],
+            command,
             cwd=project,
             env={**os.environ, "GRAPHRAG_API_KEY": "compat-replay-key"},
             capture_output=True,
@@ -459,13 +609,22 @@ def run_graphloom_live_replay(
         server.close()
 
 
-def git_head() -> str:
-    """Return the exact GraphLoom commit used for the run."""
-    return subprocess.check_output(
+def graphloom_source_state() -> dict[str, Any]:
+    """Return commit and tracked-diff evidence for the GraphLoom source."""
+    commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"],
         cwd=REPOSITORY_ROOT,
         text=True,
     ).strip()
+    diff = subprocess.check_output(
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=REPOSITORY_ROOT,
+    )
+    return {
+        "graphloom_commit": commit,
+        "graphloom_tracked_diff_sha256": sha256_bytes(diff) if diff else None,
+        "graphloom_tracked_worktree_dirty": bool(diff),
+    }
 
 
 def compare_outputs(
@@ -488,14 +647,20 @@ def compare_outputs(
 
 def markdown_report(summary: dict[str, Any]) -> str:
     """Render a secret-free local acceptance report."""
+    source_suffix = ""
+    if summary["graphloom_tracked_worktree_dirty"]:
+        source_suffix = (
+            f" with tracked diff `{summary['graphloom_tracked_diff_sha256']}`"
+        )
     lines = [
         "# Prompt-tune real-LLM compatibility report",
         "",
         f"- Result: **{summary['result']}**",
         f"- GraphRAG: `{summary['graphrag_commit']}` ({summary['graphrag_version']})",
-        f"- GraphLoom: `{summary['graphloom_commit']}`",
+        f"- GraphLoom: `{summary['graphloom_commit']}`{source_suffix}",
         f"- Provider: `{summary['provider']}`",
         f"- Model: `{summary['model']}`",
+        f"- Selection method: `{summary['prompt_tune_parameters']['selection_method']}`",
         f"- Selected chunks: `{summary['selected_chunk_count']}` (exact order matched)",
         f"- GraphRAG live requests: `{summary['graphrag_live_request_count']}`",
         f"- GraphLoom replay requests: `{summary['graphloom_replay_request_count']}`",
@@ -511,7 +676,16 @@ def markdown_report(summary: dict[str, Any]) -> str:
 def run_acceptance(arguments: argparse.Namespace) -> Path:
     """Execute GraphRAG live record followed by GraphLoom exact replay."""
     load_environment(arguments.env_file)
-    live_settings = build_live_settings(arguments.settings)
+    live_settings = configure_input_pattern(
+        configure_chunking(
+            build_live_settings(arguments.settings),
+            chunk_size=arguments.chunk_size,
+            overlap=arguments.overlap,
+            encoding_model=arguments.encoding_model,
+        ),
+        arguments.input_file_pattern,
+    )
+    discover_entity_types = not arguments.no_discover_entity_types
     run_directory = prepare_run_directory(
         arguments.output_root, arguments.run_name, arguments.clean
     )
@@ -519,7 +693,11 @@ def run_acceptance(arguments: argparse.Namespace) -> Path:
     if not graphloom_bin.is_file():
         raise FileNotFoundError(f"GraphLoom binary does not exist: {graphloom_bin}")
     graphrag_project = run_directory / "graphrag" / "project"
-    prepare_graphrag_project(graphrag_project, live_settings.project_settings)
+    prepare_graphrag_project(
+        graphrag_project,
+        live_settings.project_settings,
+        arguments.input_dir,
+    )
 
     phase = "graphrag_live_record"
     try:
@@ -530,8 +708,18 @@ def run_acceptance(arguments: argparse.Namespace) -> Path:
                 records,
                 graphrag_outputs,
                 tokenizer,
-            ) = asyncio.run(run_graphrag_live(graphrag_project))
-        selected = selected_chunk_records(all_chunks, selected_chunks, tokenizer)
+            ) = asyncio.run(
+                run_graphrag_live(
+                    graphrag_project,
+                    selection_method=arguments.selection_method,
+                    limit=arguments.limit,
+                    max_tokens=arguments.max_tokens,
+                    discover_entity_types=discover_entity_types,
+                    min_examples_required=arguments.min_examples_required,
+                    n_subset_max=arguments.n_subset_max,
+                    k=arguments.k,
+                )
+            )
         requests = [record.request_json() for record in records]
         responses = [record.response_json() for record in records]
         write_bytes(
@@ -540,58 +728,93 @@ def run_acceptance(arguments: argparse.Namespace) -> Path:
         write_bytes(
             run_directory / "record" / "responses.json", stable_json_bytes(responses)
         )
-        write_bytes(
-            run_directory / "graphrag" / "selected_chunks.json",
-            stable_json_bytes(selected),
-        )
         reference_outputs = {}
         for name, content in zip(OUTPUT_NAMES, graphrag_outputs, strict=True):
             data = content.encode("utf-8")
             reference_outputs[name] = data
             write_bytes(run_directory / "graphrag" / "generated" / name, data)
+        selected = selected_chunk_records(
+            all_chunks,
+            selected_chunks,
+            tokenizer,
+            graphrag_project,
+        )
+        write_bytes(
+            run_directory / "graphrag" / "selected_chunks.json",
+            stable_json_bytes(selected),
+        )
 
         phase = "graphloom_replay"
         replay_outputs = run_graphloom_live_replay(
-            graphloom_bin, run_directory, records
+            graphloom_bin,
+            run_directory,
+            records,
+            graphrag_project,
+            model=live_settings.model,
+            selection_method=arguments.selection_method,
+            limit=arguments.limit,
+            chunk_size=arguments.chunk_size,
+            overlap=arguments.overlap,
+            max_tokens=arguments.max_tokens,
+            discover_entity_types=discover_entity_types,
+            min_examples_required=arguments.min_examples_required,
+            n_subset_max=arguments.n_subset_max,
+            k=arguments.k,
         )
         phase = "comparison"
         output_comparison = compare_outputs(reference_outputs, replay_outputs)
         operation_counts = collections.Counter(record.operation for record in records)
         summary = {
-            "cache_strategy": "disabled for prompt-tune completion calls",
+            "cache_strategy": (
+                "single-flight coalescing for byte-identical concurrent requests"
+            ),
             "graphrag_commit": GRAPH_RAG_COMMIT,
             "graphrag_version": GRAPH_RAG_VERSION,
-            "graphloom_commit": git_head(),
+            **graphloom_source_state(),
             "graphrag_live_request_count": len(records),
             "graphloom_replay_request_count": len(records),
+            "candidate_chunk_count": len(all_chunks),
             "input_sha256": [
                 sha256_bytes(path.read_bytes())
-                for path in sorted((FIXTURE_ROOT / "input").glob("*.txt"))
+                for path in sorted((graphrag_project / "input").glob("*.txt"))
             ],
             "logical_request_comparison": "exact full role/content byte equality",
+            "embedding_model": live_settings.embedding_model,
+            "embedding_provider": live_settings.embedding_provider,
+            "embedding_strategy": (
+                "configured real embedding model called by each implementation"
+                if arguments.selection_method == "auto"
+                else "embedding API not called"
+            ),
             "model": live_settings.model,
             "model_parameters": live_settings.model_parameters,
             "operation_request_counts": dict(sorted(operation_counts.items())),
             "output_comparison": output_comparison,
             "prompt_tune_parameters": {
-                "chunk_size": 38,
-                "discover_entity_types": True,
-                "limit": 3,
-                "max_tokens": 2000,
-                "min_examples_required": 2,
-                "overlap": 0,
-                "selection_method": "top",
+                "chunk_size": arguments.chunk_size,
+                "discover_entity_types": discover_entity_types,
+                "encoding_model": arguments.encoding_model,
+                "input_file_pattern": arguments.input_file_pattern,
+                "k": arguments.k,
+                "limit": arguments.limit,
+                "max_tokens": arguments.max_tokens,
+                "min_examples_required": arguments.min_examples_required,
+                "n_subset_max": arguments.n_subset_max,
+                "overlap": arguments.overlap,
+                "selection_method": arguments.selection_method,
             },
             "provider": live_settings.provider,
             "result": "success",
             "selected_chunk_count": len(selected),
             "selected_chunk_sha256": [chunk["chunk_sha256"] for chunk in selected],
-            "selected_chunk_top_ordinals": [chunk["top_ordinal"] for chunk in selected],
+            "selected_chunk_global_ordinals": [
+                chunk["top_ordinal"] for chunk in selected
+            ],
             "settings_sha256": sha256_bytes(
                 (graphrag_project / "settings.yaml").read_bytes()
             ),
-            "top_selection_comparison": (
-                "exact ordered chunks established by full request replay"
+            "selection_comparison": (
+                "exact ordered chunks established by full completion request replay"
             ),
         }
         write_bytes(
@@ -607,7 +830,7 @@ def run_acceptance(arguments: argparse.Namespace) -> Path:
         failure = {
             "error_type": type(error).__name__,
             "graphrag_commit": GRAPH_RAG_COMMIT,
-            "graphloom_commit": git_head(),
+            **graphloom_source_state(),
             "phase": phase,
             "result": "failure",
         }
@@ -676,6 +899,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graphloom-bin", type=Path, default=default_graphloom_bin())
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--run-name", default="typed-top")
+    parser.add_argument(
+        "--selection-method",
+        choices=("top", "random", "auto"),
+        default="top",
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=FIXTURE_ROOT / "input",
+        help="directory containing the .txt inputs copied into both projects",
+    )
+    parser.add_argument("--input-file-pattern", default=r".*[.]txt")
+    parser.add_argument("--limit", type=int, default=3)
+    parser.add_argument("--chunk-size", type=int, default=38)
+    parser.add_argument("--overlap", type=int, default=0)
+    parser.add_argument("--encoding-model", default="cl100k_base")
+    parser.add_argument("--max-tokens", type=int, default=2000)
+    parser.add_argument("--min-examples-required", type=int, default=2)
+    parser.add_argument("--n-subset-max", type=int, default=300)
+    parser.add_argument("--k", type=int, default=15)
+    parser.add_argument(
+        "--no-discover-entity-types",
+        action="store_true",
+        help="use configured entity types and skip the structured-output request",
+    )
     parser.add_argument(
         "--clean",
         action="store_true",

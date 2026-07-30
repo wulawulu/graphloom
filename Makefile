@@ -35,6 +35,63 @@ test-query-record-replay:
 		uv run --project tests/compat --locked \
 		pytest -q tests/compat/test_llm_cache_proxy.py tests/compat/test_query_record_replay.py
 
+prompt-tune-real-llm-check:
+	@env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		python tests/compat/prompt_tune_real_llm.py \
+		--check \
+		--settings "$(or $(SETTINGS),debug/settings.yaml)" \
+		--env-file "$(or $(ENV_FILE),debug/.env)" \
+		--graphrag-source "$(or $(GRAPHRAG_SOURCE),../graphrag)"
+
+prompt-tune-real-llm-run: build
+	@TARGET_DIR="$$(cargo metadata --no-deps --format-version 1 | \
+		sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"; \
+	env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+		uv run --project tests/compat --locked \
+		python tests/compat/prompt_tune_real_llm.py \
+		--run \
+		--settings "$(or $(SETTINGS),debug/settings.yaml)" \
+		--env-file "$(or $(ENV_FILE),debug/.env)" \
+		--graphrag-source "$(or $(GRAPHRAG_SOURCE),../graphrag)" \
+		--graphloom-bin "$$TARGET_DIR/debug/graphloom" \
+		--selection-method "$(or $(SELECTION_METHOD),top)" \
+		--input-dir "$(or $(INPUT_DIR),tests/compat/fixtures/prompt_tune/top/input)" \
+		--input-file-pattern "$(or $(INPUT_FILE_PATTERN),.*[.]txt)" \
+		--limit "$(or $(LIMIT),3)" \
+		--chunk-size "$(or $(CHUNK_SIZE),38)" \
+		--overlap "$(or $(OVERLAP),0)" \
+		--encoding-model "$(or $(ENCODING_MODEL),o200k_base)" \
+		--n-subset-max "$(or $(N_SUBSET_MAX),300)" \
+		--k "$(or $(K),15)" \
+		--no-discover-entity-types \
+		--run-name "$(or $(RUN_NAME),prompt-tune-real-llm)" \
+		$(if $(CLEAN),--clean,)
+
+prompt-tune-update-debug: INPUT_DIR = update_debug/input
+prompt-tune-update-debug: CHUNK_SIZE = 1200
+prompt-tune-update-debug: OVERLAP = 100
+prompt-tune-update-debug: RUN_NAME = update-debug-top
+prompt-tune-update-debug: prompt-tune-real-llm-run
+
+prompt-tune-random-real-llm: SELECTION_METHOD = random
+prompt-tune-random-real-llm: INPUT_FILE_PATTERN = first[.]txt
+prompt-tune-random-real-llm: LIMIT = 1
+prompt-tune-random-real-llm: CHUNK_SIZE = 1000
+prompt-tune-random-real-llm: N_SUBSET_MAX = 1
+prompt-tune-random-real-llm: K = 1
+prompt-tune-random-real-llm: RUN_NAME = random-single-candidate
+prompt-tune-random-real-llm: prompt-tune-real-llm-run
+
+prompt-tune-auto-real-llm: SELECTION_METHOD = auto
+prompt-tune-auto-real-llm: INPUT_FILE_PATTERN = first[.]txt
+prompt-tune-auto-real-llm: LIMIT = 1
+prompt-tune-auto-real-llm: CHUNK_SIZE = 1000
+prompt-tune-auto-real-llm: N_SUBSET_MAX = 1
+prompt-tune-auto-real-llm: K = 1
+prompt-tune-auto-real-llm: RUN_NAME = auto-single-candidate
+prompt-tune-auto-real-llm: prompt-tune-real-llm-run
+
 llm-cache-proxy:
 	@env -u PYTHONPATH PYTHONNOUSERSITE=1 \
 		uv run --project tests/compat --locked \
@@ -90,4 +147,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay llm-cache-proxy query-record-replay update-debug-audit test-update-debug-audit update-reference-config-gate test-all bench-query release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay prompt-tune-real-llm-check prompt-tune-real-llm-run prompt-tune-update-debug prompt-tune-random-real-llm prompt-tune-auto-real-llm llm-cache-proxy query-record-replay update-debug-audit test-update-debug-audit update-reference-config-gate test-all bench-query release update-submodule
