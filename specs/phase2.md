@@ -1,6 +1,13 @@
 # GraphLoom Phase 2：Query 兼容实现规范
 
-> 本文件用于指导 Codex 在 GraphLoom 中实现 Query。
+> **文档状态：已完成的历史阶段契约。** 本文件描述 Query Phase 2 的
+> 设计与实施顺序，不是当前产品路线图。Basic、Local、Global、Dynamic
+> Global、DRIFT、流式 API/CLI 和跨实现兼容门禁均已交付；后续 Standard
+> Update 与 prompt-tune 也已实现。当前能力以
+> [`README-zh.md`](../README-zh.md) 和 [`docs/index-zh.md`](../docs/index-zh.md)
+> 为准。
+>
+> 本文件曾用于指导 Codex 在 GraphLoom 中实现 Query。
 >
 > 本阶段的目标不是实现一个“类似 GraphRAG 的 RAG 查询”，而是以 Microsoft GraphRAG `v3.1.0` 为行为基准，实现能够读取 GraphRAG/GraphLoom Phase 1 索引产物，并在 CLI、配置、数据适配、上下文构造、模型调用和结果返回方面保持兼容的 Query 子系统。
 
@@ -12,6 +19,7 @@
 | ------------ | ------------------------------------ |
 | 项目名称         | GraphLoom                            |
 | 当前阶段         | Phase 2：Query                        |
+| 状态             | 已完成；作为历史阶段契约保留                   |
 | 前置阶段         | Phase 1：Standard Index 已完成           |
 | 实现语言         | Rust                                 |
 | GraphLoom 基线 | Phase 1 完成后的 `dev` 分支                |
@@ -23,6 +31,7 @@
 | 正式表格式        | GraphRAG 3.1.0-compatible Parquet    |
 | 正式向量后端       | LanceDB                              |
 | Query Prompt | GraphRAG 3.1.0 原始业务文本，仅做 Tera 变量语法适配 |
+| 最近更新           | `2026-07-30`                         |
 
 本规范替代旧 `specs/README.md` 中所有仅针对 Phase 1，或把 Phase 2 简化为 Local/Global 的描述。
 
@@ -2718,7 +2727,8 @@ graphloom query --root demo --method drift \
 
 # 26. Phase 3 边界
 
-Phase 2 的公共接口不得阻止 Phase 3 Standard Update Workflows。
+本节记录 Phase 2 当时为后续 Phase 3 预留的边界。Standard Update
+Workflows 目前已经通过 CLI 与 Rust API 实现，并纳入跨实现兼容门禁。
 
 需要保留：
 
@@ -2728,7 +2738,8 @@ Phase 2 的公共接口不得阻止 Phase 3 Standard Update Workflows。
 * vector store get/upsert/remove 的后续扩展空间；
 * query runtime 对 active output 的只读抽象。
 
-但 Phase 2 不实现 update，也不得为了未来 update 提前引入未使用的复杂机制。
+Phase 2 本身不实现 update；这条约束描述的是当时的阶段范围，而不是当前
+GraphLoom 的能力限制。
 
 ---
 

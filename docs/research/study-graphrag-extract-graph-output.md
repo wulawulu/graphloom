@@ -1,78 +1,90 @@
-# GraphRAG `extract_graph` 输出语义研究
+# Study: GraphRAG `extract_graph` output semantics
 
-状态：已完成 · 维护者：graphloom · 日期：2026-07-14 · 参考源码：`../graphrag` @
-`79ab7c9ad586856e82635264c200d8a1eb3c63d9`
+Status: Done · Owner: graphloom · Date: 2026-07-14 · Source:
+`../graphrag` @ `79ab7c9ad586856e82635264c200d8a1eb3c63d9`
 
-> **决策更新（2026-07-16）：**本文对差异成因和语义代价的分析仍然有效，但“默认保留 GraphLoom
-> 严格语义”的兼容决策已被 compatibility-first 原则取代。默认模式应先复现固定 GraphRAG 基线行为；
-> `(title, type)` 身份保持只能作为未来显式优化模式，并必须拥有独立 cache/产物验证。当前实现尚未完成
-> 这一模式分离，因此该差异是已知实现缺口。
+> **Decision update (2026-07-16):** The causal analysis and semantic costs in
+> this study remain valid, but the earlier decision to preserve GraphLoom's
+> stricter semantics by default was superseded by the compatibility-first
+> principle. Default mode must reproduce the pinned GraphRAG behavior.
+> Preserving `(title, type)` identity may only become an explicit optimized
+> mode with independent cache and artifact validation. That mode split is not
+> currently implemented.
 
-## 结论摘要
+## Executive summary
 
-GraphLoom 与上述版本的 GraphRAG 使用了相同的 LLM 缓存响应，但两者生成的
-`entities.parquet` 并非逐行一致。这不代表缓存未命中，也不是图抽取结果不同。差异发生在图抽取和
-描述摘要完成之后：GraphRAG 仅使用 `title` 将实体摘要合并回抽取结果。
+GraphLoom and the referenced GraphRAG version consumed the same LLM cache
+responses, yet their `entities.parquet` rows originally differed. This was not
+a cache miss or different graph extraction. The divergence occurred after
+extraction and description summarization: GraphRAG merged entity summaries back
+into extracted entities using only `title`.
 
-当同一个标题被识别为多个实体类型时，这种合并会产生笛卡尔积。一个标题下的每条摘要都会被连接到
-该标题下的每条带类型实体记录，包括来自其他类型的摘要。GraphLoom 不进行这种二次连接，而是让
-摘要结果始终跟随产生它的原始带类型实体记录。
+When one title is recognized as multiple entity types, this merge creates a
+Cartesian product. Every summary for the title joins to every typed entity row
+for that title, including summaries produced for other types. GraphLoom's
+stricter implementation avoided this second join and kept each summary attached
+to the typed entity row that produced it.
 
-GraphLoom 当前实现具有更强的语义不变量：
+That stricter design maintained stronger invariants:
 
-- 保持 `type`、`description`、`text_unit_ids` 和 `frequency` 之间的对应关系；
-- 每个抽取后的 `(title, type)` 分组恰好输出一条记录；
-- 不会生成描述与类型不匹配的交叉记录，也不会在摘要阶段扩大实体数量；
-- 同一标题对应的类型数量增加时，输出数量保持线性增长，而不是平方增长。
+- `type`, `description`, `text_unit_ids`, and `frequency` stayed associated;
+- each extracted `(title, type)` group produced exactly one row;
+- summaries could not cross entity types or increase entity cardinality;
+- cardinality grew linearly, rather than quadratically, with type count.
 
-严格复刻当前 GraphRAG 的最终行，需要同时复刻其不完整的连接键以及由此产生的语义不一致记录。缓存
-兼容和输出行为兼容仍是两个可独立验证的问题，但 compatibility-first 要求默认模式同时满足二者；更强
-的实体记录不变量必须放入名称明确的优化模式，不能静默取代参考行为。
+Exact GraphRAG output compatibility nevertheless requires reproducing the
+incomplete join key and its inconsistent rows. Cache compatibility and output
+behavior remain independently testable, but compatibility-first requires both
+in default mode. Stronger entity invariants belong in an explicitly named
+optimization mode.
 
-## 检查范围与比较方法
+## Scope and comparison method
 
-本次比较使用同一份调试语料生成的以下文件：
+The comparison used files generated from the same debug corpus:
 
-| 文件 | GraphLoom | GraphRAG |
+| File | GraphLoom | GraphRAG |
 | --- | ---: | ---: |
-| `entities.parquet` 行数 | 370 | 386 |
-| `entities.parquet` 唯一标题数 | 362 | 362 |
-| `relationships.parquet` 行数 | 1,107 | 1,107 |
+| `entities.parquet` rows | 370 | 386 |
+| Unique entity titles | 362 | 362 |
+| `relationships.parquet` rows | 1,107 | 1,107 |
 
-被检查文件的精确信息如下：
+Exact inspected artifacts:
 
-| 文件 | 大小 | SHA-256 |
+| File | Size | SHA-256 |
 | --- | ---: | --- |
-| GraphLoom `entities.parquet` | 78,640 字节 | `ab27b1f0c3bcf2d8aad13da5a9db9cb8a970e3e384c83c9ef09d419a26f4719d` |
-| GraphRAG `entities.parquet` | 59,371 字节 | `391c9ed462cbfa500a09ea87a18155246cb796deb0200695f4ff1a32aaefe38b` |
-| GraphLoom `relationships.parquet` | 113,046 字节 | `0c862026e2daa2610d942b40763e8f1cb492f3fe3613b43b6d1196d772535d1e` |
-| GraphRAG `relationships.parquet` | 79,564 字节 | `ed991be709e2ade4ec0c4778679271239fe9645859805c5b31a3902a1ee858fe` |
+| GraphLoom `entities.parquet` | 78,640 bytes | `ab27b1f0c3bcf2d8aad13da5a9db9cb8a970e3e384c83c9ef09d419a26f4719d` |
+| GraphRAG `entities.parquet` | 59,371 bytes | `391c9ed462cbfa500a09ea87a18155246cb796deb0200695f4ff1a32aaefe38b` |
+| GraphLoom `relationships.parquet` | 113,046 bytes | `0c862026e2daa2610d942b40763e8f1cb492f3fe3613b43b6d1196d772535d1e` |
+| GraphRAG `relationships.parquet` | 79,564 bytes | `ed991be709e2ade4ec0c4778679271239fe9645859805c5b31a3902a1ee858fe` |
 
-逻辑比较先解码 Parquet 表，再对完整记录的多重集合进行比较，并对 Arrow 表示差异进行规范化。比较时
-曾有意忽略行顺序：当时 GraphLoom 的 `BTreeMap` 按键排序，而 Pandas 的
-`groupby(..., sort=False)` 保留首次出现顺序。这个处理足以比较 `extract_graph` 的关系多重集合，
-但后续验证发现它不足以保证整个 pipeline 兼容；`create_communities` 会在无向重复边中保留最后一条，
-因此关系行顺序会决定最终边权和社区划分。GraphLoom 现已改为与 Pandas 相同的首次出现分组顺序。
-语义比较仍可忽略列顺序以及相互兼容的 Arrow 物理类型。
+The logical comparison decoded Parquet, compared complete row multisets, and
+normalized Arrow representation differences. Row order was initially ignored:
+GraphLoom's `BTreeMap` sorted keys, while Pandas
+`groupby(..., sort=False)` preserves first occurrence. That was sufficient for
+relationship multisets but not the full pipeline. `create_communities` keeps
+the last duplicate undirected edge, so relationship order changes final edge
+weights and communities. GraphLoom now preserves Pandas first-occurrence group
+order. Semantic comparison may still ignore column order and compatible Arrow
+physical types.
 
-比较确认了以下事实：
+The comparison established:
 
-1. 1,107 条关系记录的 `source`、`target`、`description`、`text_unit_ids` 和
-   `weight` 全部一致。
-2. 两份实体表都包含相同的 362 个唯一标题。
-3. GraphLoom 的 370 条完整实体记录全部存在于 GraphRAG 的输出中。
-4. GraphRAG 恰好多出 16 条实体记录。这些记录全部是后文所述的跨类型摘要组合；GraphLoom 没有任何
-   无法在 GraphRAG 中找到的实体记录。
+1. All 1,107 relationship rows matched on `source`, `target`, `description`,
+   `text_unit_ids`, and `weight`.
+2. Both entity tables contained the same 362 unique titles.
+3. Every one of GraphLoom's 370 complete entity rows appeared in GraphRAG.
+4. GraphRAG had exactly 16 extra rows, all cross-type summary combinations.
 
-关系记录完全一致，并且 GraphLoom 的实体记录是 GraphRAG 实体记录的完整子集。这两点有力地说明
-两个工作流消费了相同的抽取和摘要结果。如果 LLM 响应不同，通常会表现为关系内容变化，或者基础实体
-分组缺失、增加或字段改变，而不会只产生本次观察到的连接组合。
+Matching relationships and a complete entity-row subset strongly show that
+both workflows consumed the same extraction and summarization results. Different
+LLM responses would normally change relationships or base groups, not only
+produce these join combinations.
 
-## 受影响的八个标题
+## The eight affected titles
 
-语料中有八个标题在抽取聚合后同时存在一个 `GEO` 分组和一个 `ORGANIZATION` 分组：
+Eight titles had both `GEO` and `ORGANIZATION` groups after extraction:
 
-| 标题 | GraphLoom 行数 | GraphRAG 行数 | GraphRAG 额外行数 |
+| Title | GraphLoom rows | GraphRAG rows | Extra GraphRAG rows |
 | --- | ---: | ---: | ---: |
 | 东平府 | 2 | 4 | 2 |
 | 守备府 | 2 | 4 | 2 |
@@ -82,61 +94,61 @@ GraphLoom 当前实现具有更强的语义不变量：
 | 清河县 | 2 | 4 | 2 |
 | 玉皇庙 | 2 | 4 | 2 |
 | 王婆茶坊 | 2 | 4 | 2 |
-| **合计** | **16** | **32** | **16** |
+| **Total** | **16** | **32** | **16** |
 
-其余标题只有一个带类型实体分组，因此不受影响：当标题在连接两侧都只有一行时，一对一连接和只按
-标题连接会产生相同的行数。
+Other titles had one typed group, for which a title-only join and a one-to-one
+join have the same cardinality.
 
-## 具体示例：`守备府`
+## Concrete example: `守备府`
 
-LLM 抽取完成后，GraphRAG 与 GraphLoom 都会按照 `(title, type)` 聚合实体。两个“守备府”分组
-具有不同的来源、频次和最终摘要：
+After LLM extraction, both implementations group by `(title, type)`. The two
+groups have different evidence, frequency, and final summaries:
 
-| 标题 | 类型 | 正确关联的摘要 | 频次 |
+| Title | Type | Correct summary association | Frequency |
 | --- | --- | --- | ---: |
-| 守备府 | `GEO` | 守备府是西门庆派人送人情的地点，属于官府邸宅 | 2 |
-| 守备府 | `ORGANIZATION` | 守备府是地方军事机构，提供一二十名军牢帮助西门庆搬抬嫁妆 | 1 |
+| 守备府 | `GEO` | A government residence where Ximen Qing sends a favor | 2 |
+| 守备府 | `ORGANIZATION` | A local military institution supplying guards to move a dowry | 1 |
 
-每个分组还有自己的 `text_unit_ids`。这些 ID 和频次表达的是特定带类型实体分组的证据来源与出现次数，
-而不只是“守备府”这个标题字符串的证据。
+Each group also has distinct `text_unit_ids`. Those IDs and frequencies are
+evidence for a typed group, not merely for the title string.
 
-摘要阶段为每个输入分组生成一条描述。GraphRAG 随后生成的实体摘要临时表却只有两列：
+Summarization produces one description per group, but GraphRAG's temporary
+summary table retains only:
 
-| 标题 | 摘要描述 |
+| Title | Summary |
 | --- | --- |
-| 守备府 | 官府邸宅、送人情地点的摘要 |
-| 守备府 | 地方军事机构、提供军牢的摘要 |
+| 守备府 | Government residence and favor-delivery location |
+| 守备府 | Local military institution supplying guards |
 
-区分两个输入分组的 `type` 已经丢失。使用 `title` 将这张表连接回两条抽取记录时，会形成多对多连接：
+The distinguishing `type` has been lost. Joining this table back to two
+extracted rows by `title` yields:
 
 ```text
-2 条“守备府”抽取记录 × 2 条“守备府”摘要记录 = 4 条输出记录
+2 extracted rows × 2 summary rows = 4 output rows
 ```
 
-最终组合如下：
-
-| 输出类型 | 附加的描述 | 结果 |
+| Output type | Attached description | Result |
 | --- | --- | --- |
-| `GEO` | 地点摘要 | 对应关系正确 |
-| `GEO` | 军事机构摘要 | 错误的跨类型组合 |
-| `ORGANIZATION` | 地点摘要 | 错误的跨类型组合 |
-| `ORGANIZATION` | 军事机构摘要 | 对应关系正确 |
+| `GEO` | Location summary | Correct |
+| `GEO` | Military-institution summary | Incorrect cross-type combination |
+| `ORGANIZATION` | Location summary | Incorrect cross-type combination |
+| `ORGANIZATION` | Military-institution summary | Correct |
 
-两条交叉记录并非无害的重复数据。它们的 `type`、`text_unit_ids` 和 `frequency` 来自一个抽取分组，
-而 `description` 来自另一个分组。因此，同一行中的类型、证据来源和语义描述互相矛盾。
+The cross rows are not harmless duplicates: `type`, `text_unit_ids`, and
+`frequency` come from one group while `description` comes from another.
 
-## GraphRAG 算法及其问题
+## GraphRAG algorithm and defect
 
-当前参考版本的 GraphRAG 在初始实体聚合时正确使用了两个键：
+GraphRAG initially groups correctly:
 
 ```python
 all_entities.groupby(["title", "type"], sort=False)
 ```
 
-源码位置：
-`../graphrag/packages/graphrag/graphrag/index/operations/extract_graph/extract_graph.py:104-115`。
+Source:
+`../graphrag/packages/graphrag/graphrag/index/operations/extract_graph/extract_graph.py:104-115`.
 
-摘要操作会遍历聚合后的每条实体记录，但输出结果只保留 `title` 和 `description`，没有保留 `type`：
+Summarization iterates every grouped row but drops `type`:
 
 ```python
 node_descriptions = [
@@ -148,38 +160,39 @@ node_descriptions = [
 ]
 ```
 
-源码位置：
-`../graphrag/packages/graphrag/graphrag/index/operations/summarize_descriptions/summarize_descriptions.py:59-66`。
+Source:
+`../graphrag/packages/graphrag/graphrag/index/operations/summarize_descriptions/summarize_descriptions.py:59-66`.
 
-最后，工作流只使用 `title` 把摘要连接回原始实体表：
+The workflow then joins only on `title`:
 
 ```python
 extracted_entities.drop(columns=["description"], inplace=True)
 entities = extracted_entities.merge(entity_summaries, on="title", how="left")
 ```
 
-源码位置：
-`../graphrag/packages/graphrag/graphrag/index/workflows/extract_graph.py:183-184`。
+Source:
+`../graphrag/packages/graphrag/graphrag/index/workflows/extract_graph.py:183-184`.
 
-如果同一个标题有 `k` 个带类型分组，连接左右两侧就各有 `k` 条相同标题的记录，因此连接会输出
-`k²` 条记录。其中只有 `k` 条保留了摘要与类型之间的正确关系，其余 `k² - k` 条都是交叉组合。
-在本次语料中，八个标题的 `k = 2`，所以每个标题增加两条错误记录，合计增加 16 条。
+With `k` typed groups for one title, each side has `k` rows and the merge emits
+`k²`; only `k` preserve the correct association. The remaining `k²-k` are cross
+combinations. Here eight titles had `k=2`, adding 16 rows.
 
-问题不在最初按照 `(title, type)` 聚合。这个聚合是必要的，因为同一个名称可以拥有不同的类型解释和
-不同的支持证据。真正的问题是摘要身份中丢失了 `type`，随后又使用比原分组键更弱的键进行连接。
+The initial `(title, type)` grouping is necessary because one name can have
+different interpretations and evidence. The defect is dropping `type` from
+summary identity and then joining on a weaker key.
 
-## GraphLoom 算法及其不变量
+## GraphLoom's stricter algorithm and invariant
 
-GraphLoom 同样按照 `(title, entity_type)` 聚合原始实体记录：
+GraphLoom also groups raw rows by `(title, entity_type)`:
 
 ```rust
 let key = (row.title.clone(), row.entity_type.clone());
 ```
 
-源码位置：`crates/graphloom/src/operations/graph/merge.rs:7-22`。
+Source: `crates/graphloom/src/operations/graph/merge.rs:7-22`.
 
-在摘要阶段，每个异步操作拥有一条完整的 `EntityRow`。摘要返回后，GraphLoom 直接使用同一条记录
-构造结果：
+In the stricter summarization design, each asynchronous operation owns a full
+`EntityRow` and constructs its result from that same row:
 
 ```rust
 SummarizedEntityRow {
@@ -191,103 +204,110 @@ SummarizedEntityRow {
 }
 ```
 
-源码位置：`crates/graphloom/src/operations/graph/summarize.rs:90-106`。
+Source: `crates/graphloom/src/operations/graph/summarize.rs:90-106`.
 
-整个过程不需要通过 DataFrame 二次连接恢复记录身份。输入索引会跟随每条记录一起进入异步任务，任务
-完成后再按输入索引恢复顺序，因此并发执行也不会混淆摘要结果（`summarize.rs:111-120`）。
+No DataFrame rejoin is needed. Input indices travel with tasks and restore order
+after completion, so concurrency cannot mix results
+(`summarize.rs:111-120`).
 
-该设计保持了核心实体记录不变量：
+The invariant is:
 
 ```text
-(title, type) 唯一标识一个聚合分组；该行中的
-description、text_unit_ids 和 frequency 必须全部属于这个分组。
+(title, type) identifies one aggregate group; description, text_unit_ids,
+and frequency in that row must all belong to the same group.
 ```
 
-对于 `n` 条聚合实体记录，GraphLoom 始终返回 `n` 条摘要实体记录。摘要可以改变描述文本，但不能
-改变记录身份、证据集合、频次或记录数量。
+For `n` aggregate rows, this design always returns `n` summarized rows.
 
-## 为什么 GraphLoom 的实现更好
+## Why the stricter design is better
 
-### 1. 保持证据来源正确
+### 1. Correct evidence provenance
 
-`text_unit_ids` 指向为特定带类型实体分组提供描述的文本单元。如果附加了另一个类型的摘要，该描述就
-无法由同一行保存的文本单元 ID 支持。GraphLoom 始终把证据与由这些证据生成的摘要保存在一起。
+`text_unit_ids` support a particular typed group. Attaching another type's
+summary makes the description unsupported by the IDs stored in that row.
 
-### 2. 保持分类与含义一致
+### 2. Classification matches meaning
 
-实体记录不仅由标题构成，类型也决定标题的含义。同一个名称可以同时指代地点和组织，但两者代表不同的
-解释。GraphLoom 不会给地点记录附加组织含义，也不会给组织记录附加地点含义。
+Type determines interpretation. One name may denote both a place and an
+organization; their descriptions must not cross.
 
-### 3. 保持记录基数不变
+### 3. Stable cardinality
 
-描述摘要是值转换操作，不是图扩张操作。它应该把一组描述转换为一条摘要，同时保持实体分组的数量和
-身份不变。GraphLoom 从结构上保证了这一性质；GraphRAG 的多对多连接则破坏了它。
+Summarization transforms values; it should not expand the graph. The stricter
+design preserves group identity and count structurally.
 
-### 4. 避免平方级放大
+### 4. No quadratic amplification
 
-当一个标题对应 `k` 个类型时，GraphLoom 输出 `k` 条记录，而 GraphRAG 输出 `k²` 条记录。本次
-观察到的规模较小，但算法问题具有普遍性。增加同一标题的分类数量不应该制造越来越多的实体记录。
+For `k` types, the stricter design emits `k` rows while GraphRAG emits `k²`.
 
-### 5. 避免不必要的有损往返
+### 5. No unnecessary lossy round trip
 
-GraphRAG 先把带类型记录转换为不带类型的摘要表，再尝试通过连接恢复对应关系。GraphLoom 在整个操作
-中保留带类型领域对象。让数据流和类型系统直接保持不变量，比先丢失身份再尝试恢复更安全。
+GraphRAG converts typed rows to an untyped summary table and later tries to
+recover identity. Keeping typed domain objects throughout is safer.
 
-### 6. 更符合原始数据模型的含义
+### 6. Consistency with the upstream data model
 
-GraphRAG 自己在摘要前使用 `(title, type)` 定义实体分组身份。GraphLoom 在摘要后继续使用同一个身份。
-如果复刻只按标题连接的行为，虽然可以匹配当前产物的行数，却会生成与 GraphRAG 自身前序分组键相冲突
-的记录。
+GraphRAG itself defines identity as `(title, type)` before summarization. The
+stricter design retains that identity afterward.
 
-## Parquet 物理差异
+## Physical Parquet differences
 
-即使逻辑记录相同，文件在存储层也存在以下差异：
+Even equal logical rows can differ physically:
 
-- GraphLoom 写入 Arrow `string_view` 和 `large_list<string_view>`，参考文件使用 `string` 和
-  `list<string>`；
-- 列顺序不同：GraphLoom 将 `description` 放在 `text_unit_ids` 之前，而本次 GraphRAG 产物将其放在
-  最后；
-- 本次被比较的历史产物行顺序因两边当时的分组顺序策略不同而不同；当前实现已按 GraphRAG 的首次出现
-  顺序输出分组，以保持下游社区检测兼容；
-- GraphRAG 文件包含 Pandas schema 元数据，GraphLoom 不写入该元数据；
-- 写入器、编码和压缩方式会导致文件大小和哈希不同。
+- GraphLoom writes Arrow `string_view` and `large_list<string_view>` while the
+  reference uses `string` and `list<string>`.
+- Column order differs in the historical artifacts.
+- Historical row order differed before GraphLoom adopted first-occurrence
+  grouping for downstream community compatibility.
+- GraphRAG includes Pandas schema metadata; GraphLoom does not.
+- Writers, encodings, and compression produce different sizes and hashes.
 
-因此，字节完全相同既不是这些 Parquet 文件的预期结果，也不是判断语义兼容性的有效标准。应区分以下
-三个层级：
+Byte identity is therefore neither expected nor a sound semantic criterion.
+Distinguish:
 
-1. **缓存兼容：**相同请求可以读取 GraphRAG 缓存，并恢复相同的 LLM 响应。
-2. **逻辑字段兼容：**等价实体和关系具有兼容的 schema 与含义。
-3. **产物复制：**完全复刻行顺序、Arrow 物理类型、元数据，甚至参考实现中的异常行为。
+1. **Cache compatibility:** identical requests can reuse GraphRAG cache entries.
+2. **Logical-field compatibility:** equivalent rows have compatible schemas and
+   meaning.
+3. **Artifact replication:** exact row order, physical Arrow types, metadata,
+   and even anomalous reference behavior.
 
-GraphLoom 默认实现现已复现 title-only summary join，因此这项 `entities.parquet` 逻辑行为缺口已经
-关闭。物理 Parquet 复制仍不是要求。`relationships.parquet` 没有类似问题，因为关系摘要和连接在
-两侧都使用完整的 `("source", "target")` 身份。
+GraphLoom default mode now reproduces the title-only summary join, closing this
+logical `entities.parquet` gap. Physical Parquet replication remains out of
+scope. Relationships do not have the same issue because both summarization and
+join use the full `("source", "target")` identity.
 
-## 兼容性决策（2026-07-16 更新）
+## Compatibility decision (updated 2026-07-16)
 
-默认兼容模式已经复现固定 GraphRAG 基线的 title-only summary join，包括多类型同标题时的结果基数、
-完整字段组合、左表顺序、摘要匹配顺序，以及后续 `finalize_graph` 的首次 title 保留行为。这不是对该
-算法语义正确性的认可，而是为了先建立可逐项比较的行为基线。
+Default compatibility mode reproduces the pinned GraphRAG title-only join,
+including cardinality, complete field combinations, left-row order, summary
+match order, and `finalize_graph`'s later first-title retention. This accepts an
+upstream semantic flaw only to establish a directly comparable baseline.
 
-此前“一条 `(title,type)` 输入记录对应一条摘要输出记录”的实现仅保留为未来优化机会；当前代码不暴露
-策略 enum 或配置开关。未来若实现，该模式必须有明确配置名、与兼容模式分离的验证样例，并记录产物
-差异。
+The earlier one-input-to-one-output `(title, type)` behavior remains a future
+optimization. No strategy enum or configuration switch currently exposes it.
+Any future mode needs an explicit name, isolated validation, and documented
+artifact differences.
 
-后续兼容性检查应验证：
+Compatibility checks should verify:
 
-- 物理表示规范化后，关系记录的多重集合相同；
-- `relationships.parquet` 的语义行顺序与 GraphRAG 相同，因为社区检测的“保留最后一条重复无向边”
-  会把顺序差异转化为边权差异；
-- 默认兼容模式的实体行多重集合与 GraphRAG 相同，包括 title-only join 产生的四行笛卡尔积回归样例；
-- 优化模式保持实体 `(title, type)` 分组及其正确关联字段，不输出描述来自其他类型分组的记录；
-- 两种模式都应继续使用同一兼容 cache 协议；产物比较必须标注所用模式。
+- equal relationship multisets after physical normalization;
+- GraphRAG-compatible semantic relationship order because keep-last duplicate
+  undirected edges make order affect weights;
+- equal default entity-row multisets, including the four-row Cartesian
+  regression;
+- correct typed associations and no cross-type descriptions in optimized mode;
+- one compatible cache protocol for both modes, with comparisons labeling the
+  selected artifact mode.
 
-逐字节 Parquet 复制仍不属于默认要求；这里要求的是解码后的行为和记录兼容。物理 writer、Arrow metadata
-和压缩差异继续按独立存储兼容问题处理。
+Byte-for-byte Parquet replication remains unnecessary. Decoded behavior and
+records are the contract; writers, Arrow metadata, and compression are separate
+physical-storage concerns.
 
-## 与缓存互操作研究的关系
+## Relationship to the cache interoperability study
 
-缓存格式和缓存键保证记录在
-[GraphRAG v4 LLM 缓存互操作研究](study-graphrag-llm-cache.md)中。缓存互操作保证 GraphLoom 获得相同的
-模型响应，但不能单独证明后续输出行为兼容。默认兼容模式还必须单独验证 GraphRAG 随后的 DataFrame
-转换；语义修正属于显式优化模式，而不是 cache 协议的一部分。
+Cache format and keys are documented in the
+[GraphRAG v4 LLM cache interoperability study](study-graphrag-llm-cache.md).
+Cache interoperability proves that GraphLoom receives the same model responses;
+it cannot prove compatibility of later DataFrame transformations. Default mode
+must validate those transformations separately, while semantic correction
+belongs to an explicit optimization mode rather than the cache protocol.

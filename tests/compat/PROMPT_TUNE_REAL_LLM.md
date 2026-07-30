@@ -4,7 +4,8 @@ This local-only runner fixes the reference to Microsoft GraphRAG 3.1.0,
 commit `7fc6607edda3d387d23e52ededbf8a75b6730f97`. It supports Top, Random, and Auto
 selection and performs:
 
-1. GraphRAG live Top prompt tuning with the selected real completion model.
+1. GraphRAG live prompt tuning in the selected Top, Random, or Auto mode with
+   the configured real models.
    Byte-identical concurrent requests are single-flighted to one provider call.
 2. Exact recording of logical message roles/content and raw response content.
 3. GraphLoom replay using those same responses, matched by complete message

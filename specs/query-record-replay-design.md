@@ -66,5 +66,5 @@ raw field diff 仍记录。随后比较 stdout。若请求不同，答案结果�
 
 ## 8. 参考
 
-- [GraphRAG v4 LLM cache interoperability](../docs/research/study-graphrag-llm-cache.md)
+- [GraphRAG v4 LLM 缓存互操作](../docs/research/study-graphrag-llm-cache-zh.md)
 - [Phase 2 Query compatibility](phase2.md)

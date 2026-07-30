@@ -1,12 +1,18 @@
 # GraphLoom Phase 1 实现规范
 
+> **文档状态：已完成的历史阶段契约。** 本文件描述 Standard Index 的
+> Phase 1 范围，不是当前产品能力清单。GraphLoom 后续已经交付 Query、
+> Standard Update、prompt-tune 和自动化 Python 兼容门禁。当前使用方式与
+> 支持边界以 [`README-zh.md`](../README-zh.md) 和
+> [`docs/index-zh.md`](../docs/index-zh.md) 为准。
+
 ## 0. 文档信息
 
 | 项目             | 内容                                         |
 | -------------- | ------------------------------------------ |
 | 项目名称           | GraphLoom                                  |
 | 当前阶段           | Phase 1：Standard Index                     |
-| 状态             | Phase 1 主体已实现，已建立手工 GraphRAG 交叉验证基线，仍有已知 gap |
+| 状态             | 已完成；作为历史阶段契约保留                         |
 | 实现语言           | Rust                                       |
 | 参考项目           | Microsoft GraphRAG                         |
 | 参考 tag          | `v3.1.0`                                  |
@@ -14,9 +20,9 @@
 | 固定基准提交         | `7fc6607edda3d387d23e52ededbf8a75b6730f97` |
 | 基准 GraphRAG 版本 | `3.1.0`                                    |
 | cache/operation 研究 pin | `79ab7c9ad586856e82635264c200d8a1eb3c63d9` |
-| 最近更新           | `2026-07-16`                               |
+| 最近更新           | `2026-07-30`                               |
 
-本规范用于指导 Codex 实现 GraphLoom。
+本规范曾用于指导 Codex 实现 GraphLoom 的 Phase 1。
 
 本规范定义：
 
@@ -26,7 +32,8 @@
 4. workflow、存储、LLM、Prompt、向量库和数据表契约。
 5. 测试和验收标准。
 
-当本规范与参考 GraphRAG 源码存在冲突时，优先级如下：
+以下优先级仅用于解释和维护 Phase 1 历史契约；判断当前产品行为时应以
+当前代码、测试和用户文档为准。Phase 1 范围内发生冲突时的原优先级为：
 
 1. 本规范明确规定的偏差。
 2. 固定基准提交中的 Python 实现。
@@ -50,10 +57,15 @@ GraphLoom 是一个独立的 Rust GraphRAG 实现。
 | 阶段      | 内容                              |
 | ------- | ------------------------------- |
 | Phase 1 | 完整实现 Standard Index             |
-| Phase 2 | 实现 Local Search 和 Global Search |
+| Phase 2 | 实现 Basic、Local、Global、Dynamic Global 和 DRIFT Query |
 | Phase 3 | 实现 Standard Update Workflows    |
+| 后续能力    | 实现 GraphRAG-compatible prompt tuning |
 
-当前只实施 Phase 1。Phase 1 已包含可运行的 `graphloom init` 和 `graphloom index`，但不包含 query、update、prompt-tune 或自动化 Python 兼容测试套件。Standard Index 已与 GraphRAG 完成手工交叉验证；Phase 1 的公共接口不得阻止 Phase 2 和 Phase 3 的实现。
+本文件的实施范围只包含 Phase 1。Phase 1 交付了可运行的
+`graphloom init` 和 `graphloom index`；query、update、prompt-tune
+及自动化 Python 兼容测试套件属于后来阶段，当前均已实现。Standard
+Index 最初完成手工交叉验证，随后已纳入自动化 `make test-compat`
+双实现门禁。
 
 ---
 
@@ -97,11 +109,20 @@ Phase 1 以前三层为验收重点。第四层是明确记录的存储兼容加
 3. 两个实现使用相同输入和确定性 Mock LLM 时，确定性字段应产生等价结果。
 4. UUID、当前日期、LLM 文本等非确定性字段允许不同，但类型、关联关系和语义必须一致。
 
-截至 2026-07-16，十个 Standard Index workflow 已完成手工交叉验证。已确认相同 chunk 配置产生相同分块，GraphLoom 可直接消费 GraphRAG 的 `extract_graph` cache，GraphRAG 可直接消费 GraphLoom 的 `create_community_reports` cache，community 结果一致。该结论是手工验证基线，不等同于自动化兼容测试套件。
+截至 2026-07-16，十个 Standard Index workflow 已完成手工交叉验证。
+此后项目增加了自动化兼容套件：固定的 GraphRAG 3.1.0 与 GraphLoom
+共用确定性 OpenAI-compatible provider，交叉验证标准索引、增量更新、
+Query、cache、逻辑 Parquet 和向量记录。当前门禁及其边界见
+[`docs/python-compatibility-testing-zh.md`](../docs/python-compatibility-testing-zh.md)。
 
 当前已知的存储层缺口是：GraphLoom 与比较环境使用不同的 Parquet/Arrow writer 栈和 LanceDB 版本。当前 Rust workspace 使用 `lancedb 0.31.0` 与 Arrow 58；`79ab7c9…` GraphRAG 比较环境声明 `lancedb ~=0.24.1`、`pyarrow ~=22.0`，其 lock 分别解析为 0.24.3 和 22.0.0。逻辑 schema 与行为继续以兼容为目标，但暂不承诺 Parquet 文件字节一致，也不承诺 GraphLoom 创建的 LanceDB 目录可由 GraphRAG 的 LanceDB 版本直接打开。
 
-当前另有一个已知行为缺口：同一 title 对应多个 entity type 时，GraphLoom 的 `extract_graph` 保留 `(title, type)` 摘要身份，而参考 GraphRAG 使用 title-only join。该实现语义更严格，但按本节“先建立完全兼容基线、再优化”的原则，它不能作为默认兼容行为的永久偏差；默认模式应先复现参考行为，严格语义应在未来以显式优化模式提供。证据和代价见 [`extract_graph` 输出语义研究](../docs/research/study-graphrag-extract-graph-output.md)。
+历史实现曾存在一个行为缺口：同一 title 对应多个 entity type 时，
+GraphLoom 的 `extract_graph` 保留 `(title, type)` 摘要身份，而参考
+GraphRAG 使用 title-only join。当前默认兼容模式已复现参考实现的
+title-only many-to-many join、结果基数和行序；严格的一对一身份策略仍只
+作为未来显式优化。证据、修复结论和代价见
+[`extract_graph` 输出语义研究](../docs/research/study-graphrag-extract-graph-output-zh.md)。
 
 不要求：
 
@@ -848,7 +869,10 @@ Prompt 使用 Tera。
 prompts/
 ```
 
-当前初始化仅生成 Phase 1 indexing workflows 实际使用的 Prompt。Local Search、Global Search、DRIFT、Basic Search 和 question generation Prompt 在对应 query workflow 实现时再加入。
+Phase 1 当时的初始化只要求 indexing workflows 使用的 Prompt。Query
+阶段随后扩展了初始化资产；当前 `graphloom init` 会生成 13 个 indexing
+与 Query Prompt，包括 Local、Global、DRIFT、Basic 和 question
+generation 模板。
 
 模板内容应从固定基准提交复制，不得随意缩短、改写或“优化”。运行时不得访问 GraphLoom 仓库源码目录、从网络下载 prompt，或假设用户保留 workspace。
 
@@ -1997,7 +2021,13 @@ make test-compat
 - null 和空列表差异；
 - LLM 自然语言内容及空白。
 
-该门禁不宣称两个 Parquet 文件字节一致，也不宣称不同 LanceDB 版本的目录格式兼容。Local Search 依赖后一个边界，暂不属于该门禁；不依赖 LanceDB 目录互读的 Global Search 已覆盖。任何已经纳入基线的兼容检查持续失败都必须阻止对应里程碑完成。详细运行方式与基准边界见 [Python GraphRAG compatibility testing](../docs/python-compatibility-testing.md)。
+该门禁不宣称两个 Parquet 文件字节一致，也不宣称不同 LanceDB 版本的
+目录格式兼容。当前 Basic、Local 和 DRIFT 通过版本无关的逻辑向量
+manifest 将生产者记录写入消费者原生 LanceDB；Global 与 Dynamic Global
+不需要向量桥。门禁覆盖两种生产者/消费者方向的 20 个 Query CLI 场景，
+但不把逻辑桥误称为磁盘目录直接互开。任何已经纳入基线的兼容检查持续
+失败都必须阻止对应里程碑完成。详细运行方式与基准边界见
+[Python GraphRAG 兼容测试](../docs/python-compatibility-testing-zh.md)。
 
 ---
 
@@ -2117,7 +2147,11 @@ make test-compat
   -dry-run/no-cache/full rerun 测试；
   -README 使用说明。
 
-Step 10 已通过手工 GraphRAG 交叉验证建立行为基线；自动化兼容命令和物理 Parquet/LanceDB 互操作加固仍是后续工作。配置、prompt、cache、逻辑 Parquet schema 和 LanceDB 记录结构继续以 GraphRAG 兼容为目标。
+Step 10 最初通过手工 GraphRAG 交叉验证建立行为基线。当前自动化
+`make test-compat` 已覆盖双实现标准索引、增量更新、Query、prompt-tune、
+cache、逻辑 Parquet 与向量记录；物理 LanceDB 跨版本目录互开仍是独立
+加固项。配置、prompt、cache、逻辑 Parquet schema 和 LanceDB 记录结构
+继续以 GraphRAG 兼容为目标。
 
 Codex 可以在步骤内部继续细分任务，但不得跳过尚未实现的正式能力并使用假实现完成后续步骤。
 
@@ -2201,7 +2235,9 @@ graphloom index --root ./example --dry-run
 -ID 引用完整；
 -Parquet schema 以 GraphRAG 3.1.0 为兼容目标。
 
-Standard Index 手工 GraphRAG 交叉验证属于当前验收证据；自动化互读互跑门禁和物理存储互操作仍未完成。
+Standard Index 的手工 GraphRAG 交叉验证仍属于验收证据，自动化互读
+互跑门禁也已完成。不同 LanceDB 版本的物理目录直接互操作尚未完成，
+不得与逻辑向量记录互操作混为一谈。
 
 ## 架构
 

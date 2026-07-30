@@ -11,8 +11,11 @@ pub enum DocSelectionType {
     Top,
     /// Select `limit` chunks uniformly at random.
     Random,
-    /// Embed a random subset of chunks, compute the centroid, and select the
-    /// `k` chunks closest to the centroid.
+    /// Embed a random subset, rank its positions by distance to the centroid,
+    /// then select those positions from the original chunk list.
+    ///
+    /// The final positional mapping intentionally preserves GraphRAG 3.1.0
+    /// behavior even though it does not return the sampled rows themselves.
     Auto,
     /// Select all chunks (extension point; not exposed through the GraphRAG
     /// CLI contract).

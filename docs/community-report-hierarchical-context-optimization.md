@@ -1,94 +1,122 @@
-# 社区报告层级上下文优化
+# Community-report hierarchical-context optimization
 
-状态：待优化 · 兼容基线：GraphRAG `79ab7c9ad586856e82635264c200d8a1eb3c63d9` · 记录日期：2026-07-15
+Status: Planned optimization · Compatibility baseline: GraphRAG
+`79ab7c9ad586856e82635264c200d8a1eb3c63d9` · Recorded: 2026-07-15
 
-## 背景
+## Background
 
-GraphLoom 当前首先保证 `create_community_reports` 与固定 GraphRAG 基线的实际行为兼容。兼容范围包括：
+GraphLoom currently prioritizes compatibility with the observed behavior of the
+pinned GraphRAG baseline for `create_community_reports`. That contract includes:
 
-- 社区实体和关系的选择、排序与去重；
-- Pandas CSV 等价的字段顺序、转义及换行；
-- token 上限下的裁剪和首条关系兜底；
-- prompt 渲染结果、completion 请求参数和 GraphRAG v4 缓存键；
-- 无效社区报告响应的跳过行为。
+- community entity and relationship selection, ordering, and deduplication;
+- field order, escaping, and newlines equivalent to Pandas CSV;
+- truncation at the token limit and the first-relationship fallback;
+- rendered prompts, completion parameters, and GraphRAG v4 cache keys;
+- skipping invalid community-report responses.
 
-该兼容基线是后续优化的前提，不应在没有显式模式、缓存隔离和交叉验证的情况下被改变。
-缓存协议本身的兼容约束见
-[GraphRAG v4 LLM 缓存互操作研究](research/study-graphrag-llm-cache.md)。
+This baseline is a prerequisite for later optimization. It must not change
+without an explicit mode, cache isolation, and cross-implementation validation.
+The cache constraints are documented in the
+[GraphRAG v4 LLM cache interoperability study](research/study-graphrag-llm-cache.md).
 
-## 当前基线行为
+## Current baseline behavior
 
-GraphRAG 的 `build_level_context` 已实现一种层级替换策略：父社区本地上下文超过 token 上限时，使用已经
-生成的子社区报告代替部分详细实体和关系上下文。
+GraphRAG's `build_level_context` contains a hierarchical replacement strategy:
+when a parent community's local context exceeds the token limit, it can replace
+some detailed entity and relationship context with already generated child
+community reports.
 
-但是，固定基线的标准工作流会先构造所有层级的上下文，再开始生成任何社区报告。构造上下文期间传入的
-`reports` 始终为空，因此标准工作流不会进入子社区报告替换分支：
+However, the pinned baseline's standard workflow builds context for every level
+before generating any community report. The `reports` collection passed during
+context construction is therefore always empty, so the standard workflow never
+enters the child-report replacement branch:
 
-1. 为所有层级构造并冻结本地上下文；
-2. 超限时裁剪关系列表；
-3. 如果第一条关系自身已经超过上限，仍保留第一条关系及其相关实体；
-4. 上下文全部构造完成后，才按层级生成社区报告。
+1. Build and freeze local context for every level.
+2. Truncate the relationship list when it exceeds the limit.
+3. Keep the first relationship and its related entities even when that
+   relationship alone exceeds the limit.
+4. Generate reports by level only after all contexts have been built.
 
-GraphLoom 当前复现上述实际执行顺序和兜底语义。该选择是兼容性要求，不代表这是最优的报告生成策略。
+GraphLoom reproduces this execution order and fallback semantics. Compatibility
+with that behavior does not imply that it is the best report-generation
+strategy.
 
-## 已验证的兼容基线
+## Validated compatibility baseline
 
-使用两边完全相同的 `entities.parquet`、`relationships.parquet`、`communities.parquet`、
-`covariates.parquet` 和 graph prompt 进行交叉验证：
+Cross-validation used identical `entities.parquet`, `relationships.parquet`,
+`communities.parquet`, `covariates.parquet`, and graph prompts:
 
-| `max_input_length` | 社区数 | GraphRAG 唯一请求键 | GraphLoom 唯一请求键 | 完全匹配 | 说明 |
+| `max_input_length` | Communities | GraphRAG unique request keys | GraphLoom unique request keys | Exact matches | Notes |
 | ---: | ---: | ---: | ---: | ---: | --- |
-| 1,000 | 89 | 88 | 88 | 88 | 覆盖正常裁剪；两个社区产生相同请求 |
-| 50 | 89 | 71 | 71 | 71 | 89 个上下文全部超限，覆盖首条关系兜底 |
+| 1,000 | 89 | 88 | 88 | 88 | Covers ordinary truncation; two communities produce the same request |
+| 50 | 89 | 71 | 71 | 71 | All 89 contexts exceed the limit; covers the first-relationship fallback |
 
-在上限为 50 时，GraphRAG 最终上下文仍为 75–911 tokens，说明当前标准工作流不会通过子报告替换来
-强制满足上限。GraphLoom 生成的请求键集合与其完全一致。
+At a limit of 50, GraphRAG's final contexts still contain 75–911 tokens. This
+shows that the standard workflow does not use child-report replacement to
+enforce the limit. GraphLoom produces the same request-key set.
 
-对应的 Rust 回归测试为
-`operations::community_reports::context::tests::test_should_keep_first_edge_when_it_alone_exceeds_limit_like_graphrag`。
+The corresponding Rust regression is
+`operations::community_reports::context::tests::test_should_keep_first_edge_when_it_alone_exceeds_limit_like_graphrag`.
 
-## 后续优化目标
+## Optimization goal
 
-在兼容基线稳定后，引入真正的自底向上社区报告生成：
+After the compatibility baseline remains stable, introduce genuinely bottom-up
+community-report generation:
 
-1. 从最深层社区开始生成报告；
-2. 构造父层上下文时允许引用已经成功生成的直接子社区报告；
-3. 优先替换 token 成本最高的子社区详细上下文；
-4. 每次替换后重新计算完整 prompt token 数，而不只计算数据片段；
-5. 在 token 预算内保留尽可能多的高价值实体、关系和子报告；
-6. 子报告缺失、无效或仍然过长时，确定性地回退到兼容裁剪路径；
-7. 保证并发执行不会改变社区、实体、关系或报告的选择顺序。
+1. Generate reports beginning with the deepest communities.
+2. Allow parent context to reference successfully generated direct-child
+   reports.
+3. Prefer replacing the child-community detail with the highest token cost.
+4. Recompute the complete prompt token count after each replacement, not only
+   the data-fragment count.
+5. Retain as many high-value entities, relationships, and child reports as the
+   budget permits.
+6. Deterministically fall back to compatible truncation when child reports are
+   missing, invalid, or still too long.
+7. Ensure concurrency cannot change community, entity, relationship, or report
+   selection order.
 
-此优化预计可以减少大型父社区中的重复细节，并利用子社区报告提供更高密度的概括信息。实际收益必须通过
-报告质量评估、token 使用量和端到端耗时测量确认，不能仅凭上下文更短判断成功。
+This may reduce repeated detail in large parent communities and use denser
+child summaries. Success must be measured through report quality, token use,
+and end-to-end latency, not inferred merely from shorter context.
 
-## 兼容与缓存边界
+## Compatibility and cache boundary
 
-优化后的 prompt 会与 GraphRAG 基线不同，因此必然产生不同的缓存键。实施时必须满足：
+Optimized prompts will differ from the GraphRAG baseline and therefore produce
+different cache keys. An implementation must:
 
-- 基线兼容行为保持可用，并继续通过 GraphRAG 交叉测试；
-- 优化行为必须显式启用，不能静默改变已有项目的结果；
-- 优化模式使用独立的缓存命名空间或明确的缓存版本判别，禁止与基线键碰撞；
-- 不引入缓存转换器，也不重写从 GraphRAG 复制的缓存；
-- 关闭优化后，相同输入必须恢复现有 GraphRAG 兼容请求键；
-- 配置切换、失败重试和部分子报告缺失不能污染另一种模式的缓存。
+- keep baseline-compatible behavior available and passing GraphRAG cross-tests;
+- require explicit opt-in instead of silently changing existing results;
+- use an independent cache namespace or an explicit cache-version discriminator;
+- never introduce a cache converter or rewrite copied GraphRAG caches;
+- restore the existing compatible request keys when optimization is disabled;
+- prevent configuration changes, retries, and missing child reports from
+  polluting the other mode's cache.
 
-## 验收条件
+## Acceptance criteria
 
-未来实现只有同时满足以下条件才可完成：
+The optimization is complete only when all of the following hold:
 
-1. 兼容模式在默认上限、1,000 和极端低上限下继续逐请求匹配固定 GraphRAG 基线；
-2. 优化模式确实在父社区上下文中使用已生成的子报告，并有测试证明不是死分支；
-3. 最终 prompt（而非中间片段）满足配置的 token 预算，或返回明确、可观测的不可满足状态；
-4. 子报告替换顺序、回退路径和输出在不同并发度下保持确定性；
-5. 无效或缺失的子报告不会导致整个工作流失败；
-6. 基线缓存和优化缓存可以同时存在且互不命中；
-7. 使用代表性大社区数据比较报告质量、token 数、模型调用数、缓存命中率和总耗时；
-8. 完整 Rust 门禁和 GraphRAG 跨项目兼容测试全部通过。
+1. Compatibility mode continues to match the pinned GraphRAG baseline
+   request-by-request at the default, 1,000, and extremely low limits.
+2. Optimized mode demonstrably consumes generated child reports in parent
+   context rather than leaving a dead branch.
+3. The final prompt, not an intermediate fragment, fits the configured token
+   budget or returns an explicit observable unsatisfiable state.
+4. Replacement order, fallback paths, and output remain deterministic across
+   concurrency levels.
+5. Invalid or missing child reports do not fail the entire workflow.
+6. Baseline and optimized caches can coexist without cross-hits.
+7. Representative large-community data compares quality, tokens, model calls,
+   cache hit rate, and total latency.
+8. The complete Rust gates and cross-project GraphRAG compatibility tests pass.
 
-## 非目标
+## Non-goals
 
-- 不通过修改旧 GraphRAG 缓存来适配优化模式；
-- 不在缺少质量评估的情况下用更短上下文替代更好上下文；
-- 不把固定 GraphRAG 基线当前未触发的代码分支误认为已经验证的标准行为；
-- 不为了启用优化而破坏 GraphRAG 配置、Parquet 或缓存互操作能力。
+- Modifying old GraphRAG caches to fit optimized mode.
+- Replacing higher-quality context with shorter context without quality
+  evaluation.
+- Treating a branch unused by the pinned standard workflow as already validated
+  standard behavior.
+- Breaking GraphRAG configuration, Parquet, or cache interoperability to enable
+  the optimization.

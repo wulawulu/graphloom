@@ -6,9 +6,10 @@ GraphLoom has a reproducible cross-language gate:
 make test-compat
 ```
 
-The gate builds the real `graphloom` binary and the test-only
-`compat_vector_manifest` example, then runs the published `graphrag==3.1.0`
-distribution from `tests/compat/.venv`. The fixed GraphRAG source commit is
+The gate builds the real `graphloom` binary plus the test-only
+`compat_vector_manifest` and `compat_table_reader` examples, then runs the
+published `graphrag==3.1.0` distribution from the uv-locked
+`tests/compat` project. The fixed GraphRAG source commit is
 `7fc6607edda3d387d23e52ededbf8a75b6730f97`; the annotated v3.1.0 tag object is
 `2077c4205add901e6594aced159fca81b7a6d522`. Tests reject editable installs and
 neighboring source checkouts. A session-wide probe validates `graphrag==3.1.0`,
@@ -30,10 +31,11 @@ GraphLoom separates compatibility into four layers:
 4. **Physical storage interoperability:** Parquet writer/Arrow representation
    and direct LanceDB on-disk directory access.
 
-The first three layers are hard gates for Phase 1 and Phase 2. The fourth is a
-separate storage-hardening boundary. The pinned Python environment uses
-LanceDB 0.24.3 and PyArrow 22.0.0; the Rust workspace uses lancedb 0.31.0,
-Lance 8.0.0, and Arrow 58.3.0.
+The first three layers are hard gates for standard indexing, incremental
+update, Query, and prompt tuning where the layer applies. The fourth is a
+separate storage-hardening boundary. The pinned Python environment uses LanceDB
+0.24.3 and PyArrow 22.0.0; the Rust workspace uses lancedb 0.31.0, Lance 8.0.0,
+and Arrow 58.3.0.
 
 The interoperability suite validates logical vector records through a
 version-neutral manifest and consumer-native LanceDB materialization. It does
@@ -262,6 +264,60 @@ consumer settings/prompts. After all queries, the same snapshots must match.
 No consumer cache may appear and no vector row may be added, replaced, or
 reset. Query-specific log files are allowed.
 
+## Prompt-tune compatibility
+
+The same gate runs the checked-in prompt-tune Top reference fixture in typed
+and untyped modes. The fixture was generated from the pinned GraphRAG 3.1.0
+source and contains:
+
+- exact logical completion messages and request multiplicity;
+- deterministic response bytes for request-aware replay;
+- selected chunk identity, order, token count, bytes, and digest;
+- byte-exact expected `extract_graph.txt`, `summarize_descriptions.txt`, and
+  `community_report_graph.txt`;
+- a provenance and request-contract manifest.
+
+GraphLoom must reproduce the selected chunks, consume every recorded response
+with the correct multiplicity, and emit all three files byte for byte. The
+fixture also covers GraphRAG's shared mutable message-builder behavior during
+concurrent relationship-example generation.
+
+Top, Random, and Auto have an additional opt-in real-model acceptance runner.
+It records the live GraphRAG completion responses and replays those exact bytes
+through GraphLoom. For all selection modes, prompt-tune chunking uses the
+configured embedding model's effective tokenizer rather than
+`chunking.encoding_model`. Auto additionally invokes the configured real
+embedding model on both sides.
+
+Random and Auto use one eligible candidate in the live acceptance. This proves
+the real orchestration and model contracts without requiring Python and Rust to
+share an RNG implementation. Deterministic unit and integration tests cover
+multi-candidate selection behavior.
+
+Run the offline fixture as part of:
+
+```bash
+make test-compat
+```
+
+Validate real-model prerequisites without making a network request:
+
+```bash
+make prompt-tune-real-llm-check
+```
+
+The live targets are intentionally separate from the default gate:
+
+```bash
+make prompt-tune-update-debug
+make prompt-tune-random-real-llm
+make prompt-tune-auto-real-llm
+```
+
+See the [prompt-tuning guide](prompt-tuning.md) and the
+[real-model runner guide](../tests/compat/PROMPT_TUNE_REAL_LLM.md) for their
+scope and artifact-safety rules.
+
 ## Running focused checks
 
 ```bash
@@ -311,8 +367,9 @@ if ($null -ne $oldPythonPath) {
 
 Run all Python/Rust compatibility checks, including Ruff and cache goldens, with
 `make test-compat`. That target also executes the five Rust manifest parser
-tests rather than merely compiling the example. The same explicit example-test
-command runs in the Ubuntu, Windows, and macOS Rust CI matrix.
+tests and the offline prompt-tune reference verifier rather than merely
+compiling the examples. The same explicit example-test command runs in the
+Ubuntu, Windows, and macOS Rust CI matrix.
 
 ## Known physical storage gap
 

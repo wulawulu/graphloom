@@ -1,9 +1,10 @@
 # GraphLoom
 
-GraphLoom is a Rust implementation compatible with Microsoft GraphRAG indexing
-and Query behavior. The compatibility baseline is Microsoft GraphRAG 3.1.0.
-Cache protocol behavior is additionally checked against pinned newer GraphRAG
-source where that protocol has evolved.
+GraphLoom is a Rust implementation compatible with Microsoft GraphRAG standard
+indexing, incremental update, Query, and prompt-tuning behavior. The
+compatibility baseline is Microsoft GraphRAG 3.1.0. Cache protocol behavior is
+additionally checked against pinned newer GraphRAG source where that protocol
+has evolved.
 
 ## Install
 
@@ -21,7 +22,8 @@ cargo run -p graphloom -- --help
 
 The `graphloom` crate is both the Rust library and the command-line binary.
 
-- `graphloom::api` exposes programmatic indexing and Query entry points.
+- `graphloom::api` exposes programmatic indexing, Query, and prompt-tuning entry
+  points.
   `build_index` runs standard indexing, while `update_index` runs the GraphRAG
   3.1.0 standard incremental-update pipeline. Both return structured workflow
   output and pipeline stats. Read-only Query access is available through `query`,
@@ -31,6 +33,8 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   full validation and then runs workflows directly against the configured
   output, so API callers do not need to run CLI validation first. Completed
   writes are not rolled back if a later workflow fails.
+  `generate_indexing_prompts` runs GraphRAG-compatible prompt tuning and returns
+  the three generated indexing prompts without writing them to disk.
 - `graphloom::query::QueryEngine` is the reusable Query API for services, agents, and REPLs.
   It lazily prepares each requested method and reuses its immutable models, tokenizer, prompts,
   adapted Parquet data, and vector connection. Each method/data key becomes a snapshot on its first
@@ -42,7 +46,9 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   streaming state remain request-local.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` and `graphloom update` load project
-  configuration and performs CLI validation before dry-run output or indexing.
+  configuration and perform CLI validation before dry-run output or indexing.
+  `graphloom prompt-tune` uses the public prompt-tuning API and publishes all
+  three generated prompt files transactionally.
 - `graphloom init` is a CLI-only project scaffold command. It writes default
   settings, `.env`, `input/`, and prompt files, but is not part of the public
   indexing API. Model names passed through `--model` and `--embedding` are
@@ -108,6 +114,81 @@ echo "Alice works with Bob." > demo/input/document.txt
 `input.file_pattern` is matched against logical storage paths that use `/` as
 the separator, including on Windows. For example, `^subdir/.*\.txt$` matches
 `demo/input/subdir/document.txt`.
+
+## Prompt Tuning
+
+Generate indexing prompts from the project's own input documents:
+
+```bash
+graphloom prompt-tune --root ./demo
+```
+
+The command writes these files to `demo/prompts/` by default:
+
+```text
+extract_graph.txt
+summarize_descriptions.txt
+community_report_graph.txt
+```
+
+Use `--output <directory>` to select another directory. A relative output path
+is resolved from the project root. Existing managed prompt files are replaced
+as one transaction: GraphLoom stages all three files, validates their targets,
+and restores the previous files if publication fails. Symlink or reparse-point
+targets are rejected.
+
+The default selection method is `random`. GraphRAG-compatible selection modes
+are:
+
+```bash
+# First N chunks in document order
+graphloom prompt-tune --root ./demo --selection-method top --limit 15
+
+# N uniformly sampled chunks
+graphloom prompt-tune --root ./demo --selection-method random --limit 15
+
+# Match GraphRAG's embedding-centroid Auto selection
+graphloom prompt-tune --root ./demo --selection-method auto \
+  --n-subset-max 300 --k 15
+```
+
+`--chunk-size` and `--overlap` default to 1200 and 100 and override the project
+chunking values for this command. `--domain` and `--language` skip their
+respective detection calls. Entity-type discovery is enabled by default; use
+`--no-discover-entity-types` when the completion provider cannot accept
+GraphRAG's JSON Schema request.
+
+Prompt tuning uses the configured default completion model. Auto selection also
+uses the configured embedding model. For chunk boundaries, all three modes use
+the embedding model's effective tokenizer, including its compatible fallback,
+matching GraphRAG 3.1.0 rather than reading `chunking.encoding_model`. The CLI
+does not use the LLM cache, matching GraphRAG's default prompt-tune behavior.
+Auto also preserves GraphRAG 3.1.0's positional quirk: it ranks the randomly
+sampled embeddings by distance to their centroid, then applies those ranked
+positions to the original chunk list rather than returning the sampled rows.
+
+The corresponding Rust API is:
+
+```rust,no_run
+use graphloom::api::{
+    DocSelectionType, GenerateIndexingPromptsOptions, generate_indexing_prompts,
+};
+
+# async fn example() -> graphloom::Result<()> {
+let options = GenerateIndexingPromptsOptions::new("./demo")
+    .with_selection_method(DocSelectionType::Top)
+    .with_limit(15);
+let prompts = generate_indexing_prompts(&options).await?;
+assert!(!prompts.extract_graph.is_empty());
+# Ok(())
+# }
+```
+
+The API returns prompt strings and does not publish files. It additionally
+offers an explicit cache opt-in as a GraphLoom extension; enabling it may differ
+from the reference's default behavior. See the
+[prompt-tuning guide](docs/prompt-tuning.md) for the complete option and
+compatibility contract.
 
 ## Index
 
@@ -411,6 +492,17 @@ references, and verifies GraphLoom can reuse GraphRAG's `extract_graph` cache.
 Cache key and payload compatibility for the newer `79ab7c9...` protocol
 baseline remains a separate golden-fixture gate.
 
+Prompt tuning has a separate deterministic compatibility fixture for typed and
+untyped Top selection. It records complete GraphRAG 3.1.0 logical requests,
+replays the same response bytes through GraphLoom, compares selected chunk
+identities, and requires byte-exact equality for all three generated prompts.
+An opt-in real-model runner covers Top, Random, and Auto orchestration. Random
+and Auto use a single eligible chunk in the live acceptance so selection is
+implementation-independent; multi-candidate algorithms are covered by offline
+tests. Auto additionally exercises the configured embedding provider in both
+implementations. See the [prompt-tuning guide](docs/prompt-tuning.md) and
+[real-model acceptance guide](tests/compat/PROMPT_TUNE_REAL_LLM.md).
+
 The same gate runs 20 cross-implementation Query CLI scenarios: each index
 producer is consumed by the other implementation for Basic, Local, Global, and
 DRIFT in streaming and non-streaming modes, plus Dynamic Global in both modes.
@@ -457,13 +549,14 @@ Supported:
 - LanceDB vector storage
 - Basic, Local, Global, Dynamic Global, and DRIFT through the Rust API and CLI
 - provider-native streaming
+- GraphRAG 3.1.0-compatible prompt tuning through the Rust API and CLI, with
+  Top, Random, and GraphRAG-compatible Auto chunk selection
 - Linux, Windows, and macOS Rust CI
 - tag releases published once by a dedicated Ubuntu release job after Linux and
   cross-platform build jobs and the GraphRAG compatibility gate pass
 
 Not yet supported:
 
-- prompt-tuning CLI
 - Azure OpenAI or Azure managed identity
 - remote blob storage, CosmosDB, or Azure AI Search
 - Query result cache

@@ -3,15 +3,16 @@
 ## Compatibility
 
 - [Python GraphRAG compatibility testing](python-compatibility-testing.md)
+- [Prompt tuning](prompt-tuning.md)
 - [Query LLM record/replay compatibility](query-record-replay.md)
 
 ## Optimization backlog
 
 - [GraphRAG 3.1.0 compatibility optimization opportunities](optimization-opportunities.md)
-- [社区报告层级上下文优化](community-report-hierarchical-context-optimization.md)
+- [Community-report hierarchical-context optimization](community-report-hierarchical-context-optimization.md)
 
 ## Research
 
 - [GraphRAG indexing lifecycle progress](research/study-graphrag-index-progress.md)
 - [GraphRAG v4 LLM cache interoperability](research/study-graphrag-llm-cache.md)
-- [GraphRAG `extract_graph` 输出语义研究](research/study-graphrag-extract-graph-output.md)
+- [GraphRAG `extract_graph` output-semantics study](research/study-graphrag-extract-graph-output.md)
