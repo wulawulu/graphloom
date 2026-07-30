@@ -44,7 +44,8 @@ Random is the CLI default. Common options:
 --min-examples-required <N>    # default: 2
 --chunk-size <TOKENS>          # default: 1200
 --overlap <TOKENS>             # default: 100
---[no-]discover-entity-types
+--discover-entity-types       # default
+--no-discover-entity-types
 --output <DIRECTORY>           # default: prompts
 ```
 
@@ -52,8 +53,11 @@ Random is the CLI default. Common options:
 tokenization, GraphRAG 3.1.0 constructs the prompt-tune chunker from the
 configured embedding model's tokenizer. GraphLoom does the same for Top,
 Random, and Auto, even though only Auto calls the embedding API. If the model
-has no known tokenizer mapping, the provider's effective compatible fallback is
-used; `chunking.encoding_model` does not determine prompt-tune boundaries.
+has no explicit `encoding_model`, GraphLoom currently uses `cl100k_base`; the
+checked fixture and `ollama/bge-m3` live acceptance match GraphRAG's fallback
+on that path. GraphRAG/LiteLLM can choose model-specific encodings for other
+known models, which remains a pending compatibility validation.
+`chunking.encoding_model` does not determine prompt-tune boundaries.
 
 Auto deliberately preserves a GraphRAG 3.1.0 quirk. It randomly samples up to
 `n_subset_max` chunks, embeds that sample, ranks sample positions by Euclidean
@@ -62,11 +66,19 @@ original unsampled chunk list. It does not return the sampled rows themselves.
 This behavior can look surprising, but changing it would break the fixed
 compatibility baseline.
 
+The public API rejects zero for `limit`, `min_examples_required`,
+`n_subset_max`, and `k`. An oversized positive Random limit follows GraphRAG's
+fallback to 15 and therefore still fails when fewer than 15 candidates exist;
+for a small corpus, set `--limit` to a positive value no larger than the
+candidate count.
+
 When `--domain` or `--language` is omitted, the completion model infers it.
-Entity-type discovery is enabled by default and uses GraphRAG's structured JSON
-request. `--no-discover-entity-types` skips that one request and uses the
-untyped extraction template; it is useful for completion providers that reject
-JSON Schema response formats.
+Entity-type discovery is enabled by default. GraphRAG passes its Python
+`EntityTypesResponse` schema to the model abstraction; GraphLoom deliberately
+sends the same logical messages without `response_format`, extracts the JSON
+object, and validates it on the client. This approved transport difference is
+locked in the Top fixture manifests. `--no-discover-entity-types` skips that
+one request and uses the untyped extraction template.
 
 The CLI disables prompt-tune caching, matching GraphRAG 3.1.0's default. It
 publishes the three files transactionally. Existing targets are backed up while
@@ -153,4 +165,6 @@ the Top/Random/Auto modes described above. It does not claim:
   unconstrained multi-candidate live run;
 - byte-identical arbitrary model output without request-aware replay;
 - compatibility with GraphRAG releases other than the pinned 3.1.0 baseline;
+- model-specific LiteLLM tokenizer mappings beyond the validated
+  `cl100k_base` cases;
 - equivalence when the GraphLoom-only API cache extension is enabled.

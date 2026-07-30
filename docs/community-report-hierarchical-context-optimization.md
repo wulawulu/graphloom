@@ -1,7 +1,8 @@
 # Community-report hierarchical-context optimization
 
-Status: Planned optimization · Compatibility baseline: GraphRAG
-`79ab7c9ad586856e82635264c200d8a1eb3c63d9` · Recorded: 2026-07-15
+Status: Planned optimization · Compatibility baseline: GraphRAG 3.1.0
+`7fc6607edda3d387d23e52ededbf8a75b6730f97` · Recorded: 2026-07-15 ·
+Reviewed: 2026-07-30
 
 ## Background
 
@@ -54,6 +55,13 @@ Cross-validation used identical `entities.parquet`, `relationships.parquet`,
 At a limit of 50, GraphRAG's final contexts still contain 75–911 tokens. This
 shows that the standard workflow does not use child-report replacement to
 enforce the limit. GraphLoom produces the same request-key set.
+
+The focused 1,000/50 experiment was captured from the neighboring GraphRAG
+checkout at `79ab7c9ad586856e82635264c200d8a1eb3c63d9`. The two load-bearing source
+files—`create_community_reports.py` and the graph-context
+`context_builder.py`—have identical Git blob IDs at that commit and the pinned
+3.1.0 commit. This evidence therefore describes the 3.1.0 control flow without
+claiming compatibility with the newer checkout as a whole.
 
 The corresponding Rust regression is
 `operations::community_reports::context::tests::test_should_keep_first_edge_when_it_alone_exceeds_limit_like_graphrag`.

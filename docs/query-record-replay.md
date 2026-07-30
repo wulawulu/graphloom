@@ -46,9 +46,14 @@ transcripts, reports, stdout, or proxy errors.
 only one side. It is a diagnostic precondition, not a claim that same-named Parquet files contain
 identical logical rows.
 
-The Make target exits non-zero when either request or answer comparison fails; this is a compatibility
-finding, not necessarily a proxy or provider failure. Use the two recorded process exit codes in the
-report to distinguish a comparison failure from an execution failure.
+For Basic, Local, and Global, the Make target exits non-zero unless semantic
+requests and answers both compare equal. DRIFT instead uses the stricter
+`driftBehavior` constraints described below: after a valid random branch
+diverges, request and answer bytes may differ while the run still passes.
+Either kind of failed compatibility condition returns non-zero and is not
+necessarily a proxy or provider failure. Use the two recorded process exit
+codes in the report to distinguish a comparison failure from an execution
+failure.
 
 The proxy itself can also be started independently:
 

@@ -53,8 +53,9 @@ env -u PYTHONPATH PYTHONNOUSERSITE=1 \
   --run-name typed-top
 ```
 
-To exercise the existing update-debug input with a model that does not support
-GraphRAG's JSON Schema entity-type request, use the repository target:
+The repository live targets intentionally disable entity-type discovery, so a
+provider that rejects GraphRAG's JSON Schema request does not block the
+selection-mode acceptance:
 
 ```bash
 make prompt-tune-real-llm-check
@@ -63,10 +64,13 @@ make prompt-tune-random-real-llm
 make prompt-tune-auto-real-llm
 ```
 
-`--no-discover-entity-types` is a real GraphRAG CLI/API mode: it uses the
-configured default entity types and skips only the structured-output discovery
-request. Use it only when the selected provider rejects JSON Schema response
-formats.
+`--no-discover-entity-types` is a real GraphRAG CLI/API mode: it skips the
+discovery request and generates untyped extraction templates. The
+checked-in typed Top fixture separately covers discovery. GraphLoom's ordinary
+discovery path does not send a provider-specific `response_format`; it validates
+the returned JSON on the client. To exercise live discovery, invoke the script
+directly without `--no-discover-entity-types`; the provider must then accept
+GraphRAG's schema-bearing reference request.
 
 GraphRAG 3.1.0 prompt-tune creates its chunker with the configured embedding
 model's tokenizer, not `chunking.encoding_model`. GraphLoom follows the same
@@ -75,13 +79,14 @@ not called. For the update-debug `ollama/bge-m3` configuration, both
 implementations therefore use LiteLLM's compatible `cl100k_base` fallback while
 preserving the fixture's original `chunking.encoding_model: o200k_base`.
 
-Random and Auto use `first.txt` as one 1,000-token candidate chunk. This makes
-the selected chunk unique instead of pretending that Python's pandas RNG and
-Rust's RNG can share an implementation-independent seed. Multi-candidate
-selection algorithms remain covered by deterministic offline tests; the live
-acceptances validate each mode's real orchestration, completion requests, and
-byte-exact generated prompts. Auto additionally exercises the live
-`ollama/bge-m3` embedding path on both sides.
+Random and Auto use `first.txt` with a 1,000-token chunk-size setting, producing
+one eligible candidate. This makes the selected chunk unique instead of
+pretending that Python's pandas RNG and Rust's RNG can share an
+implementation-independent seed. Multi-candidate selection algorithms remain
+covered by deterministic offline tests; the live acceptances validate each
+mode's real orchestration, completion requests, and byte-exact generated
+prompts. Auto additionally exercises the live `ollama/bge-m3` embedding path on
+both sides.
 
 The generic `prompt-tune-real-llm-run` target accepts `SETTINGS`, `ENV_FILE`,
 `GRAPHRAG_SOURCE`, `SELECTION_METHOD`, `INPUT_DIR`, `INPUT_FILE_PATTERN`,
@@ -89,9 +94,11 @@ The generic `prompt-tune-real-llm-run` target accepts `SETTINGS`, `ENV_FILE`,
 `RUN_NAME` overrides. Set `CLEAN=1` only when intentionally replacing that
 bounded run-name directory.
 
-The default output is `/prompt_tune_real_llm/typed-top` relative to the
-repository. Existing runs are never overwritten. Pass `--clean` to remove only
-the selected run-name directory before running again.
+The direct script's default output is `prompt_tune_real_llm/typed-top` relative
+to the repository. The generic Make target uses
+`prompt_tune_real_llm/prompt-tune-real-llm` unless `RUN_NAME` is set. Existing
+runs are never overwritten. Pass `--clean`, or set `CLEAN=1` for a Make target,
+to remove only the selected run-name directory before running again.
 
 The ignored run directory contains the real request/response record, sanitized
 temporary projects, comparison evidence, logs, generated prompts, and

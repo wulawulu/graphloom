@@ -22,8 +22,8 @@ into extracted entities using only `title`.
 When one title is recognized as multiple entity types, this merge creates a
 Cartesian product. Every summary for the title joins to every typed entity row
 for that title, including summaries produced for other types. GraphLoom's
-stricter implementation avoided this second join and kept each summary attached
-to the typed entity row that produced it.
+earlier stricter implementation avoided this second join and kept each summary
+attached to the typed entity row that produced it.
 
 That stricter design maintained stronger invariants:
 
@@ -181,7 +181,7 @@ The initial `(title, type)` grouping is necessary because one name can have
 different interpretations and evidence. The defect is dropping `type` from
 summary identity and then joining on a weaker key.
 
-## GraphLoom's stricter algorithm and invariant
+## Earlier stricter GraphLoom algorithm and invariant
 
 GraphLoom also groups raw rows by `(title, entity_type)`:
 
@@ -189,10 +189,11 @@ GraphLoom also groups raw rows by `(title, entity_type)`:
 let key = (row.title.clone(), row.entity_type.clone());
 ```
 
-Source: `crates/graphloom/src/operations/graph/merge.rs:7-22`.
+Source: `merge_entities` in
+`crates/graphloom/src/operations/graph/merge.rs`.
 
-In the stricter summarization design, each asynchronous operation owns a full
-`EntityRow` and constructs its result from that same row:
+In the earlier stricter summarization design, each asynchronous operation owned
+a full `EntityRow` and constructed its typed result from that same row:
 
 ```rust
 SummarizedEntityRow {
@@ -204,11 +205,14 @@ SummarizedEntityRow {
 }
 ```
 
-Source: `crates/graphloom/src/operations/graph/summarize.rs:90-106`.
+The current `summarize_entities` still constructs these intermediate typed
+summaries, then deliberately calls `join_entity_summaries_by_title` to reproduce
+GraphRAG's many-to-many title join. Source:
+`crates/graphloom/src/operations/graph/summarize.rs`.
 
-No DataFrame rejoin is needed. Input indices travel with tasks and restore order
-after completion, so concurrency cannot mix results
-(`summarize.rs:111-120`).
+The stricter version needed no DataFrame-style rejoin. Input indices still
+travel with tasks and restore order after completion, so concurrency cannot mix
+individual model responses before the compatible title join.
 
 The invariant is:
 
@@ -217,7 +221,8 @@ The invariant is:
 and frequency in that row must all belong to the same group.
 ```
 
-For `n` aggregate rows, this design always returns `n` summarized rows.
+For `n` aggregate rows, this stricter design always returned `n` summarized
+rows. It is an optimization candidate, not the current default output contract.
 
 ## Why the stricter design is better
 

@@ -1,6 +1,8 @@
 # 社区报告层级上下文优化
 
-状态：待优化 · 兼容基线：GraphRAG `79ab7c9ad586856e82635264c200d8a1eb3c63d9` · 记录日期：2026-07-15
+状态：待优化 · 兼容基线：GraphRAG 3.1.0
+`7fc6607edda3d387d23e52ededbf8a75b6730f97` · 记录日期：2026-07-15 ·
+复核日期：2026-07-30
 
 ## 背景
 
@@ -43,6 +45,12 @@ GraphLoom 当前复现上述实际执行顺序和兜底语义。该选择是兼�
 
 在上限为 50 时，GraphRAG 最终上下文仍为 75–911 tokens，说明当前标准工作流不会通过子报告替换来
 强制满足上限。GraphLoom 生成的请求键集合与其完全一致。
+
+1,000/50 的定向实验来自相邻 GraphRAG checkout
+`79ab7c9ad586856e82635264c200d8a1eb3c63d9`。其中两个关键源码文件
+`create_community_reports.py` 和 graph-context `context_builder.py` 在该
+commit 与固定 3.1.0 commit 上具有相同 Git blob ID。因此这组证据能够描述
+3.1.0 的控制流，但不代表对较新 checkout 整体声明兼容。
 
 对应的 Rust 回归测试为
 `operations::community_reports::context::tests::test_should_keep_first_edge_when_it_alone_exceeds_limit_like_graphrag`。

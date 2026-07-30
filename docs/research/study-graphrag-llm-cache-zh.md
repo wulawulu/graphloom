@@ -10,7 +10,8 @@ cache key、namespace 和 invalidation 行为可直接与当前 GraphRAG cache
 互操作。
 
 本研究只讨论缓存协议，不要求复刻 LLM 调用后的全部 Pandas 转换。实体摘要
-连接差异及 GraphLoom 更强输出语义的原因见
+连接差异、GraphLoom 历史上的更严格输出语义，以及后来将默认行为改为
+GraphRAG-compatible 的决策见
 [GraphRAG `extract_graph` 输出语义研究](study-graphrag-extract-graph-output-zh.md)。
 
 ## 架构图
@@ -54,7 +55,7 @@ nested field 出现在真实 fixture 中，必须在语义 round trip 后保留�
 Completion fixture
 `ragdebug/cache/extract_graph/04ad9d...e3e_v4` 含 choice/message extension、
 reasoning content、详细 usage、顶层 computed field 和浮点 metrics。
-Embedding fixture `ragdebug/cache/text_embedding/8428d...9_v4` 含五个
+Embedding fixture `ragdebug/cache/text_embedding/90c045...81bc7_v4` 含五个
 1024 维向量、详细 usage、computed field 和 metrics。
 
 ## 关键算法
@@ -63,7 +64,7 @@ Key 为 `sha256(PyYAML.dump(filtered_kwargs, sort_keys=True)) + "_v4"`。
 Namespace/model instance 只用于目录路由，不进入 hash。缺失 kwargs 保持
 缺失，不规范化为 null。
 
-## 采用
+## GraphLoom 已采用的决策
 
 - 明确核心字段并 flatten unknown 的 provider-neutral Rust request/response；
 - completion/embedding 共用 `{response, metrics}` envelope；
@@ -72,7 +73,7 @@ Namespace/model instance 只用于目录路由，不进入 hash。缺失 kwargs 
 - 非法 JSON/schema entry 删除并视为 miss，storage error 仍 fatal；
 - 对 canonical request kwargs 生成 GraphRAG-compatible v4 key。
 
-## 避免
+## 未采用的设计
 
 - Workflow API 暴露 provider response type；
 - 永久保留旧 GraphLoom 简化 cache payload adapter；
@@ -167,7 +168,7 @@ projection。Escaped char 后 `start = end + 1`，delta 为 `-1`。Rust 原先
 wrap。当前实现保留真实 column 并按 checked ordering 计算有符号等价值；
 173-case corpus 含 38/39/40-BEL 边界与 nested/sequence 变体。
 
-## 开放问题
+## 剩余问题
 
 实现范围内没有。Streaming、Anthropic 和 metrics aggregation 明确不在
 范围内。

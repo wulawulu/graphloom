@@ -139,17 +139,18 @@ Local Search 另行打开 embedding store
 直接写 active output 是对正常 GraphRAG 生命周期的复现。更强 online
 reindex guarantee 是显式 GraphLoom 扩展，不是兼容要求。
 
-## 采用
+## GraphLoom 已采用的决策
 
-- 区分 pipeline/workflow start/end 与计数型 item progress，让 callback
+- 区分 lifecycle stage/workflow start/end 与计数型 item progress，让 callback
   简单，并让库调用者选择 renderer。
 - total 已知时在普通 CLI 显示计数进度；GraphRAG 不用 `verbose` 隐藏。
 - 同时保留 structured logging，便于非交互运行审计生命周期。
 
-## 避免
+## 未采用的设计
 
-- 不复制 GraphRAG 静默 connectivity wait；外部网络调用应显示当前 model
-  和 indeterminate running state。
+- GraphLoom 通过 indeterminate validation-stage spinner 避免 connectivity
+  wait 完全静默，但尚未显示当前 model ID；后者仍是可观测性优化，而不是
+  已完成决策。
 - 不把一行 `pipeline_start` 当作 storage/cache/state initialization 的
   完整覆盖；无数值 total 时也应有生命周期事件。
 - 不把 carriage-return 点打印器当进度抽象；它无法表达并发、嵌套或
@@ -158,7 +159,7 @@ reindex guarantee 是显式 GraphLoom 扩展，不是兼容要求。
   publication，而当前索引直接写 output；进度应描述真实语义，不能虚构
   index activation phase。
 
-## 开放问题
+## 剩余问题
 
 比较范围内没有。Renderer 选择和 GraphLoom 生命周期事件 schema 应在进度
 功能设计中决定，而非本 prior-art 研究。

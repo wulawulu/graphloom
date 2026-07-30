@@ -249,6 +249,12 @@ GraphLoom 必须复现 chunk、按正确 multiplicity 消费全部响应，并�
 三个文件。Fixture 也覆盖 GraphRAG 并发 relationship example 的共享可变
 message-builder 行为。
 
+Top manifest 记录两项批准的 transport 差异。Entity-type discovery 中，
+GraphRAG 传入 Python response schema，GraphLoom 省略 `response_format`
+并在本地校验返回 JSON；relationship example 中，GraphRAG 传递关闭的
+JSON-object flag，GraphLoom 省略这个等价的关闭选项。逻辑 message、响应、
+multiplicity 和生成 prompt 字节仍受门禁约束。
+
 Top/Random/Auto 另有显式启用的真实模型 runner：记录 GraphRAG live
 completion 并向 GraphLoom replay。所有模式的 chunking 都使用 embedding
 model 有效 tokenizer，而非 `chunking.encoding_model`；Auto 还在两边调用
@@ -285,14 +291,17 @@ make prompt-tune-auto-real-llm
 ```bash
 cargo build -p graphloom
 cargo build -p graphloom-vectors --example compat_vector_manifest
+cargo build -p graphloom-storage --example compat_table_reader
 cargo test -p graphloom-vectors --example compat_vector_manifest
 
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | \
   python -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_query_interop.py
 ```
@@ -301,14 +310,18 @@ Query golden 与 Phase 1：
 
 ```bash
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_query_compat.py
 
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_compat.py
 ```
@@ -317,13 +330,24 @@ PowerShell：
 
 ```powershell
 $oldPythonPath = $env:PYTHONPATH
+$oldPythonNoUserSite = $env:PYTHONNOUSERSITE
+$targetDir = (cargo metadata --no-deps --format-version 1 |
+  ConvertFrom-Json).target_directory
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-$env:GRAPHLOOM_BIN = "$env:TARGET_DIR\debug\graphloom.exe"
-$env:GRAPHLOOM_VECTOR_MANIFEST_BIN = `
-  "$env:TARGET_DIR\debug\examples\compat_vector_manifest.exe"
+$env:PYTHONNOUSERSITE = "1"
+$env:GRAPHLOOM_BIN = Join-Path $targetDir "debug\graphloom.exe"
+$env:GRAPHLOOM_VECTOR_MANIFEST_BIN = Join-Path $targetDir `
+  "debug\examples\compat_vector_manifest.exe"
+$env:GRAPHLOOM_TABLE_READER_BIN = Join-Path $targetDir `
+  "debug\examples\compat_table_reader.exe"
 uv run --project tests/compat --locked pytest -q tests/compat/test_query_interop.py
 if ($null -ne $oldPythonPath) {
   $env:PYTHONPATH = $oldPythonPath
+}
+if ($null -eq $oldPythonNoUserSite) {
+  Remove-Item Env:PYTHONNOUSERSITE -ErrorAction SilentlyContinue
+} else {
+  $env:PYTHONNOUSERSITE = $oldPythonNoUserSite
 }
 ```
 

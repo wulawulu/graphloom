@@ -5,8 +5,8 @@
 
 > **决策更新（2026-07-16）：**本文对差异成因和语义代价的分析仍然有效，但“默认保留 GraphLoom
 > 严格语义”的兼容决策已被 compatibility-first 原则取代。默认模式应先复现固定 GraphRAG 基线行为；
-> `(title, type)` 身份保持只能作为未来显式优化模式，并必须拥有独立 cache/产物验证。当前实现尚未完成
-> 这一模式分离，因此该差异是已知实现缺口。
+> `(title, type)` 身份保持只能作为未来显式优化模式，并必须拥有独立 cache/产物验证。当前默认实现
+> 已完成 GraphRAG 行为对齐；上述优化模式尚未实现。
 
 ## 结论摘要
 
@@ -15,10 +15,10 @@ GraphLoom 与上述版本的 GraphRAG 使用了相同的 LLM 缓存响应，但�
 描述摘要完成之后：GraphRAG 仅使用 `title` 将实体摘要合并回抽取结果。
 
 当同一个标题被识别为多个实体类型时，这种合并会产生笛卡尔积。一个标题下的每条摘要都会被连接到
-该标题下的每条带类型实体记录，包括来自其他类型的摘要。GraphLoom 不进行这种二次连接，而是让
-摘要结果始终跟随产生它的原始带类型实体记录。
+该标题下的每条带类型实体记录，包括来自其他类型的摘要。GraphLoom 早期的严格实现不进行这种二次
+连接，而是让摘要结果始终跟随产生它的原始带类型实体记录。
 
-GraphLoom 当前实现具有更强的语义不变量：
+该早期严格设计具有更强的语义不变量：
 
 - 保持 `type`、`description`、`text_unit_ids` 和 `frequency` 之间的对应关系；
 - 每个抽取后的 `(title, type)` 分组恰好输出一条记录；
@@ -168,7 +168,7 @@ entities = extracted_entities.merge(entity_summaries, on="title", how="left")
 问题不在最初按照 `(title, type)` 聚合。这个聚合是必要的，因为同一个名称可以拥有不同的类型解释和
 不同的支持证据。真正的问题是摘要身份中丢失了 `type`，随后又使用比原分组键更弱的键进行连接。
 
-## GraphLoom 算法及其不变量
+## GraphLoom 早期严格算法及其不变量
 
 GraphLoom 同样按照 `(title, entity_type)` 聚合原始实体记录：
 
@@ -176,10 +176,11 @@ GraphLoom 同样按照 `(title, entity_type)` 聚合原始实体记录：
 let key = (row.title.clone(), row.entity_type.clone());
 ```
 
-源码位置：`crates/graphloom/src/operations/graph/merge.rs:7-22`。
+源码位置：`crates/graphloom/src/operations/graph/merge.rs` 中的
+`merge_entities`。
 
-在摘要阶段，每个异步操作拥有一条完整的 `EntityRow`。摘要返回后，GraphLoom 直接使用同一条记录
-构造结果：
+在早期严格摘要设计中，每个异步操作拥有一条完整的 `EntityRow`。摘要返回后，使用同一条记录构造
+带类型结果：
 
 ```rust
 SummarizedEntityRow {
@@ -191,10 +192,13 @@ SummarizedEntityRow {
 }
 ```
 
-源码位置：`crates/graphloom/src/operations/graph/summarize.rs:90-106`。
+当前 `summarize_entities` 仍先构造这些带类型中间摘要，随后有意调用
+`join_entity_summaries_by_title` 复现 GraphRAG 按 title 的多对多连接。
+源码位置：`crates/graphloom/src/operations/graph/summarize.rs`。
 
-整个过程不需要通过 DataFrame 二次连接恢复记录身份。输入索引会跟随每条记录一起进入异步任务，任务
-完成后再按输入索引恢复顺序，因此并发执行也不会混淆摘要结果（`summarize.rs:111-120`）。
+严格版本不需要通过 DataFrame-style 二次连接恢复记录身份。当前输入索引
+仍会跟随每条记录进入异步任务，并在兼容 title join 前恢复顺序，因此并发
+执行不会先混淆单次模型响应。
 
 该设计保持了核心实体记录不变量：
 
@@ -203,20 +207,20 @@ SummarizedEntityRow {
 description、text_unit_ids 和 frequency 必须全部属于这个分组。
 ```
 
-对于 `n` 条聚合实体记录，GraphLoom 始终返回 `n` 条摘要实体记录。摘要可以改变描述文本，但不能
-改变记录身份、证据集合、频次或记录数量。
+对于 `n` 条聚合实体记录，该严格设计始终返回 `n` 条摘要实体记录。它是
+未来优化候选，不是当前默认输出契约。
 
-## 为什么 GraphLoom 的实现更好
+## 为什么严格设计更好
 
 ### 1. 保持证据来源正确
 
 `text_unit_ids` 指向为特定带类型实体分组提供描述的文本单元。如果附加了另一个类型的摘要，该描述就
-无法由同一行保存的文本单元 ID 支持。GraphLoom 始终把证据与由这些证据生成的摘要保存在一起。
+无法由同一行保存的文本单元 ID 支持。严格设计始终把证据与由这些证据生成的摘要保存在一起。
 
 ### 2. 保持分类与含义一致
 
 实体记录不仅由标题构成，类型也决定标题的含义。同一个名称可以同时指代地点和组织，但两者代表不同的
-解释。GraphLoom 不会给地点记录附加组织含义，也不会给组织记录附加地点含义。
+解释。严格设计不会给地点记录附加组织含义，也不会给组织记录附加地点含义。
 
 ### 3. 保持记录基数不变
 

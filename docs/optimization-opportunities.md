@@ -1,7 +1,53 @@
 # GraphRAG 3.1.0 Compatibility Optimization Opportunities
 
+Last reviewed: 2026-07-30
+
 Every item below describes behavior that GraphLoom intentionally preserves for
-the GraphRAG 3.1.0 compatibility baseline.
+the GraphRAG 3.1.0 compatibility baseline. These are compatibility debts, not
+accidental TODOs: changing them in the default path without an explicit mode
+and new evidence would break the current contract.
+
+The authoritative status of the surrounding feature is maintained in the
+[GraphRAG compatibility matrix](compatibility-matrix.md).
+
+## Priority and maintenance policy
+
+| Priority | Meaning |
+|---|---|
+| P0 | Publication, recovery, or stale-data risk that can leave an index misleading or internally inconsistent. |
+| P1 | Correctness, result-quality, or material model/vector cost issue. |
+| P2 | Efficiency, usability, or maintainability issue with a narrower operational impact. |
+
+An optimization may replace compatible behavior only in an explicitly named
+non-compatible mode until it has a migration story and its own tests. A change
+must preserve the default compatibility fixture, document artifact differences,
+and update both this backlog and the compatibility matrix in the same change.
+
+## Backlog summary
+
+| ID | Area | Preserved debt | Priority | Optimized mode |
+|---|---|---|---|---|
+| O-01 | Extract graph | Entity summary joins by title only. | P1 | Not implemented |
+| O-02 | Update | Extraction and update use different entity identities. | P1 | Not implemented |
+| O-03 | Update | Entity degree is retained instead of recomputed. | P1 | Not implemented |
+| O-04 | Update | Document changes are detected by title only. | P1 | Not implemented |
+| O-05 | Update | Deleted inputs remain in tables and vectors. | P0 | Not implemented |
+| O-06 | Update | No-op updates still copy `previous`. | P2 | Not implemented |
+| O-07 | Update | Every provider table is copied. | P2 | Not implemented |
+| O-08 | Update | Delta and final records are embedded separately. | P1 | Not implemented |
+| O-09 | Vectors | Every embedding pass overwrites managed collections. | P1 | Not implemented |
+| O-10 | Update | Delta vectors become visible before final tables. | P0 | Not implemented |
+| O-11 | Update | Community `children` IDs are not remapped. | P1 | Not implemented |
+| O-12 | Update | Community report titles retain old numbering. | P2 | Not implemented |
+| O-13 | Update | Sequential merge failure leaves partial final output. | P0 | Not implemented |
+| O-14 | Prompt tune | Auto ranks a sample but selects original-row positions. | P1 | Not implemented |
+| O-15 | Prompt tune | Oversized Random limit falls back to 15 and can still fail. | P2 | Not implemented |
+| O-16 | Prompt tune | Concurrent examples reuse one accumulated message list. | P1 | Not implemented |
+| O-17 | Claims | Gleaning responses are requested but not parsed. | P1 | Not implemented |
+| O-18 | Community reports | Claims are omitted from graph context. | P1 | Not implemented |
+| O-19 | Query | Static community roll-up conflates entities by title. | P1 | Not implemented |
+| O-20 | Index publication | Standard indexing writes directly to active output. | P0 | Not implemented |
+| O-21 | Community reports | Standard execution never reaches child-report context replacement. | P1 | Not implemented |
 
 ## 1. Entity summary title-only join
 
@@ -240,6 +286,192 @@ rollback.
 **Future optimization:** Add atomic publication and recovery metadata.
 
 **Affected components:** all update workflows, final storage, vector storage.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 14. Auto selection ranks one set and returns another
+
+**GraphRAG behavior:** Auto randomly samples up to `n_subset_max` chunks,
+embeds and ranks the sample positions by centroid distance, then applies those
+positions to the original unsampled chunk list.
+
+**Problem:** The selected chunks are not necessarily the chunks whose
+embeddings were ranked, so the model cost does not reliably improve sample
+representativeness.
+
+**GraphLoom compatibility behavior:** The ranked positional indices are applied
+to the original chunk list exactly as in GraphRAG 3.1.0.
+
+**Future optimization:** In an explicit optimized selection mode, return the
+ranked sampled rows themselves and expose a deterministic sampling hook.
+
+**Affected components:** prompt-tune Auto selection, embedding requests, prompt
+examples.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 15. Oversized Random limit fallback can create an avoidable error
+
+**GraphRAG behavior:** The public API rejects non-positive `limit`,
+`min_examples_required`, `n_subset_max`, and `k` values. A positive limit larger
+than the chunk count reaches the loader, falls back to 15, and Random selection
+then fails when fewer than 15 chunks exist.
+
+**Problem:** A request to use all available small-corpus chunks becomes an
+error, and the fallback obscures the invalid effective value.
+
+**GraphLoom compatibility behavior:** GraphLoom validates the four positive
+fields at its public API boundary and reproduces the oversized-limit fallback
+and resulting Random error. Top remains observable as a separate clamped path.
+
+**Future optimization:** Validate the requested value directly or use
+`min(limit, chunk_count)` in a clearly named safe selection mode.
+
+**Affected components:** prompt-tune Top/Random selection and CLI diagnostics.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 16. Relationship examples reuse an accumulated request
+
+**GraphRAG behavior:** Concurrent relationship-example coroutines share one
+mutable message builder. By the time they execute, every request observes the
+final accumulated list of selected documents.
+
+**Problem:** Requests are repeated with unrelated document messages, total
+input grows approximately quadratically with the example count, and a response
+is no longer isolated to one intended document.
+
+**GraphLoom compatibility behavior:** One accumulated request is cloned for
+each selected document and responses are collected in producer order.
+
+**Future optimization:** Build one independent request per document, or issue
+one explicitly batched request and define how its response maps to examples.
+
+**Affected components:** prompt-tune relationship examples, completion cost,
+generated extraction prompt.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 17. Claim gleaning responses are discarded
+
+**GraphRAG behavior:** Claim extraction can send continuation and loop-check
+requests, but tuple parsing uses only the initial completion.
+
+**Problem:** Extra model calls consume latency and tokens without contributing
+additional claims; valid claims found by continuation responses are lost.
+
+**GraphLoom compatibility behavior:** The continuation conversation and stop
+checks run, but only the initial response is parsed.
+
+**Future optimization:** Parse and merge every accepted continuation with
+stable deduplication, or skip continuation calls when compatibility is not
+required.
+
+**Affected components:** covariate extraction, LLM cache and cost, downstream
+claim coverage.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 18. Claims are omitted from community-report graph context
+
+**GraphRAG behavior:** Community-report preparation supplies claims as scalar
+merge values while the context sorter accepts claim lists, so claims disappear
+from the rendered graph context.
+
+**Problem:** Claim extraction may incur model and storage cost without enriching
+community reports, reducing report grounding and wasting token budget allocated
+to covariates.
+
+**GraphLoom compatibility behavior:** Claims remain part of the workflow input
+contract but are intentionally absent from the compatible rendered context.
+
+**Future optimization:** Normalize claims into an explicit per-community list
+and budget them alongside entities and relationships.
+
+**Affected components:** community-report context, covariates, report quality
+and token budgeting.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 19. Static Query community roll-up uses entity title
+
+**GraphRAG behavior:** Static community-report adaptation explodes entity
+memberships, groups them by entity title, takes the maximum community number,
+and uses those numbers to select reports.
+
+**Problem:** Distinct entities with the same title can collapse, while opaque
+numeric maxima are not a stable semantic parent/child rule.
+
+**GraphLoom compatibility behavior:** The title-based maximum-community roll-up
+is reproduced for static Global Query.
+
+**Future optimization:** Select reports through entity IDs and explicit
+hierarchy relationships, with a migration test for duplicate titles.
+
+**Affected components:** Query index adaptation, static Global context and
+community selection.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 20. Standard indexing publishes directly to active output
+
+**GraphRAG behavior:** Workflows write active Parquet and vector outputs
+directly. There is no generation pointer, ready marker, cross-command lock, or
+atomic activation step.
+
+**Problem:** Concurrent Query can observe mixed generations, and a failed index
+can leave a partial but parseable active index.
+
+**GraphLoom compatibility behavior:** Standard indexing preserves direct active
+publication. This is separate from the safer transactional `init` and
+prompt-tune file publication.
+
+**Future optimization:** Stage a complete generation, validate tables and
+vectors, then atomically switch a generation pointer with recovery metadata.
+
+**Affected components:** standard indexing, Query startup, storage layout and
+failure recovery.
+
+Compatibility baseline: implemented
+
+Future optimization: not implemented
+
+## 21. Child community reports never replace parent detail
+
+**GraphRAG behavior:** The standard workflow builds and freezes context for
+every community before generating any report. Although the context builder can
+replace child-community detail with an existing child report, the report
+collection is empty during context construction and that branch is not reached.
+
+**Problem:** Parent prompts repeat low-level entity and relationship detail
+instead of reusing denser child summaries. At very low limits, the compatible
+first-relationship fallback can also leave the final context above the
+configured token budget.
+
+**GraphLoom compatibility behavior:** Context is built before report
+generation, including GraphRAG's truncation and first-relationship fallback.
+
+**Future optimization:** Add an explicit bottom-up mode that generates deepest
+reports first, budgets complete prompts, and safely substitutes available child
+reports. Baseline and optimized caches must remain isolated.
+
+**Affected components:** Community-report scheduling, hierarchical context,
+token budgeting, cache keys, and report quality. See the
+[detailed optimization design](community-report-hierarchical-context-optimization.md).
 
 Compatibility baseline: implemented
 

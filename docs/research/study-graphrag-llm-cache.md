@@ -10,7 +10,8 @@ keys, namespaces, and invalidation behavior interoperate directly with current G
 This study covers cache-protocol interoperability. It does not require
 GraphLoom to reproduce every Pandas transformation that GraphRAG performs after
 an LLM call. The entity-summary join difference and the reasoning behind
-GraphLoom's stronger output semantics are documented in the
+GraphLoom's historically stricter output semantics—and the later decision to
+make the default GraphRAG-compatible—are documented in the
 [GraphRAG `extract_graph` output-semantics study](study-graphrag-extract-graph-output.md).
 
 ## Architecture map
@@ -59,7 +60,7 @@ provider-specific nested fields occur in the real fixtures and must survive sema
 The completion fixture at
 `ragdebug/cache/extract_graph/04ad9d...e3e_v4` contains nested choice/message extension fields,
 reasoning content, detailed usage, top-level computed fields, and floating-point metrics. The
-embedding fixture at `ragdebug/cache/text_embedding/8428d...9_v4` contains five 1024-dimensional
+embedding fixture at `ragdebug/cache/text_embedding/90c045...81bc7_v4` contains five 1024-dimensional
 vectors, detailed usage, computed fields, and metrics.
 
 ## Key algorithms
@@ -68,7 +69,7 @@ The key is `sha256(PyYAML.dump(filtered_kwargs, sort_keys=True)) + "_v4"`. Names
 instance names are directory routing only; they are not added to the hash. Missing kwargs remain
 missing rather than being normalized to null.
 
-## What we will adopt
+## Decisions adopted by GraphLoom
 
 - Provider-neutral Rust request/response types with explicit core fields and flattened unknowns.
 - One generic `{response, metrics}` envelope for completion and embedding.
@@ -77,7 +78,7 @@ missing rather than being normalized to null.
 - Invalid JSON/schema entries are deleted and treated as misses; storage errors remain fatal.
 - GraphRAG-compatible v4 key generation over canonical request kwargs.
 
-## What we will avoid
+## Rejected design choices
 
 - Provider response types in workflow APIs.
 - Permanent adapters for GraphLoom's old simplified cache payloads.
@@ -187,7 +188,7 @@ escape too early when using the scalar's real output column. GraphLoom now keeps
 and applies the signed-equivalent projection with checked ordering; the 173-case corpus includes
 38/39/40-BEL boundary cases plus nested and sequence variants.
 
-## Open questions
+## Remaining questions
 
 None for the implementation scope. Streaming, Anthropic, and metrics aggregation remain explicitly
 out of scope.

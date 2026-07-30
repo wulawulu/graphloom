@@ -61,7 +61,10 @@ pub(crate) async fn select_chunks(
     }
 }
 
-/// GraphRAG 3.1.0 limit fallback: if `limit <= 0` or `limit > chunk_count`, use 15.
+/// GraphRAG 3.1.0 loader fallback: if `limit <= 0` or `limit > chunk_count`, use 15.
+///
+/// The public API validates its `PositiveInt` equivalent before reaching this
+/// internal rule, so zero remains here only to mirror the loader in isolation.
 fn apply_limit_fallback(limit: usize, chunk_count: usize) -> usize {
     if limit == 0 || limit > chunk_count {
         DEFAULT_LIMIT

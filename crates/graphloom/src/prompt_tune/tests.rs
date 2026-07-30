@@ -16,6 +16,46 @@ use super::{
 
 const RAW_COMPLETION_CASES: [&str; 5] = ["", "   ", "\n\t", "  value  ", "value\n"];
 
+#[test]
+fn test_should_reject_zero_for_graphrag_positive_prompt_tune_options() {
+    let cases = [
+        (
+            "limit",
+            super::GenerateIndexingPromptsOptions::new(".").with_limit(0),
+        ),
+        (
+            "min_examples_required",
+            super::GenerateIndexingPromptsOptions::new(".").with_min_examples_required(0),
+        ),
+        (
+            "n_subset_max",
+            super::GenerateIndexingPromptsOptions::new(".").with_n_subset_max(0),
+        ),
+        (
+            "k",
+            super::GenerateIndexingPromptsOptions::new(".").with_k(0),
+        ),
+    ];
+
+    for (field, options) in cases {
+        let error = super::validate_options(&options).expect_err("zero must be rejected");
+        assert!(
+            matches!(
+                &error,
+                crate::GraphLoomError::InvalidData {
+                    workflow: "prompt_tune",
+                    ..
+                }
+            ),
+            "unexpected error for {field}: {error}",
+        );
+        assert!(
+            error.to_string().contains(field),
+            "error must identify {field}: {error}",
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum RawTextGenerator {
     Domain,

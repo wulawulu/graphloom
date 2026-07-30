@@ -282,6 +282,13 @@ with the correct multiplicity, and emit all three files byte for byte. The
 fixture also covers GraphRAG's shared mutable message-builder behavior during
 concurrent relationship-example generation.
 
+The Top manifest records two approved transport differences. For entity-type
+discovery, GraphRAG passes its Python response schema while GraphLoom omits
+`response_format` and validates returned JSON locally. For relationship
+examples, GraphRAG passes a disabled JSON-object flag while GraphLoom omits the
+equivalent disabled option. Logical messages, responses, multiplicity, and
+generated prompt bytes remain gated.
+
 Top, Random, and Auto have an additional opt-in real-model acceptance runner.
 It records the live GraphRAG completion responses and replays those exact bytes
 through GraphLoom. For all selection modes, prompt-tune chunking uses the
@@ -323,14 +330,17 @@ scope and artifact-safety rules.
 ```bash
 cargo build -p graphloom
 cargo build -p graphloom-vectors --example compat_vector_manifest
+cargo build -p graphloom-storage --example compat_table_reader
 cargo test -p graphloom-vectors --example compat_vector_manifest
 
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | \
   python -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_query_interop.py
 ```
@@ -339,14 +349,18 @@ The same environment prefix applies to focused goldens and Phase 1 tests:
 
 ```bash
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_query_compat.py
 
 env -u PYTHONPATH \
+PYTHONNOUSERSITE=1 \
 GRAPHLOOM_BIN="$TARGET_DIR/debug/graphloom" \
 GRAPHLOOM_VECTOR_MANIFEST_BIN="$TARGET_DIR/debug/examples/compat_vector_manifest" \
+GRAPHLOOM_TABLE_READER_BIN="$TARGET_DIR/debug/examples/compat_table_reader" \
 uv run --project tests/compat --locked \
 pytest -vv tests/compat/test_compat.py
 ```
@@ -355,13 +369,24 @@ PowerShell equivalent:
 
 ```powershell
 $oldPythonPath = $env:PYTHONPATH
+$oldPythonNoUserSite = $env:PYTHONNOUSERSITE
+$targetDir = (cargo metadata --no-deps --format-version 1 |
+  ConvertFrom-Json).target_directory
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-$env:GRAPHLOOM_BIN = "$env:TARGET_DIR\debug\graphloom.exe"
-$env:GRAPHLOOM_VECTOR_MANIFEST_BIN = `
-  "$env:TARGET_DIR\debug\examples\compat_vector_manifest.exe"
+$env:PYTHONNOUSERSITE = "1"
+$env:GRAPHLOOM_BIN = Join-Path $targetDir "debug\graphloom.exe"
+$env:GRAPHLOOM_VECTOR_MANIFEST_BIN = Join-Path $targetDir `
+  "debug\examples\compat_vector_manifest.exe"
+$env:GRAPHLOOM_TABLE_READER_BIN = Join-Path $targetDir `
+  "debug\examples\compat_table_reader.exe"
 uv run --project tests/compat --locked pytest -q tests/compat/test_query_interop.py
 if ($null -ne $oldPythonPath) {
   $env:PYTHONPATH = $oldPythonPath
+}
+if ($null -eq $oldPythonNoUserSite) {
+  Remove-Item Env:PYTHONNOUSERSITE -ErrorAction SilentlyContinue
+} else {
+  $env:PYTHONNOUSERSITE = $oldPythonNoUserSite
 }
 ```
 

@@ -35,7 +35,8 @@ cargo run -p graphloom -- --help
   根目录解析。`Arc<QueryEngine>` 支持并发请求；callback、history、
   usage、遍历和流状态均为请求局部状态。
 - `graphloom::cli` 将 CLI 参数、控制台输出、日志和退出码适配到 API。
-  `graphloom index` 与 `graphloom update` 加载配置并执行 CLI 校验；
+  `graphloom index` 与 `graphloom update` 加载配置并在执行前进行 CLI 校验；
+  `graphloom index` 可通过 `--dry-run` 在校验后停止。
   `graphloom prompt-tune` 调用公共 API，并事务式发布三个 prompt 文件。
 - `graphloom init` 是仅 CLI 的项目脚手架命令，写入默认 settings、`.env`、
   `input/` 和 prompt。`--model` 与 `--embedding` 通过结构化 YAML
@@ -134,15 +135,18 @@ graphloom prompt-tune --root ./demo --selection-method auto \
 
 `--chunk-size` 与 `--overlap` 默认分别为 1200 和 100，只覆盖本次命令的
 项目分块配置。`--domain` 和 `--language` 可跳过相应检测调用。默认发现
-实体类型；completion provider 不接受 GraphRAG JSON Schema 请求时，可用
-`--no-discover-entity-types`。
+实体类型。GraphRAG 为该请求传入 Python response schema；GraphLoom 发送
+相同逻辑 message，但不携带 provider-specific `response_format`，并在本地
+校验返回 JSON。`--no-discover-entity-types` 会跳过该请求并生成 untyped
+extraction template。
 
 Prompt tune 使用默认 completion model；Auto 还使用 embedding model。
-三种模式都使用 embedding model 的有效 tokenizer（包括兼容回退）确定
-chunk 边界，而不使用 `chunking.encoding_model`，与 GraphRAG 3.1.0
-一致。CLI 默认不使用 LLM cache。Auto 还保留 GraphRAG 3.1.0 的位置映射
-特性：按随机样本 embedding 到质心的距离排序后，把排序位置应用到原始
-chunk 列表，而不是返回样本行。
+三种模式都使用 embedding model 的有效 tokenizer，而不使用
+`chunking.encoding_model`，与 GraphRAG 3.1.0 的 tokenizer 来源一致。
+已提交 fixture 与 `ollama/bge-m3` 验收覆盖 `cl100k_base` fallback；更广
+LiteLLM model-specific tokenizer mapping 仍待验证。CLI 默认不使用 LLM
+cache。Auto 还保留 GraphRAG 3.1.0 的位置映射特性：按随机样本 embedding
+到质心的距离排序后，把排序位置应用到原始 chunk 列表，而不是返回样本行。
 
 Rust API：
 
@@ -376,8 +380,9 @@ workflow 在写入时替换自己拥有的表，不清空整个 output，也没�
 generation 或最终 publish。未触及的文件和表保留。后续失败时已完成输出
 不会回滚，可能形成部分结果；cache 保留。
 
-`generate_text_embeddings` active 时，GraphLoom 在 pipeline 开始前 reset
-其受管 LanceDB 表；其他表和数据库目录中的无关文件不删除。
+`generate_text_embeddings` 运行时，会先确认各配置字段的来源表存在，再在
+embedding 该字段前立即 reset 对应受管 LanceDB 表。其他 LanceDB 表、来源
+表缺失的配置字段和数据库目录中的无关文件不删除。
 
 统一索引校验覆盖所需 provider 配置与连通性、active 向量 schema，以及
 output、logs、启用的 cache 和 active 向量库普通写权限。校验后才构造
@@ -404,6 +409,9 @@ Home 安全检查按 `HOME`、`USERPROFILE`、`HOMEDRIVE`+`HOMEPATH` 顺序解�
 
 GraphLoom 首先追求行为兼容：等价输入、配置、prompt 和模型响应应做出相同
 workflow 决策并产生逻辑等价数据，之后才引入 GraphLoom 优化。
+
+[GraphRAG 兼容性矩阵](docs/compatibility-matrix-zh.md)是已兼容、批准差异、
+未支持和待验证范围的权威清单。下文概述主要证据，但不会扩大矩阵中的声明。
 
 自动化 `make test-compat` 让 GraphLoom 与 uv 锁定的 PyPI GraphRAG 3.1.0
 共享一个确定性 OpenAI-compatible HTTP server。它覆盖标准索引和标准更新，
@@ -460,15 +468,18 @@ LanceDB 0.24.3 与 Rust lancedb 0.31.0 的磁盘目录直接互开。详见
 
 尚未支持：
 
-- Azure OpenAI 或 Azure managed identity；
+- `openai`、`deepseek`、`ollama` 之外的 GraphRAG model provider 名称，
+  包括 Azure/Anthropic provider 和 Azure managed identity；
+- Fast/NLP 索引及 Fast Update（仅支持 `--method standard`）；
 - 远程 blob storage、CosmosDB、Azure AI Search；
 - Query 结果 cache；
 - 跨版本 LanceDB 磁盘互操作；
 - CSV、JSON 或 JSONL 输入。
 
-Settings、prompt、workflow、cache 协议、逻辑 Parquet schema 和向量记录
-schema 均以 GraphRAG 兼容为目标。当前自动化与手工互操作构成行为基线，
-LanceDB 磁盘互操作仍是后续加固项。
+在明确支持的范围内，settings、prompt、workflow、cache 协议、逻辑
+Parquet schema 和向量记录 schema 均以 GraphRAG 兼容为目标。
+[兼容性矩阵](docs/compatibility-matrix-zh.md)是权威边界；自动化与手工互操作
+构成其当前证据。跨版本直接复用 LanceDB 目录仍不受支持。
 
 ## License
 

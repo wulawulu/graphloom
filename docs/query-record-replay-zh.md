@@ -44,8 +44,11 @@ report.json
 `indexArtifactPresence` 列出两边 Parquet 文件名并突出只存在于一边的文件。
 它是诊断前置条件，不宣称同名 Parquet 包含相同逻辑行。
 
-请求或答案比较失败时 Make target 返回非零；这是兼容性发现，不一定是
-proxy/provider 失败。使用报告中的两个进程退出码区分比较失败和执行失败。
+Basic、Local、Global 只有语义请求与答案都相等时 Make target 才通过。
+DRIFT 改用下文更严格的 `driftBehavior` 约束：合法随机分支发生分叉后，
+请求与答案字节可以不同而整体仍通过。任一方法的兼容条件失败都会返回非零，
+但这不一定是 proxy/provider 失败；可用报告中的两个进程退出码区分比较
+失败和执行失败。
 
 Proxy 也可独立启动：
 

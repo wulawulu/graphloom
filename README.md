@@ -46,7 +46,8 @@ The `graphloom` crate is both the Rust library and the command-line binary.
   streaming state remain request-local.
 - `graphloom::cli` adapts command-line arguments, console output, logging, and
   exit codes to the API indexing layer. `graphloom index` and `graphloom update` load project
-  configuration and perform CLI validation before dry-run output or indexing.
+  configuration and perform CLI validation before execution; `graphloom index`
+  can stop after validation with `--dry-run`.
   `graphloom prompt-tune` uses the public prompt-tuning API and publishes all
   three generated prompt files transactionally.
 - `graphloom init` is a CLI-only project scaffold command. It writes default
@@ -154,18 +155,23 @@ graphloom prompt-tune --root ./demo --selection-method auto \
 
 `--chunk-size` and `--overlap` default to 1200 and 100 and override the project
 chunking values for this command. `--domain` and `--language` skip their
-respective detection calls. Entity-type discovery is enabled by default; use
-`--no-discover-entity-types` when the completion provider cannot accept
-GraphRAG's JSON Schema request.
+respective detection calls. Entity-type discovery is enabled by default.
+GraphRAG passes a Python response schema for this request, while GraphLoom sends
+the same logical messages without a provider-specific `response_format` and
+validates the returned JSON locally. Use `--no-discover-entity-types` to skip
+the request and generate untyped extraction templates.
 
 Prompt tuning uses the configured default completion model. Auto selection also
 uses the configured embedding model. For chunk boundaries, all three modes use
-the embedding model's effective tokenizer, including its compatible fallback,
-matching GraphRAG 3.1.0 rather than reading `chunking.encoding_model`. The CLI
-does not use the LLM cache, matching GraphRAG's default prompt-tune behavior.
-Auto also preserves GraphRAG 3.1.0's positional quirk: it ranks the randomly
-sampled embeddings by distance to their centroid, then applies those ranked
-positions to the original chunk list rather than returning the sampled rows.
+the embedding model's effective tokenizer rather than
+`chunking.encoding_model`, matching GraphRAG 3.1.0's tokenizer source. The
+checked fixture and `ollama/bge-m3` acceptance cover the `cl100k_base` fallback;
+broader LiteLLM model-specific tokenizer mapping remains pending validation.
+The CLI does not use the LLM cache, matching GraphRAG's default prompt-tune
+behavior. Auto also preserves GraphRAG 3.1.0's positional quirk: it ranks the
+randomly sampled embeddings by distance to their centroid, then applies those
+ranked positions to the original chunk list rather than returning the sampled
+rows.
 
 The corresponding Rust API is:
 
@@ -434,9 +440,11 @@ Unrelated files and tables not touched by the configured workflow list remain in
 place. If a later workflow fails, outputs already written by completed work are
 retained and may represent a partial run. Cache is preserved.
 
-When `generate_text_embeddings` is active, GraphLoom resets its managed LanceDB
-tables during runtime preparation before the workflow pipeline starts. Other
-LanceDB tables and unrelated files under the database path are not removed.
+When `generate_text_embeddings` runs, it resets each configured managed
+LanceDB table immediately before embedding that field, after confirming that
+the field's source table exists. Other LanceDB tables, configured fields whose
+source table is missing, and unrelated files under the database path are not
+removed.
 
 Unified index validation checks required provider configuration and
 connectivity, active vector schemas, and ordinary write access for output, logs,
@@ -479,6 +487,11 @@ GraphLoom's compatibility goal is behavioral first: with equivalent input,
 configuration, prompts, and model responses, the standard workflows should make
 the same indexing decisions and produce logically equivalent data. This stable
 baseline comes before GraphLoom-specific optimizations.
+
+The [GraphRAG compatibility matrix](docs/compatibility-matrix.md) is the
+authoritative inventory of compatible surfaces, approved differences,
+unsupported features, and pending validation. The summary below explains the
+main evidence but does not widen the matrix's claims.
 
 The automated `make test-compat` gate runs GraphLoom and the uv-locked PyPI
 GraphRAG 3.1.0 package against one deterministic OpenAI-compatible HTTP server.
@@ -523,7 +536,7 @@ logical schema level. Basic/Local/DRIFT cross-implementation E2E uses the
 logical vector manifest to materialize producer records in the consumer-native
 LanceDB version without re-embedding. It does not claim direct on-disk
 compatibility between Python LanceDB 0.24.3 and Rust lancedb 0.31.0. That
-physical storage gap remains a separate hardening item. See the
+physical storage boundary remains explicitly unsupported. See the
 [compatibility test guide](docs/python-compatibility-testing.md).
 
 The `extract_graph` entity path now reproduces GraphRAG's unusual two-stage
@@ -557,16 +570,21 @@ Supported:
 
 Not yet supported:
 
-- Azure OpenAI or Azure managed identity
+- GraphRAG model-provider names other than `openai`, `deepseek`, and `ollama`,
+  including Azure/Anthropic providers and Azure managed identity
+- Fast/NLP indexing and Fast Update (`--method standard` is the only indexing
+  method)
 - remote blob storage, CosmosDB, or Azure AI Search
 - Query result cache
 - cross-version LanceDB on-disk interoperability
 - CSV, JSON, or JSONL input
 
-Settings, prompts, workflow behavior, cache protocol, logical Parquet schemas,
-and vector record schemas target GraphRAG compatibility. Automated and manual
-interoperability establish the current behavioral baseline; hardening LanceDB
-on-disk interoperability remains follow-up work.
+Within the explicitly supported surface, settings, prompts, workflow behavior,
+cache protocol, logical Parquet schemas, and vector record schemas target
+GraphRAG compatibility. The
+[compatibility matrix](docs/compatibility-matrix.md) is the authoritative
+boundary; automated and manual interoperability establish its current evidence.
+Direct cross-version LanceDB directory reuse remains unsupported.
 
 ## License
 

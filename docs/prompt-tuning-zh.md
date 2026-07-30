@@ -43,25 +43,35 @@ CLI 默认使用 Random。常用参数：
 --min-examples-required <N>    # 默认：2
 --chunk-size <TOKENS>          # 默认：1200
 --overlap <TOKENS>             # 默认：100
---[no-]discover-entity-types
+--discover-entity-types       # 默认
+--no-discover-entity-types
 --output <DIRECTORY>           # 默认：prompts
 ```
 
 `--chunk-size` 和 `--overlap` 是本次命令覆盖值。实际 tokenization 方面，
 GraphRAG 3.1.0 使用配置的 embedding model tokenizer 创建 prompt-tune
 chunker；GraphLoom 在 Top、Random 和 Auto 中都一致，即使只有 Auto 调用
-embedding API。模型没有已知 tokenizer 映射时使用 provider 的有效兼容
-fallback；`chunking.encoding_model` 不决定 prompt-tune chunk 边界。
+embedding API。未显式设置 `encoding_model` 时，GraphLoom 当前使用
+`cl100k_base`；已提交 fixture 和 `ollama/bge-m3` live 验收在该路径与
+GraphRAG fallback 一致。GraphRAG/LiteLLM 对其他已知模型可能选择
+model-specific encoding，这仍是待验证兼容边界。
+`chunking.encoding_model` 不决定 prompt-tune chunk 边界。
 
 Auto 有意保留 GraphRAG 3.1.0 的特殊行为：随机抽取最多
 `n_subset_max` 个 chunk，对样本 embedding，按到质心的欧氏距离排序样本
 位置，然后把这些位置索引应用到原始、未抽样的 chunk 列表。它不会返回
 样本行本身。该行为看似意外，但修改会破坏固定兼容基线。
 
+公共 API 会拒绝为 0 的 `limit`、`min_examples_required`、`n_subset_max`
+和 `k`。过大的正 Random limit 会按 GraphRAG 回退到 15，因此候选少于
+15 时仍会失败；小语料应把 `--limit` 设为不超过候选数的正值。
+
 未提供 `--domain` 或 `--language` 时由 completion model 推断。默认开启
-entity-type discovery，并使用 GraphRAG structured JSON 请求。
-`--no-discover-entity-types` 跳过该请求并采用 untyped extraction 模板，
-适用于拒绝 JSON Schema response format 的 provider。
+entity-type discovery。GraphRAG 向模型抽象传入 Python
+`EntityTypesResponse` schema；GraphLoom 有意发送相同逻辑 message 但不带
+`response_format`，在客户端提取并校验 JSON object。该批准的 transport
+差异已固定在 Top fixture manifest 中。`--no-discover-entity-types` 跳过
+该请求并采用 untyped extraction 模板。
 
 CLI 禁用 prompt-tune cache，与 GraphRAG 3.1.0 默认一致。三个文件事务式
 发布：旧目标在 staged file rename 期间备份，失败则恢复。输出目录和目标
@@ -137,4 +147,6 @@ GraphLoom replay，再精确比较请求身份和 prompt。配置、安全与产
 - 不同 RNG 实现在无约束多候选 live run 中选出相同随机样本；
 - 不经 request-aware replay 时任意模型输出逐字节相同；
 - 与固定 3.1.0 以外的 GraphRAG release 兼容；
+- 已验证 `cl100k_base` 场景之外的 LiteLLM model-specific tokenizer
+  mapping；
 - 启用 GraphLoom-only API cache 扩展后仍等价。

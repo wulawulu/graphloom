@@ -422,11 +422,11 @@ pub struct PromptTuneArgs {
         help = "Discover and extract unspecified entity types."
     )]
     pub discover_entity_types: bool,
-    /// Do not discover entity types; use configured defaults.
+    /// Do not discover entity types; generate untyped extraction templates.
     #[arg(
         long = "no-discover-entity-types",
         action = clap::ArgAction::SetTrue,
-        help = "Discover and extract unspecified entity types."
+        help = "Skip entity-type discovery and generate untyped extraction templates."
     )]
     pub no_discover_entity_types: bool,
     /// The directory to save prompts to, relative to the project root directory.

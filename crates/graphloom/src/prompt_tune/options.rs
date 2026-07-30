@@ -29,9 +29,10 @@ pub enum DocSelectionType {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct GenerateIndexingPromptsOptions {
-    /// Project root directory (must contain `settings.yaml`).
+    /// Project root containing `settings.yaml`, `settings.yml`, or
+    /// `settings.json`, or a direct path to one of those settings files.
     pub root: PathBuf,
-    /// Maximum number of chunks to use for prompt tuning.
+    /// Maximum number of chunks to use for prompt tuning. Must be greater than zero.
     pub limit: usize,
     /// Document chunk selection method.
     pub selection_method: DocSelectionType,
@@ -43,11 +44,11 @@ pub struct GenerateIndexingPromptsOptions {
     pub max_tokens: usize,
     /// Whether to auto-discover entity types.
     pub discover_entity_types: bool,
-    /// Minimum number of examples included in the entity extraction prompt.
+    /// Minimum number of examples included in the entity extraction prompt. Must be positive.
     pub min_examples_required: usize,
-    /// Maximum number of document chunks to embed for auto selection.
+    /// Maximum number of document chunks to embed for auto selection. Must be positive.
     pub n_subset_max: usize,
-    /// Number of chunks to retain after embedding-based selection.
+    /// Number of chunks to retain after embedding-based selection. Must be positive.
     pub k: usize,
     /// Enable verbose logging.
     pub verbose: bool,
@@ -102,7 +103,7 @@ impl GenerateIndexingPromptsOptions {
         self
     }
 
-    /// Set the chunk limit.
+    /// Set the positive chunk limit.
     #[must_use]
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit;
@@ -137,21 +138,21 @@ impl GenerateIndexingPromptsOptions {
         self
     }
 
-    /// Set the minimum number of examples in the extraction prompt.
+    /// Set the positive minimum number of examples in the extraction prompt.
     #[must_use]
     pub fn with_min_examples_required(mut self, min: usize) -> Self {
         self.min_examples_required = min;
         self
     }
 
-    /// Set the subset size for auto selection.
+    /// Set the positive subset size for auto selection.
     #[must_use]
     pub fn with_n_subset_max(mut self, n: usize) -> Self {
         self.n_subset_max = n;
         self
     }
 
-    /// Set k for auto selection.
+    /// Set the positive `k` for auto selection.
     #[must_use]
     pub fn with_k(mut self, k: usize) -> Self {
         self.k = k;

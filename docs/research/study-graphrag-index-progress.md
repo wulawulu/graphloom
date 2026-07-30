@@ -154,19 +154,20 @@ is not an accidental omission in GraphLoom's port: direct active-output writes r
 normal lifecycle. A stronger online-reindexing guarantee would be a deliberate GraphLoom extension,
 not a compatibility requirement.
 
-## What we will adopt
+## Decisions adopted by GraphLoom
 
-- Keep pipeline/workflow start/end distinct from count-based item progress. This separation makes
-  callback implementations simple and lets library callers choose their own renderer.
+- Keep lifecycle-stage/workflow start/end distinct from count-based item progress. This separation
+  makes callback implementations simple and lets library callers choose their own renderer.
 - Show count progress in normal CLI mode when a total is known. GraphRAG does not hide its item
   counter behind `verbose` ([console_workflow_callbacks.py, lines 33-50][console-callbacks]).
 - Preserve structured logging alongside user-facing progress so non-interactive runs retain an
   auditable lifecycle record.
 
-## What we will avoid
+## Rejected design choices
 
-- Do not copy GraphRAG's silent connectivity wait. GraphLoom should surface the model currently
-  being checked and an indeterminate running state because these are external network calls.
+- GraphLoom avoids a wholly silent connectivity wait with an indeterminate
+  validation-stage spinner. It does not yet expose the current model ID; that
+  remains an observability improvement rather than an implemented decision.
 - Do not treat one `pipeline_start` line as coverage for storage/cache/state initialization. Those
   operations can block independently and should have lifecycle events even when no numeric total is
   available.
@@ -176,7 +177,7 @@ not a compatibility requirement.
   managed-file publication boundary, while current indexing writes outputs directly; progress
   should describe those actual semantics rather than inventing an index activation phase.
 
-## Open questions
+## Remaining questions
 
 None for the comparison. Renderer selection and the exact GraphLoom lifecycle event schema belong in
 the progress feature design rather than this prior-art study.

@@ -113,7 +113,7 @@ pub struct ModelConfig {
     #[serde(alias = "max_retries")]
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    /// Retry strategy name. Supported values are `exponential_backoff` and `immediate`.
+    /// Retry strategy name. Runtime validation currently accepts only `exponential_backoff`.
     #[serde(alias = "retry_strategy")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_strategy: Option<String>,

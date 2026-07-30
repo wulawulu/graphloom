@@ -47,6 +47,8 @@ fn normalize_discovered_entity_types(types: Vec<String>) -> Option<Vec<String>> 
 pub async fn generate_indexing_prompts(
     options: &GenerateIndexingPromptsOptions,
 ) -> Result<GeneratedIndexingPrompts> {
+    validate_options(options)?;
+
     // Load project config
     let project = crate::config::load::load_project_config(&options.root).await?;
     let config = &project.config;
@@ -222,6 +224,23 @@ pub async fn generate_indexing_prompts(
         summarize_descriptions,
         community_report_graph,
     })
+}
+
+fn validate_options(options: &GenerateIndexingPromptsOptions) -> Result<()> {
+    for (name, value) in [
+        ("limit", options.limit),
+        ("min_examples_required", options.min_examples_required),
+        ("n_subset_max", options.n_subset_max),
+        ("k", options.k),
+    ] {
+        if value == 0 {
+            return Err(GraphLoomError::InvalidData {
+                workflow: CONSUMER_PREFIX,
+                message: format!("{name} must be greater than zero"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Create a completion model, optionally wrapped with cache middleware.
