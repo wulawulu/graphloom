@@ -619,9 +619,30 @@ pub struct ExplainabilitySinkChain {
 Core Explainability 只定义可靠输入合同，不提供会静默丢事件的 Best Effort delivery
 mode。运行时采样属于 `tracing` / OpenTelemetry；持久化后的实时广播属于 Live Hub / SSE。
 
+## 10.2 Query 请求级配置
+
+Local Query 运行时通过 `QueryOptions.explainability` 接收可选的请求级配置：
+
+```rust
+pub struct QueryExplainabilityOptions {
+    run_id: ExplainabilityRunId,
+    content_mode: ExplainabilityContentMode,
+    sink: Arc<dyn ExplainabilitySink>,
+}
+```
+
+调用方可以使用 `QueryExplainabilityOptions::new` 提前提供 `run_id`，也可以使用
+`generated` 生成便利 ID。Studio 因而可以先创建历史 Run、建立该 ID 的浏览器订阅，再调用
+GraphLoom；Core 不强制隐藏或独占 Run ID 的生成。
+
+Explainability 属于请求状态，不进入 `QueryEngine` 的长期资源缓存。缓存用的 resource
+options 会清除 callbacks、conversation history 和 Explainability 配置；query text、run ID、
+content mode、sink、投递失败计数和流状态都不会被缓存。共享同一 warm Local runtime 的并发
+Query 各自创建 Session、Span ID 和失败状态，因此不会串 Sink 或 Run。
+
 ---
 
-## 10.2 谁负责生成 Envelope
+## 10.3 谁负责生成 Envelope
 
 GraphLoom Core 负责产生业务记录：
 
@@ -637,7 +658,7 @@ pub struct ExplainabilityRecord {
 
 其中：
 
-* `run_id` 由启动本次运行的 Core 编排入口创建；
+* `run_id` 来自本次请求的 `QueryExplainabilityOptions`，便利调用方也可在请求前生成；
   -`span_id` 和 `parent_span_id` 由 Core 根据真实业务阶段创建；
   -`timestamp` 是业务事件发生时间；
   -`event` 是结构化业务事件。
@@ -922,6 +943,7 @@ Reason 应反映当前真实行为，而不是为了 UI 美观推断不存在的
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplainabilityContextSection {
     pub section: ContextSectionKind,
+    pub name: Option<String>,
 
     pub token_budget: u64,
     pub tokens_used: u64,
@@ -941,6 +963,7 @@ pub struct ExplainabilityContextSection {
 pub enum ContextSectionKind {
     ConversationHistory,
     CommunityReports,
+    LocalGraph,
     Entities,
     Relationships,
     Covariates,
@@ -949,6 +972,11 @@ pub enum ContextSectionKind {
     ReduceContext,
 }
 ```
+
+`name` 只用于区分低基数的逻辑子组，例如多个 Covariate group；它是可选、受长度限制的
+Schema 1 增量字段。`LocalGraph` 表达 Entities、Relationships 和 Covariates 实际共享的
+Local budget，避免在 `ContextBudgetAllocated` 中把同一份预算虚构成三份独立预算。该语义
+补全发生在 Explainability 尚未持久化发布的基础合同阶段，因此 Schema Version 仍为 1。
 
 ---
 
@@ -1105,6 +1133,8 @@ Studio 不得直接读取内部 DataFrame 后自行猜测列语义。
 推荐事件流程：
 
 ```text
+RunStarted
+    ↓
 QueryStarted
     ↓
 MappingQueryBuilt
@@ -1120,12 +1150,12 @@ CandidatesFiltered
 EntitiesSelected
     ↓
 GraphExpansionStarted
+    ↓
+ContextBudgetAllocated
     ├── CommunityReportsSelected
     ├── RelationshipsSelected
     ├── CovariatesSelected
     └── TextUnitsSelected
-    ↓
-ContextBudgetAllocated
     ↓
 ContextSectionBuilt × N
     ↓
@@ -1137,6 +1167,41 @@ LlmRequestCompleted
     ↓
 RunCompleted
 ```
+
+实际 Span 身份为：
+
+```text
+local_query
+├── entity_mapping
+│   ├── embedding
+│   └── entity_retrieval
+├── graph_expansion
+├── context_construction
+└── llm_completion
+```
+
+Embedding 事件只在非空 mapping query 确实调用模型时出现；空 mapping query 的 rank
+fallback 仍产生真实的 retrieved/filtered/selected 事件。Selection 和 section sidecar 在
+排序、引用解析、include/exclude、rank filter、token fitting、当前 entity 回退与最终 prefix
+接受的位置同步捕获，不解析最终文本或 DataFrame 反推。`ContextCompleted.context` 复用实际
+`QueryContextText::Text`，LLM prompt 记录实际渲染的 Local system prompt，而不是 Provider
+完整请求对象。
+
+每个业务事件只调用一次 Sink，不自动重试。Chain 的部分成功不会触发整条 Chain 重试，
+后续不同事件仍继续投递。Sink emit 失败只标记 Explainability Run 不完整，不改变 Context、
+Provider 请求、QueryEvent、Answer 或 Usage；业务成功但曾有投递失败时，终态为安全的
+`RunFailed(error_kind = "explainability_delivery")`。业务 Query 错误产生低基数、安全消息的
+`RunFailed`，原始 `QueryError` 原样返回。终态只尝试一次，随后 `finish_run` 只调用一次；
+终态或 finish 投递失败均不改变业务结果，也不重试。
+
+Local streaming 只包装共享的 completion event stream：Context、Token、Completed 和 callback
+顺序保持不变。完整消费到 Completed 或 Err 时产生终态并 finish；调用方提前 drop stream 时
+不在 Drop 中执行异步工作、不 spawn 隐藏任务，Run 暂时保持未完成，等待后续 Store/Studio
+阶段通过超时或 abandoned 状态处理。
+
+当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
+也不会产生 Local 事件。JSONL、bounded channel Adapter、sequence allocator、Store、SSE、
+Studio 和 OpenTelemetry 仍属于后续阶段，尚未实现。
 
 前端可据此处理：
 

@@ -6,15 +6,19 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use graphloom::explainability::{
-    CandidatesFiltered, CandidatesRetrieved, ContextSectionKind, EXPLAINABILITY_SCHEMA_VERSION,
-    ExplainabilityCandidate, ExplainabilityContentMode, ExplainabilityContextSection,
-    ExplainabilityContractError, ExplainabilityEnvelope, ExplainabilityEvent,
-    ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType, ExplainabilityRun,
-    ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore,
-    ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
-    ExplainabilitySinkOperation, ExplainabilitySpanId, NoopExplainabilitySink, QueryStarted,
-    RunStarted, SelectionReason,
+use graphloom::{
+    explainability::{
+        CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextSectionKind,
+        CovariatesSelected, EXPLAINABILITY_SCHEMA_VERSION, EntitiesSelected,
+        ExplainabilityCandidate, ExplainabilityContentMode, ExplainabilityContextSection,
+        ExplainabilityContractError, ExplainabilityEnvelope, ExplainabilityEvent,
+        ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
+        ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
+        ExplainabilityScore, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
+        ExplainabilitySinkOperation, ExplainabilitySpanId, NoopExplainabilitySink, QueryStarted,
+        RelationshipsSelected, RunStarted, SelectionReason, TextUnitsSelected,
+    },
+    query::{QueryExplainabilityOptions, QueryOptions, SearchMethod},
 };
 use serde_json::json;
 
@@ -193,6 +197,45 @@ async fn test_should_expose_async_foundational_contracts_to_external_crates() ->
     run.query_method = Some(ExplainabilityQueryMethod::Local);
     let run_json = serde_json::to_value(&run)?;
     assert_eq!(serde_json::from_value::<ExplainabilityRun>(run_json)?, run);
+    Ok(())
+}
+
+#[test]
+fn test_should_expose_request_scoped_query_explainability_options() -> TestResult {
+    let sink: Arc<dyn ExplainabilitySink> = Arc::new(NoopExplainabilitySink::new());
+    let run_id = ExplainabilityRunId::from_str("studio-run")?;
+    let explainability = QueryExplainabilityOptions::new(
+        run_id.clone(),
+        ExplainabilityContentMode::Content,
+        Arc::clone(&sink),
+    );
+    assert_eq!(explainability.run_id(), &run_id);
+    assert_eq!(
+        explainability.content_mode(),
+        ExplainabilityContentMode::Content
+    );
+    assert!(Arc::ptr_eq(explainability.sink(), &sink));
+
+    let defaults = QueryOptions::new(
+        std::path::PathBuf::from("project"),
+        "query".to_owned(),
+        SearchMethod::Local,
+    );
+    assert!(defaults.explainability.is_none());
+    let configured = defaults.with_explainability(explainability);
+    assert_eq!(
+        configured
+            .explainability
+            .as_ref()
+            .map(QueryExplainabilityOptions::run_id),
+        Some(&run_id)
+    );
+
+    let generated = QueryExplainabilityOptions::generated(
+        ExplainabilityContentMode::Metadata,
+        Arc::new(NoopExplainabilitySink::new()),
+    );
+    assert!(!generated.run_id().as_str().is_empty());
     Ok(())
 }
 
@@ -542,3 +585,108 @@ fn test_should_round_trip_candidate_events_without_changing_schema() -> TestResu
     assert_eq!(EXPLAINABILITY_SCHEMA_VERSION, 1);
     Ok(())
 }
+
+macro_rules! typed_selection_contract {
+    (
+        $test_name:ident,
+        $payload:ty,
+        $field:ident,
+        $variant:ident,
+        $record_type:expr,
+        $wrong_type:expr,
+        $discriminator:literal
+    ) => {
+        #[test]
+        fn $test_name() -> TestResult {
+            let expected = candidate("record-1", $record_type);
+            let payload = <$payload>::try_new(vec![expected.clone()])?;
+            assert_eq!(payload.$field(), &[expected]);
+            assert!(<$payload>::try_new(Vec::new())?.$field().is_empty());
+
+            let mismatch = <$payload>::try_new(vec![candidate("wrong-1", $wrong_type)]);
+            let Err(ExplainabilityContractError::CandidateTypeMismatch {
+                expected,
+                actual,
+                candidate_index,
+            }) = mismatch
+            else {
+                return Err("wrong candidate type must be rejected".into());
+            };
+            assert_eq!(expected, $record_type);
+            assert_eq!(actual, $wrong_type);
+            assert_eq!(candidate_index, 0);
+
+            let contradictory = json!({
+                stringify!($field): [{
+                    "id": "wrong-1",
+                    "record_type": serde_json::to_value($wrong_type)?,
+                    "selected": true,
+                }],
+            });
+            assert!(serde_json::from_value::<$payload>(contradictory.clone()).is_err());
+            let mut contradictory_event = contradictory;
+            contradictory_event
+                .as_object_mut()
+                .ok_or("selection payload must be an object")?
+                .insert("type".to_owned(), json!($discriminator));
+            assert!(
+                serde_json::from_value::<ExplainabilityEvent>(contradictory_event).is_err()
+            );
+
+            let event = ExplainabilityEvent::$variant(payload);
+            let value = serde_json::to_value(&event)?;
+            assert_eq!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some($discriminator)
+            );
+            assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
+            Ok(())
+        }
+    };
+}
+
+typed_selection_contract!(
+    test_should_enforce_entities_selected_candidate_type,
+    EntitiesSelected,
+    entities,
+    EntitiesSelected,
+    ExplainabilityRecordType::Entity,
+    ExplainabilityRecordType::Relationship,
+    "entities_selected"
+);
+typed_selection_contract!(
+    test_should_enforce_relationships_selected_candidate_type,
+    RelationshipsSelected,
+    relationships,
+    RelationshipsSelected,
+    ExplainabilityRecordType::Relationship,
+    ExplainabilityRecordType::Entity,
+    "relationships_selected"
+);
+typed_selection_contract!(
+    test_should_enforce_community_reports_selected_candidate_type,
+    CommunityReportsSelected,
+    community_reports,
+    CommunityReportsSelected,
+    ExplainabilityRecordType::CommunityReport,
+    ExplainabilityRecordType::Community,
+    "community_reports_selected"
+);
+typed_selection_contract!(
+    test_should_enforce_covariates_selected_candidate_type,
+    CovariatesSelected,
+    covariates,
+    CovariatesSelected,
+    ExplainabilityRecordType::Covariate,
+    ExplainabilityRecordType::TextUnit,
+    "covariates_selected"
+);
+typed_selection_contract!(
+    test_should_enforce_text_units_selected_candidate_type,
+    TextUnitsSelected,
+    text_units,
+    TextUnitsSelected,
+    ExplainabilityRecordType::TextUnit,
+    ExplainabilityRecordType::Covariate,
+    "text_units_selected"
+);

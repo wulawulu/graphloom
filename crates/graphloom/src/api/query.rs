@@ -177,6 +177,7 @@ pub(crate) async fn query_loaded(
                 &options.query,
                 &options.response_type,
                 options.conversation_history.as_ref(),
+                options.explainability.as_ref(),
             )
             .await?)
         }
@@ -211,6 +212,7 @@ pub(crate) async fn query_loaded_stream(
                 &options.query,
                 &options.response_type,
                 options.conversation_history.as_ref(),
+                options.explainability.as_ref(),
             )
             .await?)
         }

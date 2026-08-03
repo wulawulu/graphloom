@@ -7,15 +7,26 @@ use std::{
 };
 
 use graphloom_llm::{EmbeddingModel, EmbeddingRequest, Tokenizer};
-use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore};
-use polars_core::prelude::{NamedFrom, Series};
+use graphloom_vectors::{VectorError, VectorIndexSchema, VectorSearchResult, VectorStore};
+use polars_core::prelude::{DataFrame, NamedFrom, Series};
 
 use super::super::{
-    CommunityReport, ConversationHistory, Covariate, Entity, QueryContext, QueryContextRecords,
-    QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory, Relationship, Result,
-    SearchMethod, TextUnit, context::ContextTable, result::resolve_embedding_prompt_tokens,
+    CommunityReport, ConversationHistory, ConversationRole, Covariate, Entity, QueryContext,
+    QueryContextRecords, QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory,
+    Relationship, Result, SearchMethod, TextUnit, context::ContextTable,
+    explainability::QueryExplainabilitySession, result::resolve_embedding_prompt_tokens,
 };
-use crate::LocalSearchConfig;
+use crate::{
+    LocalSearchConfig,
+    explainability::{
+        CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextBudgetAllocated,
+        ContextCompleted, ContextSectionBudget, ContextSectionBuilt, ContextSectionKind,
+        CovariatesSelected, EmbeddingCompleted, EmbeddingStarted, EntitiesSelected,
+        ExplainabilityCandidate, ExplainabilityContextSection, ExplainabilityEvent,
+        ExplainabilityRecordType, ExplainabilityScore, GraphExpansionStarted, MappingQueryBuilt,
+        RelationshipsSelected, SelectionReason, TextUnitsSelected,
+    },
+};
 
 /// Local Search context resources, independent of completion orchestration.
 #[derive(Debug)]
@@ -46,18 +57,90 @@ pub(crate) struct LocalContextBuild {
 struct Section {
     text: String,
     table: ContextTable,
+    explainability: Option<SectionExplainability>,
 }
 
 #[derive(Debug)]
 struct LocalSections {
     text: String,
     tables: BTreeMap<String, ContextTable>,
+    explainability: Vec<SectionExplainability>,
+}
+
+#[derive(Debug)]
+struct ContextAssembly {
+    parts: Vec<String>,
+    tables: BTreeMap<String, ContextTable>,
+    explainability: Vec<SectionExplainability>,
+}
+
+#[derive(Debug)]
+struct SectionExplainability {
+    kind: ContextSectionKind,
+    name: Option<String>,
+    token_budget: usize,
+    tokens_used: usize,
+    candidate_count: usize,
+    selected_count: usize,
+    selected_record_ids: Vec<String>,
+    truncated: bool,
+    candidates: Vec<ExplainabilityCandidate>,
+}
+
+#[derive(Debug)]
+struct FittedTable {
+    table: ContextTable,
+    tokens_used: usize,
+    candidate_count: usize,
+    selected_count: usize,
+}
+
+#[derive(Debug)]
+struct SectionExplainabilitySpec {
+    kind: ContextSectionKind,
+    name: Option<String>,
+    token_budget: usize,
+    selected_reason: SelectionReason,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct RankedRelationship<'a> {
     relationship: &'a Relationship,
     links: Option<usize>,
+}
+
+#[derive(Debug)]
+struct RelationshipSelection<'a> {
+    selected: Vec<RankedRelationship<'a>>,
+    rank_filtered: Vec<RankedRelationship<'a>>,
+}
+
+#[derive(Debug)]
+struct SourceSelection<'a> {
+    ranked: Vec<(&'a TextUnit, usize, usize)>,
+    missing: Option<Vec<ExplainabilityCandidate>>,
+}
+
+#[derive(Debug)]
+struct CommunitySelection<'a> {
+    selected: Vec<(&'a CommunityReport, usize)>,
+    non_token_candidates: Option<Vec<ExplainabilityCandidate>>,
+}
+
+#[derive(Debug)]
+struct EntitySection {
+    text: String,
+    table: ContextTable,
+    tokens_used: usize,
+    explainability: Option<SectionExplainability>,
+}
+
+#[derive(Debug)]
+struct LocalExpansionAttempt {
+    text: Vec<String>,
+    tables: BTreeMap<String, ContextTable>,
+    tokens_used: usize,
+    explainability: Vec<SectionExplainability>,
 }
 
 impl LocalContextBuilder {
@@ -77,17 +160,144 @@ impl LocalContextBuilder {
         include_entity_names: &[String],
         exclude_entity_names: &[String],
     ) -> Result<LocalContextBuild> {
+        self.build_with_entity_filters_and_explainability(
+            query,
+            conversation_history,
+            include_entity_names,
+            exclude_entity_names,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn build_explainable(
+        &self,
+        query: &str,
+        conversation_history: Option<&ConversationHistory>,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<LocalContextBuild> {
+        self.build_with_entity_filters_and_explainability(
+            query,
+            conversation_history,
+            &[],
+            &[],
+            explainability,
+        )
+        .await
+    }
+
+    async fn build_with_entity_filters_and_explainability(
+        &self,
+        query: &str,
+        conversation_history: Option<&ConversationHistory>,
+        include_entity_names: &[String],
+        exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<LocalContextBuild> {
         let mapping_query = conversation_history.map_or_else(
             || query.to_owned(),
             |history| history.mapping_query(query, self.config.conversation_history_max_turns),
         );
+        self.emit_mapping_query(explainability, conversation_history, &mapping_query)
+            .await;
         let (selected_entities, usage) = self
-            .map_entities(&mapping_query, include_entity_names, exclude_entity_names)
+            .map_entities(
+                &mapping_query,
+                include_entity_names,
+                exclude_entity_names,
+                explainability,
+            )
             .await?;
+        self.emit_graph_expansion(explainability, &selected_entities)
+            .await;
+        let assembly = self
+            .build_context_sections(&selected_entities, conversation_history, explainability)
+            .await?;
+        let context_text = assembly.parts.join("\n\n");
+        let records = self.context_records(assembly.tables)?;
+        if let Some(session) = explainability {
+            self.emit_context_decisions(session, &assembly.explainability, &context_text)
+                .await;
+        }
+        Ok(LocalContextBuild {
+            context: QueryContext {
+                text: QueryContextText::Text(context_text),
+                records: QueryContextRecords::Tables(records),
+            },
+            usage,
+        })
+    }
 
+    async fn emit_mapping_query(
+        &self,
+        explainability: Option<&QueryExplainabilitySession>,
+        conversation_history: Option<&ConversationHistory>,
+        mapping_query: &str,
+    ) {
+        let Some(session) = explainability else {
+            return;
+        };
+        let turn_count = conversation_history.map_or(0, |history| {
+            history
+                .recent_user_questions(self.config.conversation_history_max_turns)
+                .len()
+        });
+        let Some(turn_count) = session.usize_to_u64(turn_count).and_then(|value| {
+            u32::try_from(value).map_or_else(
+                |_| {
+                    session.mark_sidecar_failure("conversation_turn_conversion");
+                    None
+                },
+                Some,
+            )
+        }) else {
+            return;
+        };
+        let mut event = MappingQueryBuilt::new(turn_count);
+        event.mapping_query = session.content(mapping_query);
+        session
+            .emit(
+                session.spans().mapping(),
+                Some(session.spans().root()),
+                ExplainabilityEvent::MappingQueryBuilt(event),
+            )
+            .await;
+    }
+
+    async fn emit_graph_expansion(
+        &self,
+        explainability: Option<&QueryExplainabilitySession>,
+        selected_entities: &[&Entity],
+    ) {
+        let Some(session) = explainability else {
+            return;
+        };
+        session
+            .emit(
+                session.spans().graph_expansion(),
+                Some(session.spans().root()),
+                ExplainabilityEvent::GraphExpansionStarted(GraphExpansionStarted::new(
+                    selected_entities
+                        .iter()
+                        .map(|entity| entity.id.clone())
+                        .collect(),
+                )),
+            )
+            .await;
+    }
+
+    async fn build_context_sections(
+        &self,
+        selected_entities: &[&Entity],
+        conversation_history: Option<&ConversationHistory>,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<ContextAssembly> {
         let mut remaining = self.config.max_context_tokens;
-        let mut context_parts = Vec::new();
-        let mut context_tables = BTreeMap::new();
+        let mut assembly = ContextAssembly {
+            parts: Vec::new(),
+            tables: BTreeMap::new(),
+            explainability: Vec::new(),
+        };
         if let Some(history) = conversation_history {
             let built = history.build_user_context(
                 &self.tokenizer,
@@ -95,35 +305,94 @@ impl LocalContextBuilder {
                 remaining,
             )?;
             if !built.text.trim().is_empty() {
-                remaining = remaining
-                    .saturating_sub(self.count(&built.text, "count conversation history context")?);
-                context_parts.push(built.text);
-                context_tables.insert("conversation history".to_owned(), built.table);
+                let tokens_used = self.count(&built.text, "count conversation history context")?;
+                remaining = remaining.saturating_sub(tokens_used);
+                if explainability.is_some() {
+                    let candidate_count = history
+                        .turns
+                        .iter()
+                        .filter(|turn| turn.role == ConversationRole::User)
+                        .take(if self.config.conversation_history_max_turns == 0 {
+                            usize::MAX
+                        } else {
+                            self.config.conversation_history_max_turns
+                        })
+                        .count();
+                    let selected_count = built.table.len();
+                    assembly.explainability.push(SectionExplainability {
+                        kind: ContextSectionKind::ConversationHistory,
+                        name: None,
+                        token_budget: self.config.max_context_tokens,
+                        tokens_used,
+                        candidate_count,
+                        selected_count,
+                        selected_record_ids: Vec::new(),
+                        truncated: selected_count < candidate_count,
+                        candidates: Vec::new(),
+                    });
+                }
+                assembly.parts.push(built.text);
+                assembly
+                    .tables
+                    .insert("conversation history".to_owned(), built.table);
             }
         }
 
         let community_tokens = proportion(remaining, self.config.community_prop);
-        if let Some(section) = self.build_community_context(&selected_entities, community_tokens)? {
-            context_parts.push(section.text);
-            context_tables.insert("reports".to_owned(), section.table);
-        }
-
         let local_proportion =
             (1.0 - self.config.community_prop - self.config.text_unit_prop).max(0.0);
         let local_tokens = proportion(remaining, local_proportion);
-        let local = self.build_local_context(&selected_entities, local_tokens)?;
-        if !local.text.trim().is_empty() {
-            context_parts.push(local.text);
-            context_tables.extend(local.tables);
-        }
-
         let source_tokens = proportion(remaining, self.config.text_unit_prop);
-        if let Some(section) = self.build_source_context(&selected_entities, source_tokens)? {
-            context_parts.push(section.text);
-            context_tables.insert("sources".to_owned(), section.table);
+        if let Some(session) = explainability {
+            self.emit_context_budget(
+                session,
+                conversation_history.is_some(),
+                community_tokens,
+                local_tokens,
+                source_tokens,
+            )
+            .await;
         }
 
-        let records = context_tables
+        if let Some(section) = self.build_community_context_capture(
+            selected_entities,
+            community_tokens,
+            explainability,
+        )? {
+            if let Some(capture) = section.explainability {
+                assembly.explainability.push(capture);
+            }
+            assembly.parts.push(section.text);
+            assembly.tables.insert("reports".to_owned(), section.table);
+        }
+
+        let local =
+            self.build_local_context_capture(selected_entities, local_tokens, explainability)?;
+        assembly.explainability.extend(local.explainability);
+        if !local.text.trim().is_empty() {
+            assembly.parts.push(local.text);
+            assembly.tables.extend(local.tables);
+        }
+
+        if let Some(section) =
+            self.build_source_context_capture(selected_entities, source_tokens, explainability)?
+        {
+            if let Some(capture) = section.explainability {
+                assembly.explainability.push(capture);
+            }
+            if !section.text.is_empty() {
+                assembly.parts.push(section.text);
+                assembly.tables.insert("sources".to_owned(), section.table);
+            }
+        }
+        Ok(assembly)
+    }
+
+    fn context_records(
+        &self,
+        context_tables: BTreeMap<String, ContextTable>,
+    ) -> Result<BTreeMap<String, DataFrame>> {
+        context_tables
             .into_iter()
             .map(|(name, table)| {
                 table
@@ -147,14 +416,7 @@ impl LocalContextBuilder {
                         Ok((name, dataframe))
                     })
             })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        Ok(LocalContextBuild {
-            context: QueryContext {
-                text: QueryContextText::Text(context_parts.join("\n\n")),
-                records: QueryContextRecords::Tables(records),
-            },
-            usage,
-        })
+            .collect()
     }
 
     async fn map_entities<'a>(
@@ -162,184 +424,552 @@ impl LocalContextBuilder {
         query: &str,
         include_entity_names: &[String],
         exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
     ) -> Result<(Vec<&'a Entity>, QueryUsageCategory)> {
-        let mut matched = if query.is_empty() {
-            let mut all = self.entities.iter().collect::<Vec<_>>();
-            all.sort_by(|left, right| {
-                right
-                    .rank
-                    .unwrap_or_default()
-                    .cmp(&left.rank.unwrap_or_default())
-            });
-            all.truncate(self.config.top_k_entities);
-            all
-        } else {
-            let response = self
-                .embedding_model
-                .embed(EmbeddingRequest::new(vec![query.to_owned()]))
-                .await
-                .map_err(|source| QueryError::QueryEmbedding {
-                    method: self.method,
-                    operation: "embed Local Search entity mapping query",
-                    model: self.embedding_model_id.clone(),
-                    source: Box::new(source),
-                })?;
-            let prompt_tokens = resolve_embedding_prompt_tokens(
-                response.usage.prompt_tokens,
-                query,
-                self.tokenizer.as_ref(),
-                self.method,
-                "count Local Search entity mapping embedding input tokens",
-                &self.embedding_model_id,
-            )?;
-            let vector = response
-                .into_embeddings()
-                .into_iter()
-                .next()
-                .ok_or_else(|| QueryError::QueryEmbedding {
-                    method: self.method,
-                    operation: "read Local Search query embedding",
-                    model: self.embedding_model_id.clone(),
-                    source: Box::new(graphloom_llm::LlmError::InvalidResponse {
-                        model_instance: self.embedding_model_id.clone(),
-                        operation: "embedding conversion",
-                        message: "provider returned no query embedding".to_owned(),
-                    }),
-                })?;
-            if vector.iter().any(|value| !value.is_finite()) {
-                return Err(QueryError::QueryEmbedding {
-                    method: self.method,
-                    operation: "validate Local Search query embedding",
-                    model: self.embedding_model_id.clone(),
-                    source: Box::new(graphloom_llm::LlmError::InvalidResponse {
-                        model_instance: self.embedding_model_id.clone(),
-                        operation: "embedding conversion",
-                        message: "provider returned a non-finite query embedding".to_owned(),
-                    }),
-                });
-            }
-            let ann_k = self.config.top_k_entities.checked_mul(2).ok_or_else(|| {
-                QueryError::InvalidQueryConfig {
-                    method: self.method,
-                    operation: "compute Local Search ANN oversampling",
-                    message: "top_k_entities * 2 exceeds usize".to_owned(),
-                }
-            })?;
-            let results = self
-                .vector_store
-                .similarity_search_by_vector(&self.vector_schema, &vector, ann_k, false)
-                .await
-                .map_err(|source| match source {
-                    source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
-                        method: self.method,
-                        operation: "search entity_description",
-                        index: self.vector_schema.index_name.clone(),
-                        source: Box::new(source),
-                    },
-                    source => QueryError::InvalidVectorIndex {
-                        method: self.method,
-                        operation: "search entity_description",
-                        index: self.vector_schema.index_name.clone(),
-                        source: Box::new(source),
-                    },
-                })?;
-            let mut entities = Vec::with_capacity(results.len());
-            for result in results {
-                let normalized = uuid::Uuid::parse_str(&result.document.id)
-                    .ok()
-                    .map(|value| value.simple().to_string());
-                let position = self
-                    .index
-                    .entity_by_id
-                    .get(result.document.id.as_str())
-                    .copied()
-                    .or_else(|| {
-                        normalized
-                            .as_deref()
-                            .and_then(|normalized_id| self.index.entity_by_id.get(normalized_id))
-                            .copied()
-                    });
-                if let Some(entity) = position.and_then(|index| self.entities.get(index)) {
-                    entities.push(entity);
-                } else {
-                    tracing::warn!(
-                        method = %self.method,
-                        entity_id = %result.document.id,
-                        "entity_description contains a stale entity id"
-                    );
-                }
-            }
+        if query.is_empty() {
             return Ok((
-                add_entity_filters(
-                    &self.entities,
-                    &self.index,
-                    entities,
+                self.map_entities_by_rank(
                     include_entity_names,
                     exclude_entity_names,
-                ),
-                QueryUsageCategory {
-                    llm_calls: 1,
-                    prompt_tokens,
-                    output_tokens: 0,
-                },
+                    explainability,
+                )
+                .await,
+                QueryUsageCategory::default(),
             ));
-        };
-        matched = add_entity_filters(
+        }
+        self.map_entities_by_embedding(
+            query,
+            include_entity_names,
+            exclude_entity_names,
+            explainability,
+        )
+        .await
+    }
+
+    async fn map_entities_by_rank<'a>(
+        &'a self,
+        include_entity_names: &[String],
+        exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Vec<&'a Entity> {
+        let mut candidates = self.entities.iter().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .rank
+                .unwrap_or_default()
+                .cmp(&left.rank.unwrap_or_default())
+        });
+        candidates.truncate(self.config.top_k_entities);
+        if let Some(session) = explainability {
+            let retrieved = candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entity)| {
+                    entity_candidate_with_rank(session, entity, index, None, None, false)
+                })
+                .collect();
+            self.emit_retrieved(session, retrieved).await;
+        }
+        let filter_candidates = explainability.map(|_| {
+            candidates
+                .iter()
+                .map(|entity| {
+                    let mut candidate = entity_candidate(entity);
+                    let excluded = exclude_entity_names
+                        .iter()
+                        .any(|name| name == &entity.title);
+                    candidate.selected = !excluded;
+                    candidate.reason = excluded.then_some(SelectionReason::ExplicitlyExcluded);
+                    candidate
+                })
+                .collect::<Vec<_>>()
+        });
+        let selected = add_entity_filters(
             &self.entities,
             &self.index,
-            matched,
+            candidates,
             include_entity_names,
             exclude_entity_names,
         );
-        Ok((matched, QueryUsageCategory::default()))
+        if let Some(session) = explainability {
+            self.emit_entity_filter_events(
+                session,
+                &selected,
+                include_entity_names,
+                filter_candidates.unwrap_or_default(),
+                None,
+            )
+            .await;
+        }
+        selected
     }
 
+    async fn map_entities_by_embedding<'a>(
+        &'a self,
+        query: &str,
+        include_entity_names: &[String],
+        exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<(Vec<&'a Entity>, QueryUsageCategory)> {
+        let (vector, prompt_tokens) = self.embed_mapping_query(query, explainability).await?;
+        let results = self
+            .retrieve_mapping_candidates(&vector, explainability)
+            .await?;
+        let (entities, filter_candidates) =
+            self.resolve_ann_entities(results, exclude_entity_names, explainability);
+        let selected = add_entity_filters(
+            &self.entities,
+            &self.index,
+            entities,
+            include_entity_names,
+            exclude_entity_names,
+        );
+        if let Some(session) = explainability {
+            self.emit_entity_filter_events(
+                session,
+                &selected,
+                include_entity_names,
+                filter_candidates.unwrap_or_default(),
+                Some(SelectionReason::AnnResult),
+            )
+            .await;
+        }
+        Ok((
+            selected,
+            QueryUsageCategory {
+                llm_calls: 1,
+                prompt_tokens,
+                output_tokens: 0,
+            },
+        ))
+    }
+
+    async fn embed_mapping_query(
+        &self,
+        query: &str,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<(Vec<f32>, usize)> {
+        if let Some(session) = explainability {
+            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
+            event.input = session.content(query);
+            session
+                .emit(
+                    session.spans().embedding(),
+                    Some(session.spans().mapping()),
+                    ExplainabilityEvent::EmbeddingStarted(event),
+                )
+                .await;
+        }
+        let response = self
+            .embedding_model
+            .embed(EmbeddingRequest::new(vec![query.to_owned()]))
+            .await
+            .map_err(|source| QueryError::QueryEmbedding {
+                method: self.method,
+                operation: "embed Local Search entity mapping query",
+                model: self.embedding_model_id.clone(),
+                source: Box::new(source),
+            })?;
+        let prompt_tokens = resolve_embedding_prompt_tokens(
+            response.usage.prompt_tokens,
+            query,
+            self.tokenizer.as_ref(),
+            self.method,
+            "count Local Search entity mapping embedding input tokens",
+            &self.embedding_model_id,
+        )?;
+        let vector = response
+            .into_embeddings()
+            .into_iter()
+            .next()
+            .ok_or_else(|| QueryError::QueryEmbedding {
+                method: self.method,
+                operation: "read Local Search query embedding",
+                model: self.embedding_model_id.clone(),
+                source: Box::new(graphloom_llm::LlmError::InvalidResponse {
+                    model_instance: self.embedding_model_id.clone(),
+                    operation: "embedding conversion",
+                    message: "provider returned no query embedding".to_owned(),
+                }),
+            })?;
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(QueryError::QueryEmbedding {
+                method: self.method,
+                operation: "validate Local Search query embedding",
+                model: self.embedding_model_id.clone(),
+                source: Box::new(graphloom_llm::LlmError::InvalidResponse {
+                    model_instance: self.embedding_model_id.clone(),
+                    operation: "embedding conversion",
+                    message: "provider returned a non-finite query embedding".to_owned(),
+                }),
+            });
+        }
+        if let Some(session) = explainability {
+            match (
+                session.usize_to_u64(prompt_tokens),
+                u32::try_from(vector.len()),
+            ) {
+                (Some(prompt_tokens), Ok(dimensions)) => {
+                    session
+                        .emit(
+                            session.spans().embedding(),
+                            Some(session.spans().mapping()),
+                            ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
+                                self.embedding_model_id.clone(),
+                                prompt_tokens,
+                                dimensions,
+                            )),
+                        )
+                        .await;
+                }
+                (_, Err(_)) => session.mark_sidecar_failure("embedding_dimension_conversion"),
+                (None, Ok(_)) => {}
+            }
+        }
+        Ok((vector, prompt_tokens))
+    }
+
+    async fn retrieve_mapping_candidates(
+        &self,
+        vector: &[f32],
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let ann_k = self.config.top_k_entities.checked_mul(2).ok_or_else(|| {
+            QueryError::InvalidQueryConfig {
+                method: self.method,
+                operation: "compute Local Search ANN oversampling",
+                message: "top_k_entities * 2 exceeds usize".to_owned(),
+            }
+        })?;
+        let results = self
+            .vector_store
+            .similarity_search_by_vector(&self.vector_schema, vector, ann_k, false)
+            .await
+            .map_err(|source| match source {
+                source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
+                    method: self.method,
+                    operation: "search entity_description",
+                    index: self.vector_schema.index_name.clone(),
+                    source: Box::new(source),
+                },
+                source => QueryError::InvalidVectorIndex {
+                    method: self.method,
+                    operation: "search entity_description",
+                    index: self.vector_schema.index_name.clone(),
+                    source: Box::new(source),
+                },
+            })?;
+        if let Some(session) = explainability {
+            let candidates = results
+                .iter()
+                .enumerate()
+                .filter_map(|(index, result)| {
+                    raw_ann_candidate(session, &result.document.id, result.score, index)
+                })
+                .collect();
+            self.emit_retrieved(session, candidates).await;
+        }
+        Ok(results)
+    }
+
+    fn resolve_ann_entities<'a>(
+        &'a self,
+        results: Vec<VectorSearchResult>,
+        exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> (Vec<&'a Entity>, Option<Vec<ExplainabilityCandidate>>) {
+        let mut entities = Vec::with_capacity(results.len());
+        let mut filter_candidates = explainability.map(|_| Vec::with_capacity(results.len()));
+        for (index, result) in results.into_iter().enumerate() {
+            let normalized = uuid::Uuid::parse_str(&result.document.id)
+                .ok()
+                .map(|value| value.simple().to_string());
+            let position = self
+                .index
+                .entity_by_id
+                .get(result.document.id.as_str())
+                .copied()
+                .or_else(|| {
+                    normalized
+                        .as_deref()
+                        .and_then(|normalized_id| self.index.entity_by_id.get(normalized_id))
+                        .copied()
+                });
+            if let Some(entity) = position.and_then(|position| self.entities.get(position)) {
+                entities.push(entity);
+                if let (Some(session), Some(candidates)) =
+                    (explainability, filter_candidates.as_mut())
+                {
+                    let excluded = exclude_entity_names
+                        .iter()
+                        .any(|name| name == &entity.title);
+                    if let Some(mut candidate) = entity_candidate_with_rank(
+                        session,
+                        entity,
+                        index,
+                        Some(result.score),
+                        Some(if excluded {
+                            SelectionReason::ExplicitlyExcluded
+                        } else {
+                            SelectionReason::AnnResult
+                        }),
+                        !excluded,
+                    ) {
+                        candidate.selected = !excluded;
+                        candidates.push(candidate);
+                    }
+                }
+            } else {
+                if let (Some(session), Some(candidates)) =
+                    (explainability, filter_candidates.as_mut())
+                    && let Some(mut candidate) =
+                        raw_ann_candidate(session, &result.document.id, result.score, index)
+                {
+                    candidate.selected = false;
+                    candidate.reason = Some(SelectionReason::StaleReference);
+                    candidates.push(candidate);
+                }
+                tracing::warn!(
+                    method = %self.method,
+                    entity_id = %result.document.id,
+                    "entity_description contains a stale entity id"
+                );
+            }
+        }
+        (entities, filter_candidates)
+    }
+
+    async fn emit_retrieved(
+        &self,
+        session: &QueryExplainabilitySession,
+        candidates: Vec<ExplainabilityCandidate>,
+    ) {
+        session
+            .emit_contract(
+                session.spans().retrieval(),
+                Some(session.spans().mapping()),
+                CandidatesRetrieved::try_new(ExplainabilityRecordType::Entity, candidates)
+                    .map(ExplainabilityEvent::CandidatesRetrieved),
+            )
+            .await;
+    }
+
+    async fn emit_entity_filter_events(
+        &self,
+        session: &QueryExplainabilitySession,
+        selected_entities: &[&Entity],
+        include_entity_names: &[String],
+        filter_candidates: Vec<ExplainabilityCandidate>,
+        selected_reason: Option<SelectionReason>,
+    ) {
+        let included = included_entities(&self.entities, &self.index, include_entity_names);
+        let mut filtered =
+            Vec::with_capacity(included.len().saturating_add(filter_candidates.len()));
+        filtered.extend(included.iter().map(|entity| {
+            let mut candidate = entity_candidate(entity);
+            candidate.selected = true;
+            candidate.reason = Some(SelectionReason::ExplicitlyIncluded);
+            candidate
+        }));
+        filtered.extend(filter_candidates);
+        session
+            .emit_contract(
+                session.spans().mapping(),
+                Some(session.spans().root()),
+                CandidatesFiltered::try_new(ExplainabilityRecordType::Entity, filtered)
+                    .map(ExplainabilityEvent::CandidatesFiltered),
+            )
+            .await;
+
+        let selected = selected_entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| {
+                let mut candidate = entity_candidate(entity);
+                candidate.selected = true;
+                candidate.reason = if index < included.len() {
+                    Some(SelectionReason::ExplicitlyIncluded)
+                } else {
+                    selected_reason
+                };
+                candidate
+            })
+            .collect();
+        session
+            .emit_contract(
+                session.spans().mapping(),
+                Some(session.spans().root()),
+                EntitiesSelected::try_new(selected).map(ExplainabilityEvent::EntitiesSelected),
+            )
+            .await;
+    }
+
+    async fn emit_context_budget(
+        &self,
+        session: &QueryExplainabilitySession,
+        has_conversation_history: bool,
+        community_tokens: usize,
+        local_tokens: usize,
+        source_tokens: usize,
+    ) {
+        let mut raw_sections = Vec::with_capacity(4);
+        if has_conversation_history {
+            raw_sections.push((
+                ContextSectionKind::ConversationHistory,
+                self.config.max_context_tokens,
+            ));
+        }
+        raw_sections.extend([
+            (ContextSectionKind::CommunityReports, community_tokens),
+            (ContextSectionKind::LocalGraph, local_tokens),
+            (ContextSectionKind::Sources, source_tokens),
+        ]);
+        let Some(total_token_budget) = session.usize_to_u64(self.config.max_context_tokens) else {
+            return;
+        };
+        let mut sections = Vec::with_capacity(raw_sections.len());
+        for (kind, budget) in raw_sections {
+            let Some(budget) = session.usize_to_u64(budget) else {
+                return;
+            };
+            sections.push(ContextSectionBudget::new(kind, budget));
+        }
+        session
+            .emit(
+                session.spans().context(),
+                Some(session.spans().root()),
+                ExplainabilityEvent::ContextBudgetAllocated(ContextBudgetAllocated::new(
+                    total_token_budget,
+                    sections,
+                )),
+            )
+            .await;
+    }
+
+    async fn emit_context_decisions(
+        &self,
+        session: &QueryExplainabilitySession,
+        sections: &[SectionExplainability],
+        context_text: &str,
+    ) {
+        let candidates = |kind| {
+            sections
+                .iter()
+                .filter(|section| section.kind == kind)
+                .flat_map(|section| section.candidates.iter().cloned())
+                .collect::<Vec<_>>()
+        };
+        session
+            .emit_contract(
+                session.spans().graph_expansion(),
+                Some(session.spans().root()),
+                CommunityReportsSelected::try_new(candidates(ContextSectionKind::CommunityReports))
+                    .map(ExplainabilityEvent::CommunityReportsSelected),
+            )
+            .await;
+        session
+            .emit_contract(
+                session.spans().graph_expansion(),
+                Some(session.spans().root()),
+                RelationshipsSelected::try_new(candidates(ContextSectionKind::Relationships))
+                    .map(ExplainabilityEvent::RelationshipsSelected),
+            )
+            .await;
+        session
+            .emit_contract(
+                session.spans().graph_expansion(),
+                Some(session.spans().root()),
+                CovariatesSelected::try_new(candidates(ContextSectionKind::Covariates))
+                    .map(ExplainabilityEvent::CovariatesSelected),
+            )
+            .await;
+        session
+            .emit_contract(
+                session.spans().graph_expansion(),
+                Some(session.spans().root()),
+                TextUnitsSelected::try_new(candidates(ContextSectionKind::Sources))
+                    .map(ExplainabilityEvent::TextUnitsSelected),
+            )
+            .await;
+
+        for captured in sections {
+            let Some(token_budget) = session.usize_to_u64(captured.token_budget) else {
+                continue;
+            };
+            let Some(tokens_used) = session.usize_to_u64(captured.tokens_used) else {
+                continue;
+            };
+            let Some(candidate_count) = session.usize_to_u64(captured.candidate_count) else {
+                continue;
+            };
+            let Some(selected_count) = session.usize_to_u64(captured.selected_count) else {
+                continue;
+            };
+            let mut section = ExplainabilityContextSection::new(captured.kind, token_budget);
+            section.name = captured.name.clone();
+            section.tokens_used = tokens_used;
+            section.candidate_count = candidate_count;
+            section.selected_count = selected_count;
+            section.truncated = captured.truncated;
+            section.selected_record_ids = captured.selected_record_ids.clone();
+            session
+                .emit(
+                    session.spans().context(),
+                    Some(session.spans().root()),
+                    ExplainabilityEvent::ContextSectionBuilt(ContextSectionBuilt::new(section)),
+                )
+                .await;
+        }
+
+        match self.tokenizer.count(context_text) {
+            Ok(tokens) => {
+                if let Some(tokens) = session.usize_to_u64(tokens) {
+                    let mut event = ContextCompleted::new(tokens);
+                    event.context = session.content(context_text);
+                    session
+                        .emit(
+                            session.spans().context(),
+                            Some(session.spans().root()),
+                            ExplainabilityEvent::ContextCompleted(event),
+                        )
+                        .await;
+                }
+            }
+            Err(_) => session.mark_sidecar_failure("context_token_count"),
+        }
+    }
+
+    #[cfg(test)]
     fn build_community_context(
         &self,
         selected_entities: &[&Entity],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
-        if selected_entities.is_empty() {
+        self.build_community_context_capture(selected_entities, max_tokens, None)
+    }
+
+    fn build_community_context_capture(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Option<Section>> {
+        if selected_entities.is_empty() || self.reports.is_empty() {
             return Ok(None);
         }
-        if self.reports.is_empty() {
-            return Ok(None);
-        }
-        let mut matches = Vec::<(String, usize)>::new();
-        for entity in selected_entities {
-            for community_id in &entity.community_ids {
-                if let Some((_, count)) = matches
-                    .iter_mut()
-                    .find(|(candidate, _)| candidate == community_id)
-                {
-                    *count = count.saturating_add(1);
-                } else {
-                    matches.push((community_id.clone(), 1));
-                }
-            }
-        }
+        let matches = community_matches(selected_entities);
         if matches.is_empty() {
-            return Ok(Some(Section {
-                text: "[]".to_owned(),
-                table: ContextTable::new(["id", "title", "content"], Vec::new()),
-            }));
+            let candidates = explainability.map(|_| Vec::new());
+            return Ok(Some(empty_community_section(max_tokens, candidates)));
         }
-        let mut selected = matches
-            .into_iter()
-            .filter_map(|(community_id, count)| {
-                self.index
-                    .report_by_community_id
-                    .get(community_id.as_str())
-                    .and_then(|index| self.reports.get(*index))
-                    .filter(|report| report.rank.is_some_and(|rank| rank >= 0.0))
-                    .map(|report| (report, count))
-            })
-            .collect::<Vec<_>>();
+        let mut selection = self.select_community_reports(matches, explainability.is_some());
+        let non_token_candidates = selection.non_token_candidates.take();
+        let selected = &mut selection.selected;
         if selected.is_empty() {
-            return Ok(Some(Section {
-                text: "[]".to_owned(),
-                table: ContextTable::new(["id", "title", "content"], Vec::new()),
-            }));
+            return Ok(Some(empty_community_section(
+                max_tokens,
+                non_token_candidates,
+            )));
         }
         selected.sort_by(|(left, left_matches), (right, right_matches)| {
             right_matches.cmp(left_matches).then_with(|| {
@@ -349,8 +979,14 @@ impl LocalContextBuilder {
                     .total_cmp(&left.rank.unwrap_or_default())
             })
         });
+        let candidate_reports = explainability.map(|_| {
+            selected
+                .iter()
+                .map(|(report, _)| *report)
+                .collect::<Vec<_>>()
+        });
         let candidates = selected
-            .into_iter()
+            .iter()
             .map(|(report, _)| {
                 vec![
                     report.short_id.clone(),
@@ -359,40 +995,155 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        let table = self.fit_report_rows(
+        let mut fitted = self.fit_report_rows(
             ContextTable::new(["id", "title", "content"], Vec::new()),
             candidates,
             "Reports",
             max_tokens,
             "build Local Reports context",
         )?;
-        if table.is_empty() {
+        if fitted.table.is_empty() {
+            if explainability.is_some() {
+                fitted.tokens_used = 0;
+            }
+            let capture = explainability.map(|_| {
+                build_record_section_explainability(
+                    SectionExplainabilitySpec {
+                        kind: ContextSectionKind::CommunityReports,
+                        name: None,
+                        token_budget: max_tokens,
+                        selected_reason: SelectionReason::CommunityMembership,
+                    },
+                    &fitted,
+                    candidate_reports.unwrap_or_default(),
+                    non_token_candidates.unwrap_or_default(),
+                    community_report_candidate,
+                )
+            });
             return Ok(Some(Section {
                 text: "[]".to_owned(),
-                table,
+                table: fitted.table,
+                explainability: capture,
             }));
         }
+        let text = fitted.table.render_csv_section(
+            "Reports",
+            self.method,
+            "render Local Reports context",
+        )?;
+        if let Some(session) = explainability {
+            fitted.tokens_used = self.count_for_explainability(session, &text, fitted.tokens_used);
+        }
+        let capture = explainability.map(|_| {
+            build_record_section_explainability(
+                SectionExplainabilitySpec {
+                    kind: ContextSectionKind::CommunityReports,
+                    name: None,
+                    token_budget: max_tokens,
+                    selected_reason: SelectionReason::CommunityMembership,
+                },
+                &fitted,
+                candidate_reports.unwrap_or_default(),
+                non_token_candidates.unwrap_or_default(),
+                community_report_candidate,
+            )
+        });
         Ok(Some(Section {
-            text: table.render_csv_section(
-                "Reports",
-                self.method,
-                "render Local Reports context",
-            )?,
-            table,
+            text,
+            table: fitted.table,
+            explainability: capture,
         }))
     }
 
+    fn select_community_reports(
+        &self,
+        matches: Vec<(String, usize)>,
+        capture_exclusions: bool,
+    ) -> CommunitySelection<'_> {
+        let mut selected = Vec::new();
+        let mut non_token_candidates = capture_exclusions.then(Vec::new);
+        for (community_id, count) in matches {
+            let Some(report) = self
+                .index
+                .report_by_community_id
+                .get(community_id.as_str())
+                .and_then(|index| self.reports.get(*index))
+            else {
+                if let Some(candidates) = non_token_candidates.as_mut() {
+                    let mut candidate = ExplainabilityCandidate::new(
+                        community_id,
+                        ExplainabilityRecordType::CommunityReport,
+                    );
+                    candidate.reason = Some(SelectionReason::MissingRecord);
+                    candidates.push(candidate);
+                }
+                continue;
+            };
+            if report.rank.is_some_and(|rank| rank >= 0.0) {
+                selected.push((report, count));
+            } else if let Some(filtered) = non_token_candidates.as_mut() {
+                let mut candidate = community_report_candidate(report);
+                candidate.reason = Some(SelectionReason::RankThreshold);
+                filtered.push(candidate);
+            }
+        }
+        CommunitySelection {
+            selected,
+            non_token_candidates,
+        }
+    }
+
+    #[cfg(test)]
     fn build_local_context(
         &self,
         selected_entities: &[&Entity],
         max_tokens: usize,
     ) -> Result<LocalSections> {
+        self.build_local_context_capture(selected_entities, max_tokens, None)
+    }
+
+    fn build_local_context_capture(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<LocalSections> {
         if selected_entities.is_empty() {
             return Ok(LocalSections {
                 text: String::new(),
                 tables: BTreeMap::new(),
+                explainability: Vec::new(),
             });
         }
+        let entity = self.build_entity_section(selected_entities, max_tokens, explainability)?;
+        let mut expansion = self.expand_local_graph(
+            selected_entities,
+            max_tokens,
+            entity.tokens_used,
+            explainability,
+        )?;
+        let mut text = vec![entity.text];
+        text.append(&mut expansion.text);
+        expansion.tables.insert("entities".to_owned(), entity.table);
+        let mut section_explainability = entity.explainability.into_iter().collect::<Vec<_>>();
+        section_explainability.append(&mut expansion.explainability);
+        Ok(LocalSections {
+            text: text
+                .into_iter()
+                .filter(|section| !section.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            tables: expansion.tables,
+            explainability: section_explainability,
+        })
+    }
+
+    fn build_entity_section(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<EntitySection> {
         let entity_candidates = selected_entities
             .iter()
             .map(|entity| {
@@ -404,7 +1155,7 @@ impl LocalContextBuilder {
                 ]
             })
             .collect::<Vec<_>>();
-        let entity_table = self.fit_delimited_rows(
+        let fitted_entities = self.fit_delimited_rows(
             ContextTable::new(
                 ["id", "entity", "description", "number of relationships"],
                 Vec::new(),
@@ -414,21 +1165,55 @@ impl LocalContextBuilder {
             max_tokens,
             "build Local Entities context",
         )?;
-        let entity_text = entity_table.render_delimited_section(
+        let entity_text = fitted_entities.table.render_delimited_section(
             "Entities",
             self.method,
             "render Local Entities context",
         )?;
         let entity_tokens = self.count(&entity_text, "count Local Entities context")?;
+        let capture = explainability.map(|_| SectionExplainability {
+            kind: ContextSectionKind::Entities,
+            name: None,
+            token_budget: max_tokens,
+            tokens_used: entity_tokens,
+            candidate_count: fitted_entities.candidate_count,
+            selected_count: fitted_entities.selected_count,
+            selected_record_ids: selected_entities
+                .iter()
+                .take(fitted_entities.selected_count)
+                .map(|entity| entity.id.clone())
+                .collect(),
+            truncated: fitted_entities.selected_count < fitted_entities.candidate_count,
+            candidates: Vec::new(),
+        });
+        Ok(EntitySection {
+            text: entity_text,
+            table: fitted_entities.table,
+            tokens_used: entity_tokens,
+            explainability: capture,
+        })
+    }
 
-        let mut accepted_text = Vec::new();
-        let mut accepted_tables = BTreeMap::new();
+    fn expand_local_graph(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        entity_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<LocalExpansionAttempt> {
+        let mut accepted = LocalExpansionAttempt {
+            text: Vec::new(),
+            tables: BTreeMap::new(),
+            tokens_used: entity_tokens,
+            explainability: Vec::new(),
+        };
         let mut learned_links = BTreeMap::new();
         let mut relationship_positions = BTreeSet::new();
         let mut covariate_positions = Vec::new();
-        for end in 1..=selected_entities.len() {
-            let current_entities = &selected_entities[..end];
-            let added_entity = selected_entities[end - 1];
+        for (index, added_entity) in selected_entities.iter().copied().enumerate() {
+            let Some(current_entities) = selected_entities.get(..=index) else {
+                break;
+            };
             relationship_positions.extend(
                 self.index
                     .relationships_by_entity
@@ -445,73 +1230,129 @@ impl LocalContextBuilder {
                     .flatten()
                     .copied(),
             );
-            let relationship = self.build_relationship_context_from_positions(
+            let attempt = self.build_local_expansion_attempt(
                 current_entities,
                 &relationship_positions,
+                &covariate_positions,
                 max_tokens,
+                entity_tokens,
                 &mut learned_links,
+                explainability,
             )?;
-            let mut current_text = Vec::new();
-            let mut current_tables = BTreeMap::new();
-            let mut total_tokens = entity_tokens;
-            if let Some(section) = relationship {
-                total_tokens = total_tokens.saturating_add(
-                    self.count(&section.text, "count Local Relationships context")?,
-                );
-                current_text.push(section.text);
-                current_tables.insert("relationships".to_owned(), section.table);
-            } else {
-                current_tables.insert(
-                    "relationships".to_owned(),
-                    ContextTable::new(
-                        ["id", "source", "target", "description", "weight"],
-                        Vec::new(),
-                    ),
-                );
-            }
-            for (name, group_positions) in &self.index.covariate_groups {
-                let section = self.build_covariate_context_from_positions(
-                    name,
-                    group_positions,
-                    &covariate_positions,
-                    max_tokens,
-                )?;
-                if let Some(section) = section {
-                    total_tokens = total_tokens.saturating_add(
-                        self.count(&section.text, "count Local covariate context")?,
-                    );
-                    current_text.push(section.text);
-                    current_tables.insert(name.to_lowercase(), section.table);
-                } else {
-                    current_tables.insert(
-                        name.to_lowercase(),
-                        ContextTable::new(covariate_columns(), Vec::new()),
+            if attempt.tokens_used > max_tokens {
+                if explainability.is_some() {
+                    accepted.explainability = rollback_section_explainability(
+                        attempt.explainability,
+                        &accepted.explainability,
                     );
                 }
-            }
-            if total_tokens > max_tokens {
                 tracing::warn!(
                     method = %self.method,
                     "Local entity expansion reached the token limit; reverting the current entity"
                 );
                 break;
             }
-            accepted_text = current_text;
-            accepted_tables = current_tables;
+            accepted = attempt;
         }
-        let mut text = vec![entity_text];
-        text.extend(accepted_text);
-        accepted_tables.insert("entities".to_owned(), entity_table);
-        Ok(LocalSections {
-            text: text
-                .into_iter()
-                .filter(|section| !section.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            tables: accepted_tables,
-        })
+        Ok(accepted)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the arguments are distinct immutable views of one progressive graph-expansion \
+                  step"
+    )]
+    fn build_local_expansion_attempt(
+        &self,
+        current_entities: &[&Entity],
+        relationship_positions: &BTreeSet<usize>,
+        covariate_positions: &[usize],
+        max_tokens: usize,
+        entity_tokens: usize,
+        learned_links: &mut BTreeMap<String, usize>,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<LocalExpansionAttempt> {
+        let relationship = self.build_relationship_context_from_positions_capture(
+            current_entities,
+            relationship_positions,
+            max_tokens,
+            learned_links,
+            explainability,
+        )?;
+        let mut attempt = LocalExpansionAttempt {
+            text: Vec::new(),
+            tables: BTreeMap::new(),
+            tokens_used: entity_tokens,
+            explainability: Vec::new(),
+        };
+        if let Some(section) = relationship {
+            let section_tokens = if section.text.is_empty() {
+                0
+            } else {
+                self.count(&section.text, "count Local Relationships context")?
+            };
+            attempt.tokens_used = attempt.tokens_used.saturating_add(section_tokens);
+            if let Some(mut capture) = section.explainability {
+                capture.tokens_used = section_tokens;
+                attempt.explainability.push(capture);
+            }
+            if !section.text.is_empty() {
+                attempt.text.push(section.text);
+            }
+            attempt
+                .tables
+                .insert("relationships".to_owned(), section.table);
+        } else {
+            if explainability.is_some() {
+                attempt.explainability.push(empty_section_explainability(
+                    ContextSectionKind::Relationships,
+                    None,
+                    max_tokens,
+                ));
+            }
+            attempt.tables.insert(
+                "relationships".to_owned(),
+                ContextTable::new(
+                    ["id", "source", "target", "description", "weight"],
+                    Vec::new(),
+                ),
+            );
+        }
+        for (name, group_positions) in &self.index.covariate_groups {
+            let section = self.build_covariate_context_from_positions_capture(
+                name,
+                group_positions,
+                covariate_positions,
+                max_tokens,
+                explainability,
+            )?;
+            if let Some(section) = section {
+                let section_tokens = self.count(&section.text, "count Local covariate context")?;
+                attempt.tokens_used = attempt.tokens_used.saturating_add(section_tokens);
+                if let Some(mut capture) = section.explainability {
+                    capture.tokens_used = section_tokens;
+                    attempt.explainability.push(capture);
+                }
+                attempt.text.push(section.text);
+                attempt.tables.insert(name.to_lowercase(), section.table);
+            } else {
+                if explainability.is_some() {
+                    attempt.explainability.push(empty_section_explainability(
+                        ContextSectionKind::Covariates,
+                        Some(name.clone()),
+                        max_tokens,
+                    ));
+                }
+                attempt.tables.insert(
+                    name.to_lowercase(),
+                    ContextTable::new(covariate_columns(), Vec::new()),
+                );
+            }
+        }
+        Ok(attempt)
+    }
+
+    #[cfg(test)]
     fn build_relationship_context_from_positions(
         &self,
         selected_entities: &[&Entity],
@@ -519,23 +1360,57 @@ impl LocalContextBuilder {
         max_tokens: usize,
         learned_links: &mut BTreeMap<String, usize>,
     ) -> Result<Option<Section>> {
-        let selected = filter_relationships(
+        self.build_relationship_context_from_positions_capture(
+            selected_entities,
+            relationship_positions,
+            max_tokens,
+            learned_links,
+            None,
+        )
+    }
+
+    fn build_relationship_context_from_positions_capture(
+        &self,
+        selected_entities: &[&Entity],
+        relationship_positions: &BTreeSet<usize>,
+        max_tokens: usize,
+        learned_links: &mut BTreeMap<String, usize>,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Option<Section>> {
+        let selection = filter_relationships_capture(
             selected_entities,
             &self.relationships,
             relationship_positions,
             self.config.top_k_relationships,
             learned_links,
+            explainability.is_some(),
         );
-        if selected.is_empty() {
+        if selection.selected.is_empty() && selection.rank_filtered.is_empty() {
             return Ok(None);
         }
-        let include_links = selected.first().is_some_and(|value| value.links.is_some());
+        if selection.selected.is_empty() {
+            return Ok(
+                explainability.map(|_| rank_filtered_relationship_section(&selection, max_tokens))
+            );
+        }
+        let include_links = selection
+            .selected
+            .first()
+            .is_some_and(|value| value.links.is_some());
         let mut columns = vec!["id", "source", "target", "description", "weight"];
         if include_links {
             columns.push("links");
         }
-        let candidates = selected
-            .into_iter()
+        let selected_relationships = explainability.map(|_| {
+            selection
+                .selected
+                .iter()
+                .map(|ranked| ranked.relationship)
+                .collect::<Vec<_>>()
+        });
+        let candidates = selection
+            .selected
+            .iter()
             .map(|ranked| {
                 let relationship = ranked.relationship;
                 let mut row = vec![
@@ -555,23 +1430,50 @@ impl LocalContextBuilder {
                 row
             })
             .collect::<Vec<_>>();
-        let table = self.fit_delimited_rows(
+        let fitted = self.fit_delimited_rows(
             ContextTable::new(columns, Vec::new()),
             candidates,
             "Relationships",
             max_tokens,
             "build Local Relationships context",
         )?;
+        let text = fitted.table.render_delimited_section(
+            "Relationships",
+            self.method,
+            "render Local Relationships context",
+        )?;
+        let capture = explainability.map(|_| {
+            let rank_filtered = selection
+                .rank_filtered
+                .iter()
+                .map(|ranked| {
+                    let mut candidate = relationship_candidate(ranked.relationship);
+                    candidate.selected = false;
+                    candidate.reason = Some(SelectionReason::RankThreshold);
+                    candidate
+                })
+                .collect();
+            build_record_section_explainability(
+                SectionExplainabilitySpec {
+                    kind: ContextSectionKind::Relationships,
+                    name: None,
+                    token_budget: max_tokens,
+                    selected_reason: SelectionReason::GraphExpansion,
+                },
+                &fitted,
+                selected_relationships.unwrap_or_default(),
+                rank_filtered,
+                relationship_candidate,
+            )
+        });
         Ok(Some(Section {
-            text: table.render_delimited_section(
-                "Relationships",
-                self.method,
-                "render Local Relationships context",
-            )?,
-            table,
+            text,
+            table: fitted.table,
+            explainability: capture,
         }))
     }
 
+    #[cfg(test)]
     fn build_covariate_context_from_positions(
         &self,
         name: &str,
@@ -579,10 +1481,31 @@ impl LocalContextBuilder {
         positions: &[usize],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
-        let candidates = positions
+        self.build_covariate_context_from_positions_capture(
+            name,
+            group_positions,
+            positions,
+            max_tokens,
+            None,
+        )
+    }
+
+    fn build_covariate_context_from_positions_capture(
+        &self,
+        name: &str,
+        group_positions: &HashSet<usize>,
+        positions: &[usize],
+        max_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Option<Section>> {
+        let selected = positions
             .iter()
             .filter(|index| group_positions.contains(index))
             .filter_map(|index| self.covariates.get(*index))
+            .collect::<Vec<_>>();
+        let selected_covariates = explainability.map(|_| selected.clone());
+        let candidates = selected
+            .iter()
             .map(|covariate| {
                 vec![
                     covariate.short_id.clone().unwrap_or_default(),
@@ -598,33 +1521,120 @@ impl LocalContextBuilder {
         if group_positions.is_empty() {
             return Ok(None);
         }
-        let table = self.fit_delimited_rows(
+        let fitted = self.fit_delimited_rows(
             ContextTable::new(covariate_columns(), Vec::new()),
             candidates,
             name,
             max_tokens,
             "build Local covariate context",
         )?;
+        let text = fitted.table.render_delimited_section(
+            name,
+            self.method,
+            "render Local covariate context",
+        )?;
+        let capture = explainability.map(|_| {
+            build_record_section_explainability(
+                SectionExplainabilitySpec {
+                    kind: ContextSectionKind::Covariates,
+                    name: Some(name.to_owned()),
+                    token_budget: max_tokens,
+                    selected_reason: SelectionReason::GraphExpansion,
+                },
+                &fitted,
+                selected_covariates.unwrap_or_default(),
+                Vec::new(),
+                covariate_candidate,
+            )
+        });
         Ok(Some(Section {
-            text: table.render_delimited_section(
-                name,
-                self.method,
-                "render Local covariate context",
-            )?,
-            table,
+            text,
+            table: fitted.table,
+            explainability: capture,
         }))
     }
 
+    #[cfg(test)]
     fn build_source_context(
         &self,
         selected_entities: &[&Entity],
         max_tokens: usize,
     ) -> Result<Option<Section>> {
-        if selected_entities.is_empty() || self.text_units.is_empty() {
+        self.build_source_context_capture(selected_entities, max_tokens, None)
+    }
+
+    fn build_source_context_capture(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Option<Section>> {
+        if selected_entities.is_empty() {
             return Ok(None);
         }
+        let selection = self.select_source_text_units(selected_entities, explainability.is_some());
+        if selection.ranked.is_empty() {
+            return Ok(selection
+                .missing
+                .filter(|candidates| !candidates.is_empty())
+                .map(|candidates| missing_source_section(candidates, max_tokens)));
+        }
+        let selected_text_units = explainability.map(|_| {
+            selection
+                .ranked
+                .iter()
+                .map(|(unit, _, _)| *unit)
+                .collect::<Vec<_>>()
+        });
+        let candidates = selection
+            .ranked
+            .iter()
+            .map(|(unit, _, _)| vec![unit.short_id.clone(), unit.text.clone()])
+            .collect::<Vec<_>>();
+        let mut fitted = self.fit_delimited_rows(
+            ContextTable::new(["id", "text"], Vec::new()),
+            candidates,
+            "Sources",
+            max_tokens,
+            "build Local Sources context",
+        )?;
+        let text = fitted.table.render_delimited_section(
+            "Sources",
+            self.method,
+            "render Local Sources context",
+        )?;
+        if let Some(session) = explainability {
+            fitted.tokens_used = self.count_for_explainability(session, &text, fitted.tokens_used);
+        }
+        let capture = explainability.map(|_| {
+            build_record_section_explainability(
+                SectionExplainabilitySpec {
+                    kind: ContextSectionKind::Sources,
+                    name: None,
+                    token_budget: max_tokens,
+                    selected_reason: SelectionReason::SourceReference,
+                },
+                &fitted,
+                selected_text_units.unwrap_or_default(),
+                selection.missing.unwrap_or_default(),
+                text_unit_candidate,
+            )
+        });
+        Ok(Some(Section {
+            text,
+            table: fitted.table,
+            explainability: capture,
+        }))
+    }
+
+    fn select_source_text_units<'a>(
+        &'a self,
+        selected_entities: &[&Entity],
+        capture_missing: bool,
+    ) -> SourceSelection<'a> {
         let mut seen = BTreeSet::new();
         let mut ranked = Vec::<(&TextUnit, usize, usize)>::new();
+        let mut missing = capture_missing.then(Vec::new);
         for (entity_order, entity) in selected_entities.iter().enumerate() {
             let entity_relationships = self
                 .index
@@ -644,6 +1654,15 @@ impl LocalContextBuilder {
                     .get(text_unit_id.as_str())
                     .and_then(|index| self.text_units.get(*index))
                 else {
+                    if let Some(candidates) = missing.as_mut() {
+                        let mut candidate = ExplainabilityCandidate::new(
+                            text_unit_id.clone(),
+                            ExplainabilityRecordType::TextUnit,
+                        );
+                        candidate.selected = false;
+                        candidate.reason = Some(SelectionReason::MissingRecord);
+                        candidates.push(candidate);
+                    }
                     tracing::warn!(
                         method = %self.method,
                         text_unit_id,
@@ -665,28 +1684,7 @@ impl LocalContextBuilder {
                     .then_with(|| right_count.cmp(left_count))
             },
         );
-        if ranked.is_empty() {
-            return Ok(None);
-        }
-        let candidates = ranked
-            .into_iter()
-            .map(|(unit, _, _)| vec![unit.short_id.clone(), unit.text.clone()])
-            .collect::<Vec<_>>();
-        let table = self.fit_delimited_rows(
-            ContextTable::new(["id", "text"], Vec::new()),
-            candidates,
-            "Sources",
-            max_tokens,
-            "build Local Sources context",
-        )?;
-        Ok(Some(Section {
-            text: table.render_delimited_section(
-                "Sources",
-                self.method,
-                "render Local Sources context",
-            )?,
-            table,
-        }))
+        SourceSelection { ranked, missing }
     }
 
     fn fit_delimited_rows(
@@ -696,9 +1694,10 @@ impl LocalContextBuilder {
         context_name: &str,
         max_tokens: usize,
         operation: &'static str,
-    ) -> Result<ContextTable> {
+    ) -> Result<FittedTable> {
         let header = table.render_delimited_header(context_name, self.method, operation)?;
         let mut tokens = self.count(&header, operation)?;
+        let candidate_count = candidates.len();
         for row in candidates {
             let row_text = table.render_delimited_row(&row, self.method, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
@@ -708,7 +1707,13 @@ impl LocalContextBuilder {
             tokens = tokens.saturating_add(row_tokens);
             table.push(row);
         }
-        Ok(table)
+        let selected_count = table.len();
+        Ok(FittedTable {
+            table,
+            tokens_used: tokens,
+            candidate_count,
+            selected_count,
+        })
     }
 
     fn fit_report_rows(
@@ -718,9 +1723,10 @@ impl LocalContextBuilder {
         context_name: &str,
         max_tokens: usize,
         operation: &'static str,
-    ) -> Result<ContextTable> {
+    ) -> Result<FittedTable> {
         let header = table.render_delimited_header(context_name, self.method, operation)?;
         let mut tokens = self.count(&header, operation)?;
+        let candidate_count = candidates.len();
         for row in candidates {
             let row_text = table.render_delimited_row(&row, self.method, operation)?;
             let row_tokens = self.count(&row_text, operation)?;
@@ -730,7 +1736,13 @@ impl LocalContextBuilder {
             tokens = tokens.saturating_add(row_tokens);
             table.push(row);
         }
-        Ok(table)
+        let selected_count = table.len();
+        Ok(FittedTable {
+            table,
+            tokens_used: tokens,
+            candidate_count,
+            selected_count,
+        })
     }
 
     fn count(&self, text: &str, operation: &'static str) -> Result<usize> {
@@ -741,6 +1753,20 @@ impl LocalContextBuilder {
                 operation,
                 message: source.to_string(),
             })
+    }
+
+    fn count_for_explainability(
+        &self,
+        session: &QueryExplainabilitySession,
+        text: &str,
+        reliable_fallback: usize,
+    ) -> usize {
+        if let Ok(tokens) = self.tokenizer.count(text) {
+            tokens
+        } else {
+            session.mark_sidecar_failure("section_token_count");
+            reliable_fallback
+        }
     }
 }
 
@@ -774,6 +1800,286 @@ fn add_entity_filters<'a>(
     result
 }
 
+fn included_entities<'a>(
+    all_entities: &'a [Entity],
+    index: &QueryDataIndex,
+    include_entity_names: &[String],
+) -> Vec<&'a Entity> {
+    include_entity_names
+        .iter()
+        .flat_map(|name| index.entity_by_title.get(name).into_iter().flatten())
+        .filter_map(|position| all_entities.get(*position))
+        .collect()
+}
+
+fn entity_candidate(entity: &Entity) -> ExplainabilityCandidate {
+    let mut candidate =
+        ExplainabilityCandidate::new(entity.id.clone(), ExplainabilityRecordType::Entity);
+    candidate.short_id.clone_from(&entity.short_id);
+    candidate.title = Some(entity.title.clone());
+    candidate
+}
+
+fn raw_ann_candidate(
+    session: &QueryExplainabilitySession,
+    id: &str,
+    score: f32,
+    index: usize,
+) -> Option<ExplainabilityCandidate> {
+    let rank = u32::try_from(index.saturating_add(1)).map_or_else(
+        |_| {
+            session.mark_sidecar_failure("candidate_rank_conversion");
+            None
+        },
+        Some,
+    )?;
+    let score = ExplainabilityScore::try_from(f64::from(score)).map_or_else(
+        |_| {
+            session.mark_sidecar_failure("candidate_score");
+            None
+        },
+        Some,
+    )?;
+    let mut candidate =
+        ExplainabilityCandidate::new(id.to_owned(), ExplainabilityRecordType::Entity);
+    candidate.score = Some(score);
+    candidate.rank = Some(rank);
+    candidate.reason = Some(SelectionReason::AnnResult);
+    Some(candidate)
+}
+
+fn entity_candidate_with_rank(
+    session: &QueryExplainabilitySession,
+    entity: &Entity,
+    index: usize,
+    score: Option<f32>,
+    reason: Option<SelectionReason>,
+    selected: bool,
+) -> Option<ExplainabilityCandidate> {
+    let rank = u32::try_from(index.saturating_add(1)).map_or_else(
+        |_| {
+            session.mark_sidecar_failure("candidate_rank_conversion");
+            None
+        },
+        Some,
+    )?;
+    let score = match score {
+        Some(score) => Some(ExplainabilityScore::try_from(f64::from(score)).map_or_else(
+            |_| {
+                session.mark_sidecar_failure("candidate_score");
+                None
+            },
+            Some,
+        )?),
+        None => None,
+    };
+    let mut candidate = entity_candidate(entity);
+    candidate.score = score;
+    candidate.rank = Some(rank);
+    candidate.selected = selected;
+    candidate.reason = reason;
+    Some(candidate)
+}
+
+fn community_report_candidate(report: &CommunityReport) -> ExplainabilityCandidate {
+    let mut candidate =
+        ExplainabilityCandidate::new(report.id.clone(), ExplainabilityRecordType::CommunityReport);
+    candidate.short_id = Some(report.short_id.clone());
+    candidate.title = Some(report.title.clone());
+    candidate
+}
+
+fn relationship_candidate(relationship: &Relationship) -> ExplainabilityCandidate {
+    let mut candidate = ExplainabilityCandidate::new(
+        relationship.id.clone(),
+        ExplainabilityRecordType::Relationship,
+    );
+    candidate.short_id.clone_from(&relationship.short_id);
+    candidate
+}
+
+fn covariate_candidate(covariate: &Covariate) -> ExplainabilityCandidate {
+    let mut candidate =
+        ExplainabilityCandidate::new(covariate.id.clone(), ExplainabilityRecordType::Covariate);
+    candidate.short_id.clone_from(&covariate.short_id);
+    candidate
+}
+
+fn text_unit_candidate(text_unit: &TextUnit) -> ExplainabilityCandidate {
+    let mut candidate =
+        ExplainabilityCandidate::new(text_unit.id.clone(), ExplainabilityRecordType::TextUnit);
+    candidate.short_id = Some(text_unit.short_id.clone());
+    candidate
+}
+
+fn empty_section_explainability(
+    kind: ContextSectionKind,
+    name: Option<String>,
+    token_budget: usize,
+) -> SectionExplainability {
+    SectionExplainability {
+        kind,
+        name,
+        token_budget,
+        tokens_used: 0,
+        candidate_count: 0,
+        selected_count: 0,
+        selected_record_ids: Vec::new(),
+        truncated: false,
+        candidates: Vec::new(),
+    }
+}
+
+fn empty_community_section(
+    max_tokens: usize,
+    candidates: Option<Vec<ExplainabilityCandidate>>,
+) -> Section {
+    Section {
+        text: "[]".to_owned(),
+        table: ContextTable::new(["id", "title", "content"], Vec::new()),
+        explainability: candidates.map(|candidates| SectionExplainability {
+            kind: ContextSectionKind::CommunityReports,
+            name: None,
+            token_budget: max_tokens,
+            tokens_used: 0,
+            candidate_count: 0,
+            selected_count: 0,
+            selected_record_ids: Vec::new(),
+            truncated: false,
+            candidates,
+        }),
+    }
+}
+
+fn rank_filtered_relationship_section(
+    selection: &RelationshipSelection<'_>,
+    max_tokens: usize,
+) -> Section {
+    let candidates = selection
+        .rank_filtered
+        .iter()
+        .map(|ranked| {
+            let mut candidate = relationship_candidate(ranked.relationship);
+            candidate.selected = false;
+            candidate.reason = Some(SelectionReason::RankThreshold);
+            candidate
+        })
+        .collect();
+    Section {
+        text: String::new(),
+        table: ContextTable::new(
+            ["id", "source", "target", "description", "weight"],
+            Vec::new(),
+        ),
+        explainability: Some(SectionExplainability {
+            kind: ContextSectionKind::Relationships,
+            name: None,
+            token_budget: max_tokens,
+            tokens_used: 0,
+            candidate_count: 0,
+            selected_count: 0,
+            selected_record_ids: Vec::new(),
+            truncated: false,
+            candidates,
+        }),
+    }
+}
+
+fn missing_source_section(candidates: Vec<ExplainabilityCandidate>, max_tokens: usize) -> Section {
+    Section {
+        text: String::new(),
+        table: ContextTable::new(["id", "text"], Vec::new()),
+        explainability: Some(SectionExplainability {
+            kind: ContextSectionKind::Sources,
+            name: None,
+            token_budget: max_tokens,
+            tokens_used: 0,
+            candidate_count: 0,
+            selected_count: 0,
+            selected_record_ids: Vec::new(),
+            truncated: false,
+            candidates,
+        }),
+    }
+}
+
+fn build_record_section_explainability<T>(
+    spec: SectionExplainabilitySpec,
+    fitted: &FittedTable,
+    records: Vec<&T>,
+    mut non_token_candidates: Vec<ExplainabilityCandidate>,
+    candidate_from_record: fn(&T) -> ExplainabilityCandidate,
+) -> SectionExplainability {
+    let mut candidates =
+        Vec::with_capacity(records.len().saturating_add(non_token_candidates.len()));
+    let mut selected_record_ids = Vec::with_capacity(fitted.selected_count);
+    for (index, record) in records.into_iter().enumerate() {
+        let mut candidate = candidate_from_record(record);
+        if index < fitted.selected_count {
+            candidate.selected = true;
+            candidate.reason = Some(spec.selected_reason);
+            selected_record_ids.push(candidate.id.clone());
+        } else {
+            candidate.selected = false;
+            candidate.reason = Some(SelectionReason::TokenBudget);
+        }
+        candidates.push(candidate);
+    }
+    candidates.append(&mut non_token_candidates);
+    SectionExplainability {
+        kind: spec.kind,
+        name: spec.name,
+        token_budget: spec.token_budget,
+        tokens_used: fitted.tokens_used,
+        candidate_count: fitted.candidate_count,
+        selected_count: fitted.selected_count,
+        selected_record_ids,
+        truncated: fitted.selected_count < fitted.candidate_count,
+        candidates,
+    }
+}
+
+fn rollback_section_explainability(
+    attempted: Vec<SectionExplainability>,
+    accepted: &[SectionExplainability],
+) -> Vec<SectionExplainability> {
+    attempted
+        .into_iter()
+        .map(|mut section| {
+            let accepted_section = accepted
+                .iter()
+                .find(|candidate| candidate.kind == section.kind && candidate.name == section.name);
+            let selected_record_ids = accepted_section
+                .map_or_else(Vec::new, |candidate| candidate.selected_record_ids.clone());
+            let mut accepted_ids = selected_record_ids.iter();
+            let mut next_accepted = accepted_ids.next();
+            for candidate in &mut section.candidates {
+                if matches!(
+                    candidate.reason,
+                    Some(SelectionReason::RankThreshold | SelectionReason::MissingRecord)
+                ) {
+                    continue;
+                }
+                if next_accepted.is_some_and(|id| id == &candidate.id) {
+                    candidate.selected = true;
+                    next_accepted = accepted_ids.next();
+                } else {
+                    candidate.selected = false;
+                    candidate.reason = Some(SelectionReason::TokenBudget);
+                }
+            }
+            section.tokens_used = accepted_section.map_or(0, |candidate| candidate.tokens_used);
+            section.selected_count =
+                accepted_section.map_or(0, |candidate| candidate.selected_count);
+            section.selected_record_ids = selected_record_ids;
+            section.truncated =
+                section.truncated || section.selected_count < section.candidate_count;
+            section
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn filter_relationships<'a>(
     selected_entities: &[&Entity],
     relationships: &'a [Relationship],
@@ -781,6 +2087,25 @@ fn filter_relationships<'a>(
     top_k_relationships: usize,
     learned_links: &mut BTreeMap<String, usize>,
 ) -> Vec<RankedRelationship<'a>> {
+    filter_relationships_capture(
+        selected_entities,
+        relationships,
+        relationship_positions,
+        top_k_relationships,
+        learned_links,
+        false,
+    )
+    .selected
+}
+
+fn filter_relationships_capture<'a>(
+    selected_entities: &[&Entity],
+    relationships: &'a [Relationship],
+    relationship_positions: &BTreeSet<usize>,
+    top_k_relationships: usize,
+    learned_links: &mut BTreeMap<String, usize>,
+    capture_rank_filtered: bool,
+) -> RelationshipSelection<'a> {
     let selected_names = selected_entities
         .iter()
         .map(|entity| entity.title.as_str())
@@ -820,6 +2145,7 @@ fn filter_relationships<'a>(
         })
         .collect::<Vec<_>>();
     out_network.sort_by(rank_relationships);
+    let mut rank_filtered = Vec::new();
     if out_network.len() > 1 {
         let mut neighbors_by_outside = HashMap::<&str, BTreeSet<&str>>::new();
         for ranked in &out_network {
@@ -853,10 +2179,33 @@ fn filter_relationships<'a>(
                 .then_with(|| rank_relationships(left, right))
         });
         let budget = top_k_relationships.saturating_mul(selected_entities.len());
+        if capture_rank_filtered && budget < out_network.len() {
+            rank_filtered.extend(out_network.get(budget..).into_iter().flatten().copied());
+        }
         out_network.truncate(budget);
     }
     in_network.extend(out_network);
-    in_network
+    RelationshipSelection {
+        selected: in_network,
+        rank_filtered,
+    }
+}
+
+fn community_matches(selected_entities: &[&Entity]) -> Vec<(String, usize)> {
+    let mut matches = Vec::<(String, usize)>::new();
+    for entity in selected_entities {
+        for community_id in &entity.community_ids {
+            if let Some((_, count)) = matches
+                .iter_mut()
+                .find(|(candidate, _)| candidate == community_id)
+            {
+                *count = count.saturating_add(1);
+            } else {
+                matches.push((community_id.clone(), 1));
+            }
+        }
+    }
+    matches
 }
 
 fn rank_relationships(left: &RankedRelationship<'_>, right: &RankedRelationship<'_>) -> Ordering {
@@ -947,7 +2296,14 @@ mod tests {
     use polars_core::prelude::DataType;
 
     use super::*;
-    use crate::query::{ConversationRole, ConversationTurn};
+    use crate::{
+        explainability::{
+            ExplainabilityContentMode, ExplainabilityRecord, ExplainabilityRunId,
+            ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
+            NoopExplainabilitySink,
+        },
+        query::{ConversationRole, ConversationTurn, QueryExplainabilityOptions},
+    };
 
     type RecordedSearches = Arc<Mutex<Vec<(Vec<f32>, usize, bool)>>>;
     const LOCAL_CONTEXT_GOLDEN: &str =
@@ -1101,6 +2457,37 @@ mod tests {
         builder: LocalContextBuilder,
         embedding_inputs: Arc<Mutex<Vec<Vec<String>>>>,
         searches: RecordedSearches,
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingExplainabilitySink {
+        records: Mutex<Vec<Arc<ExplainabilityRecord>>>,
+        fail_emit: bool,
+    }
+
+    #[async_trait]
+    impl ExplainabilitySink for RecordingExplainabilitySink {
+        async fn emit(
+            &self,
+            record: Arc<ExplainabilityRecord>,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            self.records
+                .lock()
+                .expect("Explainability records")
+                .push(record);
+            if self.fail_emit {
+                Err(ExplainabilitySinkError::RecordNotAccepted)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn finish_run(
+            &self,
+            _run_id: &ExplainabilityRunId,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            Ok(())
+        }
     }
 
     fn fixture(max_context_tokens: usize, ann_ids: &[&str]) -> Fixture {
@@ -1325,7 +2712,7 @@ mod tests {
 
         let (selected, usage) = fixture
             .builder
-            .map_entities("question", &[], &[])
+            .map_entities("question", &[], &[], None)
             .await
             .expect("entity mapping");
 
@@ -1354,7 +2741,7 @@ mod tests {
 
         let (_, usage) = fixture
             .builder
-            .map_entities("zero usage", &[], &[])
+            .map_entities("zero usage", &[], &[], None)
             .await
             .expect("entity mapping");
 
@@ -1383,7 +2770,7 @@ mod tests {
 
         let (selected, _) = fixture
             .builder
-            .map_entities("question", &[], &[])
+            .map_entities("question", &[], &[], None)
             .await
             .expect("canonical UUID mapping");
 
@@ -1399,7 +2786,7 @@ mod tests {
 
         let (selected, _) = fixture
             .builder
-            .map_entities("question", &include, &exclude)
+            .map_entities("question", &include, &exclude, None)
             .await
             .expect("entity filters");
 
@@ -1410,6 +2797,164 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Carol", "Alice", "Carol"]
         );
+
+        let recording = Arc::new(RecordingExplainabilitySink::default());
+        let failing = Arc::new(RecordingExplainabilitySink {
+            fail_emit: true,
+            ..RecordingExplainabilitySink::default()
+        });
+        let chain_success = Arc::new(RecordingExplainabilitySink::default());
+        let chain_failure = Arc::new(RecordingExplainabilitySink {
+            fail_emit: true,
+            ..RecordingExplainabilitySink::default()
+        });
+        let sinks: Vec<Arc<dyn ExplainabilitySink>> = vec![
+            Arc::new(NoopExplainabilitySink::new()),
+            recording.clone(),
+            failing,
+            Arc::new(ExplainabilitySinkChain::new(vec![
+                chain_success,
+                chain_failure,
+            ])),
+        ];
+        for sink in sinks {
+            let options =
+                QueryExplainabilityOptions::generated(ExplainabilityContentMode::Metadata, sink);
+            let session = QueryExplainabilitySession::new(&options);
+            let (explained, _) = fixture
+                .builder
+                .map_entities("question", &include, &exclude, Some(&session))
+                .await
+                .expect("explained entity filters");
+            assert_eq!(
+                explained
+                    .iter()
+                    .map(|entity| entity.title.as_str())
+                    .collect::<Vec<_>>(),
+                ["Carol", "Alice", "Carol"]
+            );
+        }
+        let records = recording.records.lock().expect("Explainability records");
+        let filtered = records.iter().find_map(|record| match &record.event {
+            ExplainabilityEvent::CandidatesFiltered(event) => Some(event.candidates()),
+            _ => None,
+        });
+        assert!(filtered.is_some_and(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.title.as_deref(),
+                        candidate.selected,
+                        candidate.reason,
+                    )
+                })
+                .collect::<Vec<_>>()
+                == [
+                    (
+                        Some("Carol"),
+                        true,
+                        Some(SelectionReason::ExplicitlyIncluded),
+                    ),
+                    (
+                        Some("Bob"),
+                        false,
+                        Some(SelectionReason::ExplicitlyExcluded),
+                    ),
+                    (Some("Alice"), true, Some(SelectionReason::AnnResult)),
+                    (Some("Carol"), true, Some(SelectionReason::AnnResult)),
+                ]
+        }));
+        assert_eq!(
+            *fixture.embedding_inputs.lock().expect("embedding inputs"),
+            vec![vec!["question".to_owned()]; 5]
+        );
+        let searches = fixture.searches.lock().expect("recorded searches");
+        assert_eq!(searches.len(), 5);
+        assert!(
+            searches
+                .first()
+                .is_some_and(|expected| searches.iter().all(|actual| actual == expected))
+        );
+    }
+
+    #[test]
+    fn test_should_retain_all_rank_filtered_relationship_decisions() {
+        let mut fixture = fixture(20_000, &["entity-a"]);
+        fixture.builder.config.top_k_relationships = 0;
+        let selected_entities = vec![&fixture.builder.entities[0]];
+        let relationship_positions = fixture
+            .builder
+            .index
+            .relationships_by_entity
+            .get("Alice")
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let options = QueryExplainabilityOptions::generated(
+            ExplainabilityContentMode::Metadata,
+            Arc::new(NoopExplainabilitySink::new()),
+        );
+        let session = QueryExplainabilitySession::new(&options);
+        let mut learned_links = BTreeMap::new();
+
+        let section = fixture
+            .builder
+            .build_relationship_context_from_positions_capture(
+                &selected_entities,
+                &relationship_positions,
+                20_000,
+                &mut learned_links,
+                Some(&session),
+            )
+            .expect("rank-filtered relationship capture");
+        let Some(section) = section else {
+            panic!("rank-filtered relationships must retain sidecar metadata");
+        };
+        assert!(section.text.is_empty());
+        assert!(section.table.is_empty());
+        let Some(capture) = section.explainability else {
+            panic!("rank-filtered relationship capture must exist");
+        };
+        assert!(!capture.candidates.is_empty());
+        assert!(capture.candidates.iter().all(|candidate| {
+            !candidate.selected && candidate.reason == Some(SelectionReason::RankThreshold)
+        }));
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn test_should_retain_missing_text_unit_decisions_without_context_changes() {
+        let mut fixture = fixture(20_000, &["entity-a"]);
+        fixture.builder.entities[0].text_unit_ids = vec!["missing-only".to_owned()];
+        fixture.builder.text_units.clear();
+        let selected_entities = vec![&fixture.builder.entities[0]];
+        let options = QueryExplainabilityOptions::generated(
+            ExplainabilityContentMode::Metadata,
+            Arc::new(NoopExplainabilitySink::new()),
+        );
+        let session = QueryExplainabilitySession::new(&options);
+
+        let section = fixture
+            .builder
+            .build_source_context_capture(&selected_entities, 20_000, Some(&session))
+            .expect("missing source capture");
+        let Some(section) = section else {
+            panic!("missing text units must retain sidecar metadata");
+        };
+        assert!(section.text.is_empty());
+        assert!(section.table.is_empty());
+        let Some(capture) = section.explainability else {
+            panic!("missing text-unit capture must exist");
+        };
+        assert_eq!(capture.candidates.len(), 1);
+        assert!(capture.candidates.first().is_some_and(|candidate| {
+            candidate.id == "missing-only"
+                && !candidate.selected
+                && candidate.reason == Some(SelectionReason::MissingRecord)
+        }));
+        assert!(!capture.truncated);
     }
 
     #[tokio::test]
@@ -1870,6 +3415,7 @@ mod tests {
             )
             .expect("entity table");
         let entity_text = entity_table
+            .table
             .render_delimited_section("Entities", SearchMethod::Local, "test entities")
             .expect("entity text");
         let relationship_positions = fixture.builder.index.relationships_by_entity["Alice"]
@@ -2072,7 +3618,7 @@ mod tests {
 
         let error = fixture
             .builder
-            .map_entities("question", &[], &[])
+            .map_entities("question", &[], &[], None)
             .await
             .expect_err("missing vector index");
 
@@ -2092,7 +3638,7 @@ mod tests {
 
         let error = fixture
             .builder
-            .map_entities("question", &[], &[])
+            .map_entities("question", &[], &[], None)
             .await
             .expect_err("dimension mismatch");
 

@@ -61,9 +61,10 @@ impl QueryResourceKey {
 /// resources remain request-local; the next request resolves the path again and only a canonical
 /// path can establish a snapshot.
 ///
-/// Request-specific query text, response type, callbacks, conversation history, usage counters,
-/// streaming state, and traversal state are never cached. The engine can therefore be shared as
-/// an [`Arc`] and queried concurrently.
+/// Request-specific query text, response type, callbacks, conversation history, Explainability
+/// run identity, content mode, sink, delivery state, usage counters, streaming state, and
+/// traversal state are never cached. The engine can therefore be shared as an [`Arc`] and queried
+/// concurrently without crossing request sinks or Explainability failure state.
 #[derive(Debug)]
 pub struct QueryEngine {
     project: LoadedProject,
@@ -138,6 +139,7 @@ impl QueryEngine {
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
+                    options.explainability.as_ref(),
                 )
                 .await?)
             }
@@ -172,6 +174,7 @@ impl QueryEngine {
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
+                    options.explainability.as_ref(),
                 )
                 .await?)
             }
@@ -425,6 +428,7 @@ fn resource_options(options: &QueryOptions) -> QueryOptions {
     let mut resource_options = options.clone();
     resource_options.callbacks.clear();
     resource_options.conversation_history = None;
+    resource_options.explainability = None;
     resource_options
 }
 
@@ -452,7 +456,11 @@ mod tests {
     use super::{QueryDataRootKey, QueryEngine, classify_data_root};
     use crate::{
         GraphLoomError, GraphRagConfig, Result, TEXT_UNIT_TEXT_EMBEDDING,
-        query::{QueryCallbacks, QueryContext, QueryError, QueryOptions, SearchMethod},
+        explainability::{ExplainabilityContentMode, NoopExplainabilitySink},
+        query::{
+            QueryCallbacks, QueryContext, QueryError, QueryExplainabilityOptions, QueryOptions,
+            SearchMethod,
+        },
         runtime::ModelFactory,
         test_support::CanonicalTempDir,
     };
@@ -578,6 +586,44 @@ mod tests {
         );
         options.data_dir = Some(PathBuf::from(data_dir));
         options
+    }
+
+    #[test]
+    fn test_should_strip_request_scoped_explainability_from_resource_options() {
+        let project = CanonicalTempDir::new();
+        let options = basic_options(&project, "output").with_explainability(
+            QueryExplainabilityOptions::generated(
+                ExplainabilityContentMode::Metadata,
+                Arc::new(NoopExplainabilitySink::new()),
+            ),
+        );
+
+        let resources = super::resource_options(&options);
+
+        assert!(options.explainability.is_some());
+        assert!(resources.explainability.is_none());
+        assert!(resources.callbacks.is_empty());
+        assert!(resources.conversation_history.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_should_keep_explainability_out_of_local_resource_cache_key() {
+        let (project, config) = seeded_basic_project().await;
+        let (engine, _) = engine_with_factory(config, &project).await;
+        let mut baseline = basic_options(&project, "output");
+        baseline.method = SearchMethod::Local;
+        let configured =
+            baseline
+                .clone()
+                .with_explainability(QueryExplainabilityOptions::generated(
+                    ExplainabilityContentMode::Debug,
+                    Arc::new(NoopExplainabilitySink::new()),
+                ));
+
+        let baseline_key = engine.key(&baseline, true, false).await;
+        let configured_key = engine.key(&configured, true, false).await;
+
+        assert_eq!(configured_key, baseline_key);
     }
 
     fn missing_table_fields(error: &GraphLoomError) -> (SearchMethod, &'static str, &'static str) {

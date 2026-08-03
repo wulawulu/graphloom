@@ -16,6 +16,14 @@ pub enum ExplainabilityContentMode {
     Debug,
 }
 
+impl ExplainabilityContentMode {
+    /// Return whether full non-secret query and model content may be recorded.
+    #[must_use]
+    pub const fn includes_content(self) -> bool {
+        matches!(self, Self::Content | Self::Debug)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ExplainabilityContentMode;
@@ -26,6 +34,9 @@ mod tests {
             ExplainabilityContentMode::default(),
             ExplainabilityContentMode::Metadata
         );
+        assert!(!ExplainabilityContentMode::Metadata.includes_content());
+        assert!(ExplainabilityContentMode::Content.includes_content());
+        assert!(ExplainabilityContentMode::Debug.includes_content());
         for (mode, expected) in [
             (ExplainabilityContentMode::Metadata, "\"metadata\""),
             (ExplainabilityContentMode::Content, "\"content\""),

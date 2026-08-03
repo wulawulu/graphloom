@@ -69,6 +69,8 @@ pub enum ContextSectionKind {
     Relationships,
     /// Selected claims or covariates.
     Covariates,
+    /// Shared Local Search budget for entities, relationships, and covariates.
+    LocalGraph,
     /// Source text units.
     Sources,
     /// Global-search map input.
@@ -246,6 +248,13 @@ impl ExplainabilityCandidate {
 pub struct ExplainabilityContextSection {
     /// Logical section category.
     pub section: ContextSectionKind,
+    /// Optional low-cardinality section name, such as a covariate group.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub name: Option<String>,
     /// Token budget assigned to the section.
     pub token_budget: u64,
     /// Tokens consumed by accepted section content.
@@ -267,6 +276,7 @@ impl ExplainabilityContextSection {
     pub fn new(section: ContextSectionKind, token_budget: u64) -> Self {
         Self {
             section,
+            name: None,
             token_budget,
             tokens_used: 0,
             candidate_count: 0,
@@ -393,6 +403,7 @@ mod tests {
             (ContextSectionKind::Entities, "entities"),
             (ContextSectionKind::Relationships, "relationships"),
             (ContextSectionKind::Covariates, "covariates"),
+            (ContextSectionKind::LocalGraph, "local_graph"),
             (ContextSectionKind::Sources, "sources"),
             (ContextSectionKind::MapContext, "map_context"),
             (ContextSectionKind::ReduceContext, "reduce_context"),
@@ -487,6 +498,22 @@ mod tests {
             serde_json::from_value::<ExplainabilityContextSection>(value)?,
             section
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_round_trip_bounded_covariate_section_name() -> serde_json::Result<()> {
+        let mut section = ExplainabilityContextSection::new(ContextSectionKind::Covariates, 1_024);
+        section.name = Some("claims".to_owned());
+        let value = serde_json::to_value(&section)?;
+        assert_eq!(value.get("name"), Some(&json!("claims")));
+        assert_eq!(
+            serde_json::from_value::<ExplainabilityContextSection>(value)?,
+            section
+        );
+
+        section.name = Some("x".repeat(257));
+        assert!(serde_json::to_value(section).is_err());
         Ok(())
     }
 

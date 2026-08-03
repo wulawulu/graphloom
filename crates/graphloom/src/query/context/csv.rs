@@ -30,6 +30,10 @@ impl ContextTable {
         self.rows.is_empty()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     pub(crate) fn render_csv(
         &self,
         method: SearchMethod,

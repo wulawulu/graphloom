@@ -8,6 +8,7 @@ mod data_loader;
 mod data_model;
 mod engine;
 mod error;
+mod explainability;
 mod indexer_adapters;
 mod requirements;
 mod result;
@@ -31,6 +32,7 @@ pub use data_loader::{
 pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship, TextUnit};
 pub use engine::QueryEngine;
 pub use error::{QueryError, QueryTableErrorDetails, Result};
+pub use explainability::QueryExplainabilityOptions;
 pub use global::{DynamicRating, MapPoint, MapSearchResult};
 pub use indexer_adapters::{
     read_indexer_communities, read_indexer_covariates, read_indexer_entities,
@@ -144,6 +146,11 @@ pub struct QueryOptions {
     pub callbacks: Vec<Arc<dyn QueryCallbacks>>,
     /// Optional prior conversation turns.
     pub conversation_history: Option<ConversationHistory>,
+    /// Optional request-scoped Explainability configuration.
+    ///
+    /// The first runtime-instrumentation phase emits events only for Local Search. Basic, Global,
+    /// and DRIFT queries ignore this option without error.
+    pub explainability: Option<QueryExplainabilityOptions>,
 }
 
 impl QueryOptions {
@@ -160,6 +167,14 @@ impl QueryOptions {
             response_type: "Multiple Paragraphs".to_owned(),
             callbacks: Vec::new(),
             conversation_history: None,
+            explainability: None,
         }
+    }
+
+    /// Enable request-scoped Local Search Explainability.
+    #[must_use]
+    pub fn with_explainability(mut self, explainability: QueryExplainabilityOptions) -> Self {
+        self.explainability = Some(explainability);
+        self
     }
 }

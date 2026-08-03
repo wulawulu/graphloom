@@ -1,11 +1,15 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Instant, SystemTime},
 };
 
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use graphloom::{
     COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphLoomError, GraphRagConfig,
@@ -26,9 +30,15 @@ use graphloom::{
         },
         query_stream,
     },
+    explainability::{
+        ContextSectionKind, ExplainabilityContentMode, ExplainabilityEvent, ExplainabilityRecord,
+        ExplainabilityRecordType, ExplainabilityRunId, ExplainabilitySink, ExplainabilitySinkChain,
+        ExplainabilitySinkError, NoopExplainabilitySink, SelectionReason,
+    },
     query::{
         MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
-        QueryEngine, QueryError, QueryEvent, QueryEventStream, QueryOptions, SearchMethod,
+        QueryEngine, QueryError, QueryEvent, QueryEventStream, QueryExplainabilityOptions,
+        QueryOptions, SearchMethod,
     },
 };
 use graphloom_llm::ModelConfig;
@@ -228,6 +238,56 @@ impl QueryCallbacks for RecordingQueryCallbacks {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingExplainabilitySink {
+    records: Mutex<Vec<Arc<ExplainabilityRecord>>>,
+    emit_calls: AtomicUsize,
+    finish_calls: AtomicUsize,
+    fail_emit: bool,
+    fail_finish: bool,
+}
+
+impl RecordingExplainabilitySink {
+    fn failing() -> Self {
+        Self {
+            fail_emit: true,
+            ..Self::default()
+        }
+    }
+
+    fn records(&self) -> Vec<Arc<ExplainabilityRecord>> {
+        self.records.lock().expect("Explainability records").clone()
+    }
+}
+
+#[async_trait]
+impl ExplainabilitySink for RecordingExplainabilitySink {
+    async fn emit(&self, record: Arc<ExplainabilityRecord>) -> Result<(), ExplainabilitySinkError> {
+        self.emit_calls.fetch_add(1, Ordering::SeqCst);
+        self.records
+            .lock()
+            .expect("Explainability records")
+            .push(record);
+        if self.fail_emit {
+            Err(ExplainabilitySinkError::RecordNotAccepted)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn finish_run(
+        &self,
+        _run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        self.finish_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_finish {
+            Err(ExplainabilitySinkError::RunFinalizationFailed)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 async fn mount_query_stub() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -256,6 +316,28 @@ async fn mount_query_stub() -> MockServer {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(stream),
         )
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_local_handshake_failure_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
+            "model": "embed-test",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"message": "provider unavailable"}
+        })))
         .mount(&server)
         .await;
     server
@@ -753,6 +835,32 @@ async fn fixture(server: &MockServer) -> QueryFixture {
     }
 }
 
+async fn local_fixture(server: &MockServer) -> QueryFixture {
+    let mut fixture = fixture(server).await;
+    write_local_tables(&fixture.project.path().join("output")).await;
+    fixture.config.local_search.top_k_entities = 1;
+    fixture.config.local_search.max_context_tokens = 4_000;
+    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("connect Local LanceDB");
+    let schema = fixture
+        .config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    store.ensure_index(&schema).await.expect("entity index");
+    store
+        .upsert_documents(
+            &schema,
+            &[VectorDocument {
+                id: "entity-a".to_owned(),
+                vector: vec![0.25, 0.75],
+            }],
+        )
+        .await
+        .expect("entity vector");
+    fixture
+}
+
 async fn recorded_request_bodies(server: &MockServer) -> Vec<Value> {
     server
         .received_requests()
@@ -967,7 +1075,14 @@ async fn test_should_export_all_query_apis_and_force_method_specific_dispatch() 
 async fn test_should_make_unified_and_method_specific_basic_requests_identical() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
-    let options = basic_options(fixture.project.path(), "What are the facts?");
+    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
+    let options = basic_options(fixture.project.path(), "What are the facts?").with_explainability(
+        QueryExplainabilityOptions::new(
+            "ignored-basic".parse().expect("Basic run id"),
+            ExplainabilityContentMode::Debug,
+            ignored_explainability.clone(),
+        ),
+    );
 
     let method_result = basic_search(fixture.config.clone(), options.clone())
         .await
@@ -1002,6 +1117,11 @@ async fn test_should_make_unified_and_method_specific_basic_requests_identical()
             unified_tokens.push(token);
         }
     }
+    assert!(ignored_explainability.records().is_empty());
+    assert_eq!(
+        ignored_explainability.finish_calls.load(Ordering::SeqCst),
+        0
+    );
     assert_eq!(method_tokens, unified_tokens);
 
     let requests = server.received_requests().await.expect("recorded requests");
@@ -1390,6 +1510,908 @@ async fn test_should_run_local_api_and_stream_without_mutating_tables_or_vectors
     }));
 }
 
+fn assert_query_results_equal(
+    expected: &graphloom::query::QueryResult,
+    actual: &graphloom::query::QueryResult,
+) {
+    assert_eq!(actual.response, expected.response);
+    assert_eq!(actual.usage, expected.usage);
+    assert_eq!(
+        format!("{:?}", actual.context),
+        format!("{:?}", expected.context)
+    );
+}
+
+fn explainability_event_name(event: &ExplainabilityEvent) -> String {
+    serde_json::to_value(event)
+        .expect("Explainability event JSON")
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("Explainability discriminator")
+        .to_owned()
+}
+
+fn options_with_explainability(
+    root: &Path,
+    run_id: &str,
+    mode: ExplainabilityContentMode,
+    sink: Arc<dyn ExplainabilitySink>,
+) -> QueryOptions {
+    local_options(root, "Who is Alice?").with_explainability(QueryExplainabilityOptions::new(
+        run_id.parse().expect("valid test run id"),
+        mode,
+        sink,
+    ))
+}
+
+#[tokio::test]
+async fn test_should_instrument_local_query_without_changing_business_behavior() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("baseline Local Query");
+    let all_requests = recorded_request_bodies(&server).await;
+    let baseline_requests = all_requests.clone();
+
+    let noop: Arc<dyn ExplainabilitySink> = Arc::new(NoopExplainabilitySink::new());
+    let noop_result = module_local_search(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-noop",
+            ExplainabilityContentMode::Metadata,
+            noop,
+        ),
+    )
+    .await
+    .expect("Noop Explainability Local Query");
+    assert_query_results_equal(&baseline, &noop_result);
+
+    let metadata = Arc::new(RecordingExplainabilitySink::default());
+    let metadata_result = local_search(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-metadata",
+            ExplainabilityContentMode::Metadata,
+            metadata.clone(),
+        ),
+    )
+    .await
+    .expect("Recording Explainability Local Query");
+    assert_query_results_equal(&baseline, &metadata_result);
+
+    let content = Arc::new(RecordingExplainabilitySink::default());
+    let content_result = query(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-content",
+            ExplainabilityContentMode::Content,
+            content.clone(),
+        ),
+    )
+    .await
+    .expect("Content Explainability Local Query");
+    assert_query_results_equal(&baseline, &content_result);
+
+    let debug = Arc::new(RecordingExplainabilitySink::default());
+    let debug_result = module_query(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-debug",
+            ExplainabilityContentMode::Debug,
+            debug.clone(),
+        ),
+    )
+    .await
+    .expect("Debug Explainability Local Query");
+    assert_query_results_equal(&baseline, &debug_result);
+
+    let failing = Arc::new(RecordingExplainabilitySink::failing());
+    let failing_result = local_search(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-failing",
+            ExplainabilityContentMode::Metadata,
+            failing.clone(),
+        ),
+    )
+    .await
+    .expect("Failing Explainability Local Query");
+    assert_query_results_equal(&baseline, &failing_result);
+
+    let chain_success = Arc::new(RecordingExplainabilitySink::default());
+    let chain_failure = Arc::new(RecordingExplainabilitySink::failing());
+    let chain: Arc<dyn ExplainabilitySink> = Arc::new(ExplainabilitySinkChain::new(vec![
+        chain_success.clone(),
+        chain_failure.clone(),
+    ]));
+    let chain_result = local_search(
+        fixture.config.clone(),
+        options_with_explainability(
+            fixture.project.path(),
+            "run-chain",
+            ExplainabilityContentMode::Metadata,
+            chain,
+        ),
+    )
+    .await
+    .expect("partially failing Explainability chain Local Query");
+    assert_query_results_equal(&baseline, &chain_result);
+
+    let requests = recorded_request_bodies(&server).await;
+    let requests_per_query = baseline_requests.len();
+    assert!(requests_per_query > 0);
+    assert_eq!(requests.len(), requests_per_query.saturating_mul(7));
+    for request_batch in requests.chunks(requests_per_query) {
+        assert_eq!(request_batch, baseline_requests.as_slice());
+    }
+
+    let metadata_records = metadata.records();
+    let names = metadata_records
+        .iter()
+        .map(|record| explainability_event_name(&record.event))
+        .collect::<Vec<_>>();
+    assert_eq!(names.first().map(String::as_str), Some("run_started"));
+    assert_eq!(names.last().map(String::as_str), Some("run_completed"));
+    assert_eq!(
+        names.iter().filter(|name| name.starts_with("run_")).count(),
+        2
+    );
+    assert_eq!(
+        names,
+        [
+            "run_started",
+            "query_started",
+            "mapping_query_built",
+            "embedding_started",
+            "embedding_completed",
+            "candidates_retrieved",
+            "candidates_filtered",
+            "entities_selected",
+            "graph_expansion_started",
+            "context_budget_allocated",
+            "community_reports_selected",
+            "relationships_selected",
+            "covariates_selected",
+            "text_units_selected",
+            "context_section_built",
+            "context_section_built",
+            "context_section_built",
+            "context_section_built",
+            "context_section_built",
+            "context_completed",
+            "llm_request_started",
+            "llm_request_completed",
+            "run_completed",
+        ]
+    );
+    assert!(
+        metadata_records
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-metadata")
+    );
+    assert_content_fields(&metadata_records, false);
+    let content_records = content.records();
+    let debug_records = debug.records();
+    assert_content_fields(&content_records, true);
+    assert_content_fields(&debug_records, true);
+    let QueryContextText::Text(baseline_context) = &baseline.context.text else {
+        panic!("expected Local context text");
+    };
+    assert_content_values(&content_records, baseline_context);
+    assert_content_values(&debug_records, baseline_context);
+
+    let budget = metadata_records
+        .iter()
+        .find_map(|record| match &record.event {
+            ExplainabilityEvent::ContextBudgetAllocated(event) => Some(event),
+            _ => None,
+        });
+    assert!(budget.is_some_and(|event| {
+        event
+            .sections
+            .iter()
+            .any(|section| section.section == ContextSectionKind::LocalGraph)
+            && !event.sections.iter().any(|section| {
+                matches!(
+                    section.section,
+                    ContextSectionKind::Entities
+                        | ContextSectionKind::Relationships
+                        | ContextSectionKind::Covariates
+                )
+            })
+    }));
+    assert_local_decision_records(&metadata_records);
+    assert_span_tree(&metadata_records);
+
+    assert_eq!(failing.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        failing.emit_calls.load(Ordering::SeqCst),
+        failing.records().len()
+    );
+    assert_eq!(failing.records().len(), metadata_records.len());
+    assert!(matches!(
+        failing.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert_eq!(chain_success.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chain_failure.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chain_success.records().len(), chain_failure.records().len());
+    assert_eq!(chain_success.records().len(), metadata_records.len());
+    assert_eq!(
+        chain_success.emit_calls.load(Ordering::SeqCst),
+        chain_success.records().len()
+    );
+    assert!(matches!(
+        chain_success.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+}
+
+fn assert_content_fields(records: &[Arc<ExplainabilityRecord>], expected: bool) {
+    for record in records {
+        let present = match &record.event {
+            ExplainabilityEvent::QueryStarted(event) => Some(event.query.is_some()),
+            ExplainabilityEvent::MappingQueryBuilt(event) => Some(event.mapping_query.is_some()),
+            ExplainabilityEvent::EmbeddingStarted(event) => Some(event.input.is_some()),
+            ExplainabilityEvent::ContextCompleted(event) => Some(event.context.is_some()),
+            ExplainabilityEvent::LlmRequestStarted(event) => Some(event.prompt.is_some()),
+            ExplainabilityEvent::LlmRequestCompleted(event) => Some(event.response.is_some()),
+            _ => None,
+        };
+        if let Some(present) = present {
+            assert_eq!(present, expected);
+        }
+    }
+}
+
+fn assert_content_values(records: &[Arc<ExplainabilityRecord>], expected_context: &str) {
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.query.as_deref() == Some("Who is Alice?")
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::MappingQueryBuilt(event)
+            if event.mapping_query.as_deref() == Some("Who is Alice?")
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::EmbeddingStarted(event)
+            if event.input.as_deref() == Some("Who is Alice?")
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::ContextCompleted(event)
+            if event.context.as_deref() == Some(expected_context)
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::LlmRequestStarted(event)
+            if event.prompt.as_deref().is_some_and(|prompt| prompt.contains(expected_context))
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::LlmRequestCompleted(event)
+            if event.response.as_deref() == Some("Basic answer.")
+    )));
+}
+
+fn assert_local_decision_records(records: &[Arc<ExplainabilityRecord>]) {
+    let retrieved = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::CandidatesRetrieved(event) => Some(event),
+        _ => None,
+    });
+    assert!(retrieved.is_some_and(|event| {
+        event.candidates().first().is_some_and(|candidate| {
+            candidate.id == "entity-a"
+                && candidate.rank == Some(1)
+                && candidate.score.is_some()
+                && candidate.reason == Some(SelectionReason::AnnResult)
+        })
+    }));
+    let filtered = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::CandidatesFiltered(event) => Some(event),
+        _ => None,
+    });
+    assert!(filtered.is_some_and(|event| {
+        event.candidates().first().is_some_and(|candidate| {
+            candidate.id == "entity-a"
+                && candidate.selected
+                && candidate.reason == Some(SelectionReason::AnnResult)
+        })
+    }));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::GraphExpansionStarted(event)
+            if event.seed_entity_ids == ["entity-a"]
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::CommunityReportsSelected(event)
+            if event.community_reports().iter().any(|candidate| {
+                candidate.id == "report-a" && candidate.selected
+            })
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::RelationshipsSelected(event)
+            if event.relationships().iter().any(|candidate| {
+                candidate.id == "relationship-a" && candidate.selected
+            })
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::CovariatesSelected(event) if event.covariates().is_empty()
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::TextUnitsSelected(event)
+            if event.text_units().iter().map(|candidate| candidate.id.as_str()).collect::<Vec<_>>()
+                == ["A", "B"]
+    )));
+    let section_ids = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            ExplainabilityEvent::ContextSectionBuilt(event) => Some((
+                event.section.section,
+                event.section.selected_record_ids.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(section_ids.contains(&(
+        ContextSectionKind::CommunityReports,
+        vec!["report-a".to_owned()]
+    )));
+    assert!(section_ids.contains(&(ContextSectionKind::Entities, vec!["entity-a".to_owned()])));
+    assert!(section_ids.contains(&(
+        ContextSectionKind::Relationships,
+        vec!["relationship-a".to_owned()]
+    )));
+    assert!(section_ids.contains(&(
+        ContextSectionKind::Sources,
+        vec!["A".to_owned(), "B".to_owned()]
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::ContextSectionBuilt(event)
+            if event.section.section == ContextSectionKind::Covariates
+                && event.section.name.as_deref() == Some("claims")
+    )));
+}
+
+fn assert_span_tree(records: &[Arc<ExplainabilityRecord>]) {
+    let root = records
+        .first()
+        .map(|record| record.span_id.clone())
+        .expect("root record");
+    let mapping = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::MappingQueryBuilt(_))
+                .then(|| record.span_id.clone())
+        })
+        .expect("mapping span");
+    for record in records {
+        match &record.event {
+            ExplainabilityEvent::RunStarted(_)
+            | ExplainabilityEvent::RunCompleted(_)
+            | ExplainabilityEvent::RunFailed(_)
+            | ExplainabilityEvent::QueryStarted(_) => {
+                assert_eq!(record.span_id, root);
+                assert!(record.parent_span_id.is_none());
+            }
+            ExplainabilityEvent::EmbeddingStarted(_)
+            | ExplainabilityEvent::EmbeddingCompleted(_)
+            | ExplainabilityEvent::CandidatesRetrieved(_) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&mapping));
+            }
+            _ => assert_eq!(record.parent_span_id.as_ref(), Some(&root)),
+        }
+    }
+    let stage_spans = [
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::RunStarted(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::MappingQueryBuilt(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::EmbeddingStarted(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::CandidatesRetrieved(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::GraphExpansionStarted(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::ContextBudgetAllocated(_))
+                .then(|| record.span_id.as_str())
+        }),
+        records.iter().find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_))
+                .then(|| record.span_id.as_str())
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<HashSet<_>>();
+    assert_eq!(stage_spans.len(), 7);
+}
+
+#[tokio::test]
+async fn test_should_explain_rank_fallback_without_embedding() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), ""),
+    )
+    .await
+    .expect("empty-query Local baseline");
+    let baseline_requests = recorded_request_bodies(&server).await;
+    assert_eq!(baseline_requests.len(), 1);
+    assert!(
+        baseline_requests
+            .first()
+            .is_some_and(|request| request.get("messages").is_some())
+    );
+
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = local_search(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-fallback",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        )
+        .with_query(""),
+    )
+    .await
+    .expect("empty-query Local Explainability");
+    assert_query_results_equal(&baseline, &result);
+    let records = sink.records();
+    assert!(!records.iter().any(|record| {
+        matches!(
+            record.event,
+            ExplainabilityEvent::EmbeddingStarted(_) | ExplainabilityEvent::EmbeddingCompleted(_)
+        )
+    }));
+    let retrieved = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::CandidatesRetrieved(event) => Some(event),
+        _ => None,
+    });
+    assert!(retrieved.is_some_and(|event| {
+        event.record_type() == ExplainabilityRecordType::Entity
+            && !event.candidates().is_empty()
+            && event
+                .candidates()
+                .iter()
+                .all(|candidate| candidate.score.is_none() && candidate.reason.is_none())
+    }));
+}
+
+trait QueryOptionsTestExt {
+    fn with_query(self, query: &str) -> Self;
+}
+
+impl QueryOptionsTestExt for QueryOptions {
+    fn with_query(mut self, query: &str) -> Self {
+        self.query = query.to_owned();
+        self
+    }
+}
+
+#[tokio::test]
+async fn test_should_report_stale_ann_candidate_without_changing_local_result() {
+    let server = mount_query_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    fixture.config.local_search.top_k_entities = 2;
+    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("connect Local LanceDB");
+    let schema = fixture
+        .config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    store
+        .upsert_documents(
+            &schema,
+            &[VectorDocument {
+                id: "stale-entity".to_owned(),
+                vector: vec![0.25, 0.75],
+            }],
+        )
+        .await
+        .expect("stale entity vector");
+
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("stale-vector Local baseline");
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let explained = local_search(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-stale",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    )
+    .await
+    .expect("stale-vector explained Local Query");
+    assert_query_results_equal(&baseline, &explained);
+
+    let records = sink.records();
+    let retrieved = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::CandidatesRetrieved(event) => Some(event),
+        _ => None,
+    });
+    assert!(retrieved.is_some_and(|event| {
+        event
+            .candidates()
+            .iter()
+            .any(|candidate| candidate.id == "stale-entity")
+    }));
+    let filtered = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::CandidatesFiltered(event) => Some(event),
+        _ => None,
+    });
+    assert!(filtered.is_some_and(|event| {
+        event.candidates().iter().any(|candidate| {
+            candidate.id == "stale-entity"
+                && !candidate.selected
+                && candidate.reason == Some(SelectionReason::StaleReference)
+        })
+    }));
+}
+
+#[tokio::test]
+async fn test_should_capture_token_budget_prefix_without_changing_context_bytes() {
+    let server = mount_query_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    fixture.config.local_search.max_context_tokens = 20;
+    fixture.config.local_search.community_prop = 0.0;
+    fixture.config.local_search.text_unit_prop = 0.8;
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("token-budget Local baseline");
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let explained = local_search(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-budget",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    )
+    .await
+    .expect("token-budget explained Local Query");
+    assert_query_results_equal(&baseline, &explained);
+
+    let records = sink.records();
+    let source_candidates = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::TextUnitsSelected(event) => Some(event.text_units()),
+        _ => None,
+    });
+    assert!(source_candidates.is_some_and(|candidates| {
+        candidates.iter().any(|candidate| candidate.selected)
+            && candidates.iter().any(|candidate| {
+                !candidate.selected && candidate.reason == Some(SelectionReason::TokenBudget)
+            })
+    }));
+    let source_section = records.iter().find_map(|record| match &record.event {
+        ExplainabilityEvent::ContextSectionBuilt(event)
+            if event.section.section == ContextSectionKind::Sources =>
+        {
+            Some(&event.section)
+        }
+        _ => None,
+    });
+    assert!(source_section.is_some_and(|section| {
+        section.truncated
+            && section.selected_count < section.candidate_count
+            && section.selected_record_ids == ["A"]
+    }));
+}
+
+#[tokio::test]
+async fn test_should_leave_explainability_run_open_when_stream_is_dropped_early() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let stream = local_search_streaming(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-dropped",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    )
+    .await
+    .expect("Local Explainability stream");
+    drop(stream);
+
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 0);
+    assert!(!sink.records().iter().any(|record| {
+        matches!(
+            record.event,
+            ExplainabilityEvent::RunCompleted(_) | ExplainabilityEvent::RunFailed(_)
+        )
+    }));
+}
+
+async fn query_event_snapshot(mut stream: QueryEventStream) -> Vec<String> {
+    let mut snapshot = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event.expect("Local Query event") {
+            QueryEvent::Context(context) => snapshot.push(format!("context:{context:?}")),
+            QueryEvent::Token(token) => snapshot.push(format!("token:{token}")),
+            QueryEvent::Completed(result) => snapshot.push(format!(
+                "completed:{}:{:?}:{:?}",
+                result.response, result.context, result.usage
+            )),
+            _ => panic!("unexpected future Query event"),
+        }
+    }
+    snapshot
+}
+
+#[tokio::test]
+async fn test_should_preserve_stream_events_with_explainability_enabled() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let baseline = local_search_streaming(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("baseline Local stream");
+    let baseline = query_event_snapshot(baseline).await;
+
+    let recording = Arc::new(RecordingExplainabilitySink::default());
+    let failing = Arc::new(RecordingExplainabilitySink::failing());
+    let chain_success = Arc::new(RecordingExplainabilitySink::default());
+    let chain_failure = Arc::new(RecordingExplainabilitySink::failing());
+    let cases: Vec<(&str, Arc<dyn ExplainabilitySink>)> = vec![
+        ("stream-noop", Arc::new(NoopExplainabilitySink::new())),
+        ("stream-recording", recording.clone()),
+        ("stream-failing", failing.clone()),
+        (
+            "stream-chain",
+            Arc::new(ExplainabilitySinkChain::new(vec![
+                chain_success.clone(),
+                chain_failure.clone(),
+            ])),
+        ),
+    ];
+    for (run_id, sink) in cases {
+        let explained = query_stream(
+            fixture.config.clone(),
+            options_with_explainability(
+                fixture.project.path(),
+                run_id,
+                ExplainabilityContentMode::Metadata,
+                sink,
+            ),
+        )
+        .await
+        .expect("explained Local stream");
+        assert_eq!(query_event_snapshot(explained).await, baseline);
+    }
+
+    assert_eq!(recording.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        recording.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert_eq!(failing.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        failing.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert_eq!(chain_success.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chain_failure.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chain_success.records().len(), chain_failure.records().len());
+}
+
+#[tokio::test]
+async fn test_should_ignore_finish_run_failure_after_successful_local_query() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("baseline Local Query");
+    let sink = Arc::new(RecordingExplainabilitySink {
+        fail_finish: true,
+        ..RecordingExplainabilitySink::default()
+    });
+    let explained = local_search(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-finish-failure",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    )
+    .await
+    .expect("Local Query with finish failure");
+
+    assert_query_results_equal(&baseline, &explained);
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        sink.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_should_preserve_handshake_error_and_finalize_explainability_run() {
+    let server = mount_local_handshake_failure_stub().await;
+    let fixture = local_fixture(&server).await;
+    let baseline = local_search_streaming(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await;
+    let Err(baseline_error) = baseline else {
+        panic!("baseline Local stream handshake must fail");
+    };
+    let baseline_debug = format!("{baseline_error:?}");
+    let baseline_display = baseline_error.to_string();
+
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = local_search_streaming(
+        fixture.config,
+        options_with_explainability(
+            fixture.project.path(),
+            "run-handshake-error",
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    )
+    .await;
+    let Err(explained_error) = result else {
+        panic!("explained Local stream handshake must fail");
+    };
+    assert_eq!(format!("{explained_error:?}"), baseline_debug);
+    assert_eq!(explained_error.to_string(), baseline_display);
+    assert!(matches!(
+        explained_error,
+        GraphLoomError::Query(error)
+            if matches!(
+                error.as_ref(),
+                QueryError::QueryCompletion {
+                    operation: "start Local Search completion stream",
+                    ..
+                }
+            )
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, ExplainabilityEvent::RunFailed(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_completion"
+    ));
+}
+
+#[tokio::test]
+async fn test_should_isolate_concurrent_explainability_requests_on_warm_engine() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let engine = QueryEngine::load(fixture.config, fixture.project.path())
+        .await
+        .expect("Local Query engine");
+    let warmed = engine
+        .query(local_options(fixture.project.path(), "Who is Alice?"))
+        .await
+        .expect("warm Local runtime");
+    let entity_table = fixture.project.path().join("output/entities.parquet");
+    let hidden_entity_table = fixture
+        .project
+        .path()
+        .join("output/entities.parquet.hidden");
+    tokio::fs::rename(&entity_table, &hidden_entity_table)
+        .await
+        .expect("hide Local entity table after warming runtime");
+    let sink_a = Arc::new(RecordingExplainabilitySink::failing());
+    let sink_b = Arc::new(RecordingExplainabilitySink::default());
+    let options_a = options_with_explainability(
+        fixture.project.path(),
+        "run-a",
+        ExplainabilityContentMode::Metadata,
+        sink_a.clone(),
+    );
+    let options_b = options_with_explainability(
+        fixture.project.path(),
+        "run-b",
+        ExplainabilityContentMode::Metadata,
+        sink_b.clone(),
+    );
+    let (result_a, result_b) = tokio::join!(engine.query(options_a), engine.query(options_b));
+    tokio::fs::rename(&hidden_entity_table, &entity_table)
+        .await
+        .expect("restore Local entity table fixture");
+    let result_a = result_a.expect("run-a business result");
+    let result_b = result_b.expect("run-b business result");
+    assert_query_results_equal(&warmed, &result_a);
+    assert_query_results_equal(&warmed, &result_b);
+    assert_query_results_equal(&result_a, &result_b);
+
+    let records_a = sink_a.records();
+    let records_b = sink_b.records();
+    assert!(
+        records_a
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-a")
+    );
+    assert!(
+        records_b
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-b")
+    );
+    assert!(matches!(
+        records_a.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert!(matches!(
+        records_b.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    let spans_a = records_a
+        .iter()
+        .map(|record| record.span_id.as_str().to_owned())
+        .collect::<HashSet<_>>();
+    let spans_b = records_b
+        .iter()
+        .map(|record| record.span_id.as_str().to_owned())
+        .collect::<HashSet<_>>();
+    assert!(spans_a.is_disjoint(&spans_b));
+    assert_eq!(sink_a.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink_b.finish_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only() {
     let server = mount_drift_query_stub().await;
@@ -1426,15 +2448,26 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         SearchMethod::Drift,
     );
     let non_stream_callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
     let mut non_stream_options = options.clone();
     non_stream_options
         .callbacks
         .push(non_stream_callbacks.clone());
+    non_stream_options.explainability = Some(QueryExplainabilityOptions::new(
+        "ignored-drift".parse().expect("DRIFT run id"),
+        ExplainabilityContentMode::Debug,
+        ignored_explainability.clone(),
+    ));
 
     non_stream_options.method = SearchMethod::Basic;
     let result = drift_search(fixture.config.clone(), non_stream_options)
         .await
         .expect("method-specific DRIFT Query");
+    assert!(ignored_explainability.records().is_empty());
+    assert_eq!(
+        ignored_explainability.finish_calls.load(Ordering::SeqCst),
+        0
+    );
     let method_request_bodies = recorded_request_bodies(&server).await;
     let unified_result = query(fixture.config.clone(), options.clone())
         .await
@@ -1751,10 +2784,21 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
         .to_string();
 
     let mut method_options = global_options(project.path(), "What are the themes?");
+    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
+    method_options.explainability = Some(QueryExplainabilityOptions::new(
+        "ignored-global".parse().expect("Global run id"),
+        ExplainabilityContentMode::Debug,
+        ignored_explainability.clone(),
+    ));
     method_options.method = SearchMethod::Local;
     let result = global_search(config.clone(), method_options)
         .await
         .expect("method-specific Global Query");
+    assert!(ignored_explainability.records().is_empty());
+    assert_eq!(
+        ignored_explainability.finish_calls.load(Ordering::SeqCst),
+        0
+    );
     let method_request_bodies = recorded_request_bodies(&server).await;
     let unified_result = query(
         config.clone(),

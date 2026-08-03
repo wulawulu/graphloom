@@ -301,21 +301,51 @@ fn validate_candidate_types(
 }
 
 macro_rules! candidate_selection_payload {
-    ($name:ident, $field:ident, $docs:literal, $field_docs:literal) => {
+    ($name:ident, $field:ident, $record_type:expr, $docs:literal, $field_docs:literal) => {
         #[doc = $docs]
-        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Serialize)]
         #[non_exhaustive]
         pub struct $name {
             #[doc = $field_docs]
             #[serde(default, with = "super::validation::candidates")]
-            pub $field: Vec<ExplainabilityCandidate>,
+            $field: Vec<ExplainabilityCandidate>,
         }
 
         impl $name {
-            #[doc = concat!("Create a `", stringify!($name), "` payload.")]
+            #[doc = concat!(
+                "Create a validated `",
+                stringify!($name),
+                "` payload.\n\n# Errors\n\nReturns ",
+                "[`ExplainabilityContractError::CandidateTypeMismatch`] when a candidate has ",
+                "the wrong record category."
+            )]
+            pub fn try_new(
+                $field: Vec<ExplainabilityCandidate>,
+            ) -> Result<Self, ExplainabilityContractError> {
+                validate_candidate_types($record_type, &$field)?;
+                Ok(Self { $field })
+            }
+
+            #[doc = concat!("Borrow the `", stringify!($field), "` in effective order.")]
             #[must_use]
-            pub fn new($field: Vec<ExplainabilityCandidate>) -> Self {
-                Self { $field }
+            pub fn $field(&self) -> &[ExplainabilityCandidate] {
+                &self.$field
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                struct Wire {
+                    #[serde(default, with = "super::validation::candidates")]
+                    $field: Vec<ExplainabilityCandidate>,
+                }
+
+                let wire = Wire::deserialize(deserializer)?;
+                Self::try_new(wire.$field).map_err(serde::de::Error::custom)
             }
         }
     };
@@ -324,6 +354,7 @@ macro_rules! candidate_selection_payload {
 candidate_selection_payload!(
     EntitiesSelected,
     entities,
+    ExplainabilityRecordType::Entity,
     "Entity candidates selected for Local Search context construction.",
     "Selected entities in effective order."
 );
@@ -348,24 +379,28 @@ impl GraphExpansionStarted {
 candidate_selection_payload!(
     RelationshipsSelected,
     relationships,
+    ExplainabilityRecordType::Relationship,
     "Relationships selected during graph expansion.",
     "Selected relationship metadata in context order."
 );
 candidate_selection_payload!(
     CommunityReportsSelected,
     community_reports,
+    ExplainabilityRecordType::CommunityReport,
     "Community reports selected through entity membership.",
     "Selected community-report metadata in context order."
 );
 candidate_selection_payload!(
     CovariatesSelected,
     covariates,
+    ExplainabilityRecordType::Covariate,
     "Covariates selected through entity references.",
     "Selected covariate metadata in context order."
 );
 candidate_selection_payload!(
     TextUnitsSelected,
     text_units,
+    ExplainabilityRecordType::TextUnit,
     "Source text units selected through entity references.",
     "Selected text-unit metadata in context order."
 );
@@ -464,7 +499,9 @@ pub struct LlmRequestStarted {
     pub model_id: String,
     /// Counted request input tokens.
     pub prompt_tokens: u64,
-    /// Full rendered prompt when the content mode permits it.
+    /// Rendered Local system prompt when the content mode permits it.
+    ///
+    /// This is not the provider's complete request object and never includes headers or secrets.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -702,7 +739,7 @@ mod tests {
                 "candidates_filtered",
             ),
             (
-                ExplainabilityEvent::EntitiesSelected(EntitiesSelected::new(Vec::new())),
+                ExplainabilityEvent::EntitiesSelected(EntitiesSelected::try_new(Vec::new())?),
                 "entities_selected",
             ),
             (
@@ -710,21 +747,23 @@ mod tests {
                 "graph_expansion_started",
             ),
             (
-                ExplainabilityEvent::RelationshipsSelected(RelationshipsSelected::new(Vec::new())),
+                ExplainabilityEvent::RelationshipsSelected(RelationshipsSelected::try_new(
+                    Vec::new(),
+                )?),
                 "relationships_selected",
             ),
             (
-                ExplainabilityEvent::CommunityReportsSelected(CommunityReportsSelected::new(
+                ExplainabilityEvent::CommunityReportsSelected(CommunityReportsSelected::try_new(
                     Vec::new(),
-                )),
+                )?),
                 "community_reports_selected",
             ),
             (
-                ExplainabilityEvent::CovariatesSelected(CovariatesSelected::new(Vec::new())),
+                ExplainabilityEvent::CovariatesSelected(CovariatesSelected::try_new(Vec::new())?),
                 "covariates_selected",
             ),
             (
-                ExplainabilityEvent::TextUnitsSelected(TextUnitsSelected::new(Vec::new())),
+                ExplainabilityEvent::TextUnitsSelected(TextUnitsSelected::try_new(Vec::new())?),
                 "text_units_selected",
             ),
             (
