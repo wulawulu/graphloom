@@ -1,21 +1,129 @@
-//! Synchronous, object-safe explainability event consumers.
+//! Reliable, asynchronous, object-safe explainability event consumers.
+//!
+//! The sink trait uses [`macro@async_trait`] because callers store implementations behind
+//! `Arc<dyn ExplainabilitySink>` and therefore require object-safe async dispatch.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use super::ExplainabilityRecord;
+use async_trait::async_trait;
+use thiserror::Error;
 
-/// Fast synchronous consumer of explainability business records.
-///
-/// Implementations must return quickly, must not perform blocking I/O on the calling thread, and
-/// must not panic. Persistence and network adapters should enqueue the borrowed record into a
-/// bounded channel for a dedicated writer. Adapter errors and flush lifecycles are intentionally
-/// outside this foundational contract.
-pub trait ExplainabilitySink: Send + Sync + std::fmt::Debug {
-    /// Observe one immutable business record.
-    fn emit(&self, record: &ExplainabilityRecord);
+use super::{ExplainabilityRecord, ExplainabilityRunId};
+
+/// Sink operation being performed when an aggregate failure occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExplainabilitySinkOperation {
+    /// Reliable acceptance of one record.
+    Emit,
+    /// Completion confirmation for one run.
+    FinishRun,
 }
 
-/// Reusable sink that performs no work.
+impl fmt::Display for ExplainabilitySinkOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Emit => "record delivery",
+            Self::FinishRun => "run finalization",
+        })
+    }
+}
+
+/// One indexed failure reported by an [`ExplainabilitySinkChain`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExplainabilitySinkFailure {
+    sink_index: usize,
+    error: ExplainabilitySinkError,
+}
+
+impl ExplainabilitySinkFailure {
+    fn new(sink_index: usize, error: ExplainabilitySinkError) -> Self {
+        Self { sink_index, error }
+    }
+
+    /// Return the zero-based registration index of the failed sink.
+    #[must_use]
+    pub const fn sink_index(&self) -> usize {
+        self.sink_index
+    }
+
+    /// Return the error reported by the failed sink.
+    #[must_use]
+    pub const fn error(&self) -> &ExplainabilitySinkError {
+        &self.error
+    }
+}
+
+/// Safe, structured failure from reliable explainability delivery.
+///
+/// Variants deliberately carry no provider request data, credentials, or arbitrary diagnostic
+/// strings, so their messages are safe to display. Adapters should map internal errors to the
+/// narrowest stable category and retain sensitive diagnostics only in redacted operational logs.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ExplainabilitySinkError {
+    /// A record could not be reliably accepted by the adapter.
+    #[error("the explainability record was not accepted")]
+    RecordNotAccepted,
+    /// The sink or its bounded input queue has closed.
+    #[error("the explainability sink is closed")]
+    Closed,
+    /// The sink is temporarily or permanently unavailable.
+    #[error("the explainability sink is unavailable")]
+    Unavailable,
+    /// A persistence writer failed while processing accepted records.
+    #[error("the explainability persistence writer failed")]
+    WriterFailed,
+    /// The sink could not confirm all required processing for a finished run.
+    #[error("the explainability run could not be finalized")]
+    RunFinalizationFailed,
+    /// One or more sinks in an ordered chain failed.
+    #[error("one or more explainability sinks failed during {operation}")]
+    Chain {
+        /// Operation attempted on every registered sink.
+        operation: ExplainabilitySinkOperation,
+        /// Failures in registration order, each with its stable sink index.
+        failures: Vec<ExplainabilitySinkFailure>,
+    },
+}
+
+/// Reliable consumer of immutable explainability business records.
+///
+/// Implementations may asynchronously wait for capacity in a bounded adapter queue, but must not
+/// perform blocking file, database, or network I/O on the Tokio worker. A successful [`Self::emit`]
+/// means the adapter has reliably accepted the exact record; it must never mean that a full queue
+/// silently dropped the record. Implementations must return explicit errors and must not panic.
+///
+/// The trait uses [`macro@async_trait`] to remain object-safe for
+/// `Arc<dyn ExplainabilitySink>` dynamic
+/// dispatch.
+#[async_trait]
+pub trait ExplainabilitySink: Send + Sync + fmt::Debug {
+    /// Reliably accept one immutable business record, applying asynchronous backpressure as needed.
+    ///
+    /// Success confirms adapter acceptance, not necessarily completion of persistence I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExplainabilitySinkError`] if the record cannot be accepted without loss.
+    async fn emit(&self, record: Arc<ExplainabilityRecord>) -> Result<(), ExplainabilitySinkError>;
+
+    /// Confirm that all accepted records for `run_id` completed required processing.
+    ///
+    /// Calling this method declares that the caller will emit no more records for the run. It
+    /// manages only delivery and persistence lifecycle: it neither changes run status nor creates
+    /// a `RunCompleted` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExplainabilitySinkError`] if writer processing, persistence, or final flush
+    /// confirmation fails.
+    async fn finish_run(&self, run_id: &ExplainabilityRunId)
+    -> Result<(), ExplainabilitySinkError>;
+}
+
+/// Reusable sink that performs no work and always confirms success.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct NoopExplainabilitySink;
@@ -28,11 +136,28 @@ impl NoopExplainabilitySink {
     }
 }
 
+#[async_trait]
 impl ExplainabilitySink for NoopExplainabilitySink {
-    fn emit(&self, _record: &ExplainabilityRecord) {}
+    async fn emit(
+        &self,
+        _record: Arc<ExplainabilityRecord>,
+    ) -> Result<(), ExplainabilitySinkError> {
+        Ok(())
+    }
+
+    async fn finish_run(
+        &self,
+        _run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        Ok(())
+    }
 }
 
-/// Ordered fan-out across zero or more explainability sinks.
+/// Ordered, reliable fan-out across zero or more explainability sinks.
+///
+/// Every operation visits all sinks sequentially in registration order. Failures do not prevent
+/// later sinks from receiving the record or finalization request; the returned aggregate retains
+/// every failure and its zero-based sink index.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ExplainabilitySinkChain {
@@ -57,22 +182,51 @@ impl ExplainabilitySinkChain {
     pub fn is_empty(&self) -> bool {
         self.sinks.is_empty()
     }
+
+    fn aggregate(
+        operation: ExplainabilitySinkOperation,
+        failures: Vec<ExplainabilitySinkFailure>,
+    ) -> Result<(), ExplainabilitySinkError> {
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ExplainabilitySinkError::Chain {
+                operation,
+                failures,
+            })
+        }
+    }
 }
 
+#[async_trait]
 impl ExplainabilitySink for ExplainabilitySinkChain {
-    fn emit(&self, record: &ExplainabilityRecord) {
-        for sink in &self.sinks {
-            sink.emit(record);
+    async fn emit(&self, record: Arc<ExplainabilityRecord>) -> Result<(), ExplainabilitySinkError> {
+        let mut failures = Vec::new();
+        for (sink_index, sink) in self.sinks.iter().enumerate() {
+            if let Err(error) = sink.emit(Arc::clone(&record)).await {
+                failures.push(ExplainabilitySinkFailure::new(sink_index, error));
+            }
         }
+        Self::aggregate(ExplainabilitySinkOperation::Emit, failures)
+    }
+
+    async fn finish_run(
+        &self,
+        run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        let mut failures = Vec::new();
+        for (sink_index, sink) in self.sinks.iter().enumerate() {
+            if let Err(error) = sink.finish_run(run_id).await {
+                failures.push(ExplainabilitySinkFailure::new(sink_index, error));
+            }
+        }
+        Self::aggregate(ExplainabilitySinkOperation::FinishRun, failures)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        str::FromStr,
-        sync::{Arc, Mutex, MutexGuard},
-    };
+    use std::{str::FromStr, sync::Arc};
 
     use chrono::Utc;
 
@@ -82,82 +236,30 @@ mod tests {
         ExplainabilityRecord, ExplainabilityRunId, ExplainabilitySpanId, QueryStarted,
     };
 
-    #[derive(Debug)]
-    struct RecordingSink {
-        name: &'static str,
-        calls: Arc<Mutex<Vec<(&'static str, ExplainabilityRecord)>>>,
-    }
-
-    impl ExplainabilitySink for RecordingSink {
-        fn emit(&self, record: &ExplainabilityRecord) {
-            lock_recovering_poison(&self.calls).push((self.name, record.clone()));
-        }
-    }
-
-    fn lock_recovering_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        match mutex.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    fn sample_record() -> Result<ExplainabilityRecord, ExplainabilityContractError> {
-        Ok(ExplainabilityRecord::new(
+    fn sample_record() -> Result<Arc<ExplainabilityRecord>, ExplainabilityContractError> {
+        Ok(Arc::new(ExplainabilityRecord::new(
             ExplainabilityRunId::from_str("run-1")?,
             Utc::now(),
             ExplainabilitySpanId::from_str("span-1")?,
             None,
             ExplainabilityEvent::QueryStarted(QueryStarted::new(ExplainabilityQueryMethod::Local)),
-        ))
+        )))
     }
 
-    #[test]
-    fn test_should_treat_noop_and_empty_chain_as_zero_side_effects()
-    -> Result<(), ExplainabilityContractError> {
+    #[tokio::test]
+    async fn test_should_treat_noop_and_empty_chain_as_success()
+    -> Result<(), Box<dyn std::error::Error>> {
         let record = sample_record()?;
-        NoopExplainabilitySink::new().emit(&record);
+        let run_id = record.run_id.clone();
+        let noop = NoopExplainabilitySink::new();
+        noop.emit(Arc::clone(&record)).await?;
+        noop.finish_run(&run_id).await?;
+
         let chain = ExplainabilitySinkChain::default();
         assert!(chain.is_empty());
-        chain.emit(&record);
+        chain.emit(Arc::clone(&record)).await?;
+        chain.finish_run(&run_id).await?;
         assert_eq!(record.run_id.as_str(), "run-1");
-        Ok(())
-    }
-
-    #[test]
-    fn test_should_fan_out_in_registration_order_without_mutating_record()
-    -> Result<(), ExplainabilityContractError> {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let first: Arc<dyn ExplainabilitySink> = Arc::new(RecordingSink {
-            name: "first",
-            calls: Arc::clone(&calls),
-        });
-        let second: Arc<dyn ExplainabilitySink> = Arc::new(RecordingSink {
-            name: "second",
-            calls: Arc::clone(&calls),
-        });
-        let original = sample_record()?;
-        let chain = ExplainabilitySinkChain::new(vec![first, second]);
-        assert_eq!(chain.len(), 2);
-        chain.emit(&original);
-
-        let observed = lock_recovering_poison(&calls);
-        assert_eq!(observed.len(), 2);
-        assert_eq!(observed.first().map(|call| call.0), Some("first"));
-        assert_eq!(observed.get(1).map(|call| call.0), Some("second"));
-        assert!(observed.iter().all(|(_, record)| record == &original));
-        Ok(())
-    }
-
-    #[test]
-    fn test_should_support_single_sink_chain() -> Result<(), ExplainabilityContractError> {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let sink: Arc<dyn ExplainabilitySink> = Arc::new(RecordingSink {
-            name: "only",
-            calls: Arc::clone(&calls),
-        });
-        let chain = ExplainabilitySinkChain::new(vec![sink]);
-        chain.emit(&sample_record()?);
-        assert_eq!(lock_recovering_poison(&calls).len(), 1);
         Ok(())
     }
 }

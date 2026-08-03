@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::ExplainabilityEvent;
+use super::{ExplainabilityEvent, ExplainabilityRecordType};
 
 /// Current explainability transport-schema version.
 pub const EXPLAINABILITY_SCHEMA_VERSION: u32 = 1;
@@ -30,6 +30,18 @@ pub enum ExplainabilityContractError {
     /// A candidate score was NaN or infinite.
     #[error("explainability score must be finite")]
     NonFiniteScore,
+    /// A candidate's record category differed from its containing event.
+    #[error(
+        "candidate at index {candidate_index} has record type {actual:?}; expected {expected:?}"
+    )]
+    CandidateTypeMismatch {
+        /// Homogeneous record category declared by the containing event.
+        expected: ExplainabilityRecordType,
+        /// Record category declared by the mismatched candidate.
+        actual: ExplainabilityRecordType,
+        /// Zero-based position of the mismatched candidate.
+        candidate_index: usize,
+    },
     /// A persisted envelope used a schema version this reader does not support.
     #[error("unsupported explainability schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion {

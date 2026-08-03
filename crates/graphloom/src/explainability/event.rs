@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ContextSectionKind, ExplainabilityCandidate, ExplainabilityContentMode,
-    ExplainabilityContextSection, ExplainabilityQueryMethod, ExplainabilityRecordType,
-    ExplainabilityRunKind,
+    ExplainabilityContextSection, ExplainabilityContractError, ExplainabilityQueryMethod,
+    ExplainabilityRecordType, ExplainabilityRunKind,
 };
 
 /// A run entered execution.
@@ -171,52 +171,133 @@ impl EmbeddingCompleted {
 
 /// ANN or other retrieval returned candidate records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CandidateCollectionWire")]
 #[non_exhaustive]
 pub struct CandidatesRetrieved {
     /// Category shared by the returned candidates.
-    pub record_type: ExplainabilityRecordType,
+    record_type: ExplainabilityRecordType,
     /// Candidates in provider result order.
     #[serde(default, with = "super::validation::candidates")]
-    pub candidates: Vec<ExplainabilityCandidate>,
+    candidates: Vec<ExplainabilityCandidate>,
 }
 
 impl CandidatesRetrieved {
-    /// Create a retrieval payload.
-    #[must_use]
-    pub fn new(
+    /// Create a retrieval payload after validating its homogeneous candidate category.
+    ///
+    /// Empty candidate collections are valid; `record_type` still identifies what was retrieved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExplainabilityContractError::CandidateTypeMismatch`] for the first candidate
+    /// whose category differs from `record_type`.
+    pub fn try_new(
         record_type: ExplainabilityRecordType,
         candidates: Vec<ExplainabilityCandidate>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ExplainabilityContractError> {
+        validate_candidate_types(record_type, &candidates)?;
+        Ok(Self {
             record_type,
             candidates,
-        }
+        })
+    }
+
+    /// Return the homogeneous category represented by this collection.
+    #[must_use]
+    pub const fn record_type(&self) -> ExplainabilityRecordType {
+        self.record_type
+    }
+
+    /// Borrow the candidates in provider result order.
+    #[must_use]
+    pub fn candidates(&self) -> &[ExplainabilityCandidate] {
+        &self.candidates
     }
 }
 
 /// Candidate filters produced their accepted and rejected result metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CandidateCollectionWire")]
 #[non_exhaustive]
 pub struct CandidatesFiltered {
     /// Category shared by the filtered candidates.
-    pub record_type: ExplainabilityRecordType,
+    record_type: ExplainabilityRecordType,
     /// Candidates annotated with actual selection state and reason where known.
     #[serde(default, with = "super::validation::candidates")]
-    pub candidates: Vec<ExplainabilityCandidate>,
+    candidates: Vec<ExplainabilityCandidate>,
 }
 
 impl CandidatesFiltered {
-    /// Create a candidate-filter payload.
-    #[must_use]
-    pub fn new(
+    /// Create a candidate-filter payload after validating its homogeneous candidate category.
+    ///
+    /// Empty candidate collections are valid; `record_type` still identifies what was filtered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExplainabilityContractError::CandidateTypeMismatch`] for the first candidate
+    /// whose category differs from `record_type`.
+    pub fn try_new(
         record_type: ExplainabilityRecordType,
         candidates: Vec<ExplainabilityCandidate>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ExplainabilityContractError> {
+        validate_candidate_types(record_type, &candidates)?;
+        Ok(Self {
             record_type,
             candidates,
-        }
+        })
     }
+
+    /// Return the homogeneous category represented by this collection.
+    #[must_use]
+    pub const fn record_type(&self) -> ExplainabilityRecordType {
+        self.record_type
+    }
+
+    /// Borrow the candidates in provider result order.
+    #[must_use]
+    pub fn candidates(&self) -> &[ExplainabilityCandidate] {
+        &self.candidates
+    }
+}
+
+#[derive(Deserialize)]
+struct CandidateCollectionWire {
+    record_type: ExplainabilityRecordType,
+    #[serde(default, with = "super::validation::candidates")]
+    candidates: Vec<ExplainabilityCandidate>,
+}
+
+impl TryFrom<CandidateCollectionWire> for CandidatesRetrieved {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: CandidateCollectionWire) -> Result<Self, Self::Error> {
+        Self::try_new(wire.record_type, wire.candidates)
+    }
+}
+
+impl TryFrom<CandidateCollectionWire> for CandidatesFiltered {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: CandidateCollectionWire) -> Result<Self, Self::Error> {
+        Self::try_new(wire.record_type, wire.candidates)
+    }
+}
+
+fn validate_candidate_types(
+    expected: ExplainabilityRecordType,
+    candidates: &[ExplainabilityCandidate],
+) -> Result<(), ExplainabilityContractError> {
+    if let Some((candidate_index, candidate)) = candidates
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.record_type != expected)
+    {
+        return Err(ExplainabilityContractError::CandidateTypeMismatch {
+            expected,
+            actual: candidate.record_type,
+            candidate_index,
+        });
+    }
+    Ok(())
 }
 
 macro_rules! candidate_selection_payload {
@@ -561,7 +642,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_keep_every_event_discriminator_stable() -> serde_json::Result<()> {
+    fn test_should_keep_every_event_discriminator_stable() -> Result<(), Box<dyn std::error::Error>>
+    {
         let events = [
             (
                 ExplainabilityEvent::RunStarted(RunStarted::new(
@@ -606,17 +688,17 @@ mod tests {
                 "embedding_completed",
             ),
             (
-                ExplainabilityEvent::CandidatesRetrieved(CandidatesRetrieved::new(
+                ExplainabilityEvent::CandidatesRetrieved(CandidatesRetrieved::try_new(
                     ExplainabilityRecordType::Entity,
                     Vec::new(),
-                )),
+                )?),
                 "candidates_retrieved",
             ),
             (
-                ExplainabilityEvent::CandidatesFiltered(CandidatesFiltered::new(
+                ExplainabilityEvent::CandidatesFiltered(CandidatesFiltered::try_new(
                     ExplainabilityRecordType::Entity,
                     Vec::new(),
-                )),
+                )?),
                 "candidates_filtered",
             ),
             (

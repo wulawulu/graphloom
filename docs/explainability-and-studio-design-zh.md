@@ -555,14 +555,34 @@ cache_hit=true
 第一阶段在 `graphloom` crate 内定义：
 
 ```rust
+#[async_trait::async_trait]
 pub trait ExplainabilitySink: Send + Sync + std::fmt::Debug {
-    fn emit(&self, record: &ExplainabilityRecord);
+    async fn emit(
+        &self,
+        record: Arc<ExplainabilityRecord>,
+    ) -> Result<(), ExplainabilitySinkError>;
+
+    async fn finish_run(
+        &self,
+        run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError>;
 }
 ```
 
 Core 在事件发生时创建 `ExplainabilityRecord`，因此 Sink 收到的记录已经具有完整的
-业务身份和 Span 父子关系。`emit` 必须快速返回、不得执行阻塞 I/O，也不得 panic；
-JSONL、SQLite 或 SSE Adapter 应通过 channel 把记录转交给独立单写者。
+业务身份和 Span 父子关系。`emit` 接收共享所有权的不可变 Record，可以异步等待有界
+Adapter 队列的入队容量；成功返回表示 Adapter 已可靠接受该 Record，队列满时不得
+静默丢弃或伪装成功。等待只发生在入队容量上，文件、数据库和网络 I/O 由独立单写者
+执行，不得在 Tokio worker 上使用 `blocking_send` 或直接执行阻塞 I/O。
+
+`finish_run` 表示该 Run 不再产生新 Record，并等待该 Run 已接受事件完成必要的写入、
+flush 或最终确认。后台 writer、flush 或持久化失败必须通过
+`ExplainabilitySinkError` 返回；该方法不改变 `ExplainabilityRunStatus`，也不自动产生
+`RunCompleted`，Run 的业务完成事件仍由 Core 产生。
+
+该 Trait 需要作为 `Arc<dyn ExplainabilitySink>` 动态分发，因此使用 `async-trait` 保持
+对象安全。Sink 不得 panic，所有可恢复的关闭、不可用、未接受、writer 和完成确认错误
+都使用安全、结构化的错误类别报告。
 
 默认实现和有序 fan-out 实现：
 
@@ -570,8 +590,21 @@ JSONL、SQLite 或 SSE Adapter 应通过 channel 把记录转交给独立单写�
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopExplainabilitySink;
 
+#[async_trait::async_trait]
 impl ExplainabilitySink for NoopExplainabilitySink {
-    fn emit(&self, _record: &ExplainabilityRecord) {}
+    async fn emit(
+        &self,
+        _record: Arc<ExplainabilityRecord>,
+    ) -> Result<(), ExplainabilitySinkError> {
+        Ok(())
+    }
+
+    async fn finish_run(
+        &self,
+        _run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        Ok(())
+    }
 }
 
 pub struct ExplainabilitySinkChain {
@@ -579,7 +612,12 @@ pub struct ExplainabilitySinkChain {
 }
 ```
 
-调用方不传入 Sink 时使用 No-op 实现。
+调用方不传入 Sink 时使用 No-op 实现。Chain 按注册顺序串行 await 所有 Sink，共享同一
+`Arc<ExplainabilityRecord>` 而不深度复制候选数据；一个 Sink 失败后仍调用其余 Sink，
+最终错误按稳定 Sink 索引聚合 emit 或 finish 的全部失败。空 Chain 成功。
+
+Core Explainability 只定义可靠输入合同，不提供会静默丢事件的 Best Effort delivery
+mode。运行时采样属于 `tracing` / OpenTelemetry；持久化后的实时广播属于 Live Hub / SSE。
 
 ---
 
@@ -840,6 +878,13 @@ pub struct ExplainabilityCandidate {
     pub expansion_depth: Option<u32>,
 }
 ```
+
+`CandidatesRetrieved` 和 `CandidatesFiltered` 保留外层 `record_type`，并将 Candidate
+列表定义为同质集合：每个 `candidate.record_type` 必须与外层集合类型相同。外层字段
+使空结果仍能表达本次检索或过滤的目标类型。两种 Payload 使用 fallible constructor
+在构造时验证，并在 Serde 反序列化时通过相同不变量验证；不一致数据属于 Schema 1 中
+原本无效的状态，不需要提升 Schema Version。构造后的 `record_type` 和 `candidates`
+为私有字段，只提供只读 getter，不能通过公共可变访问制造矛盾状态。
 
 ---
 
@@ -1257,19 +1302,17 @@ sequence > 12
 推荐数据流：
 
 ```text
-GraphLoom Query
+GraphLoom Core
+      ↓ await ExplainabilitySink::emit
+bounded adapter queue
       ↓
-ExplainabilityRecord
-      ↓
-Studio Explainability Service
-      ↓
-分配 sequence
-      ↓
+single writer
+      ↓ 分配 sequence
 生成并持久化 ExplainabilityEnvelope
       ↓
-广播同一个 ExplainabilityEnvelope
-      ├── SSE 实时展示
-      └── 历史回放
+Store
+      ├── 历史回放
+      └── Live Hub / SSE 实时展示
 ```
 
 核心原则：
@@ -1277,6 +1320,10 @@ Studio Explainability Service
 > 实时模式是边持久化边消费，离线模式是从存储重新消费同一事件。
 
 事件 Schema、顺序和语义必须完全相同。
+
+`GraphLoom Core → ExplainabilitySink → 持久化单写者 → Store` 是可靠、可背压、错误
+可见的边界。`Store → Live Hub / SSE 客户端` 位于持久化之后，可以发生暂时的实时
+丢失；慢客户端或断线不影响 Store，客户端通过 Store 和 `Last-Event-ID` 补发恢复。
 
 ---
 
@@ -1684,50 +1731,39 @@ Explainability Sink 不得在 Query 热路径中执行阻塞 I/O。
 推荐使用：
 
 ```text
-GraphLoom Query
+GraphLoom Core
+      ↓ await ExplainabilitySink::emit
+bounded adapter queue
       ↓
-ExplainabilitySink::emit
-      ↓
-bounded channel
-      ↓
-writer task
+single writer
       ↓
 分配 sequence 并生成 ExplainabilityEnvelope
       ↓
-Store / JSONL / SSE
+Store / JSONL
+      ↓ 持久化成功后
+Live Hub / SSE
 ```
 
-## 23.1 Best Effort
+## 23.1 Core 到 Store 的可靠投递
 
-适用于普通实时可视化或 telemetry：
+`ExplainabilitySink` 始终是可靠输入合同：
 
-* 队列满时可以丢弃；
-  -必须记录 dropped event 数量；
-  -不得让 Query 失败；
-  -不得阻塞核心流程。
+* `emit` 可以异步等待 bounded queue 容量，以明确背压保持资源上界；
+  -成功只表示 Adapter 已可靠接受 Record，不表示直接等待了磁盘或数据库 I/O；
+  -Queue Full、Closed、Unavailable 或 writer failure 不得使用 panic 表达；
+  -无法接受时返回显式 `ExplainabilitySinkError`，不得静默丢失；
+  -`finish_run` 确认该 Run 已接受事件完成必要持久化或 flush；
+  -writer、flush 和完成确认错误必须返回调用方。
 
-## 23.2 Diagnostic / Lossless
+CLI JSONL 和 Studio 本地 SQLite 均建立在这一可靠边界上。Core Sink 不提供
+`BestEffort` 模式，也不允许同一个 Sink 在不通知调用方时降级为丢事件。
 
-适用于显式指定：
+## 23.2 持久化后的可恢复实时广播
 
-```bash
---explain-output
-```
-
-要求：
-
-* 事件不得静默丢失；
-  -退出前必须 flush；
-  -写入失败必须可见；
-  -不能改变 Query 业务结果；
-  -可在 Query 结束后将 recorder failure 作为 CLI 错误报告。
-
-第一版建议：
-
-* CLI JSONL 使用 Lossless；
-  -Studio 本地 SQLite 使用 Lossless；
-  -SSE 客户端广播可以 Best Effort；
-  -即使 SSE 客户端丢事件，也可以通过 Store 补发。
+普通 `tracing` / OpenTelemetry 属于可采样的运行时观测，不承担完整业务历史。SSE
+实时广播在 Store 持久化成功之后发生：慢客户端、断线或广播队列溢出可以导致客户端
+暂时漏过实时事件，但不能影响 Store，也不能反向定义 Core Sink 为 Best Effort。
+客户端使用 Store 中按 sequence 保存的事件和 `Last-Event-ID` 补发恢复。
 
 ---
 

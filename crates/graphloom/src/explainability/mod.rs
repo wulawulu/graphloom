@@ -1,9 +1,10 @@
 //! Stable, provider-neutral contracts for explaining `GraphLoom` operations.
 //!
 //! Core orchestration will create [`ExplainabilityRecord`] values with business identity and
-//! span relationships. Sinks consume those records synchronously and must hand blocking work to
-//! another execution context. A persistence adapter later assigns the per-run sequence and creates
-//! an [`ExplainabilityEnvelope`]; this module deliberately contains no writer or allocator.
+//! span relationships. Sinks accept shared records asynchronously, applying bounded-queue
+//! backpressure and reporting delivery or finalization failures. A persistence adapter later
+//! assigns the per-run sequence and creates an [`ExplainabilityEnvelope`]; this module deliberately
+//! contains no queue, writer, or allocator implementation.
 //!
 //! The JSON schema is versioned by [`EXPLAINABILITY_SCHEMA_VERSION`]. Adding optional fields is a
 //! backward-compatible change. Removing fields or changing their meaning requires a schema-version
@@ -41,4 +42,7 @@ pub use record::{
     EXPLAINABILITY_SCHEMA_VERSION, ExplainabilityContractError, ExplainabilityEnvelope,
     ExplainabilityRecord, ExplainabilityRunId, ExplainabilitySpanId,
 };
-pub use sink::{ExplainabilitySink, ExplainabilitySinkChain, NoopExplainabilitySink};
+pub use sink::{
+    ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
+    ExplainabilitySinkFailure, ExplainabilitySinkOperation, NoopExplainabilitySink,
+};

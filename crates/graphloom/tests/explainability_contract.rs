@@ -1,31 +1,154 @@
-use std::{str::FromStr, sync::Arc};
-
-use chrono::Utc;
-use graphloom::explainability::{
-    ContextSectionKind, EXPLAINABILITY_SCHEMA_VERSION, ExplainabilityCandidate,
-    ExplainabilityContentMode, ExplainabilityContextSection, ExplainabilityEnvelope,
-    ExplainabilityEvent, ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
-    ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
-    ExplainabilityScore, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySpanId,
-    NoopExplainabilitySink, QueryStarted, RunStarted, SelectionReason,
+use std::{
+    error::Error,
+    str::FromStr,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
-#[test]
-fn test_should_expose_foundational_contracts_to_external_crates()
--> Result<(), Box<dyn std::error::Error>> {
-    let run_id = ExplainabilityRunId::from_str("public-run-1")?;
-    let span_id = ExplainabilitySpanId::from_str("public-span-1")?;
-    let started = ExplainabilityEvent::RunStarted(RunStarted::new(
-        ExplainabilityRunKind::Query,
-        ExplainabilityContentMode::Metadata,
-    ));
-    let record = ExplainabilityRecord::new(run_id, Utc::now(), span_id, None, started);
+use async_trait::async_trait;
+use chrono::Utc;
+use graphloom::explainability::{
+    CandidatesFiltered, CandidatesRetrieved, ContextSectionKind, EXPLAINABILITY_SCHEMA_VERSION,
+    ExplainabilityCandidate, ExplainabilityContentMode, ExplainabilityContextSection,
+    ExplainabilityContractError, ExplainabilityEnvelope, ExplainabilityEvent,
+    ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType, ExplainabilityRun,
+    ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore,
+    ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
+    ExplainabilitySinkOperation, ExplainabilitySpanId, NoopExplainabilitySink, QueryStarted,
+    RunStarted, SelectionReason,
+};
+use serde_json::json;
 
+type TestResult = Result<(), Box<dyn Error>>;
+
+#[derive(Debug, Clone)]
+enum ObservedCall {
+    Emit {
+        sink_name: &'static str,
+        record: Arc<ExplainabilityRecord>,
+    },
+    FinishRun {
+        sink_name: &'static str,
+        run_id: ExplainabilityRunId,
+    },
+}
+
+#[derive(Debug)]
+struct TestSink {
+    name: &'static str,
+    calls: Arc<Mutex<Vec<ObservedCall>>>,
+    emit_error: Option<ExplainabilitySinkError>,
+    finish_error: Option<ExplainabilitySinkError>,
+}
+
+impl TestSink {
+    fn successful(name: &'static str, calls: Arc<Mutex<Vec<ObservedCall>>>) -> Self {
+        Self {
+            name,
+            calls,
+            emit_error: None,
+            finish_error: None,
+        }
+    }
+
+    fn failing(
+        name: &'static str,
+        calls: Arc<Mutex<Vec<ObservedCall>>>,
+        emit_error: Option<ExplainabilitySinkError>,
+        finish_error: Option<ExplainabilitySinkError>,
+    ) -> Self {
+        Self {
+            name,
+            calls,
+            emit_error,
+            finish_error,
+        }
+    }
+}
+
+#[async_trait]
+impl ExplainabilitySink for TestSink {
+    async fn emit(&self, record: Arc<ExplainabilityRecord>) -> Result<(), ExplainabilitySinkError> {
+        lock_recovering_poison(&self.calls).push(ObservedCall::Emit {
+            sink_name: self.name,
+            record,
+        });
+        match &self.emit_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
+    async fn finish_run(
+        &self,
+        run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        lock_recovering_poison(&self.calls).push(ObservedCall::FinishRun {
+            sink_name: self.name,
+            run_id: run_id.clone(),
+        });
+        match &self.finish_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+fn lock_recovering_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn sample_record() -> Result<Arc<ExplainabilityRecord>, ExplainabilityContractError> {
+    Ok(Arc::new(ExplainabilityRecord::new(
+        ExplainabilityRunId::from_str("public-run-1")?,
+        Utc::now(),
+        ExplainabilitySpanId::from_str("public-span-1")?,
+        None,
+        ExplainabilityEvent::RunStarted(RunStarted::new(
+            ExplainabilityRunKind::Query,
+            ExplainabilityContentMode::Metadata,
+        )),
+    )))
+}
+
+fn candidate(id: &str, record_type: ExplainabilityRecordType) -> ExplainabilityCandidate {
+    ExplainabilityCandidate::new(id.to_owned(), record_type)
+}
+
+fn observed_labels(calls: &[ObservedCall]) -> Vec<String> {
+    calls
+        .iter()
+        .map(|call| match call {
+            ObservedCall::Emit { sink_name, .. } => format!("{sink_name}:emit"),
+            ObservedCall::FinishRun { sink_name, .. } => format!("{sink_name}:finish"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_should_expose_async_foundational_contracts_to_external_crates() -> TestResult {
+    let record = sample_record()?;
+    let run_id = record.run_id.clone();
     let noop: Arc<dyn ExplainabilitySink> = Arc::new(NoopExplainabilitySink::new());
-    let chain = ExplainabilitySinkChain::new(vec![noop]);
-    chain.emit(&record);
+    noop.emit(Arc::clone(&record)).await?;
+    noop.emit(Arc::clone(&record)).await?;
+    noop.finish_run(&run_id).await?;
+    noop.finish_run(&run_id).await?;
 
-    let envelope = ExplainabilityEnvelope::new(1, record)?;
+    let empty_chain = ExplainabilitySinkChain::default();
+    assert!(empty_chain.is_empty());
+    empty_chain.emit(Arc::clone(&record)).await?;
+    empty_chain.finish_run(&run_id).await?;
+
+    let chain = ExplainabilitySinkChain::new(vec![noop]);
+    assert_eq!(chain.len(), 1);
+    chain.emit(Arc::clone(&record)).await?;
+    chain.finish_run(&run_id).await?;
+    assert_eq!(record.run_id, run_id);
+
+    let envelope = ExplainabilityEnvelope::new(1, record.as_ref().clone())?;
     assert_eq!(envelope.schema_version(), EXPLAINABILITY_SCHEMA_VERSION);
     assert_eq!(envelope.sequence(), 1);
     assert_eq!(envelope.record.run_id.as_str(), "public-run-1");
@@ -39,16 +162,15 @@ fn test_should_expose_foundational_contracts_to_external_crates()
         Some("query_started")
     );
 
-    let mut candidate =
-        ExplainabilityCandidate::new("entity-1".to_owned(), ExplainabilityRecordType::Entity);
-    candidate.score = Some(ExplainabilityScore::try_from(0.91)?);
-    candidate.rank = Some(1);
-    candidate.selected = true;
-    candidate.reason = Some(SelectionReason::AnnResult);
-    let candidate_json = serde_json::to_value(&candidate)?;
+    let mut explainability_candidate = candidate("entity-1", ExplainabilityRecordType::Entity);
+    explainability_candidate.score = Some(ExplainabilityScore::try_from(0.91)?);
+    explainability_candidate.rank = Some(1);
+    explainability_candidate.selected = true;
+    explainability_candidate.reason = Some(SelectionReason::AnnResult);
+    let candidate_json = serde_json::to_value(&explainability_candidate)?;
     assert_eq!(
         serde_json::from_value::<ExplainabilityCandidate>(candidate_json)?,
-        candidate
+        explainability_candidate
     );
 
     let mut section = ExplainabilityContextSection::new(ContextSectionKind::Entities, 2_048);
@@ -71,5 +193,352 @@ fn test_should_expose_foundational_contracts_to_external_crates()
     run.query_method = Some(ExplainabilityQueryMethod::Local);
     let run_json = serde_json::to_value(&run)?;
     assert_eq!(serde_json::from_value::<ExplainabilityRun>(run_json)?, run);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_fan_out_shared_record_and_finish_in_registration_order() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sinks = ["sink-1", "sink-2", "sink-3"]
+        .into_iter()
+        .map(|name| {
+            Arc::new(TestSink::successful(name, Arc::clone(&calls))) as Arc<dyn ExplainabilitySink>
+        })
+        .collect();
+    let chain = ExplainabilitySinkChain::new(sinks);
+    let record = sample_record()?;
+    let run_id = record.run_id.clone();
+
+    chain.emit(Arc::clone(&record)).await?;
+    chain.finish_run(&run_id).await?;
+
+    let observed = lock_recovering_poison(&calls);
+    assert_eq!(
+        observed_labels(&observed),
+        [
+            "sink-1:emit",
+            "sink-2:emit",
+            "sink-3:emit",
+            "sink-1:finish",
+            "sink-2:finish",
+            "sink-3:finish",
+        ]
+    );
+    assert!(observed.iter().all(|call| match call {
+        ObservedCall::Emit {
+            record: observed_record,
+            ..
+        } => Arc::ptr_eq(observed_record, &record),
+        ObservedCall::FinishRun {
+            run_id: observed_run_id,
+            ..
+        } => observed_run_id == &run_id,
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_aggregate_emit_failures_and_continue_all_sinks() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sinks: Vec<Arc<dyn ExplainabilitySink>> = vec![
+        Arc::new(TestSink::failing(
+            "sink-1",
+            Arc::clone(&calls),
+            Some(ExplainabilitySinkError::Closed),
+            None,
+        )),
+        Arc::new(TestSink::failing(
+            "sink-2",
+            Arc::clone(&calls),
+            Some(ExplainabilitySinkError::Unavailable),
+            None,
+        )),
+        Arc::new(TestSink::successful("sink-3", Arc::clone(&calls))),
+    ];
+    let result = ExplainabilitySinkChain::new(sinks)
+        .emit(sample_record()?)
+        .await;
+    let error = match result {
+        Ok(()) => return Err("failing sinks must produce an aggregate error".into()),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        observed_labels(&lock_recovering_poison(&calls)),
+        ["sink-1:emit", "sink-2:emit", "sink-3:emit"]
+    );
+    match error {
+        ExplainabilitySinkError::Chain {
+            operation,
+            failures,
+        } => {
+            assert_eq!(operation, ExplainabilitySinkOperation::Emit);
+            assert_eq!(failures.len(), 2);
+            let first = failures.first().ok_or("first failure must be retained")?;
+            assert_eq!(first.sink_index(), 0);
+            assert_eq!(first.error(), &ExplainabilitySinkError::Closed);
+            let second = failures.get(1).ok_or("second failure must be retained")?;
+            assert_eq!(second.sink_index(), 1);
+            assert_eq!(second.error(), &ExplainabilitySinkError::Unavailable);
+        }
+        _ => return Err("expected an emit chain error".into()),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_call_sinks_before_and_after_a_middle_emit_failure() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sinks: Vec<Arc<dyn ExplainabilitySink>> = vec![
+        Arc::new(TestSink::successful("sink-1", Arc::clone(&calls))),
+        Arc::new(TestSink::failing(
+            "sink-2",
+            Arc::clone(&calls),
+            Some(ExplainabilitySinkError::WriterFailed),
+            None,
+        )),
+        Arc::new(TestSink::successful("sink-3", Arc::clone(&calls))),
+    ];
+    let result = ExplainabilitySinkChain::new(sinks)
+        .emit(sample_record()?)
+        .await;
+    let error = match result {
+        Ok(()) => return Err("the middle sink must produce an aggregate error".into()),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        observed_labels(&lock_recovering_poison(&calls)),
+        ["sink-1:emit", "sink-2:emit", "sink-3:emit"]
+    );
+    match error {
+        ExplainabilitySinkError::Chain {
+            operation,
+            failures,
+        } => {
+            assert_eq!(operation, ExplainabilitySinkOperation::Emit);
+            assert_eq!(failures.len(), 1);
+            let failure = failures.first().ok_or("middle failure must be retained")?;
+            assert_eq!(failure.sink_index(), 1);
+            assert_eq!(failure.error(), &ExplainabilitySinkError::WriterFailed);
+        }
+        _ => return Err("expected a middle-sink chain error".into()),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_aggregate_finish_failures_and_continue_all_sinks() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sinks: Vec<Arc<dyn ExplainabilitySink>> = vec![
+        Arc::new(TestSink::failing(
+            "sink-1",
+            Arc::clone(&calls),
+            None,
+            Some(ExplainabilitySinkError::WriterFailed),
+        )),
+        Arc::new(TestSink::successful("sink-2", Arc::clone(&calls))),
+        Arc::new(TestSink::failing(
+            "sink-3",
+            Arc::clone(&calls),
+            None,
+            Some(ExplainabilitySinkError::RunFinalizationFailed),
+        )),
+    ];
+    let run_id = ExplainabilityRunId::from_str("finish-run")?;
+    let result = ExplainabilitySinkChain::new(sinks)
+        .finish_run(&run_id)
+        .await;
+    let error = match result {
+        Ok(()) => return Err("failing sinks must produce an aggregate error".into()),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        observed_labels(&lock_recovering_poison(&calls)),
+        ["sink-1:finish", "sink-2:finish", "sink-3:finish"]
+    );
+    match error {
+        ExplainabilitySinkError::Chain {
+            operation,
+            failures,
+        } => {
+            assert_eq!(operation, ExplainabilitySinkOperation::FinishRun);
+            assert_eq!(failures.len(), 2);
+            let first = failures.first().ok_or("first failure must be retained")?;
+            assert_eq!(first.sink_index(), 0);
+            assert_eq!(first.error(), &ExplainabilitySinkError::WriterFailed);
+            let second = failures.get(1).ok_or("second failure must be retained")?;
+            assert_eq!(second.sink_index(), 2);
+            assert_eq!(
+                second.error(),
+                &ExplainabilitySinkError::RunFinalizationFailed
+            );
+        }
+        _ => return Err("expected a finish chain error".into()),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_report_single_sink_error_with_stable_index() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<dyn ExplainabilitySink> = Arc::new(TestSink::failing(
+        "only",
+        Arc::clone(&calls),
+        Some(ExplainabilitySinkError::RecordNotAccepted),
+        None,
+    ));
+    let result = ExplainabilitySinkChain::new(vec![sink])
+        .emit(sample_record()?)
+        .await;
+    let error = match result {
+        Ok(()) => return Err("the failing sink must return an error".into()),
+        Err(error) => error,
+    };
+
+    match error {
+        ExplainabilitySinkError::Chain {
+            operation,
+            failures,
+        } => {
+            assert_eq!(operation, ExplainabilitySinkOperation::Emit);
+            assert_eq!(failures.len(), 1);
+            let failure = failures.first().ok_or("single failure must be retained")?;
+            assert_eq!(failure.sink_index(), 0);
+            assert_eq!(failure.error(), &ExplainabilitySinkError::RecordNotAccepted);
+        }
+        _ => return Err("expected a single-entry chain error".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn test_should_construct_homogeneous_candidate_collections() -> TestResult {
+    let entity = candidate("entity-1", ExplainabilityRecordType::Entity);
+    let retrieved =
+        CandidatesRetrieved::try_new(ExplainabilityRecordType::Entity, vec![entity.clone()])?;
+    assert_eq!(retrieved.record_type(), ExplainabilityRecordType::Entity);
+    assert_eq!(retrieved.candidates(), &[entity]);
+
+    let relationship = candidate("relationship-1", ExplainabilityRecordType::Relationship);
+    let filtered = CandidatesFiltered::try_new(
+        ExplainabilityRecordType::Relationship,
+        vec![relationship.clone()],
+    )?;
+    assert_eq!(
+        filtered.record_type(),
+        ExplainabilityRecordType::Relationship
+    );
+    assert_eq!(filtered.candidates(), &[relationship]);
+
+    let empty = CandidatesRetrieved::try_new(ExplainabilityRecordType::TextUnit, Vec::new())?;
+    assert_eq!(empty.record_type(), ExplainabilityRecordType::TextUnit);
+    assert!(empty.candidates().is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_should_reject_mismatched_and_mixed_candidate_collections() {
+    let mismatch = CandidatesRetrieved::try_new(
+        ExplainabilityRecordType::Entity,
+        vec![candidate(
+            "relationship-1",
+            ExplainabilityRecordType::Relationship,
+        )],
+    );
+    assert!(matches!(
+        mismatch,
+        Err(ExplainabilityContractError::CandidateTypeMismatch {
+            expected: ExplainabilityRecordType::Entity,
+            actual: ExplainabilityRecordType::Relationship,
+            candidate_index: 0,
+        })
+    ));
+
+    let mixed = CandidatesFiltered::try_new(
+        ExplainabilityRecordType::Entity,
+        vec![
+            candidate("entity-1", ExplainabilityRecordType::Entity),
+            candidate("text-unit-1", ExplainabilityRecordType::TextUnit),
+        ],
+    );
+    assert!(matches!(
+        mixed,
+        Err(ExplainabilityContractError::CandidateTypeMismatch {
+            expected: ExplainabilityRecordType::Entity,
+            actual: ExplainabilityRecordType::TextUnit,
+            candidate_index: 1,
+        })
+    ));
+}
+
+#[test]
+fn test_should_validate_candidate_types_during_deserialization() {
+    let contradictory = json!({
+        "record_type": "entity",
+        "candidates": [{
+            "id": "relationship-1",
+            "record_type": "relationship",
+            "selected": false,
+        }],
+    });
+    assert!(serde_json::from_value::<CandidatesRetrieved>(contradictory.clone()).is_err());
+    assert!(serde_json::from_value::<CandidatesFiltered>(contradictory).is_err());
+
+    let mixed_event = json!({
+        "type": "candidates_filtered",
+        "record_type": "entity",
+        "candidates": [
+            {
+                "id": "entity-1",
+                "record_type": "entity",
+                "selected": true,
+            },
+            {
+                "id": "relationship-1",
+                "record_type": "relationship",
+                "selected": false,
+            },
+        ],
+    });
+    assert!(serde_json::from_value::<ExplainabilityEvent>(mixed_event).is_err());
+}
+
+#[test]
+fn test_should_round_trip_candidate_events_without_changing_schema() -> TestResult {
+    let retrieved = ExplainabilityEvent::CandidatesRetrieved(CandidatesRetrieved::try_new(
+        ExplainabilityRecordType::Entity,
+        vec![candidate("entity-1", ExplainabilityRecordType::Entity)],
+    )?);
+    let filtered = ExplainabilityEvent::CandidatesFiltered(CandidatesFiltered::try_new(
+        ExplainabilityRecordType::Relationship,
+        vec![candidate(
+            "relationship-1",
+            ExplainabilityRecordType::Relationship,
+        )],
+    )?);
+
+    for (event, discriminator) in [
+        (retrieved, "candidates_retrieved"),
+        (filtered, "candidates_filtered"),
+    ] {
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(
+            value.get("type").and_then(serde_json::Value::as_str),
+            Some(discriminator)
+        );
+        assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
+    }
+
+    let empty = CandidatesFiltered::try_new(ExplainabilityRecordType::Community, Vec::new())?;
+    let empty_value = serde_json::to_value(&empty)?;
+    assert_eq!(empty_value.get("record_type"), Some(&json!("community")));
+    assert_eq!(empty_value.get("candidates"), Some(&json!([])));
+    assert_eq!(
+        serde_json::from_value::<CandidatesFiltered>(empty_value)?,
+        empty
+    );
+    assert_eq!(EXPLAINABILITY_SCHEMA_VERSION, 1);
     Ok(())
 }

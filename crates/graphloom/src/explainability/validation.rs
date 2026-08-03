@@ -387,7 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reject_oversized_record_id_and_candidate_collections() {
+    fn test_should_reject_oversized_record_id_and_candidate_collections()
+    -> Result<(), Box<dyn std::error::Error>> {
         let expansion = GraphExpansionStarted::new(vec![
             "entity-1".to_owned();
             MAX_RECORD_IDS.saturating_add(1)
@@ -400,11 +401,12 @@ mod tests {
 
         let candidate =
             ExplainabilityCandidate::new("entity-1".to_owned(), ExplainabilityRecordType::Entity);
-        let retrieved = CandidatesRetrieved::new(
+        let retrieved = CandidatesRetrieved::try_new(
             ExplainabilityRecordType::Entity,
             vec![candidate; MAX_CANDIDATES.saturating_add(1)],
-        );
+        )?;
         assert!(serde_json::to_value(retrieved).is_err());
+        Ok(())
     }
 
     #[test]
