@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod dataframe;
 mod error;
+pub mod explainability;
 pub mod indexing;
 mod operations;
 #[allow(

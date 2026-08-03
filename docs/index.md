@@ -12,6 +12,10 @@
 - [GraphRAG 3.1.0 compatibility optimization opportunities](optimization-opportunities.md)
 - [Community-report hierarchical-context optimization](community-report-hierarchical-context-optimization.md)
 
+## Architecture
+
+- [GraphLoom Explainability and Studio architecture (Chinese)](explainability-and-studio-design-zh.md)
+
 ## Research
 
 Research memos are point-in-time prior-art records. Their decision updates
