@@ -33,6 +33,7 @@ pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship
 pub use engine::QueryEngine;
 pub use error::{QueryError, QueryTableErrorDetails, Result};
 pub use explainability::QueryExplainabilityOptions;
+pub(crate) use explainability::QueryExplainabilitySession;
 pub use global::{DynamicRating, MapPoint, MapSearchResult};
 pub use indexer_adapters::{
     read_indexer_communities, read_indexer_covariates, read_indexer_entities,

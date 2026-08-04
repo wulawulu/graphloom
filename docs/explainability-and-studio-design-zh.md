@@ -640,6 +640,13 @@ options 会清除 callbacks、conversation history 和 Explainability 配置；q
 content mode、sink、投递失败计数和流状态都不会被缓存。共享同一 warm Local runtime 的并发
 Query 各自创建 Session、Span ID 和失败状态，因此不会串 Sink 或 Run。
 
+Local Run 的请求边界从 GraphLoom 已收到方法为 Local 且带 Explainability 的
+`QueryOptions` 开始：先创建并启动请求级 Session，再校验项目根目录、构建或获取 runtime。
+因此 root mismatch、必需表或 vector index 缺失、schema、prompt、model 或 runtime 构建失败
+同样产生安全低基数的 `RunFailed`，并尝试一次 `finish_run`。`QueryEngine::load(config, root)`
+本身尚未收到 `QueryOptions` 和调用方 run ID，所以单独调用 load 不创建 Run；one-shot API 在
+调用 load 前已经持有 options，因而由其请求编排层覆盖 load 失败。
+
 ---
 
 ## 10.3 谁负责生成 Envelope
@@ -1186,6 +1193,15 @@ fallback 仍产生真实的 retrieved/filtered/selected 事件。Selection 和 s
 接受的位置同步捕获，不解析最终文本或 DataFrame 反推。`ContextCompleted.context` 复用实际
 `QueryContextText::Text`，LLM prompt 记录实际渲染的 Local system prompt，而不是 Provider
 完整请求对象。
+
+Progressive Local Graph expansion 回滚时，以最后一次 accepted section 的完整 Candidate
+快照和 Context 为最终真相；failed attempt 相对 accepted 新出现的 occurrence 追加为未选择的
+`token_budget`，已有的 `rank_threshold` / `missing_record` 原因保持不变。重复 ID 按出现顺序
+逐个消费而不按 Set 合并，Covariate 按 `kind + name` 独立匹配。发出前从最终 Candidate 顺序
+重新推导 selected flags 对应的 `selected_count` 与 `selected_record_ids`，使其与最终 Context
+行顺序一致。Community section 实际输出空列表 `"[]"` 时，仅在 Explainability 开启时复用当前
+tokenizer 统计真实 tokens；统计失败只标记 sidecar 不完整并省略不可靠的 section capture，
+不会改变 `"[]"`、Query 或 Usage。
 
 每个业务事件只调用一次 Sink，不自动重试。Chain 的部分成功不会触发整条 Chain 重试，
 后续不同事件仍继续投递。Sink emit 失败只标记 Explainability Run 不完整，不改变 Context、

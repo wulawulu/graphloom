@@ -1545,6 +1545,181 @@ fn options_with_explainability(
 }
 
 #[tokio::test]
+async fn test_should_finalize_local_runs_when_one_shot_runtime_loading_fails() {
+    let server = mount_query_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    fixture.config.local_search.embedding_model_id = "missing-model".to_owned();
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await;
+    let Err(baseline_error) = baseline else {
+        panic!("invalid Local embedding configuration must fail runtime loading");
+    };
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let explained_options = options_with_explainability(
+        fixture.project.path(),
+        "run-runtime-failure",
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    );
+
+    let explained = local_search(fixture.config, explained_options).await;
+    let Err(explained_error) = explained else {
+        panic!("explained invalid Local embedding configuration must fail runtime loading");
+    };
+
+    assert_eq!(explained_error.to_string(), baseline_error.to_string());
+    assert_eq!(
+        format!("{explained_error:?}"),
+        format!("{baseline_error:?}")
+    );
+    assert!(matches!(
+        explained_error,
+        GraphLoomError::Query(error)
+            if matches!(error.as_ref(), QueryError::InvalidQueryConfig { .. })
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| explainability_event_name(&record.event))
+            .collect::<Vec<_>>(),
+        ["run_started", "query_started", "run_failed"]
+    );
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "invalid_query_config"
+    ));
+    assert!(
+        records
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-runtime-failure")
+    );
+    assert!(recorded_request_bodies(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_should_finalize_local_stream_when_runtime_loading_and_sink_fail() {
+    let server = mount_query_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    fixture.config.local_search.embedding_model_id = "missing-model".to_owned();
+    let baseline = local_search_streaming(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await;
+    let Err(baseline_error) = baseline else {
+        panic!("invalid Local embedding configuration must fail before producing a stream");
+    };
+    let sink = Arc::new(RecordingExplainabilitySink {
+        fail_emit: true,
+        fail_finish: true,
+        ..RecordingExplainabilitySink::default()
+    });
+
+    let explained_options = options_with_explainability(
+        fixture.project.path(),
+        "run-stream-runtime-failure",
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    );
+    let explained = local_search_streaming(fixture.config, explained_options).await;
+    let Err(explained_error) = explained else {
+        panic!(
+            "explained invalid Local embedding configuration must fail before producing a stream"
+        );
+    };
+
+    assert_eq!(explained_error.to_string(), baseline_error.to_string());
+    assert_eq!(
+        format!("{explained_error:?}"),
+        format!("{baseline_error:?}")
+    );
+    assert_eq!(sink.emit_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        sink.records()
+            .iter()
+            .filter(|record| matches!(record.event, ExplainabilityEvent::RunFailed(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        sink.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "invalid_query_config"
+    ));
+    assert!(recorded_request_bodies(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_should_finalize_and_isolate_warm_engine_root_mismatch() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let engine = QueryEngine::load(fixture.config, fixture.project.path())
+        .await
+        .expect("Local Query engine");
+    let sink_a = Arc::new(RecordingExplainabilitySink::default());
+    engine
+        .query(options_with_explainability(
+            fixture.project.path(),
+            "run-warm-a",
+            ExplainabilityContentMode::Metadata,
+            sink_a.clone(),
+        ))
+        .await
+        .expect("warm Local run");
+    let sink_b = Arc::new(RecordingExplainabilitySink::default());
+    let mismatch_root = fixture.project.path().join("other");
+
+    let failed = engine
+        .query_stream(options_with_explainability(
+            &mismatch_root,
+            "run-warm-b",
+            ExplainabilityContentMode::Metadata,
+            sink_b.clone(),
+        ))
+        .await;
+
+    assert!(matches!(
+        failed,
+        Err(GraphLoomError::Query(error))
+            if matches!(error.as_ref(), QueryError::InvalidQueryConfig { .. })
+    ));
+    assert_eq!(sink_a.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink_b.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        sink_a
+            .records()
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-warm-a")
+    );
+    assert!(
+        sink_b
+            .records()
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-warm-b")
+    );
+    assert_eq!(
+        sink_b
+            .records()
+            .iter()
+            .filter(|record| matches!(record.event, ExplainabilityEvent::RunFailed(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        sink_b.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "invalid_query_config"
+    ));
+}
+
+#[tokio::test]
 async fn test_should_instrument_local_query_without_changing_business_behavior() {
     let server = mount_query_stub().await;
     let fixture = local_fixture(&server).await;

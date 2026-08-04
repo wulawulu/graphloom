@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::super::{
     ConversationHistory, LocalQueryRuntime, QueryContext, QueryContextText, QueryError, QueryEvent,
-    QueryEventStream, QueryExplainabilityOptions, QueryResult, Result, SearchMethod,
+    QueryEventStream, QueryResult, Result, SearchMethod,
     explainability::QueryExplainabilitySession,
     result::count_completion_input,
     streaming::{CompletionStreamState, completion_event_stream},
@@ -26,16 +26,11 @@ pub(crate) async fn local_search(
     query: &str,
     response_type: &str,
     conversation_history: Option<&ConversationHistory>,
-    explainability: Option<&QueryExplainabilityOptions>,
+    session: Option<Arc<QueryExplainabilitySession>>,
 ) -> Result<QueryResult> {
-    let mut events = local_search_streaming(
-        runtime,
-        query,
-        response_type,
-        conversation_history,
-        explainability,
-    )
-    .await?;
+    let mut events =
+        local_search_streaming(runtime, query, response_type, conversation_history, session)
+            .await?;
     while let Some(event) = events.next().await {
         if let QueryEvent::Completed(result) = event? {
             return Ok(result);
@@ -58,12 +53,8 @@ pub(crate) async fn local_search_streaming(
     query: &str,
     response_type: &str,
     conversation_history: Option<&ConversationHistory>,
-    explainability: Option<&QueryExplainabilityOptions>,
+    session: Option<Arc<QueryExplainabilitySession>>,
 ) -> Result<QueryEventStream> {
-    let session = explainability.map(|options| Arc::new(QueryExplainabilitySession::new(options)));
-    if let Some(session) = &session {
-        session.start(query).await;
-    }
     match prepare_local_stream(
         runtime,
         query,

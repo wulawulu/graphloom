@@ -74,7 +74,7 @@ struct ContextAssembly {
     explainability: Vec<SectionExplainability>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SectionExplainability {
     kind: ContextSectionKind,
     name: Option<String>,
@@ -960,15 +960,24 @@ impl LocalContextBuilder {
         let matches = community_matches(selected_entities);
         if matches.is_empty() {
             let candidates = explainability.map(|_| Vec::new());
-            return Ok(Some(empty_community_section(max_tokens, candidates)));
+            let tokens_used = explainability
+                .and_then(|session| self.count_empty_community_for_explainability(session));
+            return Ok(Some(empty_community_section(
+                max_tokens,
+                candidates,
+                tokens_used,
+            )));
         }
         let mut selection = self.select_community_reports(matches, explainability.is_some());
         let non_token_candidates = selection.non_token_candidates.take();
         let selected = &mut selection.selected;
         if selected.is_empty() {
+            let tokens_used = explainability
+                .and_then(|session| self.count_empty_community_for_explainability(session));
             return Ok(Some(empty_community_section(
                 max_tokens,
                 non_token_candidates,
+                tokens_used,
             )));
         }
         selected.sort_by(|(left, left_matches), (right, right_matches)| {
@@ -1003,10 +1012,12 @@ impl LocalContextBuilder {
             "build Local Reports context",
         )?;
         if fitted.table.is_empty() {
-            if explainability.is_some() {
-                fitted.tokens_used = 0;
+            let empty_tokens = explainability
+                .and_then(|session| self.count_empty_community_for_explainability(session));
+            if let Some(tokens) = empty_tokens {
+                fitted.tokens_used = tokens;
             }
-            let capture = explainability.map(|_| {
+            let capture = empty_tokens.map(|_| {
                 build_record_section_explainability(
                     SectionExplainabilitySpec {
                         kind: ContextSectionKind::CommunityReports,
@@ -1768,6 +1779,19 @@ impl LocalContextBuilder {
             reliable_fallback
         }
     }
+
+    fn count_empty_community_for_explainability(
+        &self,
+        session: &QueryExplainabilitySession,
+    ) -> Option<usize> {
+        self.tokenizer.count("[]").map_or_else(
+            |_| {
+                session.mark_sidecar_failure("section_token_count");
+                None
+            },
+            Some,
+        )
+    }
 }
 
 fn local_table_requires_in_context(name: &str) -> bool {
@@ -1933,21 +1957,24 @@ fn empty_section_explainability(
 fn empty_community_section(
     max_tokens: usize,
     candidates: Option<Vec<ExplainabilityCandidate>>,
+    tokens_used: Option<usize>,
 ) -> Section {
     Section {
         text: "[]".to_owned(),
         table: ContextTable::new(["id", "title", "content"], Vec::new()),
-        explainability: candidates.map(|candidates| SectionExplainability {
-            kind: ContextSectionKind::CommunityReports,
-            name: None,
-            token_budget: max_tokens,
-            tokens_used: 0,
-            candidate_count: 0,
-            selected_count: 0,
-            selected_record_ids: Vec::new(),
-            truncated: false,
-            candidates,
-        }),
+        explainability: candidates
+            .zip(tokens_used)
+            .map(|(candidates, tokens_used)| SectionExplainability {
+                kind: ContextSectionKind::CommunityReports,
+                name: None,
+                token_budget: max_tokens,
+                tokens_used,
+                candidate_count: 0,
+                selected_count: 0,
+                selected_record_ids: Vec::new(),
+                truncated: false,
+                candidates,
+            }),
     }
 }
 
@@ -2043,40 +2070,83 @@ fn rollback_section_explainability(
     attempted: Vec<SectionExplainability>,
     accepted: &[SectionExplainability],
 ) -> Vec<SectionExplainability> {
-    attempted
-        .into_iter()
-        .map(|mut section| {
-            let accepted_section = accepted
-                .iter()
-                .find(|candidate| candidate.kind == section.kind && candidate.name == section.name);
-            let selected_record_ids = accepted_section
-                .map_or_else(Vec::new, |candidate| candidate.selected_record_ids.clone());
-            let mut accepted_ids = selected_record_ids.iter();
-            let mut next_accepted = accepted_ids.next();
-            for candidate in &mut section.candidates {
-                if matches!(
-                    candidate.reason,
-                    Some(SelectionReason::RankThreshold | SelectionReason::MissingRecord)
-                ) {
-                    continue;
-                }
-                if next_accepted.is_some_and(|id| id == &candidate.id) {
-                    candidate.selected = true;
-                    next_accepted = accepted_ids.next();
-                } else {
-                    candidate.selected = false;
-                    candidate.reason = Some(SelectionReason::TokenBudget);
-                }
-            }
-            section.tokens_used = accepted_section.map_or(0, |candidate| candidate.tokens_used);
-            section.selected_count =
-                accepted_section.map_or(0, |candidate| candidate.selected_count);
-            section.selected_record_ids = selected_record_ids;
-            section.truncated =
-                section.truncated || section.selected_count < section.candidate_count;
-            section
+    let mut rolled_back = Vec::with_capacity(attempted.len().max(accepted.len()));
+    for attempted_section in attempted {
+        let accepted_section = accepted.iter().find(|section| {
+            section.kind == attempted_section.kind && section.name == attempted_section.name
+        });
+        rolled_back.push(rollback_one_section(attempted_section, accepted_section));
+    }
+    for accepted_section in accepted {
+        if !rolled_back.iter().any(|section| {
+            section.kind == accepted_section.kind && section.name == accepted_section.name
+        }) {
+            rolled_back.push(accepted_section.clone());
+        }
+    }
+    rolled_back
+}
+
+fn rollback_one_section(
+    attempted: SectionExplainability,
+    accepted: Option<&SectionExplainability>,
+) -> SectionExplainability {
+    let mut section = accepted.cloned().unwrap_or(SectionExplainability {
+        kind: attempted.kind,
+        name: attempted.name.clone(),
+        token_budget: attempted.token_budget,
+        tokens_used: 0,
+        candidate_count: 0,
+        selected_count: 0,
+        selected_record_ids: Vec::new(),
+        truncated: false,
+        candidates: Vec::new(),
+    });
+    let accepted_candidate_count = section.candidates.len();
+    let mut matched_accepted = vec![false; accepted_candidate_count];
+    let mut rollback_candidates = 0_usize;
+    for mut candidate in attempted.candidates {
+        let accepted_occurrence = section
+            .candidates
+            .iter()
+            .take(accepted_candidate_count)
+            .enumerate()
+            .position(|(index, accepted_candidate)| {
+                !matched_accepted[index] && accepted_candidate.id == candidate.id
+            });
+        if let Some(index) = accepted_occurrence {
+            matched_accepted[index] = true;
+            continue;
+        }
+        if !matches!(
+            candidate.reason,
+            Some(SelectionReason::RankThreshold | SelectionReason::MissingRecord)
+        ) {
+            candidate.selected = false;
+            candidate.reason = Some(SelectionReason::TokenBudget);
+            rollback_candidates = rollback_candidates.saturating_add(1);
+        }
+        section.candidates.push(candidate);
+    }
+    section.candidate_count = section
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            !matches!(
+                candidate.reason,
+                Some(SelectionReason::RankThreshold | SelectionReason::MissingRecord)
+            )
         })
-        .collect()
+        .count();
+    section.selected_record_ids = section
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.selected)
+        .map(|candidate| candidate.id.clone())
+        .collect();
+    section.selected_count = section.selected_record_ids.len();
+    section.truncated = section.truncated || rollback_candidates > 0;
+    section
 }
 
 #[cfg(test)]
@@ -2336,6 +2406,22 @@ mod tests {
                 encoding_model: "bytes".to_owned(),
                 message: source.to_string(),
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingTokenizer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tokenizer for CountingTokenizer {
+        fn encode(&self, text: &str) -> graphloom_llm::Result<Vec<u32>> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            ByteTokenizer.encode(text)
+        }
+
+        fn decode(&self, tokens: &[u32]) -> graphloom_llm::Result<String> {
+            ByteTokenizer.decode(tokens)
         }
     }
 
@@ -3034,6 +3120,81 @@ mod tests {
     }
 
     #[test]
+    fn test_should_count_rendered_empty_community_tokens_for_explainability() {
+        let mut fixture = fixture(20_000, &[]);
+        fixture
+            .builder
+            .reports
+            .retain(|report| report.community_id != "3");
+        let options = QueryExplainabilityOptions::generated(
+            ExplainabilityContentMode::Metadata,
+            Arc::new(NoopExplainabilitySink::new()),
+        );
+        let session = QueryExplainabilitySession::new(&options);
+        let carol = vec![&fixture.builder.entities[2]];
+
+        let section = fixture
+            .builder
+            .build_community_context_capture(&carol, 20_000, Some(&session))
+            .expect("empty community context")
+            .expect("rendered empty community section");
+        let expected_tokens = fixture
+            .builder
+            .tokenizer
+            .count("[]")
+            .expect("deterministic empty-list token count");
+
+        assert_eq!(section.text, "[]");
+        assert_eq!(
+            section.explainability.map(|capture| capture.tokens_used),
+            Some(expected_tokens)
+        );
+    }
+
+    #[test]
+    fn test_should_only_count_empty_community_sidecar_when_explainability_is_enabled() {
+        let mut fixture = fixture(20_000, &[]);
+        fixture
+            .builder
+            .reports
+            .retain(|report| report.community_id != "3");
+        let calls = Arc::new(AtomicUsize::new(0));
+        fixture.builder.tokenizer = Arc::new(CountingTokenizer {
+            calls: Arc::clone(&calls),
+        });
+        let carol = vec![&fixture.builder.entities[2]];
+
+        let baseline = fixture
+            .builder
+            .build_community_context_capture(&carol, 20_000, None)
+            .expect("baseline empty community context")
+            .expect("baseline empty community section");
+        assert_eq!(baseline.text, "[]");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+
+        let options = QueryExplainabilityOptions::generated(
+            ExplainabilityContentMode::Metadata,
+            Arc::new(NoopExplainabilitySink::new()),
+        );
+        let session = QueryExplainabilitySession::new(&options);
+        let expected_tokens = ByteTokenizer
+            .count("[]")
+            .expect("deterministic empty-list token count");
+        let explained = fixture
+            .builder
+            .build_community_context_capture(&carol, 20_000, Some(&session))
+            .expect("explained empty community context")
+            .expect("explained empty community section");
+
+        assert_eq!(explained.text, baseline.text);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            explained.explainability.map(|capture| capture.tokens_used),
+            Some(expected_tokens)
+        );
+    }
+
+    #[test]
     fn test_should_fit_local_reports_with_raw_rows_and_render_final_csv() {
         let mut fixture = fixture(20_000, &[]);
         let mut first = report("1", 4.0, "alpha|beta \"quoted\" \\path\nsecond line");
@@ -3383,6 +3544,200 @@ mod tests {
                 "local relationship performance: relationships={relationship_count}, \
                  elapsed={elapsed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn test_should_restore_accepted_candidates_missing_from_failed_attempt() {
+        let accepted = section_explainability_for_test(
+            ContextSectionKind::Relationships,
+            None,
+            7,
+            vec![candidate_for_test(
+                "r1",
+                true,
+                SelectionReason::GraphExpansion,
+            )],
+        );
+        let attempted = section_explainability_for_test(
+            ContextSectionKind::Relationships,
+            None,
+            19,
+            vec![
+                candidate_for_test("r2", true, SelectionReason::GraphExpansion),
+                candidate_for_test("r3", false, SelectionReason::RankThreshold),
+            ],
+        );
+
+        let rolled_back = rollback_section_explainability(vec![attempted], &[accepted]);
+        let [section] = rolled_back.as_slice() else {
+            panic!("expected one relationship section");
+        };
+
+        assert_eq!(section.tokens_used, 7);
+        assert_eq!(section.selected_count, 1);
+        assert_eq!(section.selected_record_ids, ["r1"]);
+        assert_eq!(
+            section
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.id.as_str(), candidate.selected, candidate.reason))
+                .collect::<Vec<_>>(),
+            [
+                ("r1", true, Some(SelectionReason::GraphExpansion)),
+                ("r2", false, Some(SelectionReason::TokenBudget)),
+                ("r3", false, Some(SelectionReason::RankThreshold)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_should_preserve_duplicate_occurrences_and_covariate_groups_on_rollback() {
+        let accepted = vec![
+            section_explainability_for_test(
+                ContextSectionKind::Relationships,
+                None,
+                5,
+                vec![
+                    candidate_for_test("r1", true, SelectionReason::GraphExpansion),
+                    candidate_for_test("r1", true, SelectionReason::GraphExpansion),
+                ],
+            ),
+            section_explainability_for_test(
+                ContextSectionKind::Covariates,
+                Some("claims".to_owned()),
+                3,
+                vec![candidate_for_test(
+                    "claim-1",
+                    true,
+                    SelectionReason::GraphExpansion,
+                )],
+            ),
+            section_explainability_for_test(
+                ContextSectionKind::Covariates,
+                Some("other".to_owned()),
+                4,
+                vec![candidate_for_test(
+                    "other-1",
+                    true,
+                    SelectionReason::GraphExpansion,
+                )],
+            ),
+        ];
+        let attempted = vec![
+            section_explainability_for_test(
+                ContextSectionKind::Relationships,
+                None,
+                20,
+                vec![
+                    candidate_for_test("r1", true, SelectionReason::GraphExpansion),
+                    candidate_for_test("r2", true, SelectionReason::GraphExpansion),
+                ],
+            ),
+            section_explainability_for_test(
+                ContextSectionKind::Covariates,
+                Some("claims".to_owned()),
+                20,
+                vec![candidate_for_test(
+                    "claim-2",
+                    true,
+                    SelectionReason::GraphExpansion,
+                )],
+            ),
+            section_explainability_for_test(
+                ContextSectionKind::Covariates,
+                Some("other".to_owned()),
+                20,
+                vec![candidate_for_test(
+                    "other-2",
+                    true,
+                    SelectionReason::GraphExpansion,
+                )],
+            ),
+        ];
+
+        let rolled_back = rollback_section_explainability(attempted, &accepted);
+
+        assert_eq!(rolled_back[0].selected_record_ids, ["r1", "r1"]);
+        assert_eq!(rolled_back[0].selected_count, 2);
+        assert_eq!(rolled_back[0].candidates[2].id, "r2");
+        assert!(!rolled_back[0].candidates[2].selected);
+        assert_eq!(rolled_back[1].name.as_deref(), Some("claims"));
+        assert_eq!(rolled_back[1].selected_record_ids, ["claim-1"]);
+        assert_eq!(rolled_back[2].name.as_deref(), Some("other"));
+        assert_eq!(rolled_back[2].selected_record_ids, ["other-1"]);
+    }
+
+    #[test]
+    fn test_should_reject_all_selectable_candidates_when_first_attempt_rolls_back() {
+        let attempted = section_explainability_for_test(
+            ContextSectionKind::Relationships,
+            None,
+            11,
+            vec![
+                candidate_for_test("r1", true, SelectionReason::GraphExpansion),
+                candidate_for_test("r2", false, SelectionReason::MissingRecord),
+            ],
+        );
+
+        let rolled_back = rollback_section_explainability(vec![attempted], &[]);
+        let [section] = rolled_back.as_slice() else {
+            panic!("expected one relationship section");
+        };
+
+        assert_eq!(section.tokens_used, 0);
+        assert_eq!(section.selected_count, 0);
+        assert!(section.selected_record_ids.is_empty());
+        assert!(section.truncated);
+        assert_eq!(
+            section.candidates[0].reason,
+            Some(SelectionReason::TokenBudget)
+        );
+        assert_eq!(
+            section.candidates[1].reason,
+            Some(SelectionReason::MissingRecord)
+        );
+        assert!(
+            section
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.selected)
+        );
+    }
+
+    fn candidate_for_test(
+        id: &str,
+        selected: bool,
+        reason: SelectionReason,
+    ) -> ExplainabilityCandidate {
+        let mut candidate =
+            ExplainabilityCandidate::new(id.to_owned(), ExplainabilityRecordType::Relationship);
+        candidate.selected = selected;
+        candidate.reason = Some(reason);
+        candidate
+    }
+
+    fn section_explainability_for_test(
+        kind: ContextSectionKind,
+        name: Option<String>,
+        tokens_used: usize,
+        candidates: Vec<ExplainabilityCandidate>,
+    ) -> SectionExplainability {
+        let selected_record_ids = candidates
+            .iter()
+            .filter(|candidate| candidate.selected)
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        SectionExplainability {
+            kind,
+            name,
+            token_budget: 20,
+            tokens_used,
+            candidate_count: candidates.len(),
+            selected_count: selected_record_ids.len(),
+            selected_record_ids,
+            truncated: false,
+            candidates,
         }
     }
 

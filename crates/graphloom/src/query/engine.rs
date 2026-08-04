@@ -14,6 +14,7 @@ use super::{
     QueryRuntimeFactory, Result, SearchMethod,
     basic::{basic_search, basic_search_streaming},
     drift::{drift_search, drift_search_streaming},
+    explainability::QueryExplainabilitySession,
     global::{global_search, global_search_streaming},
     local::{local_search, local_search_streaming},
     runtime::{
@@ -126,29 +127,50 @@ impl QueryEngine {
     /// Returns a typed Query error for invalid request options, missing snapshot resources, or
     /// model/provider failures.
     pub async fn query(&self, options: QueryOptions) -> crate::Result<QueryResult> {
-        self.validate_project_root(&options).await?;
+        let session = QueryExplainabilitySession::start_local(&options).await;
+        self.query_with_session(options, session).await
+    }
+
+    pub(crate) async fn query_with_session(
+        &self,
+        options: QueryOptions,
+        session: Option<Arc<QueryExplainabilitySession>>,
+    ) -> crate::Result<QueryResult> {
+        let result = self.query_inner(&options, session.clone()).await;
+        if let (Err(error), Some(session)) = (&result, session) {
+            session.finish_graphloom_error(error).await;
+        }
+        result
+    }
+
+    async fn query_inner(
+        &self,
+        options: &QueryOptions,
+        session: Option<Arc<QueryExplainabilitySession>>,
+    ) -> crate::Result<QueryResult> {
+        self.validate_project_root(options).await?;
         match options.method {
             SearchMethod::Basic => {
-                let runtime = self.basic_runtime(&options).await?;
+                let runtime = self.basic_runtime(options).await?;
                 Ok(basic_search(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Local => {
-                let runtime = self.local_runtime(&options).await?;
+                let runtime = self.local_runtime(options).await?;
                 Ok(local_search(
                     runtime,
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
-                    options.explainability.as_ref(),
+                    session,
                 )
                 .await?)
             }
             SearchMethod::Global => {
-                let runtime = self.global_runtime(&options).await?;
+                let runtime = self.global_runtime(options).await?;
                 Ok(global_search(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Drift => {
-                let runtime = self.drift_runtime(&options).await?;
+                let runtime = self.drift_runtime(options).await?;
                 Ok(drift_search(runtime, &options.query, &options.response_type).await?)
             }
         }
@@ -161,32 +183,53 @@ impl QueryEngine {
     /// Returns a typed Query error when resource preparation or the provider stream handshake
     /// fails.
     pub async fn query_stream(&self, options: QueryOptions) -> crate::Result<QueryEventStream> {
-        self.validate_project_root(&options).await?;
+        let session = QueryExplainabilitySession::start_local(&options).await;
+        self.query_stream_with_session(options, session).await
+    }
+
+    pub(crate) async fn query_stream_with_session(
+        &self,
+        options: QueryOptions,
+        session: Option<Arc<QueryExplainabilitySession>>,
+    ) -> crate::Result<QueryEventStream> {
+        let result = self.query_stream_inner(&options, session.clone()).await;
+        if let (Err(error), Some(session)) = (&result, session) {
+            session.finish_graphloom_error(error).await;
+        }
+        result
+    }
+
+    async fn query_stream_inner(
+        &self,
+        options: &QueryOptions,
+        session: Option<Arc<QueryExplainabilitySession>>,
+    ) -> crate::Result<QueryEventStream> {
+        self.validate_project_root(options).await?;
         match options.method {
             SearchMethod::Basic => {
-                let runtime = self.basic_runtime(&options).await?;
+                let runtime = self.basic_runtime(options).await?;
                 Ok(basic_search_streaming(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Local => {
-                let runtime = self.local_runtime(&options).await?;
+                let runtime = self.local_runtime(options).await?;
                 Ok(local_search_streaming(
                     runtime,
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
-                    options.explainability.as_ref(),
+                    session,
                 )
                 .await?)
             }
             SearchMethod::Global => {
-                let runtime = self.global_runtime(&options).await?;
+                let runtime = self.global_runtime(options).await?;
                 Ok(
                     global_search_streaming(runtime, &options.query, &options.response_type)
                         .await?,
                 )
             }
             SearchMethod::Drift => {
-                let runtime = self.drift_runtime(&options).await?;
+                let runtime = self.drift_runtime(options).await?;
                 Ok(drift_search_streaming(runtime, &options.query, &options.response_type).await?)
             }
         }

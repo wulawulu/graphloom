@@ -1,10 +1,13 @@
 //! Public Query API.
 
+use std::sync::Arc;
+
 use crate::{
     GraphRagConfig, Result,
     project::LoadedProject,
     query::{
-        QueryEngine, QueryEventStream, QueryOptions, QueryResult, SearchMethod,
+        QueryEngine, QueryEventStream, QueryExplainabilitySession, QueryOptions, QueryResult,
+        SearchMethod,
         basic::{basic_search as run_basic, basic_search_streaming as run_basic_streaming},
         drift::{drift_search as run_drift, drift_search_streaming as run_drift_streaming},
         global::{global_search as run_global, global_search_streaming as run_global_streaming},
@@ -145,8 +148,17 @@ async fn execute_query(
     method: SearchMethod,
 ) -> Result<QueryResult> {
     options.method = method;
-    let engine = QueryEngine::load(config, &options.project_root).await?;
-    engine.query(options).await
+    let session = QueryExplainabilitySession::start_local(&options).await;
+    let engine = match QueryEngine::load(config, &options.project_root).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            if let Some(session) = &session {
+                session.finish_graphloom_error(&error).await;
+            }
+            return Err(error);
+        }
+    };
+    engine.query_with_session(options, session).await
 }
 
 async fn execute_query_stream(
@@ -155,40 +167,58 @@ async fn execute_query_stream(
     method: SearchMethod,
 ) -> Result<QueryEventStream> {
     options.method = method;
-    let engine = QueryEngine::load(config, &options.project_root).await?;
-    engine.query_stream(options).await
+    let session = QueryExplainabilitySession::start_local(&options).await;
+    let engine = match QueryEngine::load(config, &options.project_root).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            if let Some(session) = &session {
+                session.finish_graphloom_error(&error).await;
+            }
+            return Err(error);
+        }
+    };
+    engine.query_stream_with_session(options, session).await
 }
 
 pub(crate) async fn query_loaded(
     project: LoadedProject,
     options: QueryOptions,
 ) -> Result<QueryResult> {
+    let session = QueryExplainabilitySession::start_local(&options).await;
+    let result = query_loaded_with_session(&project, &options, session.clone()).await;
+    if let (Err(error), Some(session)) = (&result, session) {
+        session.finish_graphloom_error(error).await;
+    }
+    result
+}
+
+async fn query_loaded_with_session(
+    project: &LoadedProject,
+    options: &QueryOptions,
+    session: Option<Arc<QueryExplainabilitySession>>,
+) -> Result<QueryResult> {
     match options.method {
         SearchMethod::Basic => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_basic(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_basic(project, options).await?;
             Ok(run_basic(runtime, &options.query, &options.response_type).await?)
         }
         SearchMethod::Local => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_local(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_local(project, options).await?;
             Ok(run_local(
                 runtime,
                 &options.query,
                 &options.response_type,
                 options.conversation_history.as_ref(),
-                options.explainability.as_ref(),
+                session.clone(),
             )
             .await?)
         }
         SearchMethod::Global => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_global(project, options).await?;
             Ok(run_global(runtime, &options.query, &options.response_type).await?)
         }
         SearchMethod::Drift => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_drift(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;
             Ok(run_drift(runtime, &options.query, &options.response_type).await?)
         }
     }
@@ -198,32 +228,41 @@ pub(crate) async fn query_loaded_stream(
     project: LoadedProject,
     options: QueryOptions,
 ) -> Result<QueryEventStream> {
+    let session = QueryExplainabilitySession::start_local(&options).await;
+    let result = query_loaded_stream_with_session(&project, &options, session.clone()).await;
+    if let (Err(error), Some(session)) = (&result, session) {
+        session.finish_graphloom_error(error).await;
+    }
+    result
+}
+
+async fn query_loaded_stream_with_session(
+    project: &LoadedProject,
+    options: &QueryOptions,
+    session: Option<Arc<QueryExplainabilitySession>>,
+) -> Result<QueryEventStream> {
     match options.method {
         SearchMethod::Basic => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_basic(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_basic(project, options).await?;
             Ok(run_basic_streaming(runtime, &options.query, &options.response_type).await?)
         }
         SearchMethod::Local => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_local(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_local(project, options).await?;
             Ok(run_local_streaming(
                 runtime,
                 &options.query,
                 &options.response_type,
                 options.conversation_history.as_ref(),
-                options.explainability.as_ref(),
+                session.clone(),
             )
             .await?)
         }
         SearchMethod::Global => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_global(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_global(project, options).await?;
             Ok(run_global_streaming(runtime, &options.query, &options.response_type).await?)
         }
         SearchMethod::Drift => {
-            let runtime =
-                crate::query::QueryRuntimeFactory::build_drift(&project, &options).await?;
+            let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;
             Ok(run_drift_streaming(runtime, &options.query, &options.response_type).await?)
         }
     }

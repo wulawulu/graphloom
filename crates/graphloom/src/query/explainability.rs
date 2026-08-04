@@ -10,11 +10,15 @@ use std::{
 
 use chrono::Utc;
 
-use super::QueryError;
-use crate::explainability::{
-    ExplainabilityContentMode, ExplainabilityContractError, ExplainabilityEvent,
-    ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRunId, ExplainabilityRunKind,
-    ExplainabilitySink, ExplainabilitySpanId, QueryStarted, RunCompleted, RunFailed, RunStarted,
+use super::{QueryError, QueryOptions, SearchMethod};
+use crate::{
+    GraphLoomError,
+    explainability::{
+        ExplainabilityContentMode, ExplainabilityContractError, ExplainabilityEvent,
+        ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRunId,
+        ExplainabilityRunKind, ExplainabilitySink, ExplainabilitySpanId, QueryStarted,
+        RunCompleted, RunFailed, RunStarted,
+    },
 };
 
 const DELIVERY_ERROR_KIND: &str = "explainability_delivery";
@@ -155,6 +159,18 @@ impl QueryExplainabilitySession {
         }
     }
 
+    pub(crate) async fn start_local(options: &QueryOptions) -> Option<Arc<Self>> {
+        if options.method != SearchMethod::Local {
+            return None;
+        }
+        let session = options
+            .explainability
+            .as_ref()
+            .map(|options| Arc::new(Self::new(options)))?;
+        session.start(&options.query).await;
+        Some(session)
+    }
+
     pub(crate) const fn spans(&self) -> &QueryExplainabilitySpans {
         &self.spans
     }
@@ -273,6 +289,15 @@ impl QueryExplainabilitySession {
     pub(crate) async fn finish_query_error(&self, error: &QueryError) {
         self.finish_failure(query_error_kind(error), QUERY_ERROR_MESSAGE)
             .await;
+    }
+
+    pub(crate) async fn finish_graphloom_error(&self, error: &GraphLoomError) {
+        let error_kind = match error {
+            GraphLoomError::Query(error) => query_error_kind(error),
+            GraphLoomError::InvalidRoot { .. } => "invalid_query_config",
+            _ => "query_runtime",
+        };
+        self.finish_failure(error_kind, QUERY_ERROR_MESSAGE).await;
     }
 
     pub(crate) async fn finish_stream_ended(&self) {
