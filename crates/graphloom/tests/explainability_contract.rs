@@ -15,8 +15,9 @@ use graphloom::{
         ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
         ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
         ExplainabilityScore, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
-        ExplainabilitySinkOperation, ExplainabilitySpanId, NoopExplainabilitySink, QueryStarted,
-        RelationshipsSelected, RunStarted, SelectionReason, TextUnitsSelected,
+        ExplainabilitySinkOperation, ExplainabilitySpanId, JsonlExplainabilityOptions,
+        JsonlExplainabilityRecorder, NoopExplainabilitySink, QueryStarted, RelationshipsSelected,
+        RunStarted, SelectionReason, TextUnitsSelected,
     },
     query::{QueryExplainabilityOptions, QueryOptions, SearchMethod},
 };
@@ -115,6 +116,30 @@ fn sample_record() -> Result<Arc<ExplainabilityRecord>, ExplainabilityContractEr
             ExplainabilityContentMode::Metadata,
         )),
     )))
+}
+
+#[tokio::test]
+async fn test_should_persist_public_records_through_jsonl_recorder() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("public/records.jsonl");
+    let recorder =
+        JsonlExplainabilityRecorder::create(JsonlExplainabilityOptions::new(path.clone())).await?;
+    let sink = ExplainabilitySinkChain::new(vec![
+        recorder.sink(),
+        Arc::new(NoopExplainabilitySink::new()),
+    ]);
+    let record = sample_record()?;
+    let run_id = record.run_id.clone();
+    sink.emit(Arc::clone(&record)).await?;
+    sink.finish_run(&run_id).await?;
+    let bytes = tokio::fs::read(recorder.path()).await?;
+    let line = bytes.strip_suffix(b"\n").ok_or("missing JSONL LF")?;
+    let envelope: ExplainabilityEnvelope = serde_json::from_slice(line)?;
+    assert_eq!(envelope.schema_version(), EXPLAINABILITY_SCHEMA_VERSION);
+    assert_eq!(envelope.sequence(), 1);
+    assert_eq!(envelope.record.run_id, run_id);
+    recorder.shutdown().await?;
+    Ok(())
 }
 
 fn candidate(id: &str, record_type: ExplainabilityRecordType) -> ExplainabilityCandidate {

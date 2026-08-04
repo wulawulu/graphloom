@@ -9,7 +9,28 @@ use std::{
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 
-use crate::query::SearchMethod;
+use crate::{explainability::ExplainabilityContentMode, query::SearchMethod};
+
+/// Explainability content policy accepted by the Query CLI.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExplainabilityContentArg {
+    /// Persist metadata and identifiers without user or model content.
+    Metadata,
+    /// Persist the content fields needed to replay and inspect a Query.
+    Content,
+    /// Persist the most detailed currently supported diagnostic content.
+    Debug,
+}
+
+impl From<ExplainabilityContentArg> for ExplainabilityContentMode {
+    fn from(value: ExplainabilityContentArg) -> Self {
+        match value {
+            ExplainabilityContentArg::Metadata => Self::Metadata,
+            ExplainabilityContentArg::Content => Self::Content,
+            ExplainabilityContentArg::Debug => Self::Debug,
+        }
+    }
+}
 
 /// `GraphLoom` command line.
 #[derive(Debug, Parser)]
@@ -155,6 +176,23 @@ pub struct QueryArgs {
         help = "Print the response in a streaming manner."
     )]
     pub no_streaming: bool,
+    /// Write Local Query Explainability envelopes as JSONL.
+    #[arg(
+        long = "explain-output",
+        value_name = "EXPLAIN_OUTPUT",
+        help = "Write Local Query Explainability envelopes as JSONL."
+    )]
+    pub explain_output: Option<PathBuf>,
+    /// Explainability content policy; valid only with `--explain-output` and defaults to metadata.
+    #[arg(
+        long = "explain-content",
+        value_name = "EXPLAIN_CONTENT",
+        value_enum,
+        requires = "explain_output",
+        help = "Explainability content policy for Local Query JSONL [possible values: metadata, \
+                content, debug]."
+    )]
+    pub explain_content: Option<ExplainabilityContentArg>,
     /// The query to execute.
     #[arg(help = "The query to execute.")]
     pub query: String,
@@ -191,6 +229,13 @@ where
     let Command::Query(args) = &mut cli.command else {
         return Ok(cli);
     };
+    validate_query_explainability(args)?;
+    args.explain_output = args
+        .explain_output
+        .as_deref()
+        .map(resolve_output_path)
+        .transpose()
+        .map_err(query_path_error)?;
     args.root = parse_existing_root(&args.root).map_err(query_path_error)?;
     args.data = args
         .data
@@ -200,6 +245,24 @@ where
         .map_err(query_path_error)?;
     writable_probe(&args.root).map_err(query_path_error)?;
     Ok(cli)
+}
+
+fn validate_query_explainability(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
+    if args.explain_output.is_some() && !matches!(args.method, SearchMethod::Local) {
+        return Err(query_path_error(
+            "--explain-output currently supports only --method local".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_output_path(value: &Path) -> Result<PathBuf, String> {
+    if value.is_absolute() {
+        return Ok(value.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(value))
+        .map_err(|source| format!("cannot resolve Explainability output path: {source}"))
 }
 
 fn query_path_error(message: String) -> clap::Error {
@@ -768,7 +831,11 @@ mod tests {
         let actual_order = query
             .get_arguments()
             .filter_map(|argument| match argument.get_id().as_str() {
-                "query" | "no_dynamic_selection" | "no_streaming" => None,
+                "query"
+                | "no_dynamic_selection"
+                | "no_streaming"
+                | "explain_output"
+                | "explain_content" => None,
                 name => Some(name),
             })
             .collect::<Vec<_>>();

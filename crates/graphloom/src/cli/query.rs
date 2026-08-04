@@ -9,11 +9,14 @@ use crate::{
     GraphLoomError,
     api::query::{query_loaded, query_loaded_stream},
     cli::{
-        QueryArgs,
+        ExplainabilityContentArg, QueryArgs,
         error::{CliError, Result},
     },
     config::load::load_project_config,
-    query::{QueryEvent, QueryOptions, QueryResult, SearchMethod},
+    explainability::{
+        JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
+    },
+    query::{QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod},
 };
 
 const QUERY_FILE_FILTER: &str = "off,graphloom::cli::query=info,graphloom::query=info";
@@ -34,13 +37,28 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
     options.community_level = args.community_level;
     options.dynamic_community_selection = args.dynamic_selection_enabled();
     options.response_type.clone_from(&args.response_type);
+    let recorder = create_explainability_recorder(args).await?;
+    if let Some(recorder) = recorder.as_ref() {
+        let content_mode = args
+            .explain_content
+            .unwrap_or(ExplainabilityContentArg::Metadata)
+            .into();
+        let explainability = QueryExplainabilityOptions::generated(content_mode, recorder.sink());
+        tracing::info!(
+            run_id = %explainability.run_id(),
+            output_path = %recorder.path().display(),
+            content_mode = ?content_mode,
+            "Local Query Explainability JSONL enabled"
+        );
+        options.explainability = Some(explainability);
+    }
     tracing::info!(method = %args.method, streaming, "query run started");
-    let outcome = if streaming {
+    let query_outcome = if streaming {
         run_streaming(project, options, args.method).await
     } else {
         run_non_streaming(project, options, args.method).await
     };
-    if let Err(error) = &outcome {
+    if let Err(error) = &query_outcome {
         tracing::error!(
             method = %args.method,
             streaming,
@@ -48,7 +66,62 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
             "query run failed"
         );
     }
-    outcome
+    let recorder_outcome = shutdown_explainability_recorder(recorder).await;
+    combine_query_and_recorder_outcomes(query_outcome, recorder_outcome)
+}
+
+async fn create_explainability_recorder(
+    args: &QueryArgs,
+) -> Result<Option<JsonlExplainabilityRecorder>> {
+    let Some(path) = args.explain_output.as_ref() else {
+        return Ok(None);
+    };
+    JsonlExplainabilityRecorder::create(JsonlExplainabilityOptions::new(path.clone()))
+        .await
+        .map(Some)
+        .map_err(|source| {
+            explainability_output_error("create Explainability JSONL output", path, source)
+        })
+}
+
+async fn shutdown_explainability_recorder(
+    recorder: Option<JsonlExplainabilityRecorder>,
+) -> Result<()> {
+    let Some(recorder) = recorder else {
+        return Ok(());
+    };
+    let path = recorder.path().to_path_buf();
+    recorder.shutdown().await.map_err(|source| {
+        explainability_output_error("shutdown Explainability JSONL output", &path, source)
+    })
+}
+
+fn combine_query_and_recorder_outcomes(query: Result<()>, recorder: Result<()>) -> Result<()> {
+    match (query, recorder) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(query_error), Ok(())) => Err(query_error),
+        (Ok(()), Err(recorder_error)) => Err(recorder_error),
+        (Err(query_error), Err(recorder_error)) => {
+            tracing::error!(
+                error_category = "explainability_output",
+                error = %recorder_error,
+                "Explainability Recorder shutdown also failed"
+            );
+            Err(query_error)
+        }
+    }
+}
+
+fn explainability_output_error(
+    operation: &'static str,
+    path: &Path,
+    source: JsonlExplainabilityError,
+) -> GraphLoomError {
+    GraphLoomError::ExplainabilityOutput {
+        operation,
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    }
 }
 
 async fn run_non_streaming(
@@ -132,6 +205,7 @@ fn error_category(error: &GraphLoomError) -> &'static str {
     match error {
         GraphLoomError::Query(_) => "query",
         GraphLoomError::Io { .. } => "io",
+        GraphLoomError::ExplainabilityOutput { .. } => "explainability_output",
         GraphLoomError::MissingSettings { .. }
         | GraphLoomError::ConfigParse { .. }
         | GraphLoomError::MissingEnvironmentVariable { .. }

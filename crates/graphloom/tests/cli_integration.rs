@@ -16,6 +16,7 @@ use graphloom::{
     ALL_EMBEDDINGS, COMMUNITY_FULL_CONTENT_EMBEDDING, ENTITY_DESCRIPTION_EMBEDDING, GraphRagConfig,
     TEXT_UNIT_TEXT_EMBEDDING,
     api::{BuildIndexOptions, CacheMode, IndexingMethod, build_index},
+    explainability::{ExplainabilityEnvelope, ExplainabilityEvent},
 };
 use graphloom_llm::{
     CachedModelResult, ChatMessage, CompletionRequest, CompletionResponse, EmbeddingRequest,
@@ -1227,6 +1228,346 @@ async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
     assert!(!query_log.contains("Authorization"));
     assert!(!query_log.contains(query_sentinel));
     assert!(!query_log.contains("Alice works for Acme"));
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real Local fixture verifies JSONL modes, relative paths, streaming, and failure \
+              boundaries"
+)]
+async fn test_should_export_local_query_explainability_jsonl_from_cli() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let project = TempDir::new().expect("project");
+    run_minimal_standard_index(project.path(), &server.uri()).await;
+    let settings = tokio::fs::read_to_string(project.path().join("settings.yaml"))
+        .await
+        .expect("settings");
+    let vector_fixture = TempDir::new().expect("vector fixture");
+    let local_vectors = vector_fixture.path().join("local");
+    copy_vector_indices(
+        project.path(),
+        &local_vectors,
+        &[ENTITY_DESCRIPTION_EMBEDDING],
+    )
+    .await;
+    set_query_vector_db(project.path(), &settings, &local_vectors).await;
+    let working = TempDir::new().expect("working directory");
+    let query = "WHO_IS_ALICE_JSONL_FIXTURE";
+
+    let baseline_offset = server.received_requests().await.expect("requests").len();
+    let baseline = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            query,
+        ])
+        .output()
+        .expect("baseline Query");
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(normalize_cli_text(&baseline.stdout), "Local answer.\n");
+    let baseline_requests = request_bodies_since(&server, baseline_offset).await;
+
+    let metadata_offset = server.received_requests().await.expect("requests").len();
+    let metadata = graphloom_command()
+        .current_dir(working.path())
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--explain-output",
+            "traces/metadata.jsonl",
+            query,
+        ])
+        .output()
+        .expect("metadata Query");
+    assert_eq!(
+        metadata.status.code(),
+        Some(0),
+        "{}",
+        normalize_cli_text(&metadata.stderr)
+    );
+    assert_eq!(normalize_cli_text(&metadata.stdout), "Local answer.\n");
+    assert!(metadata.stderr.is_empty());
+    assert_eq!(
+        request_bodies_since(&server, metadata_offset).await,
+        baseline_requests
+    );
+    let metadata_path = working.path().join("traces/metadata.jsonl");
+    let metadata_envelopes = read_explainability_jsonl(&metadata_path).await;
+    assert_complete_explainability_run(&metadata_envelopes);
+    let metadata_json = tokio::fs::read_to_string(&metadata_path)
+        .await
+        .expect("metadata JSONL");
+    for forbidden in [
+        query,
+        "Local answer.",
+        "Alice works for Acme",
+        "test-key",
+        "Authorization",
+        "\"query\":",
+        "\"mapping_query\":",
+        "\"input\":",
+        "\"context\":",
+        "\"prompt\":",
+        "\"response\":",
+    ] {
+        assert!(
+            !metadata_json.contains(forbidden),
+            "metadata leaked {forbidden}"
+        );
+    }
+
+    let content_path = working.path().join("content.jsonl");
+    let content_offset = server.received_requests().await.expect("requests").len();
+    let content = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--explain-output",
+            content_path.to_str().expect("UTF-8 content path"),
+            "--explain-content",
+            "content",
+            query,
+        ])
+        .output()
+        .expect("content Query");
+    assert_eq!(
+        content.status.code(),
+        Some(0),
+        "{}",
+        normalize_cli_text(&content.stderr)
+    );
+    assert_eq!(normalize_cli_text(&content.stdout), "Local answer.\n");
+    assert_eq!(
+        request_bodies_since(&server, content_offset).await,
+        baseline_requests
+    );
+    let content_json = tokio::fs::read_to_string(&content_path)
+        .await
+        .expect("content JSONL");
+    assert!(content_json.contains(query));
+    assert!(content_json.contains("Local answer."));
+    assert!(content_json.contains("incorporating any relevant general knowledge"));
+    for field in [
+        "\"query\":",
+        "\"mapping_query\":",
+        "\"input\":",
+        "\"context\":",
+        "\"prompt\":",
+        "\"response\":",
+    ] {
+        assert!(
+            content_json.contains(field),
+            "content JSONL omitted {field}"
+        );
+    }
+    for secret in ["test-key", "Authorization", "GRAPHRAG_API_KEY"] {
+        assert!(!content_json.contains(secret));
+    }
+
+    let streaming_path = working.path().join("streaming.jsonl");
+    let streaming = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--streaming",
+            "--explain-output",
+            streaming_path.to_str().expect("UTF-8 streaming path"),
+            query,
+        ])
+        .output()
+        .expect("streaming Query");
+    assert_eq!(
+        streaming.status.code(),
+        Some(0),
+        "{}",
+        normalize_cli_text(&streaming.stderr)
+    );
+    assert_eq!(normalize_cli_text(&streaming.stdout), "Local answer.\n");
+    let streaming_envelopes = read_explainability_jsonl(&streaming_path).await;
+    assert_complete_explainability_run(&streaming_envelopes);
+    assert!(streaming_envelopes.iter().any(|envelope| matches!(
+        envelope.record.event,
+        ExplainabilityEvent::LlmRequestCompleted(_)
+    )));
+
+    let existing_path = working.path().join("existing.jsonl");
+    tokio::fs::write(&existing_path, b"do-not-overwrite")
+        .await
+        .expect("existing output");
+    let requests_before_existing = server.received_requests().await.expect("requests").len();
+    let existing = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--explain-output",
+            existing_path.to_str().expect("UTF-8 existing path"),
+            query,
+        ])
+        .output()
+        .expect("existing output Query");
+    assert_eq!(existing.status.code(), Some(1));
+    assert!(normalize_cli_text(&existing.stderr).contains("create Explainability JSONL output"));
+    assert_eq!(
+        tokio::fs::read(&existing_path)
+            .await
+            .expect("existing bytes"),
+        b"do-not-overwrite"
+    );
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        requests_before_existing
+    );
+
+    let empty_vectors = vector_fixture.path().join("empty");
+    tokio::fs::create_dir_all(&empty_vectors)
+        .await
+        .expect("empty vector directory");
+    set_query_vector_db(project.path(), &settings, &empty_vectors).await;
+    let failed_path = working.path().join("failed.jsonl");
+    let requests_before_failure = server.received_requests().await.expect("requests").len();
+    let failed = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--explain-output",
+            failed_path.to_str().expect("UTF-8 failed path"),
+            query,
+        ])
+        .output()
+        .expect("failed Query");
+    assert_eq!(failed.status.code(), Some(1));
+    let failed_envelopes = read_explainability_jsonl(&failed_path).await;
+    assert_eq!(failed_envelopes.len(), 3);
+    assert!(matches!(
+        failed_envelopes[0].record.event,
+        ExplainabilityEvent::RunStarted(_)
+    ));
+    assert!(matches!(
+        failed_envelopes[1].record.event,
+        ExplainabilityEvent::QueryStarted(_)
+    ));
+    assert!(matches!(
+        failed_envelopes[2].record.event,
+        ExplainabilityEvent::RunFailed(_)
+    ));
+    assert_eq!(failed_envelopes[2].sequence(), 3);
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        requests_before_failure
+    );
+}
+
+#[test]
+fn test_should_reject_invalid_query_explainability_cli_combinations() {
+    let working = TempDir::new().expect("working directory");
+    for method_name in ["basic", "global", "drift"] {
+        let path = working.path().join(format!("{method_name}.jsonl"));
+        let output = graphloom_command()
+            .current_dir(working.path())
+            .args([
+                "query",
+                "--method",
+                method_name,
+                "--explain-output",
+                path.to_str().expect("UTF-8 output"),
+                "question",
+            ])
+            .output()
+            .expect("invalid Explainability method");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(normalize_cli_text(&output.stderr).contains("currently supports only"));
+        assert!(!path.exists());
+    }
+
+    let output = graphloom_command()
+        .current_dir(working.path())
+        .args(["query", "--explain-content", "debug", "question"])
+        .output()
+        .expect("content without output");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(normalize_cli_text(&output.stderr).contains("--explain-output"));
+}
+
+async fn read_explainability_jsonl(path: &std::path::Path) -> Vec<ExplainabilityEnvelope> {
+    let bytes = tokio::fs::read(path).await.expect("Explainability JSONL");
+    assert!(bytes.ends_with(b"\n"));
+    assert!(!bytes.windows(2).any(|window| window == b"\r\n"));
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("Explainability Envelope"))
+        .collect()
+}
+
+async fn request_bodies_since(server: &MockServer, offset: usize) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .expect("provider requests")
+        .get(offset..)
+        .expect("new provider requests")
+        .iter()
+        .map(|request| request.body_json::<Value>().expect("provider request JSON"))
+        .collect()
+}
+
+fn assert_complete_explainability_run(envelopes: &[ExplainabilityEnvelope]) {
+    assert!(!envelopes.is_empty());
+    let run_id = &envelopes[0].record.run_id;
+    for (index, envelope) in envelopes.iter().enumerate() {
+        assert_eq!(
+            envelope.sequence(),
+            u64::try_from(index).expect("sequence index") + 1
+        );
+        assert_eq!(envelope.schema_version(), 1);
+        assert_eq!(&envelope.record.run_id, run_id);
+    }
+    assert!(matches!(
+        envelopes[0].record.event,
+        ExplainabilityEvent::RunStarted(_)
+    ));
+    assert!(matches!(
+        envelopes[1].record.event,
+        ExplainabilityEvent::QueryStarted(_)
+    ));
+    assert!(matches!(
+        envelopes.last().map(|envelope| &envelope.record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
 }
 
 fn is_dynamic_rating_request(request: &Request) -> bool {

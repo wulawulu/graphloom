@@ -2,9 +2,9 @@
 //!
 //! Core orchestration will create [`ExplainabilityRecord`] values with business identity and
 //! span relationships. Sinks accept shared records asynchronously, applying bounded-queue
-//! backpressure and reporting delivery or finalization failures. A persistence adapter later
-//! assigns the per-run sequence and creates an [`ExplainabilityEnvelope`]; this module deliberately
-//! contains no queue, writer, or allocator implementation.
+//! backpressure and reporting delivery or finalization failures. A persistence adapter assigns
+//! the per-run sequence and creates an [`ExplainabilityEnvelope`]. The JSONL Recorder in this
+//! module provides one bounded, single-writer persistence adapter.
 //!
 //! The JSON schema is versioned by [`EXPLAINABILITY_SCHEMA_VERSION`]. Adding optional fields is a
 //! backward-compatible change. Removing fields or changing their meaning requires a schema-version
@@ -20,6 +20,7 @@
 mod content_mode;
 mod dto;
 mod event;
+mod jsonl;
 mod record;
 mod sink;
 mod validation;
@@ -37,6 +38,9 @@ pub use event::{
     ExplainabilityWarning, GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted,
     MappingQueryBuilt, QueryStarted, RelationshipsSelected, RunCompleted, RunFailed, RunStarted,
     TextUnitsSelected,
+};
+pub use jsonl::{
+    JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
 };
 pub use record::{
     EXPLAINABILITY_SCHEMA_VERSION, ExplainabilityContractError, ExplainabilityEnvelope,

@@ -340,6 +340,18 @@ pub enum GraphLoomError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// Explainability output creation or shutdown failed.
+    #[error("{operation} failed for {path}: {source}")]
+    ExplainabilityOutput {
+        /// Recorder operation.
+        operation: &'static str,
+        /// Explainability output path.
+        path: PathBuf,
+        /// Detailed Recorder failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Indexing failed.
     #[error("index failed: {source}")]
     IndexFailed {

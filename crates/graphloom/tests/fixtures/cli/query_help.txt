@@ -51,5 +51,16 @@ Options:
       --no-streaming
           Print the response in a streaming manner.
 
+      --explain-output <EXPLAIN_OUTPUT>
+          Write Local Query Explainability envelopes as JSONL.
+
+      --explain-content <EXPLAIN_CONTENT>
+          Explainability content policy for Local Query JSONL [possible values: metadata, content, debug].
+
+          Possible values:
+          - metadata: Persist metadata and identifiers without user or model content
+          - content:  Persist the content fields needed to replay and inspect a Query
+          - debug:    Persist the most detailed currently supported diagnostic content
+
   -h, --help
           Print help (see a summary with '-h')

@@ -1216,8 +1216,9 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 阶段通过超时或 abandoned 状态处理。
 
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
-也不会产生 Local 事件。JSONL、bounded channel Adapter、sequence allocator、Store、SSE、
-Studio 和 OpenTelemetry 仍属于后续阶段，尚未实现。
+也不会产生 Local 事件。JSONL Recorder、bounded channel Adapter 和每 Run sequence allocator
+已经实现；SQLite、Turso、DuckDB、Store、SSE、Studio 和 OpenTelemetry 仍属于后续阶段，
+尚未实现。
 
 前端可据此处理：
 
@@ -1660,12 +1661,45 @@ CLI 使用 JSONL 作为 Explainability 输出格式。
 
 ```bash
 graphloom query \
-  --explain-output ./runs/local-query.jsonl
+  --root ./demo \
+  --method local \
+  --explain-output ./runs/local-query.jsonl \
+  --explain-content metadata \
+  "问题"
 ```
+
+当前实现结构为：
+
+```text
+JsonlExplainabilityRecorder
+├── JsonlExplainabilitySink
+│   └── bounded mpsc queue（默认容量 256，可由库调用方配置）
+└── single writer task
+    ├── 每 Run 从 1 开始分配严格递增 sequence
+    ├── ExplainabilityEnvelope::new
+    └── compact JSON + LF → write_all → flush
+```
+
+`--explain-output` 当前只允许 Local Query；`--explain-content` 支持 `metadata`、`content`
+和 `debug`，省略时采用 `metadata`。CLI 在项目配置与日志初始化成功后创建 Recorder、生成
+run ID 并提交 `QueryOptions`；因此 settings、`.env` 或配置解析失败不会创建 Run。Query、
+stream 消费或 stdout 失败后，CLI 仍显式调用 `shutdown()`；Query 与 Recorder 同时失败时，
+原 Query 错误保持主错误，Recorder 错误进入不含用户内容的安全日志。
+
+输出路径相对 CLI 进程当前工作目录解析，必要父目录会创建，文件使用 `create_new`：既不
+覆盖，也不 truncate 或跨进程 append 已存在文件。每个 Envelope 是一个紧凑 JSON 对象并
+固定追加单个 LF 字节，不写 BOM、数组或 tracing 文本。writer 每写完一行即 flush，
+`finish_run()` 在确认该 Run 之前再次 flush，Recorder `shutdown()` 处理此前已接受 command、
+再次 flush 并等待 writer task。这里不执行 `fsync` / `sync_data`；正常 finish/shutdown 后已
+接受事件均已进入底层异步文件，进程突然终止时只保证保留已经完成写入的 JSONL 前缀，
+极端情况下不完整的末行应被 Reader 视为损坏而不是猜测修复。
+
+stream 被调用方提前 drop 时不伪造终态；shutdown 仍写完并 flush 已接受事件，JSONL 会如实
+保留未完成 Run 前缀。Recorder 不提供文件轮转、压缩、远程上传、离线播放器或 append。
 
 优点：
 
-* 可流式追加；
+* 可逐行流式写入；
   -进程崩溃后保留已写事件；
   -便于 diff；
   -便于作为测试 fixture；
@@ -1836,7 +1870,7 @@ Live Hub / SSE
   -`finish_run` 确认该 Run 已接受事件完成必要持久化或 flush；
   -writer、flush 和完成确认错误必须返回调用方。
 
-CLI JSONL 和 Studio 本地 SQLite 均建立在这一可靠边界上。Core Sink 不提供
+已实现的 CLI JSONL 和未来的 Studio 本地 SQLite 均建立在这一可靠边界上。Core Sink 不提供
 `BestEffort` 模式，也不允许同一个 Sink 在不通知调用方时降级为丢事件。
 
 ## 23.2 持久化后的可恢复实时广播
@@ -2248,6 +2282,8 @@ Recording Sink
    12.LLM 请求。
 
 ## Phase 3：CLI JSONL
+
+已实现：
 
 1. JSONL Sink；
    2.bounded channel；

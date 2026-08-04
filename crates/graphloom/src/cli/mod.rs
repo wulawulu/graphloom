@@ -10,8 +10,8 @@ pub mod query;
 pub mod update;
 
 pub use args::{
-    Cli, Command, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage, PromptTuneArgs,
-    PromptTuneSelectionMethod, QueryArgs, UpdateArgs,
+    Cli, Command, ExplainabilityContentArg, IndexArgs, IndexMethodArg, InitArgs, PromptLanguage,
+    PromptTuneArgs, PromptTuneSelectionMethod, QueryArgs, UpdateArgs,
 };
 pub use error::{CliError, Result};
 pub use index::run as run_index;
