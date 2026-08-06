@@ -193,6 +193,22 @@ pub struct QueryArgs {
                 content, debug]."
     )]
     pub explain_content: Option<ExplainabilityContentArg>,
+    /// Export Local Query traces to an OTLP/HTTP collector base endpoint.
+    #[arg(
+        long = "otel-endpoint",
+        value_name = "OTEL_ENDPOINT",
+        help = "Export Local Query traces to an OTLP/HTTP collector base endpoint."
+    )]
+    pub otel_endpoint: Option<String>,
+    /// OpenTelemetry service.name used when OTLP trace export is enabled.
+    #[arg(
+        long = "otel-service-name",
+        value_name = "OTEL_SERVICE_NAME",
+        requires = "otel_endpoint",
+        value_parser = validate_otel_service_name,
+        help = "OpenTelemetry service.name used when OTLP trace export is enabled."
+    )]
+    pub otel_service_name: Option<String>,
     /// The query to execute.
     #[arg(help = "The query to execute.")]
     pub query: String,
@@ -230,6 +246,7 @@ where
         return Ok(cli);
     };
     validate_query_explainability(args)?;
+    validate_query_telemetry(args)?;
     args.explain_output = args
         .explain_output
         .as_deref()
@@ -254,6 +271,28 @@ fn validate_query_explainability(args: &QueryArgs) -> std::result::Result<(), cl
         ));
     }
     Ok(())
+}
+
+fn validate_query_telemetry(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
+    if args.otel_endpoint.is_some() && !matches!(args.method, SearchMethod::Local) {
+        return Err(query_path_error(
+            "--otel-endpoint currently supports only --method local".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_otel_service_name(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("OpenTelemetry service name must not be empty".to_owned());
+    }
+    if value.trim().is_empty() {
+        return Err("OpenTelemetry service name must not be whitespace-only".to_owned());
+    }
+    if value.len() > 128 {
+        return Err("OpenTelemetry service name must be at most 128 bytes".to_owned());
+    }
+    Ok(value.to_owned())
 }
 
 fn resolve_output_path(value: &Path) -> Result<PathBuf, String> {
@@ -740,6 +779,91 @@ mod tests {
     }
 
     #[test]
+    fn test_should_reject_otlp_arguments_for_non_local_methods() {
+        for method_name in ["basic", "global", "drift"] {
+            let error = Cli::try_parse_from([
+                "graphloom",
+                "query",
+                "--method",
+                method_name,
+                "--otel-endpoint",
+                "http://collector.invalid:4318",
+                "question",
+            ])
+            .expect_err("non-local OTLP endpoint must be rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(
+                error
+                    .to_string()
+                    .contains("--otel-endpoint currently supports only --method local"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_require_endpoint_for_otel_service_name() {
+        let error = Cli::try_parse_from([
+            "graphloom",
+            "query",
+            "--method",
+            "local",
+            "--otel-service-name",
+            "graphloom-test",
+            "question",
+        ])
+        .expect_err("service name without endpoint must be rejected");
+        assert!(
+            error.to_string().contains("--otel-endpoint"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_otel_service_names() {
+        let long_name = "a".repeat(129);
+        for value in ["", "   ", long_name.as_str()] {
+            let error = Cli::try_parse_from([
+                "graphloom",
+                "query",
+                "--method",
+                "local",
+                "--otel-endpoint",
+                "http://collector.invalid:4318",
+                "--otel-service-name",
+                value,
+                "question",
+            ])
+            .expect_err("invalid service name must be rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn test_should_parse_valid_otel_arguments() {
+        let cli = Cli::try_parse_from([
+            "graphloom",
+            "query",
+            "--method",
+            "local",
+            "--otel-endpoint",
+            "http://collector.invalid:4318",
+            "--otel-service-name",
+            "graphloom-test",
+            "question",
+        ])
+        .expect("valid OTLP arguments");
+        let Command::Query(args) = cli.command else {
+            panic!("expected Query command");
+        };
+        assert_eq!(
+            args.otel_endpoint.as_deref(),
+            Some("http://collector.invalid:4318")
+        );
+        assert_eq!(args.otel_service_name.as_deref(), Some("graphloom-test"));
+    }
+
+    #[test]
     fn test_should_parse_all_query_methods_and_boolean_pairs() {
         for method in ["global", "local", "drift", "basic"] {
             let cli = Cli::try_parse_from([
@@ -835,7 +959,9 @@ mod tests {
                 | "no_dynamic_selection"
                 | "no_streaming"
                 | "explain_output"
-                | "explain_content" => None,
+                | "explain_content"
+                | "otel_endpoint"
+                | "otel_service_name" => None,
                 name => Some(name),
             })
             .collect::<Vec<_>>();

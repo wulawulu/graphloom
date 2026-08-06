@@ -56,6 +56,7 @@ pub(crate) const fn graphloom_error_kind(error: &GraphLoomError) -> &'static str
         GraphLoomError::Query(error) => query_error_kind(error),
         GraphLoomError::InvalidRoot { .. } => error_kind::INVALID_QUERY_CONFIG,
         GraphLoomError::ExplainabilityOutput { .. } => error_kind::EXPLAINABILITY_OUTPUT,
+        GraphLoomError::Telemetry { .. } => error_kind::TELEMETRY_OUTPUT,
         _ => error_kind::QUERY_RUNTIME,
     }
 }

@@ -52,6 +52,14 @@ fn test_should_expose_exact_event_names() {
         "graphloom.cli.explainability.shutdown_failed"
     );
     assert_eq!(
+        event_name::CLI_TELEMETRY_ENABLED,
+        "graphloom.cli.telemetry.enabled"
+    );
+    assert_eq!(
+        event_name::CLI_TELEMETRY_SHUTDOWN_FAILED,
+        "graphloom.cli.telemetry.shutdown_failed"
+    );
+    assert_eq!(
         event_name::QUERY_EXPLAINABILITY_DELIVERY_FAILED,
         "graphloom.query.explainability.delivery_failed"
     );
@@ -87,6 +95,7 @@ fn test_should_expose_exact_field_names() {
         field_name::EXPLAINABILITY_ENABLED,
         "graphloom.explainability.enabled"
     );
+    assert_eq!(field_name::TELEMETRY_ENABLED, "graphloom.telemetry.enabled");
     assert_eq!(field_name::MODEL_INSTANCE, "graphloom.model.instance");
     assert_eq!(field_name::MODEL_PROVIDER, "graphloom.model.provider");
     assert_eq!(field_name::VECTOR_INDEX, "graphloom.vector.index");
@@ -143,6 +152,7 @@ fn test_should_expose_stable_error_kinds() {
         error_kind::EVENT_CONTRACT,
         error_kind::EXPLAINABILITY_FINISH,
         error_kind::EXPLAINABILITY_OUTPUT,
+        error_kind::TELEMETRY_OUTPUT,
         error_kind::STALE_REFERENCE,
     ] {
         assert!(!kind.is_empty());
@@ -169,6 +179,8 @@ fn test_should_keep_span_and_event_names_unique_and_low_cardinality() {
         event_name::CLI_QUERY_FAILED,
         event_name::CLI_EXPLAINABILITY_ENABLED,
         event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED,
+        event_name::CLI_TELEMETRY_ENABLED,
+        event_name::CLI_TELEMETRY_SHUTDOWN_FAILED,
         event_name::QUERY_EXPLAINABILITY_DELIVERY_FAILED,
         event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
         event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,
@@ -196,6 +208,7 @@ fn test_should_prefix_every_field_name_with_graphloom() {
         field_name::QUERY_METHOD,
         field_name::QUERY_STREAMING,
         field_name::EXPLAINABILITY_ENABLED,
+        field_name::TELEMETRY_ENABLED,
         field_name::MODEL_INSTANCE,
         field_name::MODEL_PROVIDER,
         field_name::VECTOR_INDEX,

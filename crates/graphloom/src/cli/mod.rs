@@ -7,6 +7,7 @@ pub mod index;
 pub mod init;
 pub mod prompt_tune;
 pub mod query;
+mod telemetry;
 pub mod update;
 
 pub use args::{

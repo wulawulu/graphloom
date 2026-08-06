@@ -11,12 +11,15 @@ use crate::{
     cli::{
         ExplainabilityContentArg, QueryArgs,
         error::{CliError, Result},
+        telemetry::{
+            OtlpTraceGuard, OtlpTraceOptions, OtlpTraceRuntime, otel_layer, telemetry_error,
+        },
     },
     config::load::load_project_config,
     explainability::{
         JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
     },
-    observability::{OBSERVABILITY_CONTRACT_VERSION, event_name},
+    observability::{OBSERVABILITY_CONTRACT_VERSION, error_kind, event_name},
     query::{
         QueryEvent, QueryEventStream, QueryExplainabilityOptions, QueryOptions, QueryResult,
         SearchMethod,
@@ -35,7 +38,19 @@ const QUERY_VERBOSE_CONSOLE_FILTER: &str = "off,graphloom::cli::query=debug,grap
 /// Returns a typed Query/config/provider error or stdout I/O error.
 pub async fn run(args: &QueryArgs) -> Result<()> {
     let project = load_project_config(&args.root).await?;
-    let _log_guard = init_logging(&project.paths.reporting_dir, args.verbose).await?;
+    let otlp_runtime = OtlpTraceOptions::from_args(args)
+        .map(|options| OtlpTraceRuntime::build(&options))
+        .transpose()?;
+    let mut observability =
+        init_query_observability(&project.paths.reporting_dir, args.verbose, otlp_runtime).await?;
+    let work_outcome = Box::pin(run_query_work(args, project)).await;
+    let telemetry_outcome = observability.shutdown_telemetry().await;
+    let outcome = combine_work_and_telemetry_outcomes(work_outcome, telemetry_outcome);
+    drop(observability);
+    outcome
+}
+
+async fn run_query_work(args: &QueryArgs, project: crate::project::LoadedProject) -> Result<()> {
     let streaming = args.streaming_enabled();
     let mut options = QueryOptions::new(project.root.clone(), args.query.clone(), args.method);
     options.data_dir = args.data.clone();
@@ -144,6 +159,24 @@ fn combine_query_and_recorder_outcomes(query: Result<()>, recorder: Result<()>) 
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(recorder_error)) => Err(recorder_error),
         (Err(query_error), _) => Err(query_error),
+    }
+}
+
+fn combine_work_and_telemetry_outcomes(work: Result<()>, telemetry: Result<()>) -> Result<()> {
+    if telemetry.is_err() {
+        tracing::error!(
+            name: event_name::CLI_TELEMETRY_SHUTDOWN_FAILED,
+            {
+                "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
+                "graphloom.error.kind" = error_kind::TELEMETRY_OUTPUT,
+            },
+            "OpenTelemetry trace export shutdown failed"
+        );
+    }
+    match (work, telemetry) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(telemetry_error)) => Err(telemetry_error),
+        (Err(work_error), _) => Err(work_error),
     }
 }
 
@@ -302,10 +335,34 @@ fn log_completion(metrics: &QueryCompletionMetrics, method: SearchMethod, stream
     }
 }
 
-async fn init_logging(
+/// Combined Query observability guard: log writer plus optional OTLP shutdown.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct QueryObservabilityGuard {
+    // Held only for RAII: keeps the non-blocking query.log writer alive until
+    // after the telemetry shutdown event has been emitted.
+    _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    otlp_guard: Option<OtlpTraceGuard>,
+}
+
+impl QueryObservabilityGuard {
+    /// Explicitly flush and shut down the OTLP provider, if any.
+    ///
+    /// The log writer guard stays alive until the caller drops this struct so
+    /// telemetry failure events are still written to `query.log`.
+    async fn shutdown_telemetry(&mut self) -> Result<()> {
+        let Some(guard) = self.otlp_guard.take() else {
+            return Ok(());
+        };
+        guard.shutdown().await
+    }
+}
+
+async fn init_query_observability(
     reporting_dir: &Path,
     verbose: bool,
-) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    otlp_runtime: Option<OtlpTraceRuntime>,
+) -> Result<QueryObservabilityGuard> {
     tokio::fs::create_dir_all(reporting_dir)
         .await
         .map_err(|source| CliError::Io {
@@ -327,16 +384,37 @@ async fn init_logging(
         .with_span_events(fmt::format::FmtSpan::NEW | fmt::format::FmtSpan::CLOSE)
         .with_writer(writer)
         .with_filter(file_filter);
+    let otel_layer = otlp_runtime
+        .as_ref()
+        .map(|runtime| otel_layer(runtime.tracer().clone()));
     let subscriber = tracing_subscriber::registry()
         .with(console_layer)
-        .with(file_layer);
+        .with(file_layer)
+        .with(otel_layer);
+    let otlp_enabled = otlp_runtime.is_some();
     match tracing::subscriber::set_global_default(subscriber) {
-        Ok(()) => Ok(Some(guard)),
+        Ok(()) => {
+            if otlp_enabled {
+                tracing::info!(
+                    name: event_name::CLI_TELEMETRY_ENABLED,
+                    {
+                        "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
+                        "graphloom.telemetry.enabled" = true,
+                    },
+                    "OpenTelemetry trace export enabled"
+                );
+            }
+            Ok(QueryObservabilityGuard {
+                _log_guard: Some(guard),
+                otlp_guard: otlp_runtime.map(OtlpTraceRuntime::into_guard),
+            })
+        }
         Err(source) => {
             drop(guard);
-            Err(CliError::RuntimeBuild {
-                source: Box::new(source),
-            })
+            if let Some(runtime) = otlp_runtime {
+                runtime.shutdown_after_init_failure().await;
+            }
+            Err(telemetry_error("install Query tracing subscriber", source))
         }
     }
 }
@@ -362,16 +440,26 @@ mod tests {
     use std::{
         collections::BTreeMap,
         io::{Error, ErrorKind, Write},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
+    use opentelemetry_sdk::{
+        error::OTelSdkError,
+        trace::{SdkTracerProvider, SpanData, SpanProcessor},
+    };
+
     use super::{
-        combine_query_and_recorder_outcomes, consume_stream_to_output, emit_query_failed,
-        write_non_streaming_response, write_stream_token, write_terminal_newline,
+        combine_query_and_recorder_outcomes, combine_work_and_telemetry_outcomes,
+        consume_stream_to_output, emit_query_failed, write_non_streaming_response,
+        write_stream_token, write_terminal_newline,
     };
     use crate::{
         GraphLoomError,
+        cli::telemetry::{OtlpTraceRuntime, telemetry_error},
         observability::event_name as contract_event_name,
         query::{
             QueryContext, QueryEvent, QueryEventStream, QueryResult, QueryUsage, SearchMethod,
@@ -407,6 +495,13 @@ mod tests {
             path: std::path::PathBuf::from("<stdout>"),
             source: Error::new(ErrorKind::BrokenPipe, "forced"),
         }
+    }
+
+    fn telemetry_error_for_test() -> GraphLoomError {
+        telemetry_error(
+            "flush OTLP traces",
+            Error::other("forced telemetry failure"),
+        )
     }
 
     #[derive(Debug, Default)]
@@ -632,6 +727,142 @@ mod tests {
         assert_eq!(
             event_count(&state, contract_event_name::CLI_QUERY_FAILED),
             0
+        );
+    }
+
+    #[test]
+    fn test_should_combine_query_recorder_telemetry_outcomes_by_priority() {
+        for (query_operation, recorder_operation, telemetry_failed) in [
+            (None, None, false),
+            (None, None, true),
+            (None, Some("shutdown Explainability JSONL output"), false),
+            (None, Some("shutdown Explainability JSONL output"), true),
+            (Some("write Query response"), None, false),
+            (Some("write Query response"), None, true),
+            (
+                Some("write Query response"),
+                Some("shutdown Explainability JSONL output"),
+                false,
+            ),
+            (
+                Some("write Query response"),
+                Some("shutdown Explainability JSONL output"),
+                true,
+            ),
+        ] {
+            let query = match query_operation {
+                Some(operation) => Err(io_error(operation)),
+                None => Ok(()),
+            };
+            let recorder = match recorder_operation {
+                Some(operation) => Err(io_error(operation)),
+                None => Ok(()),
+            };
+            let telemetry = if telemetry_failed {
+                Err(telemetry_error_for_test())
+            } else {
+                Ok(())
+            };
+            let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+            let subscriber = tracing_capture::capture_subscriber(state.clone());
+            let _guard = tracing::subscriber::set_default(subscriber);
+
+            let work = combine_query_and_recorder_outcomes(query, recorder);
+            let outcome = combine_work_and_telemetry_outcomes(work, telemetry);
+            let expected_operation =
+                match (query_operation.or(recorder_operation), telemetry_failed) {
+                    (Some(operation), _) => Some(operation),
+                    (None, true) => Some("flush OTLP traces"),
+                    (None, false) => None,
+                };
+            match expected_operation {
+                Some(operation) => {
+                    let Err(error) = outcome else {
+                        panic!("expected error for {operation:?}");
+                    };
+                    let actual_operation = match error {
+                        GraphLoomError::Io {
+                            operation: actual, ..
+                        }
+                        | GraphLoomError::Telemetry {
+                            operation: actual, ..
+                        } => actual,
+                        other => panic!("unexpected error variant: {other:?}"),
+                    };
+                    assert_eq!(actual_operation, operation);
+                }
+                None => {
+                    assert!(outcome.is_ok());
+                }
+            }
+
+            let state = state.lock().expect("capture state");
+            let recorder_events = state
+                .events
+                .iter()
+                .filter(|event| {
+                    event.name == contract_event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED
+                })
+                .count();
+            let telemetry_events = state
+                .events
+                .iter()
+                .filter(|event| event.name == contract_event_name::CLI_TELEMETRY_SHUTDOWN_FAILED)
+                .count();
+            assert_eq!(
+                recorder_events,
+                usize::from(recorder_operation.is_some()),
+                "recorder failure event must be emitted exactly once per failure"
+            );
+            assert_eq!(
+                telemetry_events,
+                usize::from(telemetry_failed),
+                "telemetry failure event must be emitted exactly once per failure"
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingShutdownProcessor {
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    impl SpanProcessor for CountingShutdownProcessor {
+        fn on_start(
+            &self,
+            _span: &mut opentelemetry_sdk::trace::Span,
+            _cx: &opentelemetry::Context,
+        ) {
+        }
+
+        fn on_end(&self, _span: SpanData) {}
+
+        fn force_flush(&self) -> Result<(), OTelSdkError> {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> Result<(), OTelSdkError> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_shutdown_provider_after_subscriber_install_failure_cleanup() {
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(CountingShutdownProcessor {
+                shutdowns: Arc::clone(&shutdowns),
+            })
+            .build();
+        let runtime = OtlpTraceRuntime::from_provider_for_test(provider, Duration::from_secs(1));
+
+        runtime.shutdown_after_init_failure().await;
+
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "provider must be explicitly shut down after subscriber install failure"
         );
     }
 }

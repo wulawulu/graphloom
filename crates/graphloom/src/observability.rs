@@ -64,6 +64,10 @@ pub mod event_name {
     /// CLI Explainability Recorder shutdown failed.
     pub const CLI_EXPLAINABILITY_SHUTDOWN_FAILED: &str =
         "graphloom.cli.explainability.shutdown_failed";
+    /// CLI OpenTelemetry trace export enabled.
+    pub const CLI_TELEMETRY_ENABLED: &str = "graphloom.cli.telemetry.enabled";
+    /// CLI OpenTelemetry trace force-flush or shutdown failed.
+    pub const CLI_TELEMETRY_SHUTDOWN_FAILED: &str = "graphloom.cli.telemetry.shutdown_failed";
     /// Explainability record delivery to the sink failed.
     pub const QUERY_EXPLAINABILITY_DELIVERY_FAILED: &str =
         "graphloom.query.explainability.delivery_failed";
@@ -124,6 +128,8 @@ pub mod field_name {
     pub const QUERY_STREAMING: &str = "graphloom.query.streaming";
     /// Whether request Explainability is enabled.
     pub const EXPLAINABILITY_ENABLED: &str = "graphloom.explainability.enabled";
+    /// Whether the CLI OpenTelemetry trace exporter is enabled.
+    pub const TELEMETRY_ENABLED: &str = "graphloom.telemetry.enabled";
     /// Configured model instance identifier.
     pub const MODEL_INSTANCE: &str = "graphloom.model.instance";
     /// Configured model provider type.
@@ -232,6 +238,8 @@ pub mod error_kind {
     pub const EXPLAINABILITY_OUTPUT: &str = "explainability_output";
     /// Entity mapping ignored a stale vector reference.
     pub const STALE_REFERENCE: &str = "stale_reference";
+    /// OpenTelemetry trace export initialization, flush, or shutdown failed.
+    pub const TELEMETRY_OUTPUT: &str = "telemetry_output";
 }
 
 #[cfg(test)]
@@ -263,6 +271,8 @@ mod tests {
             event_name::CLI_QUERY_FAILED,
             event_name::CLI_EXPLAINABILITY_ENABLED,
             event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED,
+            event_name::CLI_TELEMETRY_ENABLED,
+            event_name::CLI_TELEMETRY_SHUTDOWN_FAILED,
             event_name::QUERY_EXPLAINABILITY_DELIVERY_FAILED,
             event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
             event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,

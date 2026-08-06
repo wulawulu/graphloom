@@ -601,6 +601,8 @@ graphloom.cli.query.completed
 graphloom.cli.query.failed
 graphloom.cli.explainability.enabled
 graphloom.cli.explainability.shutdown_failed
+graphloom.cli.telemetry.enabled
+graphloom.cli.telemetry.shutdown_failed
 
 graphloom.query.explainability.delivery_failed
 graphloom.query.explainability.contract_failed
@@ -620,6 +622,7 @@ graphloom.operation               string
 graphloom.query.method            string
 graphloom.query.streaming         bool
 graphloom.explainability.enabled  bool
+graphloom.telemetry.enabled       bool
 graphloom.model.instance          string
 graphloom.model.provider          string
 graphloom.vector.index            string
@@ -772,17 +775,182 @@ CLI 的 `query.log` 使用稳定字段（`graphloom.query.method`、`graphloom.q
 
 当前只有 Local Query 详细 Span 已实现。以下内容尚未实现，不得描述为可用：
 
-* OpenTelemetry exporter；
-  -OTLP endpoint/transport（本任务未确定）；
-  -`tracing-opentelemetry` / `opentelemetry` 接入；
-  -OpenLIT 接入；
-  -Collector endpoint 配置；
-  -`--otel-*` 与 JSON 日志 CLI 参数；
-  -Basic、Global、DRIFT 的详细 Core Span；
+* Basic、Global、DRIFT 的详细 Core Span；
   -Index、Update、Prompt Tune 的 tracing 重构；
   -graphloom-llm 通用 Provider wrapper 重构。
 
-OpenTelemetry Layer 是后续任务，以本合同的 Span/Event/Field 作为稳定输入。
+JSON 日志 CLI 参数与 OpenLIT 接入尚未实现。OpenTelemetry Layer 以本合同的
+Span/Event/Field 作为稳定输入；CLI 的 OTLP/HTTP Trace Adapter 见 9.6。
+
+---
+
+# 9.6 OTLP/HTTP Trace Adapter（已实现）
+
+`graphloom query` 现在可以把 Local Query 的 `tracing` Span 通过
+OTLP/HTTP binary protobuf 导出到 OpenTelemetry Collector。
+
+## 9.6.1 传输与协议
+
+* 只实现 Trace，不实现 Metrics、Logs；
+  -固定使用 OTLP/HTTP binary protobuf（`application/x-protobuf`）；
+  -不实现 OTLP/gRPC、OTLP/JSON；
+  -不启用压缩、自动重试、Baggage、Trace Context HTTP 传播；
+  -HTTP 客户端使用官方 `reqwest-blocking-client`（Batch 工作线程内阻塞导出，
+  不在 Query async 热路径执行 HTTP 请求），TLS 使用 `reqwest-rustls-webpki-roots`；
+  -当前依赖版本：
+
+```text
+opentelemetry 0.32.0
+opentelemetry_sdk 0.32.1
+opentelemetry-otlp 0.32.0
+tracing-opentelemetry 0.33.0
+```
+
+`opentelemetry-otlp` 的 `http-proto` feature 会编译该 crate 的 proto/metrics 类型，
+但 GraphLoom 不创建 Meter Provider，也不导出任何 Metrics。
+
+## 9.6.2 CLI 参数
+
+```text
+--otel-endpoint <OTEL_ENDPOINT>
+--otel-service-name <OTEL_SERVICE_NAME>
+```
+
+* `--otel-endpoint` 是 Collector base endpoint；只有显式指定时才启用 OTLP。
+  Adapter 按 OTLP HTTP 规则追加 `/v1/traces`；
+  -未指定时完全不创建 exporter、不启动 batch 工作线程、不发起网络请求，
+  Query 行为与性能保持原样；
+  -只有 `--method local` 合法；Basic、Global、DRIFT 携带 endpoint 时在参数校验
+  阶段以 exit code 2 拒绝；
+  -`--otel-service-name` 依赖 `--otel-endpoint`，有效默认值为 `graphloom`；
+  拒绝空字符串、纯空白与超过 128 字节的值；
+  -endpoint、service name、timeout 均不会进入日志、Span 或错误 Display。
+
+示例：
+
+```bash
+graphloom query \
+  --root ./demo \
+  --method local \
+  --otel-endpoint http://localhost:4318 \
+  --otel-service-name graphloom-demo \
+  "问题"
+```
+
+与 Explainability 同时启用：
+
+```bash
+graphloom query \
+  --root ./demo \
+  --method local \
+  --explain-output ./runs/query.jsonl \
+  --explain-content metadata \
+  --otel-endpoint http://localhost:4318 \
+  --otel-service-name graphloom-demo \
+  "问题"
+```
+
+两通道职责不同：
+
+```text
+OTLP Trace
+    → 运行性能、父子 Span、token/count/status
+
+Explainability JSONL
+    → Candidate、选择原因、Context 决策与可回放内容
+```
+
+## 9.6.3 Resource 与 Instrumentation Scope
+
+Resource 使用 SDK `Resource::builder()`（保留 `telemetry.sdk.*` 等默认属性），并固定包含：
+
+```text
+service.name = <--otel-service-name 或 graphloom>
+service.version = CARGO_PKG_VERSION
+graphloom.observability.version = 1
+```
+
+不记录 project root、cwd、Query、output path、endpoint、API base URL、用户账号或主机名。
+
+Instrumentation Scope：
+
+```text
+name = graphloom
+version = CARGO_PKG_VERSION
+```
+
+## 9.6.4 Batch Span Processor 与 Layer Filter
+
+生产路径使用官方 `SdkTracerProvider::builder().with_batch_exporter(exporter)`：
+
+* Span close 不等待网络导出，已完成 Span 进入 SDK 有界 batch queue；
+  -不新增 queue size、batch size、schedule delay、sampler、retry 参数；
+  -不使用 SimpleSpanProcessor 作为生产实现；
+  -不使用实验性 async-runtime BatchSpanProcessor。
+
+`tracing-opentelemetry` Layer 持有显式 tracer，不设置全局 OTel Provider：
+
+```rust
+tracing_opentelemetry::layer()
+    .with_tracer(tracer)
+    .with_filter(EnvFilter::new("off,graphloom::query=info"))
+```
+
+只导出 `graphloom::query` 及其子 target（含
+`graphloom.query.local`、`graphloom.query.runtime`、`graphloom.query.context`、
+`graphloom.query.entity_mapping`、`graphloom.embedding.request`、
+`graphloom.vector.search`、`graphloom.query.graph_expansion`、
+`graphloom.query.prompt`、`graphloom.llm.request`）。`opentelemetry`、`reqwest`、
+`hyper`、`rustls` 与依赖库日志不会被再次导出，避免递归。
+
+## 9.6.5 生命周期与错误语义
+
+```text
+load project config
+→ 初始化 file/console/可选 OTLP subscriber
+→ 创建可选 Explainability Recorder
+→ 执行 Query
+→ shutdown Explainability Recorder
+→ force-flush + shutdown OTLP provider（spawn_blocking）
+→ 合并 Query/Recorder/Telemetry outcome
+→ drop query.log WorkerGuard
+```
+
+* Query Core Span 在 Query 返回前关闭；OTLP flush 发生在全部 Query Span close 后；
+  -Recorder creation 失败时也会显式关闭 OTLP provider；
+  -没有早期 `?` 跳过 shutdown；
+  -force flush、shutdown 与 shutdown task join 的失败都返回聚焦的
+  `GraphLoomError::Telemetry`，Display 不包含 endpoint、Header、Token 或
+  response body；
+  -错误优先级固定为：Query 业务错误 > Explainability Recorder 错误 >
+  Telemetry flush/shutdown 错误；Telemetry 失败不会覆盖业务 Query 错误。
+
+初始化成功时产生一次 `graphloom.cli.telemetry.enabled`
+（`graphloom.observability.version=1`、`graphloom.telemetry.enabled=true`）；
+force flush 或 shutdown 失败产生一次 `graphloom.cli.telemetry.shutdown_failed`
+（`graphloom.error.kind=telemetry_output`）。`OBSERVABILITY_CONTRACT_VERSION`
+保持 1，新增 Event/Field/error kind 均是可选项。
+
+## 9.6.6 内容安全
+
+OTLP Trace 与 `query.log` 均不包含：
+
+```text
+Query、Prompt、Context、Response
+endpoint、Header、Token
+output path、Entity/Vector ID
+```
+
+标准 OTLP Header 环境变量（如 `OTEL_EXPORTER_OTLP_HEADERS`、
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`）由官方 exporter 读取并发送；GraphLoom
+自己不读取、不记录、不复制这些值。Explainability Content 通道仍按原合同包含
+允许的内容。
+
+## 9.6.7 未实现
+
+Metrics、Logs、OTLP/gRPC、OTLP/JSON、压缩、自动重试、Trace Context HTTP
+传播、Baggage、SSE、Studio、OpenLIT、Collector 部署、Basic/Global/DRIFT 详细
+Span、Index/Update/Prompt Tune Span 重构均未实现。
 
 ---
 

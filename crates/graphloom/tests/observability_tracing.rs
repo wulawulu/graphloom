@@ -22,8 +22,17 @@ use graphloom::{
 use graphloom_llm::ModelConfig;
 use graphloom_storage::{ParquetTableProvider, TableProvider};
 use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
+use opentelemetry::{
+    InstrumentationScope, KeyValue,
+    trace::{SpanId, TracerProvider},
+};
+use opentelemetry_sdk::{
+    Resource,
+    trace::{BatchSpanProcessor, InMemorySpanExporter, SdkTracerProvider, SpanData},
+};
 use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 use serde_json::{Value, json};
+use tracing_subscriber::{EnvFilter, prelude::*};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -1424,4 +1433,585 @@ async fn test_should_emit_stale_reference_without_leaking_vector_id() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(content.contains(STALE_VECTOR_ID_SECRET_SENTINEL));
+}
+
+fn otel_in_memory_subscriber(
+    exporter: InMemorySpanExporter,
+    service_name: &str,
+) -> (SdkTracerProvider, impl tracing::Subscriber) {
+    let provider = SdkTracerProvider::builder()
+        .with_resource(
+            Resource::builder()
+                .with_service_name(service_name.to_owned())
+                .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+                .with_attribute(KeyValue::new("graphloom.observability.version", 1_i64))
+                .build(),
+        )
+        .with_span_processor(BatchSpanProcessor::builder(exporter).build())
+        .build();
+    let scope = InstrumentationScope::builder("graphloom")
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .build();
+    let tracer = provider.tracer_with_scope(scope);
+    let layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(EnvFilter::new("off,graphloom::query=info"));
+    let subscriber = tracing_subscriber::registry().with(layer);
+    (provider, subscriber)
+}
+
+fn otel_span_attribute(span: &SpanData, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key.as_str() == key)
+        .map(|attribute| attribute.value.as_str().into_owned())
+}
+
+fn otel_spans_named<'a>(spans: &'a [SpanData], name: &str) -> Vec<&'a SpanData> {
+    spans
+        .iter()
+        .filter(|span| span.name.as_ref() == name)
+        .collect()
+}
+
+fn otel_single_span<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
+    let spans = otel_spans_named(spans, name);
+    assert_eq!(spans.len(), 1, "expected exactly one {name} span");
+    spans[0]
+}
+
+fn otel_span_parent_name<'a>(spans: &'a [SpanData], span: &SpanData) -> Option<&'a str> {
+    if span.parent_span_id == SpanId::INVALID {
+        return None;
+    }
+    spans
+        .iter()
+        .find(|candidate| candidate.span_context.span_id() == span.parent_span_id)
+        .map(|candidate| candidate.name.as_ref())
+}
+
+fn assert_otel_no_content(spans: &[SpanData], forbidden: &[&str]) {
+    let mut haystack = String::new();
+    for span in spans {
+        haystack.push_str(&span.name);
+        for attribute in &span.attributes {
+            haystack.push_str(attribute.key.as_str());
+            haystack.push('=');
+            haystack.push_str(&attribute.value.as_str());
+        }
+        for event in &span.events.events {
+            haystack.push_str(&event.name);
+            for attribute in &event.attributes {
+                haystack.push_str(attribute.key.as_str());
+                haystack.push('=');
+                haystack.push_str(&attribute.value.as_str());
+            }
+        }
+    }
+    for sentinel in forbidden {
+        assert!(
+            !haystack.contains(sentinel),
+            "exported OTLP spans leaked {sentinel}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_export_complete_local_span_tree_to_in_memory_exporter() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let result = local_search(
+        fixture.config,
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("Local Query");
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+
+    for name in [
+        span_name::QUERY_LOCAL,
+        span_name::QUERY_RUNTIME,
+        span_name::QUERY_CONTEXT,
+        span_name::QUERY_ENTITY_MAPPING,
+        span_name::EMBEDDING_REQUEST,
+        span_name::VECTOR_SEARCH,
+        span_name::QUERY_GRAPH_EXPANSION,
+        span_name::QUERY_PROMPT,
+        span_name::LLM_REQUEST,
+    ] {
+        assert_eq!(otel_spans_named(&spans, name).len(), 1, "missing {name}");
+    }
+
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+    let runtime = otel_single_span(&spans, span_name::QUERY_RUNTIME);
+    let context = otel_single_span(&spans, span_name::QUERY_CONTEXT);
+    let mapping = otel_single_span(&spans, span_name::QUERY_ENTITY_MAPPING);
+    let embedding = otel_single_span(&spans, span_name::EMBEDDING_REQUEST);
+    let vector = otel_single_span(&spans, span_name::VECTOR_SEARCH);
+    let graph_expansion = otel_single_span(&spans, span_name::QUERY_GRAPH_EXPANSION);
+    let prompt = otel_single_span(&spans, span_name::QUERY_PROMPT);
+    let llm = otel_single_span(&spans, span_name::LLM_REQUEST);
+
+    assert_eq!(
+        otel_span_parent_name(&spans, runtime),
+        Some(span_name::QUERY_LOCAL)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, context),
+        Some(span_name::QUERY_LOCAL)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, mapping),
+        Some(span_name::QUERY_CONTEXT)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, embedding),
+        Some(span_name::QUERY_ENTITY_MAPPING)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, vector),
+        Some(span_name::QUERY_ENTITY_MAPPING)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, graph_expansion),
+        Some(span_name::QUERY_CONTEXT)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, prompt),
+        Some(span_name::QUERY_LOCAL)
+    );
+    assert_eq!(
+        otel_span_parent_name(&spans, llm),
+        Some(span_name::QUERY_LOCAL)
+    );
+    assert_eq!(otel_span_parent_name(&spans, root), None);
+
+    let root_trace_id = root.span_context.trace_id();
+    assert!(
+        spans
+            .iter()
+            .all(|span| span.span_context.trace_id() == root_trace_id),
+        "all spans must share one trace ID"
+    );
+
+    assert_eq!(
+        otel_span_attribute(root, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::OPERATION).as_deref(),
+        Some("query")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::QUERY_METHOD).as_deref(),
+        Some("local")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::QUERY_STREAMING).as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::EXPLAINABILITY_ENABLED).as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::OBSERVABILITY_VERSION).as_deref(),
+        Some("1")
+    );
+    assert!(otel_span_attribute(root, field_name::RUN_ID).is_none());
+    let input_tokens = u64::try_from(result.usage.prompt_tokens)
+        .expect("prompt tokens")
+        .to_string();
+    let output_tokens = u64::try_from(result.usage.output_tokens)
+        .expect("output tokens")
+        .to_string();
+    let llm_calls = u64::try_from(result.usage.llm_calls)
+        .expect("llm calls")
+        .to_string();
+    assert_eq!(
+        otel_span_attribute(root, field_name::INPUT_TOKENS).as_deref(),
+        Some(input_tokens.as_str())
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::OUTPUT_TOKENS).as_deref(),
+        Some(output_tokens.as_str())
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::LLM_CALLS).as_deref(),
+        Some(llm_calls.as_str())
+    );
+    assert!(otel_span_attribute(root, field_name::ELAPSED_MS).is_some());
+
+    assert_eq!(
+        otel_span_attribute(runtime, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert_eq!(
+        otel_span_attribute(context, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::CONTEXT_TOKENS),
+        otel_span_attribute(context, field_name::CONTEXT_TOKENS)
+    );
+    assert!(otel_span_attribute(context, field_name::CONTEXT_TOKENS).is_some());
+
+    assert_eq!(
+        otel_span_attribute(mapping, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert_eq!(
+        otel_span_attribute(mapping, field_name::CANDIDATE_COUNT).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        otel_span_attribute(mapping, field_name::SELECTED_COUNT).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        otel_span_attribute(embedding, field_name::MODEL_INSTANCE).as_deref(),
+        Some("default_embedding_model")
+    );
+    assert_eq!(
+        otel_span_attribute(embedding, field_name::MODEL_PROVIDER).as_deref(),
+        Some("openai")
+    );
+    assert_eq!(
+        otel_span_attribute(embedding, field_name::INPUT_COUNT).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        otel_span_attribute(embedding, field_name::EMBEDDING_DIMENSIONS).as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        otel_span_attribute(vector, field_name::VECTOR_INDEX).as_deref(),
+        Some("entity_description")
+    );
+    assert_eq!(
+        otel_span_attribute(vector, field_name::RETRIEVAL_TOP_K).as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        otel_span_attribute(graph_expansion, field_name::CANDIDATE_COUNT).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        otel_span_attribute(graph_expansion, field_name::SELECTED_COUNT).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        otel_span_attribute(prompt, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert!(otel_span_attribute(prompt, field_name::INPUT_TOKENS).is_some());
+    assert_eq!(
+        otel_span_attribute(llm, field_name::STATUS).as_deref(),
+        Some("ok")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::MODEL_INSTANCE).as_deref(),
+        Some("default_completion_model")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::MODEL_PROVIDER).as_deref(),
+        Some("openai")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::QUERY_STREAMING).as_deref(),
+        Some("true")
+    );
+    assert!(otel_span_attribute(llm, field_name::ELAPSED_MS).is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_correlate_otel_root_run_id_with_explainability_envelope() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut options = local_options(fixture.project.path(), "Who is Alice?");
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        ExplainabilityRunId::from_str("run-otel-correlation").expect("run id"),
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    ));
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    local_search(fixture.config, options)
+        .await
+        .expect("Local Query");
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+
+    assert_eq!(
+        otel_span_attribute(root, field_name::RUN_ID).as_deref(),
+        Some("run-otel-correlation")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::EXPLAINABILITY_ENABLED).as_deref(),
+        Some("true")
+    );
+    let records = sink.records();
+    assert!(!records.is_empty());
+    assert!(
+        records
+            .iter()
+            .all(|record| record.run_id.as_str() == "run-otel-correlation")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_export_error_and_abandoned_states_to_in_memory_exporter() {
+    let server = mount_query_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    fixture.config.local_search.embedding_model_id = "missing-model".to_owned();
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let result = local_search(
+        fixture.config,
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await;
+    assert!(result.is_err());
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+    let runtime = otel_single_span(&spans, span_name::QUERY_RUNTIME);
+    assert_eq!(
+        otel_span_attribute(root, field_name::STATUS).as_deref(),
+        Some("error")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::ERROR_KIND).as_deref(),
+        Some("invalid_query_config")
+    );
+    assert_eq!(
+        otel_span_attribute(runtime, field_name::STATUS).as_deref(),
+        Some("error")
+    );
+    assert_eq!(
+        otel_span_attribute(runtime, field_name::ERROR_KIND).as_deref(),
+        Some("invalid_query_config")
+    );
+
+    let server = mount_handshake_failure_stub().await;
+    let fixture = local_fixture(&server).await;
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let result = module_local_search_streaming(
+        fixture.config,
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await;
+    assert!(result.is_err());
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+    let llm = otel_single_span(&spans, span_name::LLM_REQUEST);
+    assert_eq!(
+        otel_span_attribute(root, field_name::STATUS).as_deref(),
+        Some("error")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::ERROR_KIND).as_deref(),
+        Some("query_completion")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::STATUS).as_deref(),
+        Some("error")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::ERROR_KIND).as_deref(),
+        Some("query_completion")
+    );
+
+    let server = mount_midstream_failure_stub().await;
+    let fixture = local_fixture(&server).await;
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut events = module_local_search_streaming(
+        fixture.config,
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("stream");
+    let mut observed_error = None;
+    while let Some(event) = events.next().await {
+        if let Err(error) = event {
+            observed_error = Some(error.to_string());
+            break;
+        }
+    }
+    assert!(observed_error.is_some());
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+    let llm = otel_single_span(&spans, span_name::LLM_REQUEST);
+    assert_eq!(
+        otel_span_attribute(root, field_name::STATUS).as_deref(),
+        Some("error")
+    );
+    assert_eq!(
+        otel_span_attribute(root, field_name::ERROR_KIND).as_deref(),
+        Some("query_completion")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::ERROR_KIND).as_deref(),
+        Some("query_completion")
+    );
+
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut stream = local_search_streaming(
+        fixture.config,
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("stream");
+    let first = stream.next().await.expect("first event").expect("event");
+    assert!(matches!(first, QueryEvent::Context(_)));
+    drop(stream);
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    let root = otel_single_span(&spans, span_name::QUERY_LOCAL);
+    let llm = otel_single_span(&spans, span_name::LLM_REQUEST);
+    assert_eq!(
+        otel_span_attribute(root, field_name::STATUS).as_deref(),
+        Some("abandoned")
+    );
+    assert_eq!(
+        otel_span_attribute(llm, field_name::STATUS).as_deref(),
+        Some("abandoned")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_not_leak_content_into_exported_otel_spans() {
+    let server = mount_response_sentinel_stub().await;
+    let mut fixture = local_fixture(&server).await;
+    let mut options = local_options(
+        fixture.project.path(),
+        &format!("Who is Alice? {QUERY_SENTINEL}"),
+    );
+    fixture.config.local_search.prompt = Some(format!("{PROMPT_SENTINEL} {{{{ context_data }}}}"));
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        ExplainabilityRunId::from_str("run-otel-content-safety").expect("run id"),
+        ExplainabilityContentMode::Content,
+        Arc::new(RecordingExplainabilitySink::default()),
+    ));
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let result = local_search(fixture.config, options)
+        .await
+        .expect("Local Query");
+    assert!(result.response.contains(RESPONSE_SENTINEL));
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    assert_otel_no_content(
+        &spans,
+        &[
+            QUERY_SENTINEL,
+            PROMPT_SENTINEL,
+            CONTEXT_SENTINEL,
+            RESPONSE_SENTINEL,
+            API_KEY_SENTINEL,
+            PATH_SENTINEL,
+            STALE_VECTOR_ID_SECRET_SENTINEL,
+        ],
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_preserve_behavior_with_in_memory_otel_subscriber() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let vector_ids_before = vector_ids(&fixture.config).await;
+
+    let baseline = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("baseline");
+    let baseline_requests = request_bodies(&server).await;
+    let baseline_offset = baseline_requests.len();
+
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let captured = local_search(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("OTel subscriber");
+    assert_query_results_equal(&baseline, &captured);
+    assert_eq!(
+        request_bodies_since(&server, baseline_offset).await,
+        baseline_requests
+    );
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    let spans = exporter.get_finished_spans().expect("finished spans");
+    assert_eq!(otel_spans_named(&spans, span_name::QUERY_LOCAL).len(), 1);
+
+    let streaming_offset = server.received_requests().await.expect("requests").len();
+    let exporter = InMemorySpanExporter::default();
+    let (provider, subscriber) = otel_in_memory_subscriber(exporter.clone(), "graphloom-test");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut stream = local_search_streaming(
+        fixture.config.clone(),
+        local_options(fixture.project.path(), "Who is Alice?"),
+    )
+    .await
+    .expect("stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event"));
+    }
+    assert_eq!(
+        request_bodies_since(&server, streaming_offset).await,
+        baseline_requests
+    );
+    let expected = ["Context", "Token", "Token", "Completed"];
+    let actual = events
+        .iter()
+        .map(|event| match event {
+            QueryEvent::Context(_) => "Context",
+            QueryEvent::Token(_) => "Token",
+            QueryEvent::Completed(_) => "Completed",
+            _ => "Other",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    drop(_guard);
+    provider.force_flush().expect("force flush");
+    assert_eq!(
+        vector_ids(&fixture.config).await,
+        vector_ids_before,
+        "OTel export must not mutate vector state"
+    );
 }

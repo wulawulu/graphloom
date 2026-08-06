@@ -31,7 +31,7 @@ use serde_yaml::Mapping;
 use tokio::io::AsyncReadExt;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 mod support;
@@ -40,6 +40,9 @@ use support::CanonicalTempDir as TempDir;
 
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const STALE_VECTOR_ID_SECRET_SENTINEL: &str = "STALE_VECTOR_ID_SECRET_SENTINEL";
+const OTEL_ENDPOINT_SECRET_SENTINEL: &str = "OTEL_ENDPOINT_SECRET_SENTINEL";
+const OTEL_HEADER_SECRET_SENTINEL: &str = "OTEL_HEADER_SECRET_SENTINEL";
+const OTEL_TOKEN_SECRET_SENTINEL: &str = "OTEL_TOKEN_SECRET_SENTINEL";
 
 fn graphloom_command() -> Command {
     let mut command = Command::cargo_bin("graphloom").expect("binary");
@@ -1631,6 +1634,468 @@ fn test_should_reject_invalid_query_explainability_cli_combinations() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(normalize_cli_text(&output.stderr).contains("--explain-output"));
+}
+
+async fn local_query_project(provider: &MockServer) -> (TempDir, TempDir, String) {
+    let project = TempDir::new().expect("project");
+    run_minimal_standard_index(project.path(), &provider.uri()).await;
+    let settings = tokio::fs::read_to_string(project.path().join("settings.yaml"))
+        .await
+        .expect("settings");
+    let vector_fixture = TempDir::new().expect("vector fixture");
+    let local_vectors = vector_fixture.path().join("local");
+    copy_vector_indices(
+        project.path(),
+        &local_vectors,
+        &[ENTITY_DESCRIPTION_EMBEDDING],
+    )
+    .await;
+    set_query_vector_db(project.path(), &settings, &local_vectors).await;
+    (project, vector_fixture, settings)
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real Local Query + OTLP collector verifies HTTP export, safety, and equivalence"
+)]
+async fn test_should_export_local_query_traces_over_otlp_http() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&provider)
+        .await;
+    let collector = MockServer::start().await;
+    let traces_path = format!("/{OTEL_ENDPOINT_SECRET_SENTINEL}/v1/traces");
+    Mock::given(method("POST"))
+        .and(path(traces_path.clone()))
+        .and(header("content-type", "application/x-protobuf"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&collector)
+        .await;
+    let (project, _vector_fixture, _settings) = local_query_project(&provider).await;
+    let working = TempDir::new().expect("working directory");
+    let query = "WHO_IS_ALICE_OTLP_FIXTURE";
+
+    let baseline_offset = provider.received_requests().await.expect("requests").len();
+    let baseline = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            query,
+        ])
+        .output()
+        .expect("baseline Query");
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(normalize_cli_text(&baseline.stdout), "Local answer.\n");
+    let baseline_requests = request_bodies_since(&provider, baseline_offset).await;
+
+    let endpoint = format!("{}/{}", collector.uri(), OTEL_ENDPOINT_SECRET_SENTINEL);
+    let otlp_offset = provider.received_requests().await.expect("requests").len();
+    let otlp = graphloom_command()
+        .env(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            format!(
+                "Authorization=Bearer_{OTEL_HEADER_SECRET_SENTINEL},\
+                 X-Otel-Token={OTEL_TOKEN_SECRET_SENTINEL}"
+            ),
+        )
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--otel-endpoint",
+            &endpoint,
+            "--otel-service-name",
+            "graphloom-demo",
+            query,
+        ])
+        .output()
+        .expect("OTLP Query");
+    assert_eq!(
+        otlp.status.code(),
+        Some(0),
+        "{}",
+        normalize_cli_text(&otlp.stderr)
+    );
+    assert_eq!(normalize_cli_text(&otlp.stdout), "Local answer.\n");
+    assert!(otlp.stderr.is_empty());
+    assert_eq!(
+        request_bodies_since(&provider, otlp_offset).await,
+        baseline_requests,
+        "OTLP export must not change provider requests"
+    );
+
+    let collector_requests = collector
+        .received_requests()
+        .await
+        .expect("collector requests");
+    assert!(
+        !collector_requests.is_empty(),
+        "OTLP HTTP export must be observable after Query completion"
+    );
+    for request in &collector_requests {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.url.path(), traces_path);
+        assert_eq!(
+            request
+                .headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/x-protobuf")
+        );
+        assert!(
+            !request.body.is_empty(),
+            "OTLP trace body must be non-empty"
+        );
+        assert!(
+            request.url.path() != "/v1/metrics" && request.url.path() != "/v1/logs",
+            "OTLP adapter must not export metrics or logs"
+        );
+    }
+    let authorization = collector_requests
+        .iter()
+        .find_map(|request| {
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+        })
+        .expect("Authorization header");
+    assert!(authorization.contains(OTEL_HEADER_SECRET_SENTINEL));
+    let x_token = collector_requests
+        .iter()
+        .find_map(|request| {
+            request
+                .headers
+                .get("x-otel-token")
+                .and_then(|value| value.to_str().ok())
+        })
+        .expect("X-Otel-Token header");
+    assert!(x_token.contains(OTEL_TOKEN_SECRET_SENTINEL));
+
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert_eq!(log.matches("OpenTelemetry trace export enabled").count(), 1);
+    assert_eq!(log.matches("graphloom.telemetry.enabled=true").count(), 1);
+    assert_eq!(log.matches("query run started").count(), 2);
+    assert_eq!(log.matches("query run completed").count(), 2);
+    for forbidden in [
+        OTEL_ENDPOINT_SECRET_SENTINEL,
+        OTEL_HEADER_SECRET_SENTINEL,
+        OTEL_TOKEN_SECRET_SENTINEL,
+        "graphloom-demo",
+        "127.0.0.1",
+        query,
+        "test-key",
+        "Authorization",
+    ] {
+        assert!(!log.contains(forbidden), "query.log leaked {forbidden}");
+    }
+
+    let explain_baseline_path = working.path().join("baseline.jsonl");
+    let explain_baseline = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--explain-output",
+            explain_baseline_path.to_str().expect("UTF-8 baseline path"),
+            query,
+        ])
+        .output()
+        .expect("Explainability baseline Query");
+    assert_eq!(explain_baseline.status.code(), Some(0));
+    let baseline_envelopes = read_explainability_jsonl(&explain_baseline_path).await;
+    assert_complete_explainability_run(&baseline_envelopes);
+
+    let explain_otlp_path = working.path().join("otlp.jsonl");
+    let explain_otlp = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--explain-output",
+            explain_otlp_path.to_str().expect("UTF-8 OTLP path"),
+            "--otel-endpoint",
+            &endpoint,
+            "--otel-service-name",
+            "graphloom-demo",
+            query,
+        ])
+        .output()
+        .expect("Explainability + OTLP Query");
+    assert_eq!(explain_otlp.status.code(), Some(0));
+    assert_eq!(normalize_cli_text(&explain_otlp.stdout), "Local answer.\n");
+    let otlp_envelopes = read_explainability_jsonl(&explain_otlp_path).await;
+    assert_complete_explainability_run(&otlp_envelopes);
+    let baseline_event_types = baseline_envelopes
+        .iter()
+        .map(|envelope| {
+            serde_json::to_value(&envelope.record.event)
+                .expect("event JSON")
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let otlp_event_types = otlp_envelopes
+        .iter()
+        .map(|envelope| {
+            serde_json::to_value(&envelope.record.event)
+                .expect("event JSON")
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        otlp_event_types, baseline_event_types,
+        "OTLP must not change Explainability event ordering"
+    );
+}
+
+#[tokio::test]
+async fn test_should_fail_cli_query_when_otlp_collector_rejects_export() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&provider)
+        .await;
+    let collector = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/traces"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("collector exploded"))
+        .mount(&collector)
+        .await;
+    let (project, _vector_fixture, _settings) = local_query_project(&provider).await;
+
+    let output = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--otel-endpoint",
+            &collector.uri(),
+            "--otel-service-name",
+            "graphloom-demo",
+            "WHO_IS_ALICE_OTLP_FAILURE",
+        ])
+        .output()
+        .expect("OTLP failure Query");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(normalize_cli_text(&output.stdout), "Local answer.\n");
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(
+        stderr.contains("failed to flush OTLP traces for OpenTelemetry trace export"),
+        "stderr was {stderr}"
+    );
+    assert!(!stderr.contains("127.0.0.1"));
+    assert!(!stderr.contains("500"));
+    assert!(!stderr.contains("collector exploded"));
+
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert_eq!(
+        log.matches("OpenTelemetry trace export shutdown failed")
+            .count(),
+        1,
+        "shutdown failure event must be emitted exactly once"
+    );
+    assert!(log.contains("graphloom.error.kind=\"telemetry_output\""));
+    assert!(log.contains("graphloom.observability.version=1"));
+    assert_eq!(log.matches("OpenTelemetry trace export enabled").count(), 1);
+    assert!(!log.contains("127.0.0.1"));
+    assert!(!log.contains("collector exploded"));
+}
+
+#[tokio::test]
+async fn test_should_keep_query_error_primary_when_otlp_export_fails() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&provider)
+        .await;
+    let collector = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/traces"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&collector)
+        .await;
+    let (project, vector_fixture, settings) = local_query_project(&provider).await;
+    let empty_vectors = vector_fixture.path().join("empty");
+    tokio::fs::create_dir_all(&empty_vectors)
+        .await
+        .expect("empty vector directory");
+    set_query_vector_db(project.path(), &settings, &empty_vectors).await;
+
+    let output = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--otel-endpoint",
+            &collector.uri(),
+            "WHO_IS_ALICE_OTLP_FAILURE",
+        ])
+        .output()
+        .expect("failing Query with failing OTLP");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = normalize_cli_text(&output.stderr);
+    assert!(
+        !stderr.contains("OpenTelemetry trace export"),
+        "telemetry error must not replace the Query error: {stderr}"
+    );
+    assert!(stderr.contains("vector"), "stderr was {stderr}");
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert_eq!(log.matches("query run failed").count(), 1);
+    assert_eq!(
+        log.matches("OpenTelemetry trace export shutdown failed")
+            .count(),
+        1
+    );
+    assert_eq!(log.matches("query run completed").count(), 0);
+}
+
+#[tokio::test]
+async fn test_should_reject_otlp_arguments_and_exporter_build_failures_without_query() {
+    let provider = MockServer::start().await;
+    let working = TempDir::new().expect("working directory");
+    for method_name in ["basic", "global", "drift"] {
+        let output = graphloom_command()
+            .current_dir(working.path())
+            .args([
+                "query",
+                "--method",
+                method_name,
+                "--otel-endpoint",
+                "http://collector.invalid:4318",
+                "question",
+            ])
+            .output()
+            .expect("non-local OTLP Query");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            normalize_cli_text(&output.stderr)
+                .contains("--otel-endpoint currently supports only --method local"),
+            "{}",
+            normalize_cli_text(&output.stderr)
+        );
+    }
+    assert!(!working.path().join("logs").exists());
+
+    let missing_endpoint = graphloom_command()
+        .current_dir(working.path())
+        .args([
+            "query",
+            "--method",
+            "local",
+            "--otel-service-name",
+            "graphloom-test",
+            "question",
+        ])
+        .output()
+        .expect("service name without endpoint");
+    assert_eq!(missing_endpoint.status.code(), Some(2));
+    assert!(missing_endpoint.stdout.is_empty());
+
+    let long_name = "a".repeat(129);
+    for value in ["", "   ", long_name.as_str()] {
+        let output = graphloom_command()
+            .current_dir(working.path())
+            .args([
+                "query",
+                "--method",
+                "local",
+                "--otel-endpoint",
+                "http://collector.invalid:4318",
+                "--otel-service-name",
+                value,
+                "question",
+            ])
+            .output()
+            .expect("invalid service name");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+
+    let project = TempDir::new().expect("project");
+    init_project(project.path());
+    let build_failure = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 root"),
+            "--method",
+            "local",
+            "--otel-endpoint",
+            "http://[invalid",
+            "question",
+        ])
+        .output()
+        .expect("exporter build failure");
+    assert_eq!(build_failure.status.code(), Some(1));
+    assert!(build_failure.stdout.is_empty());
+    let stderr = normalize_cli_text(&build_failure.stderr);
+    assert!(
+        stderr.contains("failed to build OTLP trace exporter for OpenTelemetry trace export"),
+        "stderr was {stderr}"
+    );
+    assert!(!stderr.contains("http://[invalid"));
+    assert!(!project.path().join("logs").join("query.log").exists());
+    assert!(
+        provider
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "no provider request may be sent when OTLP initialization fails"
+    );
 }
 
 async fn read_explainability_jsonl(path: &std::path::Path) -> Vec<ExplainabilityEnvelope> {

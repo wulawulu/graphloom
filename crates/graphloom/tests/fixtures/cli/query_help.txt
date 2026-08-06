@@ -62,5 +62,11 @@ Options:
           - content:  Persist the content fields needed to replay and inspect a Query
           - debug:    Persist the most detailed currently supported diagnostic content
 
+      --otel-endpoint <OTEL_ENDPOINT>
+          Export Local Query traces to an OTLP/HTTP collector base endpoint.
+
+      --otel-service-name <OTEL_SERVICE_NAME>
+          OpenTelemetry service.name used when OTLP trace export is enabled.
+
   -h, --help
           Print help (see a summary with '-h')

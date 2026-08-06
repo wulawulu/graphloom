@@ -352,6 +352,16 @@ pub enum GraphLoomError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// OpenTelemetry trace export initialization or shutdown failed.
+    #[error("failed to {operation} for OpenTelemetry trace export")]
+    Telemetry {
+        /// Trace export operation.
+        operation: &'static str,
+        /// Underlying exporter, subscriber, flush, or shutdown failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Indexing failed.
     #[error("index failed: {source}")]
     IndexFailed {
