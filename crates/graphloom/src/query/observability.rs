@@ -10,7 +10,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -101,8 +101,11 @@ pub(crate) async fn with_runtime_span<T>(
     let Some(trace) = trace else {
         return future.await;
     };
+    let Some(root_span) = trace.clone_root_span() else {
+        return future.await;
+    };
     let span = tracing::info_span!(
-        parent: trace.root_span(),
+        parent: &root_span,
         span_name::QUERY_RUNTIME,
         "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
         "graphloom.operation" = operation::RUNTIME_LOAD,
@@ -132,7 +135,7 @@ pub(crate) async fn with_runtime_span<T>(
 /// early. It never depends on Explainability's asynchronous `finish_run()`.
 #[derive(Debug)]
 pub(crate) struct QueryTraceSession {
-    span: Span,
+    span: Mutex<Option<Span>>,
     started: Instant,
     terminal: AtomicBool,
 }
@@ -164,7 +167,7 @@ impl QueryTraceSession {
             return None;
         }
         let session = Arc::new(Self {
-            span,
+            span: Mutex::new(Some(span)),
             started: Instant::now(),
             terminal: AtomicBool::new(false),
         });
@@ -172,15 +175,30 @@ impl QueryTraceSession {
             .explainability
             .as_ref()
             .map(|explainability| explainability.run_id().as_str())
+            && let Some(span) = session.clone_root_span()
         {
-            session.span.record(field_name::RUN_ID, run_id);
+            span.record(field_name::RUN_ID, run_id);
         }
         Some(session)
     }
 
-    /// Borrow the root span, used as the explicit parent of top-level stages.
-    pub(crate) const fn root_span(&self) -> &Span {
-        &self.span
+    /// Clone the root span, used as the explicit parent of top-level stages.
+    ///
+    /// The clone is temporary and is released immediately after child span
+    /// creation; it never extends the root span's terminal close.
+    pub(crate) fn clone_root_span(&self) -> Option<Span> {
+        self.span
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Take the only long-lived root span handle for terminal recording.
+    fn take_root_span(&self) -> Option<Span> {
+        self.span
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Record a successful terminal state from the real Query result.
@@ -188,28 +206,32 @@ impl QueryTraceSession {
         if !self.begin_terminal() {
             return;
         }
-        self.span.record(field_name::STATUS, status::OK);
+        let Some(span) = self.take_root_span() else {
+            return;
+        };
+        span.record(field_name::STATUS, status::OK);
         record_u64(
-            &self.span,
+            &span,
             field_name::INPUT_TOKENS,
             usize_to_u64(result.usage.prompt_tokens),
         );
         record_u64(
-            &self.span,
+            &span,
             field_name::OUTPUT_TOKENS,
             usize_to_u64(result.usage.output_tokens),
         );
-        record_u64(&self.span, field_name::CONTEXT_TOKENS, context_tokens);
+        record_u64(&span, field_name::CONTEXT_TOKENS, context_tokens);
         record_u64(
-            &self.span,
+            &span,
             field_name::LLM_CALLS,
             usize_to_u64(result.usage.llm_calls),
         );
         record_u64(
-            &self.span,
+            &span,
             field_name::ELAPSED_MS,
-            duration_millis(result.elapsed),
+            duration_millis(self.started.elapsed()),
         );
+        drop(span);
     }
 
     /// Record a failed terminal state with a stable error category.
@@ -217,13 +239,17 @@ impl QueryTraceSession {
         if !self.begin_terminal() {
             return;
         }
-        self.span.record(field_name::STATUS, status::ERROR);
-        self.span.record(field_name::ERROR_KIND, error_kind_value);
+        let Some(span) = self.take_root_span() else {
+            return;
+        };
+        span.record(field_name::STATUS, status::ERROR);
+        span.record(field_name::ERROR_KIND, error_kind_value);
         record_u64(
-            &self.span,
+            &span,
             field_name::ELAPSED_MS,
             duration_millis(self.started.elapsed()),
         );
+        drop(span);
     }
 
     /// Record a failed terminal state from a typed Query error.
@@ -250,14 +276,23 @@ impl QueryTraceSession {
 
 impl Drop for QueryTraceSession {
     fn drop(&mut self) {
-        if self.begin_terminal() {
-            self.span.record(field_name::STATUS, status::ABANDONED);
-            record_u64(
-                &self.span,
-                field_name::ELAPSED_MS,
-                duration_millis(self.started.elapsed()),
-            );
+        if !self.begin_terminal() {
+            return;
         }
+        let Some(span) = self
+            .span
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        span.record(field_name::STATUS, status::ABANDONED);
+        record_u64(
+            &span,
+            field_name::ELAPSED_MS,
+            duration_millis(self.started.elapsed()),
+        );
     }
 }
 
@@ -302,11 +337,18 @@ impl LocalQueryInstrumentation {
         self.explainability.as_deref()
     }
 
-    /// Finalize both channels with a successful Query result.
-    pub(crate) async fn finish_success(&self, result: &QueryResult, context_tokens: Option<u64>) {
+    /// Close the root tracing span with a successful Query result.
+    ///
+    /// The caller must close the LLM span first and only then await any
+    /// Explainability sink work.
+    pub(crate) fn finish_trace_success(&self, result: &QueryResult, context_tokens: Option<u64>) {
         if let Some(trace) = &self.trace {
             trace.finish_ok(result, context_tokens);
         }
+    }
+
+    /// Finalize the Explainability run after both tracing spans are closed.
+    pub(crate) async fn finish_explainability_success(&self) {
         if let Some(session) = &self.explainability {
             session.finish_success().await;
         }
@@ -365,32 +407,41 @@ impl LlmSpanLatch {
         }
     }
 
+    /// Clone the LLM span so stream polls run inside it.
+    ///
+    /// The clone is temporary and is released after each poll; it never delays
+    /// the terminal close.
+    pub(crate) fn span(&self) -> Option<Span> {
+        self.span.clone()
+    }
+
     /// Record the successful completion state from the real Query result.
     pub(crate) fn finish_ok(&mut self, result: &QueryResult) {
         if self.finalized {
             return;
         }
         self.finalized = true;
-        let Some(span) = &self.span else {
+        let Some(span) = self.span.take() else {
             return;
         };
         span.record(field_name::STATUS, status::OK);
         let usage = result.usage.categories.get("response");
         record_u64(
-            span,
+            &span,
             field_name::INPUT_TOKENS,
             usage.and_then(|usage| usize_to_u64(usage.prompt_tokens)),
         );
         record_u64(
-            span,
+            &span,
             field_name::OUTPUT_TOKENS,
             usage.and_then(|usage| usize_to_u64(usage.output_tokens)),
         );
         record_u64(
-            span,
+            &span,
             field_name::ELAPSED_MS,
             duration_millis(self.started.elapsed()),
         );
+        drop(span);
     }
 
     /// Record the completion failure terminal state.
@@ -399,16 +450,17 @@ impl LlmSpanLatch {
             return;
         }
         self.finalized = true;
-        let Some(span) = &self.span else {
+        let Some(span) = self.span.take() else {
             return;
         };
         span.record(field_name::STATUS, status::ERROR);
         span.record(field_name::ERROR_KIND, error_kind::QUERY_COMPLETION);
         record_u64(
-            span,
+            &span,
             field_name::ELAPSED_MS,
             duration_millis(self.started.elapsed()),
         );
+        drop(span);
     }
 }
 
@@ -417,12 +469,12 @@ impl Drop for LlmSpanLatch {
         if self.finalized {
             return;
         }
-        let Some(span) = &self.span else {
+        let Some(span) = self.span.take() else {
             return;
         };
         span.record(field_name::STATUS, status::ABANDONED);
         record_u64(
-            span,
+            &span,
             field_name::ELAPSED_MS,
             duration_millis(self.started.elapsed()),
         );
@@ -431,8 +483,17 @@ impl Drop for LlmSpanLatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{duration_millis, query_error_kind, usize_to_u64};
-    use crate::query::{QueryError, SearchMethod};
+    use std::{
+        sync::{Arc, Mutex, atomic::AtomicBool},
+        time::{Duration, Instant},
+    };
+
+    use super::{QueryTraceSession, duration_millis, query_error_kind, usize_to_u64};
+    use crate::{
+        observability::{field_name, span_name},
+        query::{QueryContext, QueryError, QueryResult, QueryUsage, SearchMethod},
+        test_support::tracing_capture,
+    };
 
     #[test]
     fn test_should_convert_usize_and_durations_safely() {
@@ -467,5 +528,68 @@ mod tests {
         for error in errors {
             assert!(!query_error_kind(&error).is_empty());
         }
+    }
+
+    #[test]
+    fn test_should_use_session_started_for_root_elapsed() {
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let subscriber = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let span = tracing::info_span!(
+            span_name::QUERY_LOCAL,
+            "graphloom.observability.version" = 1_u64,
+            "graphloom.run.id" = tracing::field::Empty,
+            "graphloom.operation" = "query",
+            "graphloom.query.method" = "local",
+            "graphloom.query.streaming" = false,
+            "graphloom.explainability.enabled" = false,
+            "graphloom.status" = tracing::field::Empty,
+            "graphloom.error.kind" = tracing::field::Empty,
+            "graphloom.input.tokens" = tracing::field::Empty,
+            "graphloom.output.tokens" = tracing::field::Empty,
+            "graphloom.context.tokens" = tracing::field::Empty,
+            "graphloom.llm.calls" = tracing::field::Empty,
+            "graphloom.elapsed_ms" = tracing::field::Empty,
+        );
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("past instant");
+        let session = QueryTraceSession {
+            span: Mutex::new(Some(span)),
+            started,
+            terminal: AtomicBool::new(false),
+        };
+        let result = QueryResult {
+            response: "answer".to_owned(),
+            context: QueryContext::default(),
+            elapsed: Duration::from_millis(1),
+            usage: QueryUsage::default(),
+        };
+
+        session.finish_ok(&result, None);
+
+        let state = state.lock().expect("capture state");
+        let captured = state
+            .spans
+            .iter()
+            .find(|span| span.name == span_name::QUERY_LOCAL)
+            .expect("root span");
+        let elapsed_ms = captured
+            .field(field_name::ELAPSED_MS)
+            .expect("root elapsed")
+            .parse::<u64>()
+            .expect("u64 elapsed");
+        assert!(
+            elapsed_ms >= 5_000,
+            "root elapsed must cover request lifetime"
+        );
+        assert_ne!(
+            elapsed_ms,
+            u64::try_from(result.elapsed.as_millis()).expect("result elapsed"),
+            "root elapsed must not reuse QueryResult.elapsed"
+        );
+        assert!(captured.closed);
+        assert_eq!(captured.field(field_name::STATUS), Some("\"ok\""));
     }
 }

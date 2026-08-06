@@ -23,7 +23,7 @@ use graphloom_llm::{
     EmbeddingResponse, completion_request_cache_key, embedding_request_cache_key,
 };
 use graphloom_storage::{FileStorage, ParquetTableProvider, Storage, TableProvider};
-use graphloom_vectors::{LanceDbVectorStore, VectorStore};
+use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
 use polars_core::prelude::{AnyValue, DataFrame, DataType, NamedFrom, PlSmallStr, Series};
 use predicates::prelude::*;
 use serde_json::{Value, json};
@@ -39,6 +39,7 @@ mod support;
 use support::CanonicalTempDir as TempDir;
 
 static REPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const STALE_VECTOR_ID_SECRET_SENTINEL: &str = "STALE_VECTOR_ID_SECRET_SENTINEL";
 
 fn graphloom_command() -> Command {
     let mut command = Command::cargo_bin("graphloom").expect("binary");
@@ -1271,6 +1272,30 @@ async fn test_should_export_local_query_explainability_jsonl_from_cli() {
     )
     .await;
     set_query_vector_db(project.path(), &settings, &local_vectors).await;
+    let query_settings = tokio::fs::read_to_string(project.path().join("settings.yaml"))
+        .await
+        .expect("query settings");
+    let query_config: GraphRagConfig = serde_yaml::from_str(&query_settings).expect("query config");
+    let stale_store = LanceDbVectorStore::connect(&query_config.vector_store)
+        .await
+        .expect("stale vector store");
+    let stale_schema = query_config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    let mut stale_vector = vec![0.0_f32; query_config.vector_store.vector_size];
+    if let Some(first) = stale_vector.first_mut() {
+        *first = 1.0;
+    }
+    stale_store
+        .upsert_documents(
+            &stale_schema,
+            &[VectorDocument {
+                id: STALE_VECTOR_ID_SECRET_SENTINEL.to_owned(),
+                vector: stale_vector,
+            }],
+        )
+        .await
+        .expect("stale vector document");
     let working = TempDir::new().expect("working directory");
     let query = "WHO_IS_ALICE_JSONL_FIXTURE";
 
@@ -1569,6 +1594,7 @@ async fn test_should_write_standardized_local_query_log_fields() {
         "test-key",
         "Authorization",
         "GRAPHRAG_API_KEY",
+        STALE_VECTOR_ID_SECRET_SENTINEL,
     ] {
         assert!(!log.contains(forbidden), "query.log leaked {forbidden}");
     }

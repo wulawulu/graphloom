@@ -30,13 +30,15 @@ pub(crate) struct CapturedSpan {
     pub(crate) parent: Option<Id>,
     pub(crate) fields: Vec<(String, String)>,
     pub(crate) closed: bool,
+    pub(crate) close_order: Option<usize>,
 }
 
-/// One captured event, including its stable name and fields.
+/// One captured event, including its stable name, fields, and effective parent.
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedEvent {
     pub(crate) name: String,
     pub(crate) fields: Vec<(String, String)>,
+    pub(crate) parent: Option<Id>,
 }
 
 /// Thread-safe capture state shared with the layer.
@@ -44,6 +46,7 @@ pub(crate) struct CapturedEvent {
 pub(crate) struct CaptureState {
     pub(crate) spans: Vec<CapturedSpan>,
     pub(crate) events: Vec<CapturedEvent>,
+    pub(crate) close_sequence: usize,
 }
 
 /// `tracing_subscriber` layer that records structured span/event data.
@@ -82,6 +85,7 @@ where
                 parent,
                 fields,
                 closed: false,
+                close_order: None,
             });
     }
 
@@ -96,11 +100,15 @@ where
         }
     }
 
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let mut fields = Vec::new();
         event.record(&mut FieldRecorder {
             fields: &mut fields,
         });
+        let parent = event
+            .parent()
+            .cloned()
+            .or_else(|| ctx.lookup_current().map(|span| span.id().clone()));
         self.state
             .lock()
             .expect("capture state lock")
@@ -108,13 +116,17 @@ where
             .push(CapturedEvent {
                 name: event.metadata().name().to_owned(),
                 fields,
+                parent,
             });
     }
 
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
         let mut state = self.state.lock().expect("capture state lock");
+        let close_order = state.close_sequence;
+        state.close_sequence = state.close_sequence.saturating_add(1);
         if let Some(span) = state.spans.iter_mut().find(|span| span.id == id) {
             span.closed = true;
+            span.close_order = Some(close_order);
         }
     }
 }

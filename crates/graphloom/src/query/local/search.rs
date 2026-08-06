@@ -152,16 +152,18 @@ async fn prepare_prompt_stage(
     context_tokens: Option<u64>,
     trace: Option<&QueryTraceSession>,
 ) -> Result<(CompletionRequest, usize)> {
-    let prompt_span = trace.map(|trace| {
-        tracing::info_span!(
-            parent: trace.root_span(),
-            span_name::QUERY_PROMPT,
-            "graphloom.operation" = operation::PROMPT_RENDER,
-            "graphloom.context.tokens" = tracing::field::Empty,
-            "graphloom.input.tokens" = tracing::field::Empty,
-            "graphloom.status" = tracing::field::Empty,
-            "graphloom.error.kind" = tracing::field::Empty,
-        )
+    let prompt_span = trace.and_then(|trace| {
+        trace.clone_root_span().map(|root_span| {
+            tracing::info_span!(
+                parent: &root_span,
+                span_name::QUERY_PROMPT,
+                "graphloom.operation" = operation::PROMPT_RENDER,
+                "graphloom.context.tokens" = tracing::field::Empty,
+                "graphloom.input.tokens" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+            )
+        })
     });
     let record_prompt_span = prompt_span.clone();
     let prompt_future = async {
@@ -248,20 +250,22 @@ async fn prepare_llm_stage(
             .await;
     }
     let llm_started = Instant::now();
-    let llm_span = trace.map(|trace| {
-        tracing::info_span!(
-            parent: trace.root_span(),
-            span_name::LLM_REQUEST,
-            "graphloom.operation" = operation::COMPLETION,
-            "graphloom.model.instance" = &runtime.completion_model_id,
-            "graphloom.model.provider" = runtime.completion_config.provider_type(),
-            "graphloom.query.streaming" = true,
-            "graphloom.input.tokens" = tracing::field::Empty,
-            "graphloom.output.tokens" = tracing::field::Empty,
-            "graphloom.status" = tracing::field::Empty,
-            "graphloom.error.kind" = tracing::field::Empty,
-            "graphloom.elapsed_ms" = tracing::field::Empty,
-        )
+    let llm_span = trace.and_then(|trace| {
+        trace.clone_root_span().map(|root_span| {
+            tracing::info_span!(
+                parent: &root_span,
+                span_name::LLM_REQUEST,
+                "graphloom.operation" = operation::COMPLETION,
+                "graphloom.model.instance" = &runtime.completion_model_id,
+                "graphloom.model.provider" = runtime.completion_config.provider_type(),
+                "graphloom.query.streaming" = true,
+                "graphloom.input.tokens" = tracing::field::Empty,
+                "graphloom.output.tokens" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+                "graphloom.elapsed_ms" = tracing::field::Empty,
+            )
+        })
     });
     let mut llm_latch = LlmSpanLatch::new(llm_span.clone(), llm_started);
     if let Some(span) = &llm_span {
@@ -304,8 +308,8 @@ fn local_context_text(context: &QueryContext) -> Result<&str> {
 
 struct LocalCompletionState {
     events: QueryEventStream,
-    instrumentation: Option<LocalQueryInstrumentation>,
     llm: LlmSpanLatch,
+    instrumentation: Option<LocalQueryInstrumentation>,
     llm_started: Instant,
     completion_model_id: String,
     context_tokens: Option<u64>,
@@ -321,8 +325,8 @@ fn instrument_local_completion_stream(
 ) -> QueryEventStream {
     let state = LocalCompletionState {
         events,
-        instrumentation,
         llm,
+        instrumentation,
         llm_started,
         completion_model_id,
         context_tokens: usize_to_u64(context_tokens),
@@ -337,9 +341,16 @@ async fn next_local_completion_event(
     state: Option<LocalCompletionState>,
 ) -> Option<(Result<QueryEvent>, Option<LocalCompletionState>)> {
     let mut state = state?;
-    match state.events.next().await {
+    let llm_span = state.llm.span();
+    let next_event = match llm_span {
+        Some(span) => state.events.next().instrument(span).await,
+        None => state.events.next().await,
+    };
+    match next_event {
         Some(Ok(QueryEvent::Completed(result))) => {
+            state.llm.finish_ok(&result);
             if let Some(instrumentation) = &state.instrumentation {
+                instrumentation.finish_trace_success(&result, state.context_tokens);
                 if let Some(session) = instrumentation.explainability() {
                     emit_llm_completed(
                         session,
@@ -349,26 +360,23 @@ async fn next_local_completion_event(
                     )
                     .await;
                 }
-                instrumentation
-                    .finish_success(&result, state.context_tokens)
-                    .await;
+                instrumentation.finish_explainability_success().await;
             }
-            state.llm.finish_ok(&result);
             Some((Ok(QueryEvent::Completed(result)), None))
         }
         Some(Ok(event)) => Some((Ok(event), Some(state))),
         Some(Err(error)) => {
+            state.llm.finish_completion_error();
             if let Some(instrumentation) = &state.instrumentation {
                 instrumentation.finish_query_error(&error).await;
             }
-            state.llm.finish_completion_error();
             Some((Err(error), None))
         }
         None => {
+            state.llm.finish_completion_error();
             if let Some(instrumentation) = &state.instrumentation {
                 instrumentation.finish_stream_ended().await;
             }
-            state.llm.finish_completion_error();
             None
         }
     }
@@ -407,4 +415,86 @@ async fn emit_llm_completed(
             ExplainabilityEvent::LlmRequestCompleted(event),
         )
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
+
+    use futures_util::stream;
+
+    use super::{LlmSpanLatch, LocalCompletionState, next_local_completion_event};
+    use crate::{
+        observability::span_name,
+        query::{QueryError, QueryEvent, QueryEventStream},
+        test_support::tracing_capture,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_poll_provider_stream_inside_llm_span() {
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let subscriber = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let llm_span = tracing::info_span!(
+            span_name::LLM_REQUEST,
+            "graphloom.operation" = "completion",
+            "graphloom.model.instance" = "test-model",
+            "graphloom.model.provider" = "openai",
+            "graphloom.query.streaming" = true,
+            "graphloom.input.tokens" = tracing::field::Empty,
+            "graphloom.output.tokens" = tracing::field::Empty,
+            "graphloom.status" = tracing::field::Empty,
+            "graphloom.error.kind" = tracing::field::Empty,
+            "graphloom.elapsed_ms" = tracing::field::Empty,
+        );
+        let llm_latch = LlmSpanLatch::new(Some(llm_span.clone()), Instant::now());
+
+        let inner: QueryEventStream = Box::pin(stream::unfold(0_u8, |step| async move {
+            if step == 0 {
+                tracing::info!(
+                    name: "graphloom.test.provider.stream.polled",
+                    "provider stream polled"
+                );
+                return Some((
+                    Ok::<QueryEvent, QueryError>(QueryEvent::Token("t".to_owned())),
+                    1_u8,
+                ));
+            }
+            None
+        }));
+        let state_holder = LocalCompletionState {
+            events: inner,
+            llm: llm_latch,
+            instrumentation: None,
+            llm_started: Instant::now(),
+            completion_model_id: "test-model".to_owned(),
+            context_tokens: None,
+        };
+
+        let (event, _) = next_local_completion_event(Some(state_holder))
+            .await
+            .expect("event");
+        assert!(matches!(event, Ok(QueryEvent::Token(_))));
+
+        let state = state.lock().expect("capture state");
+        let llm_captured = state
+            .spans
+            .iter()
+            .find(|span| span.name == span_name::LLM_REQUEST)
+            .expect("LLM span");
+        let polled = state
+            .events
+            .iter()
+            .find(|event| event.name == "graphloom.test.provider.stream.polled")
+            .expect("polled event");
+        assert_eq!(
+            polled.parent.as_ref(),
+            Some(&llm_captured.id),
+            "provider poll must run inside the LLM span"
+        );
+    }
 }

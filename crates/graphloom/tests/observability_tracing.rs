@@ -16,7 +16,7 @@ use graphloom::{
         ExplainabilityContentMode, ExplainabilityEvent, ExplainabilityRecord, ExplainabilityRunId,
         ExplainabilitySink, ExplainabilitySinkError,
     },
-    observability::{field_name, span_name},
+    observability::{event_name, field_name, span_name},
     query::{QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod},
 };
 use graphloom_llm::ModelConfig;
@@ -42,6 +42,7 @@ const CONTEXT_SENTINEL: &str = "CONTEXT_SECRET_SENTINEL";
 const RESPONSE_SENTINEL: &str = "RESPONSE_SECRET_SENTINEL";
 const API_KEY_SENTINEL: &str = "API_KEY_SECRET_SENTINEL";
 const PATH_SENTINEL: &str = "PATH_SECRET_SENTINEL";
+const STALE_VECTOR_ID_SECRET_SENTINEL: &str = "STALE_VECTOR_ID_SECRET_SENTINEL";
 
 struct LocalFixture {
     project: TempDir,
@@ -412,6 +413,65 @@ impl ExplainabilitySink for RecordingExplainabilitySink {
     }
 }
 
+#[derive(Debug)]
+struct BlockingFinishSink {
+    finish_entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release_finish: Arc<tokio::sync::Notify>,
+    capture_state: Arc<Mutex<CaptureState>>,
+    observation: Arc<Mutex<Option<FinishObservation>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FinishObservation {
+    llm_closed: bool,
+    root_closed: bool,
+    llm_status: Option<String>,
+    root_status: Option<String>,
+    llm_elapsed: Option<String>,
+}
+
+#[async_trait]
+impl ExplainabilitySink for BlockingFinishSink {
+    async fn emit(
+        &self,
+        _record: Arc<ExplainabilityRecord>,
+    ) -> Result<(), ExplainabilitySinkError> {
+        Ok(())
+    }
+
+    async fn finish_run(
+        &self,
+        _run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilitySinkError> {
+        let observation = {
+            let state = self.capture_state.lock().expect("capture state");
+            let llm = state
+                .spans
+                .iter()
+                .find(|span| span.name == span_name::LLM_REQUEST);
+            let root = state
+                .spans
+                .iter()
+                .find(|span| span.name == span_name::QUERY_LOCAL);
+            FinishObservation {
+                llm_closed: llm.is_some_and(|span| span.closed),
+                root_closed: root.is_some_and(|span| span.closed),
+                llm_status: llm.and_then(|span| span.field(field_name::STATUS).map(str::to_owned)),
+                root_status: root
+                    .and_then(|span| span.field(field_name::STATUS).map(str::to_owned)),
+                llm_elapsed: llm
+                    .and_then(|span| span.field(field_name::ELAPSED_MS).map(str::to_owned)),
+            }
+        };
+        *self.observation.lock().expect("observation") = Some(observation);
+        self.finish_entered
+            .send(())
+            .expect("finish observer channel");
+        self.release_finish.notified().await;
+        Ok(())
+    }
+}
+
 async fn run_with_capture<T, F>(future: F) -> (T, Arc<Mutex<CaptureState>>)
 where
     F: std::future::Future<Output = T>,
@@ -648,6 +708,9 @@ async fn test_should_capture_complete_local_span_tree_on_success() {
     assert_eq!(llm.field(field_name::MODEL_PROVIDER), Some("\"openai\""));
     assert_eq!(llm.field(field_name::QUERY_STREAMING), Some("true"));
     assert!(llm.field(field_name::ELAPSED_MS).is_some());
+    assert!(context.close_order.expect("context close") < llm.close_order.expect("llm close"));
+    assert!(prompt.close_order.expect("prompt close") < llm.close_order.expect("llm close"));
+    assert!(llm.close_order.expect("llm close") < root.close_order.expect("root close"));
 
     for span in &state.spans {
         assert!(span.closed, "span {} must be closed", span.name);
@@ -918,6 +981,7 @@ async fn test_should_record_completion_handshake_failure() {
         llm.field(field_name::ERROR_KIND),
         Some("\"query_completion\"")
     );
+    assert!(llm.close_order.expect("llm close") < root.close_order.expect("root close"));
     assert_eq!(spans_named(&state, span_name::QUERY_LOCAL).len(), 1);
 }
 
@@ -988,6 +1052,7 @@ async fn test_should_record_completion_stream_midway_failure() {
         llm.field(field_name::ERROR_KIND),
         Some("\"query_completion\"")
     );
+    assert!(llm.close_order.expect("llm close") < root.close_order.expect("root close"));
     drop(_guard);
 }
 
@@ -1073,6 +1138,7 @@ async fn test_should_record_abandoned_on_early_stream_drop() {
     assert_eq!(llm.field(field_name::STATUS), Some("\"abandoned\""));
     assert!(root.closed);
     assert!(llm.closed);
+    assert!(llm.close_order.expect("llm close") < root.close_order.expect("root close"));
     assert!(
         !sink
             .records()
@@ -1219,4 +1285,143 @@ async fn request_bodies_since(server: &MockServer, offset: usize) -> Vec<Value> 
         .skip(offset)
         .map(|request| request.body_json::<Value>().expect("request JSON"))
         .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_close_tracing_spans_before_explainability_flush() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let (finish_entered_tx, mut finish_entered_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release_finish = Arc::new(tokio::sync::Notify::new());
+    let state = Arc::new(Mutex::new(CaptureState::default()));
+    let observation = Arc::new(Mutex::new(None));
+    let sink = Arc::new(BlockingFinishSink {
+        finish_entered: finish_entered_tx,
+        release_finish: Arc::clone(&release_finish),
+        capture_state: Arc::clone(&state),
+        observation: Arc::clone(&observation),
+    });
+    let mut options = local_options(fixture.project.path(), "Who is Alice?");
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        ExplainabilityRunId::from_str("run-blocking-finish").expect("run id"),
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    ));
+
+    let subscriber = capture_subscriber(state.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let gate = tokio::spawn(async move {
+        finish_entered_rx.recv().await;
+        release_finish.notify_one();
+    });
+
+    let mut stream = local_search_streaming(fixture.config, options)
+        .await
+        .expect("stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event"));
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, QueryEvent::Completed(_)))
+    );
+    gate.await.expect("gate");
+
+    let observed = observation
+        .lock()
+        .expect("observation")
+        .clone()
+        .expect("finish observation");
+    assert!(
+        observed.llm_closed && observed.root_closed,
+        "LLM and root spans must close before Explainability finish_run"
+    );
+    assert_eq!(observed.llm_status.as_deref(), Some("\"ok\""));
+    assert_eq!(observed.root_status.as_deref(), Some("\"ok\""));
+    let state = state.lock().expect("capture state");
+    let llm = single_span(&state, span_name::LLM_REQUEST);
+    let root = single_span(&state, span_name::QUERY_LOCAL);
+    assert!(
+        llm.close_order.expect("llm close") < root.close_order.expect("root close"),
+        "LLM span must close before the root span"
+    );
+    assert_eq!(
+        llm.field(field_name::ELAPSED_MS),
+        observed.llm_elapsed.as_deref(),
+        "finish delay must not change the recorded LLM elapsed"
+    );
+    drop(_guard);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_should_emit_stale_reference_without_leaking_vector_id() {
+    let server = mount_query_stub().await;
+    let fixture = local_fixture(&server).await;
+    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
+        .await
+        .expect("vector store");
+    let schema = fixture
+        .config
+        .vector_store
+        .schema_for(ENTITY_DESCRIPTION_EMBEDDING);
+    store
+        .upsert_documents(
+            &schema,
+            &[VectorDocument {
+                id: STALE_VECTOR_ID_SECRET_SENTINEL.to_owned(),
+                vector: vec![0.9, 0.1],
+            }],
+        )
+        .await
+        .expect("stale vector document");
+    drop(store);
+
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut options = local_options(fixture.project.path(), "Who is Alice?");
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        ExplainabilityRunId::from_str("run-stale-reference").expect("run id"),
+        ExplainabilityContentMode::Content,
+        sink.clone(),
+    ));
+
+    let (result, state) = run_with_capture(async {
+        local_search(fixture.config, options)
+            .await
+            .expect("Local Query")
+    })
+    .await;
+    assert!(!result.response.is_empty());
+
+    let state = state.lock().expect("capture state");
+    let stale_events = state
+        .events
+        .iter()
+        .filter(|event| event.name == event_name::QUERY_ENTITY_MAPPING_STALE_REFERENCE)
+        .collect::<Vec<_>>();
+    assert_eq!(stale_events.len(), 1);
+    assert_eq!(
+        stale_events[0].field(field_name::ERROR_KIND),
+        Some("\"stale_reference\"")
+    );
+    assert_eq!(
+        stale_events[0].field(field_name::QUERY_METHOD),
+        Some("\"local\"")
+    );
+    assert!(stale_events[0].fields.iter().all(|(field, value)| {
+        !field.contains("id")
+            && !field.contains("entity")
+            && !field.contains("vector")
+            && !value.contains(STALE_VECTOR_ID_SECRET_SENTINEL)
+    }));
+    assert_no_content_in_capture(&state, &[STALE_VECTOR_ID_SECRET_SENTINEL]);
+
+    let content = sink
+        .records()
+        .iter()
+        .filter_map(|record| serde_json::to_string(&record.event).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(content.contains(STALE_VECTOR_ID_SECRET_SENTINEL));
 }

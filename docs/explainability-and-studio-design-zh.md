@@ -704,8 +704,43 @@ graphloom.query.local
   -Stream 提前 drop：根 Span 与 LLM Span 同步记录 `status = abandoned`，不 spawn 隐藏任务、
   不调用 Explainability finish、不生成 RunCompleted/RunFailed、不改变 QueryEvent。
 
-LLM Span 覆盖 handshake 与完整 stream 消费；`Completed` 到达前不会提前关闭，`Completed` 后
-记录 `ok` 与 token 使用。所有阶段 Span 在返回路径上闭合。
+LLM Span 覆盖 provider stream handshake 与真实 stream polling：每次 `poll_next()` 都运行在
+`graphloom.llm.request` Span 中（通过 `tracing::Instrument`，不使用跨 `.await` 的 enter
+guard），因此 Provider stream 内部产生的 Event/子 Span 自动成为 LLM Span 的子节点。
+`Completed` 到达前不会提前关闭，`Completed` 后记录 `ok` 与 token 使用。
+
+LLM/Root tracing Span 在 Explainability 投递与 JSONL flush 之前真正 close：
+
+```text
+LLM tracing Span 终态（取走并 drop Span 句柄）
+→ Local 根 tracing Span 终态（取走并 drop Span 句柄）
+→ Explainability LlmRequestCompleted / RunCompleted / RunFailed
+→ Explainability finish_run / JSONL flush
+```
+
+tracing Span duration 不包含 JSONL flush。所有阶段 Span 在返回路径上闭合。
+
+根 Span 的 `graphloom.elapsed_ms` 语义：
+
+```text
+graphloom.query.local elapsed_ms
+    = 收到请求级 QueryOptions 后，到 tracing 业务终态的完整生命周期
+
+QueryResult.elapsed
+    = 现有 Local Query 执行计时，兼容语义不变
+```
+
+成功、失败与 abandoned 统一使用 Session request start 到业务终态的计时，
+不再使用 `QueryResult.elapsed` 作为根 Span elapsed。
+
+Entity mapping 忽略 stale vector reference 时产生 named Event
+`graphloom.query.entity_mapping.stale_reference`（`error.kind = stale_reference`），
+tracing 不记录具体 Entity/Vector/文档 ID；stale ID 只通过 Explainability 内容通道表达。
+
+CLI `graphloom.cli.query.completed` 与 `graphloom.cli.query.failed` 互斥：streaming 路径在
+terminal newline 与 stdout flush 全部成功后才记录 completed；stdout 失败时只记录 failed。
+任何 Recorder shutdown failure（无论 Query 成败）都产生一次
+`graphloom.cli.explainability.shutdown_failed`。
 
 ### 9.5.9 tracing 与 Explainability 分离
 

@@ -76,6 +76,9 @@ pub mod event_name {
     /// Explainability sink finalization failed.
     pub const QUERY_EXPLAINABILITY_FINISH_FAILED: &str =
         "graphloom.query.explainability.finish_failed";
+    /// Entity mapping ignored a stale vector reference.
+    pub const QUERY_ENTITY_MAPPING_STALE_REFERENCE: &str =
+        "graphloom.query.entity_mapping.stale_reference";
 }
 
 /// Stable `tracing` field names and their fixed wire types.
@@ -227,6 +230,8 @@ pub mod error_kind {
     pub const EXPLAINABILITY_FINISH: &str = "explainability_finish";
     /// Explainability output creation/shutdown failed.
     pub const EXPLAINABILITY_OUTPUT: &str = "explainability_output";
+    /// Entity mapping ignored a stale vector reference.
+    pub const STALE_REFERENCE: &str = "stale_reference";
 }
 
 #[cfg(test)]
@@ -262,6 +267,7 @@ mod tests {
             event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
             event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,
             event_name::QUERY_EXPLAINABILITY_FINISH_FAILED,
+            event_name::QUERY_ENTITY_MAPPING_STALE_REFERENCE,
         ]);
         for name in &names {
             assert!(name.chars().filter(|ch| *ch == '.').count() >= 2);

@@ -67,6 +67,10 @@ fn test_should_expose_exact_event_names() {
         event_name::QUERY_EXPLAINABILITY_FINISH_FAILED,
         "graphloom.query.explainability.finish_failed"
     );
+    assert_eq!(
+        event_name::QUERY_ENTITY_MAPPING_STALE_REFERENCE,
+        "graphloom.query.entity_mapping.stale_reference"
+    );
 }
 
 #[test]
@@ -139,6 +143,7 @@ fn test_should_expose_stable_error_kinds() {
         error_kind::EVENT_CONTRACT,
         error_kind::EXPLAINABILITY_FINISH,
         error_kind::EXPLAINABILITY_OUTPUT,
+        error_kind::STALE_REFERENCE,
     ] {
         assert!(!kind.is_empty());
     }
@@ -168,6 +173,7 @@ fn test_should_keep_span_and_event_names_unique_and_low_cardinality() {
         event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
         event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,
         event_name::QUERY_EXPLAINABILITY_FINISH_FAILED,
+        event_name::QUERY_ENTITY_MAPPING_STALE_REFERENCE,
     ]);
     let unique = names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(unique.len(), names.len(), "span/event names must be unique");

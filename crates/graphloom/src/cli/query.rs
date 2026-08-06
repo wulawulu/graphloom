@@ -18,7 +18,8 @@ use crate::{
     },
     observability::{OBSERVABILITY_CONTRACT_VERSION, event_name},
     query::{
-        QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod,
+        QueryEvent, QueryEventStream, QueryExplainabilityOptions, QueryOptions, QueryResult,
+        SearchMethod,
         observability::{duration_millis, graphloom_error_kind, usize_to_u64},
     },
 };
@@ -58,7 +59,11 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
         );
         options.explainability = Some(explainability);
     }
-    match options.explainability.as_ref().map(|item| item.run_id()) {
+    match options
+        .explainability
+        .as_ref()
+        .map(QueryExplainabilityOptions::run_id)
+    {
         Some(run_id) => {
             tracing::info!(
                 name: event_name::CLI_QUERY_STARTED,
@@ -92,15 +97,7 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
         run_non_streaming(project, options, args.method).await
     };
     if let Err(error) = &query_outcome {
-        tracing::error!(
-            name: event_name::CLI_QUERY_FAILED,
-            {
-                "graphloom.query.method" = %args.method,
-                "graphloom.query.streaming" = streaming,
-                "graphloom.error.kind" = graphloom_error_kind(error),
-            },
-            "query run failed"
-        );
+        emit_query_failed(args.method, streaming, error);
     }
     let recorder_outcome = shutdown_explainability_recorder(recorder).await;
     combine_query_and_recorder_outcomes(query_outcome, recorder_outcome)
@@ -133,21 +130,33 @@ async fn shutdown_explainability_recorder(
 }
 
 fn combine_query_and_recorder_outcomes(query: Result<()>, recorder: Result<()>) -> Result<()> {
+    if recorder.is_err() {
+        tracing::error!(
+            name: event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED,
+            {
+                "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
+                "graphloom.error.kind" = "explainability_output",
+            },
+            "Explainability Recorder shutdown failed"
+        );
+    }
     match (query, recorder) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(query_error), Ok(())) => Err(query_error),
         (Ok(()), Err(recorder_error)) => Err(recorder_error),
-        (Err(query_error), Err(_)) => {
-            tracing::error!(
-                name: event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED,
-                {
-                    "graphloom.error.kind" = "explainability_output",
-                },
-                "Explainability Recorder shutdown also failed"
-            );
-            Err(query_error)
-        }
+        (Err(query_error), _) => Err(query_error),
     }
+}
+
+fn emit_query_failed(method: SearchMethod, streaming: bool, error: &GraphLoomError) {
+    tracing::error!(
+        name: event_name::CLI_QUERY_FAILED,
+        {
+            "graphloom.query.method" = %method,
+            "graphloom.query.streaming" = streaming,
+            "graphloom.error.kind" = graphloom_error_kind(error),
+        },
+        "query run failed"
+    );
 }
 
 fn explainability_output_error(
@@ -171,7 +180,7 @@ async fn run_non_streaming(
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     write_non_streaming_response(&mut output, &result.response)?;
-    log_completion(&result, method, false);
+    log_completion(&QueryCompletionMetrics::from_result(&result), method, false);
     Ok(())
 }
 
@@ -180,20 +189,52 @@ async fn run_streaming(
     options: QueryOptions,
     method: SearchMethod,
 ) -> Result<()> {
-    let mut events = query_loaded_stream(project, options).await?;
+    let events = query_loaded_stream(project, options).await?;
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
+    consume_stream_to_output(events, &mut output, method).await
+}
+
+async fn consume_stream_to_output(
+    events: QueryEventStream,
+    output: &mut impl Write,
+    method: SearchMethod,
+) -> Result<()> {
+    let mut events = events;
+    let mut completion_metrics = None;
     while let Some(event) = events.next().await {
         match event? {
-            QueryEvent::Token(token) => {
-                write_stream_token(&mut output, &token)?;
+            QueryEvent::Token(token) => write_stream_token(output, &token)?,
+            QueryEvent::Completed(result) => {
+                completion_metrics = Some(QueryCompletionMetrics::from_result(&result));
             }
-            QueryEvent::Completed(result) => log_completion(&result, method, true),
             QueryEvent::Context(_) => {}
         }
     }
-    write_terminal_newline(&mut output)?;
+    write_terminal_newline(output)?;
+    if let Some(metrics) = completion_metrics {
+        log_completion(&metrics, method, true);
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueryCompletionMetrics {
+    elapsed_ms: Option<u64>,
+    llm_calls: Option<u64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl QueryCompletionMetrics {
+    fn from_result(result: &QueryResult) -> Self {
+        Self {
+            elapsed_ms: duration_millis(result.elapsed),
+            llm_calls: usize_to_u64(result.usage.llm_calls),
+            input_tokens: usize_to_u64(result.usage.prompt_tokens),
+            output_tokens: usize_to_u64(result.usage.output_tokens),
+        }
+    }
 }
 
 fn write_non_streaming_response(output: &mut impl Write, response: &str) -> Result<()> {
@@ -227,12 +268,12 @@ fn flush_stdout(output: &mut impl Write, operation: &'static str) -> Result<()> 
     })
 }
 
-fn log_completion(result: &QueryResult, method: SearchMethod, streaming: bool) {
+fn log_completion(metrics: &QueryCompletionMetrics, method: SearchMethod, streaming: bool) {
     match (
-        duration_millis(result.elapsed),
-        usize_to_u64(result.usage.llm_calls),
-        usize_to_u64(result.usage.prompt_tokens),
-        usize_to_u64(result.usage.output_tokens),
+        metrics.elapsed_ms,
+        metrics.llm_calls,
+        metrics.input_tokens,
+        metrics.output_tokens,
     ) {
         (Some(elapsed_ms), Some(llm_calls), Some(input_tokens), Some(output_tokens)) => {
             tracing::info!(
@@ -318,10 +359,55 @@ fn query_console_filter(verbose: bool) -> EnvFilter {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Error, ErrorKind, Write};
+    use std::{
+        collections::BTreeMap,
+        io::{Error, ErrorKind, Write},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use super::{write_non_streaming_response, write_stream_token, write_terminal_newline};
-    use crate::GraphLoomError;
+    use super::{
+        combine_query_and_recorder_outcomes, consume_stream_to_output, emit_query_failed,
+        write_non_streaming_response, write_stream_token, write_terminal_newline,
+    };
+    use crate::{
+        GraphLoomError,
+        observability::event_name as contract_event_name,
+        query::{
+            QueryContext, QueryEvent, QueryEventStream, QueryResult, QueryUsage, SearchMethod,
+        },
+        test_support::tracing_capture,
+    };
+
+    fn query_result() -> QueryResult {
+        QueryResult {
+            response: "answer".to_owned(),
+            context: QueryContext::default(),
+            elapsed: Duration::from_millis(1),
+            usage: QueryUsage {
+                llm_calls: 1,
+                prompt_tokens: 2,
+                output_tokens: 3,
+                categories: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn event_count(state: &tracing_capture::CaptureState, name: &str) -> usize {
+        state
+            .events
+            .iter()
+            .filter(|event| event.name == name)
+            .count()
+    }
+
+    fn io_error(operation: &'static str) -> GraphLoomError {
+        GraphLoomError::Io {
+            operation,
+            path: std::path::PathBuf::from("<stdout>"),
+            source: Error::new(ErrorKind::BrokenPipe, "forced"),
+        }
+    }
 
     #[derive(Debug, Default)]
     struct AlwaysFailWriter;
@@ -412,5 +498,140 @@ mod tests {
         let error =
             write_terminal_newline(&mut FlushFailWriter::default()).expect_err("terminal flush");
         assert_io_operation(error, "flush Query stdout");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_emit_completed_after_stream_output_succeeds() {
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let subscriber = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let events: Vec<crate::query::Result<QueryEvent>> = vec![
+            Ok(QueryEvent::Token("chunk".to_owned())),
+            Ok(QueryEvent::Completed(query_result())),
+        ];
+        let stream: QueryEventStream = Box::pin(futures_util::stream::iter(events));
+        let mut writer = Vec::new();
+
+        consume_stream_to_output(stream, &mut writer, SearchMethod::Local)
+            .await
+            .expect("stream output");
+
+        assert_eq!(writer, b"chunk\n");
+        let state = state.lock().expect("capture state");
+        assert_eq!(
+            event_count(&state, contract_event_name::CLI_QUERY_COMPLETED),
+            1
+        );
+        assert_eq!(
+            event_count(&state, contract_event_name::CLI_QUERY_FAILED),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_not_emit_completed_when_stream_stdout_fails() {
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let subscriber = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let events: Vec<crate::query::Result<QueryEvent>> = vec![
+            Ok(QueryEvent::Token("chunk".to_owned())),
+            Ok(QueryEvent::Completed(query_result())),
+        ];
+        let stream: QueryEventStream = Box::pin(futures_util::stream::iter(events));
+        let mut writer = SecondWriteFailWriter::default();
+
+        let error = consume_stream_to_output(stream, &mut writer, SearchMethod::Local)
+            .await
+            .expect_err("terminal newline write must fail");
+        let GraphLoomError::Io {
+            operation, path, ..
+        } = &error
+        else {
+            panic!("expected stdout I/O error");
+        };
+        assert_eq!(*operation, "write Query terminal newline");
+        assert_eq!(*path, std::path::Path::new("<stdout>"));
+        emit_query_failed(SearchMethod::Local, true, &error);
+
+        let state = state.lock().expect("capture state");
+        assert_eq!(
+            event_count(&state, contract_event_name::CLI_QUERY_COMPLETED),
+            0
+        );
+        assert_eq!(
+            event_count(&state, contract_event_name::CLI_QUERY_FAILED),
+            1
+        );
+        let failed = state
+            .events
+            .iter()
+            .find(|event| event.name == contract_event_name::CLI_QUERY_FAILED)
+            .expect("failed event");
+        assert_eq!(failed.field("graphloom.query.method"), Some("local"));
+        assert_eq!(failed.field("graphloom.query.streaming"), Some("true"));
+    }
+
+    #[test]
+    fn test_should_emit_shutdown_failed_for_every_recorder_failure() {
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let subscriber = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let query_error_a = io_error("write Query response");
+        let query_error_b = io_error("write Query response");
+        let recorder_error_a = io_error("shutdown Explainability JSONL output");
+        let recorder_error_b = io_error("shutdown Explainability JSONL output");
+
+        let success_failure = combine_query_and_recorder_outcomes(Ok(()), Err(recorder_error_a));
+        assert!(matches!(
+            success_failure,
+            Err(GraphLoomError::Io { operation, .. })
+                if operation == "shutdown Explainability JSONL output"
+        ));
+
+        let failure_failure =
+            combine_query_and_recorder_outcomes(Err(query_error_a), Err(recorder_error_b));
+        assert!(matches!(
+            failure_failure,
+            Err(GraphLoomError::Io { operation, .. }) if operation == "write Query response"
+        ));
+
+        let failure_success = combine_query_and_recorder_outcomes(Err(query_error_b), Ok(()));
+        assert!(matches!(
+            failure_success,
+            Err(GraphLoomError::Io { operation, .. })
+                if operation == "write Query response"
+        ));
+        let both_ok = combine_query_and_recorder_outcomes(Ok(()), Ok(()));
+        assert!(both_ok.is_ok());
+
+        let state = state.lock().expect("capture state");
+        let shutdown_events = state
+            .events
+            .iter()
+            .filter(|event| event.name == contract_event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(shutdown_events.len(), 2);
+        for event in &shutdown_events {
+            assert_eq!(event.field("graphloom.observability.version"), Some("1"));
+            assert_eq!(
+                event.field("graphloom.error.kind"),
+                Some("\"explainability_output\"")
+            );
+            assert!(
+                event
+                    .fields
+                    .iter()
+                    .all(|(field, value)| !field.contains("path")
+                        && !value.contains("stdout")
+                        && !value.contains("shutdown Explainability JSONL output"))
+            );
+        }
+        assert_eq!(
+            event_count(&state, contract_event_name::CLI_QUERY_FAILED),
+            0
+        );
     }
 }

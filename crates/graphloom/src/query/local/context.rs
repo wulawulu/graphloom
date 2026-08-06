@@ -32,7 +32,7 @@ use crate::{
         ExplainabilityRecordType, ExplainabilityScore, GraphExpansionStarted, MappingQueryBuilt,
         RelationshipsSelected, SelectionReason, TextUnitsSelected,
     },
-    observability::{field_name, operation, span_name, status},
+    observability::{error_kind, event_name, field_name, operation, span_name, status},
 };
 
 /// Local Search context resources, independent of completion orchestration.
@@ -218,17 +218,19 @@ impl LocalContextBuilder {
         explainability: Option<&QueryExplainabilitySession>,
         trace: Option<&QueryTraceSession>,
     ) -> Result<LocalContextBuild> {
-        let context_span = trace.map(|trace| {
-            tracing::info_span!(
-                parent: trace.root_span(),
-                span_name::QUERY_CONTEXT,
-                "graphloom.operation" = operation::CONTEXT_BUILD,
-                "graphloom.context.tokens" = tracing::field::Empty,
-                "graphloom.candidate.count" = tracing::field::Empty,
-                "graphloom.selected.count" = tracing::field::Empty,
-                "graphloom.status" = tracing::field::Empty,
-                "graphloom.error.kind" = tracing::field::Empty,
-            )
+        let context_span = trace.and_then(|trace| {
+            trace.clone_root_span().map(|root_span| {
+                tracing::info_span!(
+                    parent: &root_span,
+                    span_name::QUERY_CONTEXT,
+                    "graphloom.operation" = operation::CONTEXT_BUILD,
+                    "graphloom.context.tokens" = tracing::field::Empty,
+                    "graphloom.candidate.count" = tracing::field::Empty,
+                    "graphloom.selected.count" = tracing::field::Empty,
+                    "graphloom.status" = tracing::field::Empty,
+                    "graphloom.error.kind" = tracing::field::Empty,
+                )
+            })
         });
         let record_context_span = context_span.clone();
         let context_future = async {
@@ -976,9 +978,12 @@ impl LocalContextBuilder {
                     candidates.push(candidate);
                 }
                 tracing::warn!(
-                    method = %self.method,
-                    entity_id = %result.document.id,
-                    "entity_description contains a stale entity id"
+                    name: event_name::QUERY_ENTITY_MAPPING_STALE_REFERENCE,
+                    {
+                        "graphloom.query.method" = "local",
+                        "graphloom.error.kind" = error_kind::STALE_REFERENCE,
+                    },
+                    "entity mapping ignored a stale vector reference"
                 );
             }
         }
