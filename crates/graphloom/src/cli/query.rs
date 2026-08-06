@@ -1,6 +1,9 @@
 //! Query CLI adapter.
 
-use std::{io::Write, path::Path};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use futures_util::StreamExt;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -38,12 +41,59 @@ const QUERY_VERBOSE_CONSOLE_FILTER: &str = "off,graphloom::cli::query=debug,grap
 /// Returns a typed Query/config/provider error or stdout I/O error.
 pub async fn run(args: &QueryArgs) -> Result<()> {
     let project = load_project_config(&args.root).await?;
+    run_query_with_observability(
+        args,
+        project,
+        prepare_query_log_directory,
+        OtlpTraceRuntime::build,
+        |subscriber| {
+            tracing::subscriber::set_global_default(subscriber)
+                .map_err(|source| Box::new(source) as Box<dyn std::error::Error + Send + Sync>)
+        },
+        |args, project| async move { Box::pin(run_query_work(&args, project)).await },
+    )
+    .await
+}
+
+/// Run a Query with injectable observability orchestration.
+///
+/// Production [`run`] wires the real directory preparer, OTLP runtime builder,
+/// global subscriber installer, and Query work; tests inject failing or
+/// counting replacements to prove every initialization failure closes any
+/// already-created OTLP runtime before returning.
+///
+/// The Query log directory is prepared *before* any OTLP runtime is built, so
+/// a directory failure cannot leak a provider or batch worker.
+async fn run_query_with_observability<Prepare, PrepareFut, BuildRuntime, Install, Work, WorkFut>(
+    args: &QueryArgs,
+    project: crate::project::LoadedProject,
+    prepare_directory: Prepare,
+    build_runtime: BuildRuntime,
+    install_subscriber: Install,
+    run_work: Work,
+) -> Result<()>
+where
+    Prepare: FnOnce(PathBuf) -> PrepareFut,
+    PrepareFut: std::future::Future<Output = Result<()>>,
+    BuildRuntime: FnOnce(&OtlpTraceOptions) -> Result<OtlpTraceRuntime>,
+    Install: FnOnce(
+        Box<dyn tracing::Subscriber + Send + Sync>,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    Work: FnOnce(QueryArgs, crate::project::LoadedProject) -> WorkFut,
+    WorkFut: std::future::Future<Output = Result<()>>,
+{
+    prepare_directory(project.paths.reporting_dir.clone()).await?;
     let otlp_runtime = OtlpTraceOptions::from_args(args)
-        .map(|options| OtlpTraceRuntime::build(&options))
+        .map(|options| build_runtime(&options))
         .transpose()?;
-    let mut observability =
-        init_query_observability(&project.paths.reporting_dir, args.verbose, otlp_runtime).await?;
-    let work_outcome = Box::pin(run_query_work(args, project)).await;
+    let mut observability = init_query_observability_prepared_with(
+        &project.paths.reporting_dir,
+        args.verbose,
+        otlp_runtime,
+        install_subscriber,
+    )
+    .await?;
+    let work_outcome = Box::pin(run_work(args.clone(), project)).await;
     let telemetry_outcome = observability.shutdown_telemetry().await;
     let outcome = combine_work_and_telemetry_outcomes(work_outcome, telemetry_outcome);
     drop(observability);
@@ -358,18 +408,71 @@ impl QueryObservabilityGuard {
     }
 }
 
-async fn init_query_observability(
-    reporting_dir: &Path,
-    verbose: bool,
-    otlp_runtime: Option<OtlpTraceRuntime>,
-) -> Result<QueryObservabilityGuard> {
-    tokio::fs::create_dir_all(reporting_dir)
+/// Create the Query log directory before any OTLP runtime is built.
+///
+/// Takes an owned path so the returned future never borrows the caller's
+/// reference, which keeps the function injectable into the generic
+/// observability orchestrator.
+///
+/// # Errors
+///
+/// Returns the stable `create Query log directory` I/O error when the
+/// reporting directory cannot be created.
+async fn prepare_query_log_directory(reporting_dir: PathBuf) -> Result<()> {
+    prepare_query_log_directory_with(&reporting_dir, |path| {
+        let path = path.to_path_buf();
+        async move { tokio::fs::create_dir_all(&path).await }
+    })
+    .await
+}
+
+/// Create the Query log directory through an injected creator.
+///
+/// Keeps the stable error mapping testable without platform permission
+/// differences.
+///
+/// # Errors
+///
+/// Returns the stable `create Query log directory` I/O error when the
+/// injected creator fails.
+async fn prepare_query_log_directory_with<F, Fut>(reporting_dir: &Path, create_dir: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
+{
+    create_dir(reporting_dir)
         .await
         .map_err(|source| CliError::Io {
             operation: "create Query log directory",
             path: reporting_dir.to_path_buf(),
             source,
-        })?;
+        })
+}
+
+/// Build the Query subscriber stack for an already prepared log directory.
+///
+/// The caller must have already created `reporting_dir` successfully (see
+/// [`prepare_query_log_directory`]) before building any OTLP runtime. This
+/// function never creates directories. The only fallible step after an OTLP
+/// runtime is built is the injected subscriber install; on failure the
+/// provider is explicitly shut down on a blocking thread before the install
+/// error is returned.
+///
+/// # Errors
+///
+/// Returns a safe `install Query tracing subscriber` telemetry error when the
+/// injected subscriber installer fails.
+async fn init_query_observability_prepared_with<F>(
+    reporting_dir: &Path,
+    verbose: bool,
+    otlp_runtime: Option<OtlpTraceRuntime>,
+    install_subscriber: F,
+) -> Result<QueryObservabilityGuard>
+where
+    F: FnOnce(
+        Box<dyn tracing::Subscriber + Send + Sync>,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>,
+{
     let file_filter = query_file_filter(verbose);
     let console_filter = query_console_filter(verbose);
     let appender = tracing_appender::rolling::never(reporting_dir, "query.log");
@@ -387,12 +490,14 @@ async fn init_query_observability(
     let otel_layer = otlp_runtime
         .as_ref()
         .map(|runtime| otel_layer(runtime.tracer().clone()));
-    let subscriber = tracing_subscriber::registry()
-        .with(console_layer)
-        .with(file_layer)
-        .with(otel_layer);
+    let subscriber: Box<dyn tracing::Subscriber + Send + Sync> = Box::new(
+        tracing_subscriber::registry()
+            .with(console_layer)
+            .with(file_layer)
+            .with(otel_layer),
+    );
     let otlp_enabled = otlp_runtime.is_some();
-    match tracing::subscriber::set_global_default(subscriber) {
+    match install_subscriber(subscriber) {
         Ok(()) => {
             if otlp_enabled {
                 tracing::info!(
@@ -440,6 +545,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         io::{Error, ErrorKind, Write},
+        path::{Path, PathBuf},
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -454,13 +560,18 @@ mod tests {
 
     use super::{
         combine_query_and_recorder_outcomes, combine_work_and_telemetry_outcomes,
-        consume_stream_to_output, emit_query_failed, write_non_streaming_response,
-        write_stream_token, write_terminal_newline,
+        consume_stream_to_output, emit_query_failed, prepare_query_log_directory,
+        prepare_query_log_directory_with, run_query_with_observability,
+        write_non_streaming_response, write_stream_token, write_terminal_newline,
     };
     use crate::{
-        GraphLoomError,
-        cli::telemetry::{OtlpTraceRuntime, telemetry_error},
+        GraphLoomError, GraphRagConfig,
+        cli::{
+            Cli, Command, QueryArgs,
+            telemetry::{OtlpTraceRuntime, telemetry_error},
+        },
         observability::event_name as contract_event_name,
+        project::LoadedProject,
         query::{
             QueryContext, QueryEvent, QueryEventStream, QueryResult, QueryUsage, SearchMethod,
         },
@@ -863,6 +974,158 @@ mod tests {
             shutdowns.load(Ordering::SeqCst),
             1,
             "provider must be explicitly shut down after subscriber install failure"
+        );
+    }
+
+    fn local_otel_args() -> QueryArgs {
+        let cli = Cli::try_parse_from([
+            "graphloom",
+            "query",
+            "--method",
+            "local",
+            "--otel-endpoint",
+            "http://collector.invalid:4318",
+            "question",
+        ])
+        .expect("Query arguments");
+        let Command::Query(args) = cli.command else {
+            panic!("expected Query command");
+        };
+        args
+    }
+
+    fn loaded_project(root: &Path) -> LoadedProject {
+        LoadedProject::from_config(root, GraphRagConfig::default()).expect("loaded project")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_map_log_directory_preparation_failure_to_io_error() {
+        let error = prepare_query_log_directory_with(Path::new("reports"), |_path| async move {
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "forced directory failure",
+            ))
+        })
+        .await
+        .expect_err("directory preparation must fail");
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "create Query log directory",
+                path,
+                ..
+            } if path == Path::new("reports")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_not_build_runtime_or_run_query_when_directory_preparation_fails() {
+        let directory = tempfile::tempdir().expect("project directory");
+        let project = loaded_project(directory.path());
+        let args = local_otel_args();
+        let runtime_builds = Arc::new(AtomicUsize::new(0));
+        let installs = Arc::new(AtomicUsize::new(0));
+        let runtime_builds_for_closure = Arc::clone(&runtime_builds);
+        let installs_for_closure = Arc::clone(&installs);
+
+        let error = run_query_with_observability(
+            &args,
+            project,
+            |_path| async move {
+                Err(GraphLoomError::Io {
+                    operation: "create Query log directory",
+                    path: PathBuf::from("reports"),
+                    source: Error::other("forced directory failure"),
+                })
+            },
+            |_options| {
+                runtime_builds_for_closure.fetch_add(1, Ordering::SeqCst);
+                panic!("OTLP runtime must not be built when directory preparation fails");
+            },
+            |_subscriber| {
+                installs_for_closure.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_args, _project| async move {
+                panic!("Query work must not run when directory preparation fails");
+            },
+        )
+        .await
+        .expect_err("directory preparation must fail before OTLP runtime creation");
+
+        assert!(matches!(
+            &error,
+            GraphLoomError::Io {
+                operation: "create Query log directory",
+                ..
+            }
+        ));
+        assert_eq!(runtime_builds.load(Ordering::SeqCst), 0);
+        assert_eq!(installs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_shutdown_provider_when_subscriber_install_fails_in_orchestration() {
+        let directory = tempfile::tempdir().expect("project directory");
+        let project = loaded_project(directory.path());
+        let args = local_otel_args();
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let installs = Arc::new(AtomicUsize::new(0));
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(CountingShutdownProcessor {
+                shutdowns: Arc::clone(&shutdowns),
+            })
+            .build();
+        let runtime = OtlpTraceRuntime::from_provider_for_test(provider, Duration::from_secs(1));
+        let installs_for_closure = Arc::clone(&installs);
+        let state = Arc::new(Mutex::new(tracing_capture::CaptureState::default()));
+        let capture = tracing_capture::capture_subscriber(state.clone());
+        let _guard = tracing::subscriber::set_default(capture);
+
+        let error = run_query_with_observability(
+            &args,
+            project,
+            prepare_query_log_directory,
+            move |_options| Ok(runtime),
+            move |_subscriber| {
+                installs_for_closure.fetch_add(1, Ordering::SeqCst);
+                Err(Box::new(Error::other("forced subscriber install failure")))
+            },
+            |_args, _project| async move {
+                panic!("Query work must not run when subscriber install fails");
+            },
+        )
+        .await
+        .expect_err("subscriber install must fail");
+
+        assert!(matches!(
+            &error,
+            GraphLoomError::Telemetry {
+                operation: "install Query tracing subscriber",
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "failed to install Query tracing subscriber for OpenTelemetry trace export"
+        );
+        assert_eq!(installs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "provider must be explicitly shut down after subscriber install failure"
+        );
+        let state = state.lock().expect("capture state");
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| {
+                    event.name == contract_event_name::CLI_TELEMETRY_SHUTDOWN_FAILED
+                })
+                .count(),
+            0,
+            "install failure must not emit the telemetry shutdown named event"
         );
     }
 }

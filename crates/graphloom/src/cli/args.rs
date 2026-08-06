@@ -279,8 +279,40 @@ fn validate_query_telemetry(args: &QueryArgs) -> std::result::Result<(), clap::E
             "--otel-endpoint currently supports only --method local".to_owned(),
         ));
     }
+    if let Some(endpoint) = args.otel_endpoint.as_deref()
+        && let Err(message) = validate_otel_endpoint(endpoint)
+    {
+        return Err(query_path_error(message));
+    }
     Ok(())
 }
+
+fn validate_otel_endpoint(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(OTEL_ENDPOINT_VALIDATION_ERROR.to_owned());
+    }
+    let lower = value.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return Err(OTEL_ENDPOINT_VALIDATION_ERROR.to_owned());
+    };
+    if rest.is_empty() || rest.chars().any(char::is_whitespace) {
+        return Err(OTEL_ENDPOINT_VALIDATION_ERROR.to_owned());
+    }
+    if value.contains('?') || value.contains('#') {
+        return Err(OTEL_ENDPOINT_VALIDATION_ERROR.to_owned());
+    }
+    if lower.trim_end_matches('/').ends_with("/v1/traces") {
+        return Err(OTEL_ENDPOINT_VALIDATION_ERROR.to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+const OTEL_ENDPOINT_VALIDATION_ERROR: &str = "--otel-endpoint must be a non-empty http or https \
+                                              collector base endpoint without query, fragment, or \
+                                              /v1/traces";
 
 fn validate_otel_service_name(value: &str) -> Result<String, String> {
     if value.is_empty() {
@@ -861,6 +893,77 @@ mod tests {
             Some("http://collector.invalid:4318")
         );
         assert_eq!(args.otel_service_name.as_deref(), Some("graphloom-test"));
+    }
+
+    #[test]
+    fn test_should_accept_valid_otel_base_endpoints() {
+        for endpoint in [
+            "http://localhost:4318",
+            "http://localhost:4318/",
+            "https://collector.example.com",
+            "https://collector.example.com/custom",
+            "HTTPS://collector.example.com/custom",
+        ] {
+            let cli = Cli::try_parse_from([
+                "graphloom",
+                "query",
+                "--method",
+                "local",
+                "--otel-endpoint",
+                endpoint,
+                "question",
+            ])
+            .expect("valid OTLP endpoint");
+            let Command::Query(args) = cli.command else {
+                panic!("expected Query command");
+            };
+            assert_eq!(
+                args.otel_endpoint.as_deref(),
+                Some(endpoint),
+                "original base path must be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_reject_invalid_otel_endpoints_without_echoing_value() {
+        for endpoint in [
+            "",
+            "   ",
+            "ftp://collector:4318",
+            "http://collector:4318?token=secret",
+            "http://collector:4318/#fragment",
+            "http://collector:4318/v1/traces",
+            "http://collector:4318/v1/traces/",
+            "http://",
+            "http://host with space:4318",
+        ] {
+            let error = Cli::try_parse_from([
+                "graphloom",
+                "query",
+                "--method",
+                "local",
+                "--otel-endpoint",
+                endpoint,
+                "question",
+            ])
+            .expect_err("invalid OTLP endpoint must be rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            let text = error.to_string();
+            assert!(
+                text.contains(
+                    "--otel-endpoint must be a non-empty http or https collector base endpoint \
+                     without query, fragment, or /v1/traces"
+                ),
+                "unexpected error: {text}"
+            );
+            if !endpoint.is_empty() && !endpoint.trim().is_empty() {
+                assert!(
+                    !text.contains(endpoint),
+                    "error must not echo the endpoint value: {text}"
+                );
+            }
+        }
     }
 
     #[test]

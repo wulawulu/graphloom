@@ -818,6 +818,10 @@ tracing-opentelemetry 0.33.0
 
 * `--otel-endpoint` 是 Collector base endpoint；只有显式指定时才启用 OTLP。
   Adapter 按 OTLP HTTP 规则追加 `/v1/traces`；
+  -只允许 `http://` 与 `https://`（大小写不敏感）；拒绝空字符串、纯空白、
+  query string、fragment，以及已经以 `/v1/traces` 结尾的值；
+  -endpoint 校验发生在参数校验阶段（project config 加载、OTLP Runtime 创建、
+  网络请求与 Query 执行之前），错误消息为固定低基数文本，不回显用户输入；
   -未指定时完全不创建 exporter、不启动 batch 工作线程、不发起网络请求，
   Query 行为与性能保持原样；
   -只有 `--method local` 合法；Basic、Global、DRIFT 携带 endpoint 时在参数校验
@@ -907,6 +911,8 @@ tracing_opentelemetry::layer()
 
 ```text
 load project config
+→ prepare query log directory（在 OTLP Runtime 创建前）
+→ 构建可选 OTLP Runtime（exporter/provider/tracer）
 → 初始化 file/console/可选 OTLP subscriber
 → 创建可选 Explainability Recorder
 → 执行 Query
@@ -917,6 +923,14 @@ load project config
 ```
 
 * Query Core Span 在 Query 返回前关闭；OTLP flush 发生在全部 Query Span close 后；
+  -Query log directory 在 OTLP Runtime 创建前准备；目录创建失败时
+  Runtime builder / SpanExporter / Batch worker 均未创建，直接返回
+  `create Query log directory` I/O error，不产生 telemetry shutdown Event；
+  -OTLP Runtime 创建之后到 `set_global_default` 之间没有其他可失败步骤；
+  subscriber install 失败时在 `spawn_blocking` 上显式
+  `force_flush()` + `shutdown_with_timeout()`，不遗留 batch worker；
+  -初始化清理失败不覆盖初始化主错误；该路径尽最大努力关闭 Provider，
+  且不会产生 `graphloom.cli.telemetry.shutdown_failed`（subscriber 尚未安装）；
   -Recorder creation 失败时也会显式关闭 OTLP provider；
   -没有早期 `?` 跳过 shutdown；
   -force flush、shutdown 与 shutdown task join 的失败都返回聚焦的

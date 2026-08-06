@@ -187,8 +187,10 @@ impl OtlpTraceRuntime {
     /// Explicitly shut the provider down after a subscriber install failure.
     ///
     /// This runs on a blocking thread so no batch worker thread is leaked and
-    /// the async worker is never blocked. Failures are intentionally ignored:
-    /// the primary init error is returned by the caller.
+    /// the async worker is never blocked. Cleanup failures are intentionally
+    /// ignored: this path best-effort closes the provider, never overrides the
+    /// primary install error, and never emits `CLI_TELEMETRY_SHUTDOWN_FAILED`
+    /// because no subscriber was successfully installed.
     pub(crate) async fn shutdown_after_init_failure(self) {
         let timeout = self.shutdown_timeout;
         let provider = self.provider;
@@ -744,12 +746,24 @@ mod tests {
             "http://collector.invalid:4318/v1/traces"
         );
         assert_eq!(
+            traces_endpoint("http://collector.invalid:4318/"),
+            "http://collector.invalid:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector.invalid:4318/custom"),
+            "http://collector.invalid:4318/custom/v1/traces"
+        );
+        assert_eq!(
             traces_endpoint("http://collector.invalid:4318/collector/"),
             "http://collector.invalid:4318/collector/v1/traces"
         );
         assert_eq!(
             traces_endpoint("http://collector.invalid:4318"),
             format!("http://collector.invalid:4318{OTLP_TRACES_PATH}")
+        );
+        assert!(
+            !traces_endpoint("http://collector.invalid:4318").contains("//v1/traces"),
+            "trailing slash must not produce a double slash"
         );
     }
 }

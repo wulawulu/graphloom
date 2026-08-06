@@ -2098,6 +2098,79 @@ async fn test_should_reject_otlp_arguments_and_exporter_build_failures_without_q
     );
 }
 
+#[tokio::test]
+async fn test_should_reject_invalid_otel_endpoints_without_echoing_secrets() {
+    let provider = MockServer::start().await;
+    let working = TempDir::new().expect("working directory");
+    let cases = [
+        ("".to_owned(), OTEL_ENDPOINT_SECRET_SENTINEL),
+        ("   ".to_owned(), OTEL_ENDPOINT_SECRET_SENTINEL),
+        (
+            "ftp://collector.invalid:4318".to_owned(),
+            OTEL_ENDPOINT_SECRET_SENTINEL,
+        ),
+        (
+            format!("http://collector.invalid:4318?token={OTEL_TOKEN_SECRET_SENTINEL}"),
+            OTEL_TOKEN_SECRET_SENTINEL,
+        ),
+        (
+            format!("http://collector.invalid:4318/#{OTEL_ENDPOINT_SECRET_SENTINEL}"),
+            OTEL_ENDPOINT_SECRET_SENTINEL,
+        ),
+        (
+            format!("http://collector.invalid:4318/{OTEL_ENDPOINT_SECRET_SENTINEL}/v1/traces"),
+            OTEL_ENDPOINT_SECRET_SENTINEL,
+        ),
+    ];
+    for (endpoint, sentinel) in cases {
+        let output = graphloom_command()
+            .current_dir(working.path())
+            .args([
+                "query",
+                "--method",
+                "local",
+                "--otel-endpoint",
+                &endpoint,
+                "question",
+            ])
+            .output()
+            .expect("invalid OTLP endpoint Query");
+        assert_eq!(output.status.code(), Some(2), "endpoint {endpoint:?}");
+        assert!(output.stdout.is_empty());
+        let stderr = normalize_cli_text(&output.stderr);
+        assert!(
+            stderr.contains(
+                "--otel-endpoint must be a non-empty http or https collector base endpoint \
+                 without query, fragment, or /v1/traces"
+            ),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains(sentinel),
+            "stderr echoed {sentinel}: {stderr}"
+        );
+        if !endpoint.trim().is_empty() {
+            assert!(
+                !stderr.contains(&endpoint),
+                "stderr echoed the endpoint value: {stderr}"
+            );
+        }
+        assert!(!stderr.contains("token="), "stderr echoed a query token");
+    }
+    assert!(
+        !working.path().join("logs").exists(),
+        "invalid endpoint must fail before log directory creation"
+    );
+    assert!(
+        provider
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "invalid endpoint must not trigger network requests"
+    );
+}
+
 async fn read_explainability_jsonl(path: &std::path::Path) -> Vec<ExplainabilityEnvelope> {
     let bytes = tokio::fs::read(path).await.expect("Explainability JSONL");
     assert!(bytes.ends_with(b"\n"));
