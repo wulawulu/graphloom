@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod capture;
+
 /// Temporary directory guard exposing the canonical filesystem path.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct CanonicalTempDir {
     _guard: tempfile::TempDir,
@@ -11,6 +14,7 @@ pub(crate) struct CanonicalTempDir {
 }
 
 impl CanonicalTempDir {
+    #[allow(dead_code)]
     pub(crate) fn new() -> io::Result<Self> {
         let guard = tempfile::TempDir::new()?;
         let path = guard.path().canonicalize()?;
@@ -20,6 +24,7 @@ impl CanonicalTempDir {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

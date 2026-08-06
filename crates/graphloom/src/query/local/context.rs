@@ -9,12 +9,18 @@ use std::{
 use graphloom_llm::{EmbeddingModel, EmbeddingRequest, Tokenizer};
 use graphloom_vectors::{VectorError, VectorIndexSchema, VectorSearchResult, VectorStore};
 use polars_core::prelude::{DataFrame, NamedFrom, Series};
+use tracing::Instrument;
 
 use super::super::{
     CommunityReport, ConversationHistory, ConversationRole, Covariate, Entity, QueryContext,
     QueryContextRecords, QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory,
-    Relationship, Result, SearchMethod, TextUnit, context::ContextTable,
-    explainability::QueryExplainabilitySession, result::resolve_embedding_prompt_tokens,
+    Relationship, Result, SearchMethod, TextUnit,
+    context::ContextTable,
+    explainability::QueryExplainabilitySession,
+    observability::{
+        QueryTraceSession, query_error_kind, record_stage_error, record_u64, usize_to_u64,
+    },
+    result::resolve_embedding_prompt_tokens,
 };
 use crate::{
     LocalSearchConfig,
@@ -26,6 +32,7 @@ use crate::{
         ExplainabilityRecordType, ExplainabilityScore, GraphExpansionStarted, MappingQueryBuilt,
         RelationshipsSelected, SelectionReason, TextUnitsSelected,
     },
+    observability::{field_name, operation, span_name, status},
 };
 
 /// Local Search context resources, independent of completion orchestration.
@@ -41,6 +48,7 @@ pub(crate) struct LocalContextBuilder {
     pub(crate) index: Arc<QueryDataIndex>,
     pub(crate) embedding_model: Arc<dyn EmbeddingModel>,
     pub(crate) embedding_model_id: String,
+    pub(crate) embedding_provider: String,
     pub(crate) vector_store: Arc<dyn VectorStore>,
     pub(crate) vector_schema: VectorIndexSchema,
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
@@ -51,12 +59,14 @@ pub(crate) struct LocalContextBuilder {
 pub(crate) struct LocalContextBuild {
     pub(crate) context: QueryContext,
     pub(crate) usage: QueryUsageCategory,
+    pub(crate) context_tokens: usize,
 }
 
 #[derive(Debug)]
 struct Section {
     text: String,
     table: ContextTable,
+    tokens_used: usize,
     explainability: Option<SectionExplainability>,
 }
 
@@ -64,6 +74,7 @@ struct Section {
 struct LocalSections {
     text: String,
     tables: BTreeMap<String, ContextTable>,
+    tokens_used: usize,
     explainability: Vec<SectionExplainability>,
 }
 
@@ -71,7 +82,16 @@ struct LocalSections {
 struct ContextAssembly {
     parts: Vec<String>,
     tables: BTreeMap<String, ContextTable>,
+    tokens_used: usize,
     explainability: Vec<SectionExplainability>,
+}
+
+#[derive(Debug)]
+struct ConversationHistorySection {
+    text: String,
+    table: ContextTable,
+    tokens_used: usize,
+    capture: Option<SectionExplainability>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +186,7 @@ impl LocalContextBuilder {
             include_entity_names,
             exclude_entity_names,
             None,
+            None,
         )
         .await
     }
@@ -175,6 +196,7 @@ impl LocalContextBuilder {
         query: &str,
         conversation_history: Option<&ConversationHistory>,
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<LocalContextBuild> {
         self.build_with_entity_filters_and_explainability(
             query,
@@ -182,6 +204,7 @@ impl LocalContextBuilder {
             &[],
             &[],
             explainability,
+            trace,
         )
         .await
     }
@@ -193,39 +216,147 @@ impl LocalContextBuilder {
         include_entity_names: &[String],
         exclude_entity_names: &[String],
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<LocalContextBuild> {
-        let mapping_query = conversation_history.map_or_else(
-            || query.to_owned(),
-            |history| history.mapping_query(query, self.config.conversation_history_max_turns),
-        );
-        self.emit_mapping_query(explainability, conversation_history, &mapping_query)
-            .await;
-        let (selected_entities, usage) = self
-            .map_entities(
-                &mapping_query,
-                include_entity_names,
-                exclude_entity_names,
-                explainability,
+        let context_span = trace.map(|trace| {
+            tracing::info_span!(
+                parent: trace.root_span(),
+                span_name::QUERY_CONTEXT,
+                "graphloom.operation" = operation::CONTEXT_BUILD,
+                "graphloom.context.tokens" = tracing::field::Empty,
+                "graphloom.candidate.count" = tracing::field::Empty,
+                "graphloom.selected.count" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
             )
-            .await?;
-        self.emit_graph_expansion(explainability, &selected_entities)
+        });
+        let record_context_span = context_span.clone();
+        let context_future = async {
+            let outcome: Result<LocalContextBuild> = async {
+                let mapping_query = conversation_history.map_or_else(
+                    || query.to_owned(),
+                    |history| {
+                        history.mapping_query(query, self.config.conversation_history_max_turns)
+                    },
+                );
+                self.emit_mapping_query(explainability, conversation_history, &mapping_query)
+                    .await;
+                let (selected_entities, usage) = self
+                    .map_entities(
+                        &mapping_query,
+                        include_entity_names,
+                        exclude_entity_names,
+                        explainability,
+                        trace,
+                    )
+                    .await?;
+                self.emit_graph_expansion(explainability, &selected_entities)
+                    .await;
+                let assembly = self
+                    .build_context_sections(
+                        &selected_entities,
+                        conversation_history,
+                        explainability,
+                        trace,
+                    )
+                    .await?;
+                let context_tokens = assembly.tokens_used;
+                let context_text = assembly.parts.join("\n\n");
+                let records = self.context_records(assembly.tables)?;
+                if let Some(session) = explainability {
+                    self.emit_context_decisions(session, &assembly.explainability, &context_text)
+                        .await;
+                }
+                Ok(LocalContextBuild {
+                    context: QueryContext {
+                        text: QueryContextText::Text(context_text),
+                        records: QueryContextRecords::Tables(records),
+                    },
+                    usage,
+                    context_tokens,
+                })
+            }
             .await;
-        let assembly = self
-            .build_context_sections(&selected_entities, conversation_history, explainability)
-            .await?;
-        let context_text = assembly.parts.join("\n\n");
-        let records = self.context_records(assembly.tables)?;
-        if let Some(session) = explainability {
-            self.emit_context_decisions(session, &assembly.explainability, &context_text)
-                .await;
+            if let Some(span) = &record_context_span {
+                match &outcome {
+                    Ok(built) => {
+                        record_u64(
+                            span,
+                            field_name::CONTEXT_TOKENS,
+                            usize_to_u64(built.context_tokens),
+                        );
+                        span.record(field_name::STATUS, status::OK);
+                    }
+                    Err(error) => record_stage_error(span, query_error_kind(error)),
+                }
+            }
+            outcome
+        };
+        match context_span {
+            Some(span) => context_future.instrument(span).await,
+            None => context_future.await,
         }
-        Ok(LocalContextBuild {
-            context: QueryContext {
-                text: QueryContextText::Text(context_text),
-                records: QueryContextRecords::Tables(records),
-            },
-            usage,
-        })
+    }
+
+    async fn map_entities<'a>(
+        &'a self,
+        query: &str,
+        include_entity_names: &[String],
+        exclude_entity_names: &[String],
+        explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
+    ) -> Result<(Vec<&'a Entity>, QueryUsageCategory)> {
+        let mapping_span = trace.map(|_| {
+            tracing::info_span!(
+                span_name::QUERY_ENTITY_MAPPING,
+                "graphloom.operation" = operation::ENTITY_MAPPING,
+                "graphloom.candidate.count" = tracing::field::Empty,
+                "graphloom.selected.count" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+            )
+        });
+        let record_mapping_span = mapping_span.clone();
+        let mapping_future = async {
+            let outcome: Result<(Vec<&'a Entity>, QueryUsageCategory)> = async {
+                if query.is_empty() {
+                    Ok((
+                        self.map_entities_by_rank(
+                            include_entity_names,
+                            exclude_entity_names,
+                            explainability,
+                            record_mapping_span.as_ref(),
+                        )
+                        .await,
+                        QueryUsageCategory::default(),
+                    ))
+                } else {
+                    self.map_entities_by_embedding(
+                        query,
+                        include_entity_names,
+                        exclude_entity_names,
+                        explainability,
+                        record_mapping_span.as_ref(),
+                        trace,
+                    )
+                    .await
+                }
+            }
+            .await;
+            if let Some(span) = &record_mapping_span {
+                match &outcome {
+                    Ok(_) => {
+                        span.record(field_name::STATUS, status::OK);
+                    }
+                    Err(error) => record_stage_error(span, query_error_kind(error)),
+                }
+            }
+            outcome
+        };
+        match mapping_span {
+            Some(span) => mapping_future.instrument(span).await,
+            None => mapping_future.await,
+        }
     }
 
     async fn emit_mapping_query(
@@ -291,51 +422,28 @@ impl LocalContextBuilder {
         selected_entities: &[&Entity],
         conversation_history: Option<&ConversationHistory>,
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<ContextAssembly> {
         let mut remaining = self.config.max_context_tokens;
         let mut assembly = ContextAssembly {
             parts: Vec::new(),
             tables: BTreeMap::new(),
+            tokens_used: 0,
             explainability: Vec::new(),
         };
-        if let Some(history) = conversation_history {
-            let built = history.build_user_context(
-                &self.tokenizer,
-                self.config.conversation_history_max_turns,
-                remaining,
-            )?;
-            if !built.text.trim().is_empty() {
-                let tokens_used = self.count(&built.text, "count conversation history context")?;
-                remaining = remaining.saturating_sub(tokens_used);
-                if explainability.is_some() {
-                    let candidate_count = history
-                        .turns
-                        .iter()
-                        .filter(|turn| turn.role == ConversationRole::User)
-                        .take(if self.config.conversation_history_max_turns == 0 {
-                            usize::MAX
-                        } else {
-                            self.config.conversation_history_max_turns
-                        })
-                        .count();
-                    let selected_count = built.table.len();
-                    assembly.explainability.push(SectionExplainability {
-                        kind: ContextSectionKind::ConversationHistory,
-                        name: None,
-                        token_budget: self.config.max_context_tokens,
-                        tokens_used,
-                        candidate_count,
-                        selected_count,
-                        selected_record_ids: Vec::new(),
-                        truncated: selected_count < candidate_count,
-                        candidates: Vec::new(),
-                    });
-                }
-                assembly.parts.push(built.text);
-                assembly
-                    .tables
-                    .insert("conversation history".to_owned(), built.table);
+        if let Some(history) = conversation_history
+            && let Some(section) =
+                self.build_conversation_history_capture(history, remaining, explainability)?
+        {
+            assembly.tokens_used = assembly.tokens_used.saturating_add(section.tokens_used);
+            remaining = remaining.saturating_sub(section.tokens_used);
+            if let Some(capture) = section.capture {
+                assembly.explainability.push(capture);
             }
+            assembly.parts.push(section.text);
+            assembly
+                .tables
+                .insert("conversation history".to_owned(), section.table);
         }
 
         let community_tokens = proportion(remaining, self.config.community_prop);
@@ -359,6 +467,7 @@ impl LocalContextBuilder {
             community_tokens,
             explainability,
         )? {
+            assembly.tokens_used = assembly.tokens_used.saturating_add(section.tokens_used);
             if let Some(capture) = section.explainability {
                 assembly.explainability.push(capture);
             }
@@ -366,8 +475,13 @@ impl LocalContextBuilder {
             assembly.tables.insert("reports".to_owned(), section.table);
         }
 
-        let local =
-            self.build_local_context_capture(selected_entities, local_tokens, explainability)?;
+        let local = self.build_local_context_capture(
+            selected_entities,
+            local_tokens,
+            explainability,
+            trace,
+        )?;
+        assembly.tokens_used = assembly.tokens_used.saturating_add(local.tokens_used);
         assembly.explainability.extend(local.explainability);
         if !local.text.trim().is_empty() {
             assembly.parts.push(local.text);
@@ -377,6 +491,7 @@ impl LocalContextBuilder {
         if let Some(section) =
             self.build_source_context_capture(selected_entities, source_tokens, explainability)?
         {
+            assembly.tokens_used = assembly.tokens_used.saturating_add(section.tokens_used);
             if let Some(capture) = section.explainability {
                 assembly.explainability.push(capture);
             }
@@ -386,6 +501,53 @@ impl LocalContextBuilder {
             }
         }
         Ok(assembly)
+    }
+
+    fn build_conversation_history_capture(
+        &self,
+        history: &ConversationHistory,
+        remaining: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<Option<ConversationHistorySection>> {
+        let built = history.build_user_context(
+            &self.tokenizer,
+            self.config.conversation_history_max_turns,
+            remaining,
+        )?;
+        if built.text.trim().is_empty() {
+            return Ok(None);
+        }
+        let tokens_used = self.count(&built.text, "count conversation history context")?;
+        let capture = explainability.map(|_| {
+            let candidate_count = history
+                .turns
+                .iter()
+                .filter(|turn| turn.role == ConversationRole::User)
+                .take(if self.config.conversation_history_max_turns == 0 {
+                    usize::MAX
+                } else {
+                    self.config.conversation_history_max_turns
+                })
+                .count();
+            let selected_count = built.table.len();
+            SectionExplainability {
+                kind: ContextSectionKind::ConversationHistory,
+                name: None,
+                token_budget: self.config.max_context_tokens,
+                tokens_used,
+                candidate_count,
+                selected_count,
+                selected_record_ids: Vec::new(),
+                truncated: selected_count < candidate_count,
+                candidates: Vec::new(),
+            }
+        });
+        Ok(Some(ConversationHistorySection {
+            text: built.text,
+            table: built.table,
+            tokens_used,
+            capture,
+        }))
     }
 
     fn context_records(
@@ -419,38 +581,12 @@ impl LocalContextBuilder {
             .collect()
     }
 
-    async fn map_entities<'a>(
-        &'a self,
-        query: &str,
-        include_entity_names: &[String],
-        exclude_entity_names: &[String],
-        explainability: Option<&QueryExplainabilitySession>,
-    ) -> Result<(Vec<&'a Entity>, QueryUsageCategory)> {
-        if query.is_empty() {
-            return Ok((
-                self.map_entities_by_rank(
-                    include_entity_names,
-                    exclude_entity_names,
-                    explainability,
-                )
-                .await,
-                QueryUsageCategory::default(),
-            ));
-        }
-        self.map_entities_by_embedding(
-            query,
-            include_entity_names,
-            exclude_entity_names,
-            explainability,
-        )
-        .await
-    }
-
     async fn map_entities_by_rank<'a>(
         &'a self,
         include_entity_names: &[String],
         exclude_entity_names: &[String],
         explainability: Option<&QueryExplainabilitySession>,
+        mapping_span: Option<&tracing::Span>,
     ) -> Vec<&'a Entity> {
         let mut candidates = self.entities.iter().collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
@@ -484,6 +620,7 @@ impl LocalContextBuilder {
                 })
                 .collect::<Vec<_>>()
         });
+        let candidate_count = candidates.len();
         let selected = add_entity_filters(
             &self.entities,
             &self.index,
@@ -491,6 +628,18 @@ impl LocalContextBuilder {
             include_entity_names,
             exclude_entity_names,
         );
+        if let Some(span) = mapping_span {
+            record_u64(
+                span,
+                field_name::CANDIDATE_COUNT,
+                usize_to_u64(candidate_count),
+            );
+            record_u64(
+                span,
+                field_name::SELECTED_COUNT,
+                usize_to_u64(selected.len()),
+            );
+        }
         if let Some(session) = explainability {
             self.emit_entity_filter_events(
                 session,
@@ -510,11 +659,16 @@ impl LocalContextBuilder {
         include_entity_names: &[String],
         exclude_entity_names: &[String],
         explainability: Option<&QueryExplainabilitySession>,
+        mapping_span: Option<&tracing::Span>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<(Vec<&'a Entity>, QueryUsageCategory)> {
-        let (vector, prompt_tokens) = self.embed_mapping_query(query, explainability).await?;
-        let results = self
-            .retrieve_mapping_candidates(&vector, explainability)
+        let (vector, prompt_tokens) = self
+            .embed_mapping_query(query, explainability, trace)
             .await?;
+        let results = self
+            .retrieve_mapping_candidates(&vector, explainability, trace)
+            .await?;
+        let candidate_count = results.len();
         let (entities, filter_candidates) =
             self.resolve_ann_entities(results, exclude_entity_names, explainability);
         let selected = add_entity_filters(
@@ -524,6 +678,18 @@ impl LocalContextBuilder {
             include_entity_names,
             exclude_entity_names,
         );
+        if let Some(span) = mapping_span {
+            record_u64(
+                span,
+                field_name::CANDIDATE_COUNT,
+                usize_to_u64(candidate_count),
+            );
+            record_u64(
+                span,
+                field_name::SELECTED_COUNT,
+                usize_to_u64(selected.len()),
+            );
+        }
         if let Some(session) = explainability {
             self.emit_entity_filter_events(
                 session,
@@ -548,6 +714,7 @@ impl LocalContextBuilder {
         &self,
         query: &str,
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<(Vec<f32>, usize)> {
         if let Some(session) = explainability {
             let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
@@ -560,6 +727,68 @@ impl LocalContextBuilder {
                 )
                 .await;
         }
+        let embedding_span = trace.map(|_| {
+            tracing::info_span!(
+                span_name::EMBEDDING_REQUEST,
+                "graphloom.operation" = operation::EMBEDDING,
+                "graphloom.model.instance" = self.embedding_model_id.as_str(),
+                "graphloom.model.provider" = self.embedding_provider.as_str(),
+                "graphloom.input.count" = 1_u64,
+                "graphloom.input.tokens" = tracing::field::Empty,
+                "graphloom.embedding.dimensions" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+            )
+        });
+        let record_embedding_span = embedding_span.clone();
+        let embed_future = async {
+            let outcome = self.embed_mapping_query_core(query).await;
+            if let Some(span) = &record_embedding_span {
+                match &outcome {
+                    Ok((vector, prompt_tokens)) => {
+                        record_u64(span, field_name::INPUT_TOKENS, usize_to_u64(*prompt_tokens));
+                        record_u64(
+                            span,
+                            field_name::EMBEDDING_DIMENSIONS,
+                            usize_to_u64(vector.len()),
+                        );
+                        span.record(field_name::STATUS, status::OK);
+                    }
+                    Err(error) => record_stage_error(span, query_error_kind(error)),
+                }
+            }
+            outcome
+        };
+        let (vector, prompt_tokens) = match embedding_span {
+            Some(span) => embed_future.instrument(span).await?,
+            None => embed_future.await?,
+        };
+        if let Some(session) = explainability {
+            match (
+                session.usize_to_u64(prompt_tokens),
+                u32::try_from(vector.len()),
+            ) {
+                (Some(prompt_tokens), Ok(dimensions)) => {
+                    session
+                        .emit(
+                            session.spans().embedding(),
+                            Some(session.spans().mapping()),
+                            ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
+                                self.embedding_model_id.clone(),
+                                prompt_tokens,
+                                dimensions,
+                            )),
+                        )
+                        .await;
+                }
+                (_, Err(_)) => session.mark_sidecar_failure("embedding_dimension_conversion"),
+                (None, Ok(_)) => {}
+            }
+        }
+        Ok((vector, prompt_tokens))
+    }
+
+    async fn embed_mapping_query_core(&self, query: &str) -> Result<(Vec<f32>, usize)> {
         let response = self
             .embedding_model
             .embed(EmbeddingRequest::new(vec![query.to_owned()]))
@@ -604,28 +833,6 @@ impl LocalContextBuilder {
                 }),
             });
         }
-        if let Some(session) = explainability {
-            match (
-                session.usize_to_u64(prompt_tokens),
-                u32::try_from(vector.len()),
-            ) {
-                (Some(prompt_tokens), Ok(dimensions)) => {
-                    session
-                        .emit(
-                            session.spans().embedding(),
-                            Some(session.spans().mapping()),
-                            ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
-                                self.embedding_model_id.clone(),
-                                prompt_tokens,
-                                dimensions,
-                            )),
-                        )
-                        .await;
-                }
-                (_, Err(_)) => session.mark_sidecar_failure("embedding_dimension_conversion"),
-                (None, Ok(_)) => {}
-            }
-        }
         Ok((vector, prompt_tokens))
     }
 
@@ -633,6 +840,7 @@ impl LocalContextBuilder {
         &self,
         vector: &[f32],
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<Vec<VectorSearchResult>> {
         let ann_k = self.config.top_k_entities.checked_mul(2).ok_or_else(|| {
             QueryError::InvalidQueryConfig {
@@ -641,35 +849,73 @@ impl LocalContextBuilder {
                 message: "top_k_entities * 2 exceeds usize".to_owned(),
             }
         })?;
-        let results = self
-            .vector_store
-            .similarity_search_by_vector(&self.vector_schema, vector, ann_k, false)
-            .await
-            .map_err(|source| match source {
-                source @ VectorError::MissingIndex { .. } => QueryError::MissingVectorIndex {
-                    method: self.method,
-                    operation: "search entity_description",
-                    index: self.vector_schema.index_name.clone(),
-                    source: Box::new(source),
-                },
-                source => QueryError::InvalidVectorIndex {
-                    method: self.method,
-                    operation: "search entity_description",
-                    index: self.vector_schema.index_name.clone(),
-                    source: Box::new(source),
-                },
-            })?;
-        if let Some(session) = explainability {
-            let candidates = results
-                .iter()
-                .enumerate()
-                .filter_map(|(index, result)| {
-                    raw_ann_candidate(session, &result.document.id, result.score, index)
-                })
-                .collect();
-            self.emit_retrieved(session, candidates).await;
+        let vector_span = trace.map(|_| {
+            tracing::info_span!(
+                span_name::VECTOR_SEARCH,
+                "graphloom.operation" = operation::VECTOR_SEARCH,
+                "graphloom.vector.index" = self.vector_schema.index_name.as_str(),
+                "graphloom.retrieval.top_k" = tracing::field::Empty,
+                "graphloom.candidate.count" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+            )
+        });
+        let record_vector_span = vector_span.clone();
+        let search_future = async {
+            let outcome: Result<Vec<VectorSearchResult>> = async {
+                let results = self
+                    .vector_store
+                    .similarity_search_by_vector(&self.vector_schema, vector, ann_k, false)
+                    .await
+                    .map_err(|source| match source {
+                        source @ VectorError::MissingIndex { .. } => {
+                            QueryError::MissingVectorIndex {
+                                method: self.method,
+                                operation: "search entity_description",
+                                index: self.vector_schema.index_name.clone(),
+                                source: Box::new(source),
+                            }
+                        }
+                        source => QueryError::InvalidVectorIndex {
+                            method: self.method,
+                            operation: "search entity_description",
+                            index: self.vector_schema.index_name.clone(),
+                            source: Box::new(source),
+                        },
+                    })?;
+                if let Some(session) = explainability {
+                    let candidates = results
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, result)| {
+                            raw_ann_candidate(session, &result.document.id, result.score, index)
+                        })
+                        .collect();
+                    self.emit_retrieved(session, candidates).await;
+                }
+                Ok(results)
+            }
+            .await;
+            if let Some(span) = &record_vector_span {
+                match &outcome {
+                    Ok(results) => {
+                        record_u64(span, field_name::RETRIEVAL_TOP_K, usize_to_u64(ann_k));
+                        record_u64(
+                            span,
+                            field_name::CANDIDATE_COUNT,
+                            usize_to_u64(results.len()),
+                        );
+                        span.record(field_name::STATUS, status::OK);
+                    }
+                    Err(error) => record_stage_error(span, query_error_kind(error)),
+                }
+            }
+            outcome
+        };
+        match vector_span {
+            Some(span) => search_future.instrument(span).await,
+            None => search_future.await,
         }
-        Ok(results)
     }
 
     fn resolve_ann_entities<'a>(
@@ -1034,6 +1280,7 @@ impl LocalContextBuilder {
             return Ok(Some(Section {
                 text: "[]".to_owned(),
                 table: fitted.table,
+                tokens_used: fitted.tokens_used,
                 explainability: capture,
             }));
         }
@@ -1062,6 +1309,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text,
             table: fitted.table,
+            tokens_used: fitted.tokens_used,
             explainability: capture,
         }))
     }
@@ -1110,7 +1358,7 @@ impl LocalContextBuilder {
         selected_entities: &[&Entity],
         max_tokens: usize,
     ) -> Result<LocalSections> {
-        self.build_local_context_capture(selected_entities, max_tokens, None)
+        self.build_local_context_capture(selected_entities, max_tokens, None, None)
     }
 
     fn build_local_context_capture(
@@ -1118,11 +1366,13 @@ impl LocalContextBuilder {
         selected_entities: &[&Entity],
         max_tokens: usize,
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<LocalSections> {
         if selected_entities.is_empty() {
             return Ok(LocalSections {
                 text: String::new(),
                 tables: BTreeMap::new(),
+                tokens_used: 0,
                 explainability: Vec::new(),
             });
         }
@@ -1132,6 +1382,7 @@ impl LocalContextBuilder {
             max_tokens,
             entity.tokens_used,
             explainability,
+            trace,
         )?;
         let mut text = vec![entity.text];
         text.append(&mut expansion.text);
@@ -1145,6 +1396,7 @@ impl LocalContextBuilder {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             tables: expansion.tables,
+            tokens_used: expansion.tokens_used,
             explainability: section_explainability,
         })
     }
@@ -1211,7 +1463,62 @@ impl LocalContextBuilder {
         max_tokens: usize,
         entity_tokens: usize,
         explainability: Option<&QueryExplainabilitySession>,
+        trace: Option<&QueryTraceSession>,
     ) -> Result<LocalExpansionAttempt> {
+        let expansion_span = trace.map(|_| {
+            tracing::info_span!(
+                span_name::QUERY_GRAPH_EXPANSION,
+                "graphloom.operation" = operation::GRAPH_EXPANSION,
+                "graphloom.candidate.count" = tracing::field::Empty,
+                "graphloom.selected.count" = tracing::field::Empty,
+                "graphloom.status" = tracing::field::Empty,
+                "graphloom.error.kind" = tracing::field::Empty,
+            )
+        });
+        let outcome: Result<(LocalExpansionAttempt, usize, usize)> = match &expansion_span {
+            Some(span) => span.in_scope(|| {
+                self.expand_local_graph_inner(
+                    selected_entities,
+                    max_tokens,
+                    entity_tokens,
+                    explainability,
+                )
+            }),
+            None => self.expand_local_graph_inner(
+                selected_entities,
+                max_tokens,
+                entity_tokens,
+                explainability,
+            ),
+        };
+        if let Some(span) = &expansion_span {
+            match &outcome {
+                Ok((_, candidate_count, selected_count)) => {
+                    record_u64(
+                        span,
+                        field_name::CANDIDATE_COUNT,
+                        usize_to_u64(*candidate_count),
+                    );
+                    record_u64(
+                        span,
+                        field_name::SELECTED_COUNT,
+                        usize_to_u64(*selected_count),
+                    );
+                    span.record(field_name::STATUS, status::OK);
+                }
+                Err(error) => record_stage_error(span, query_error_kind(error)),
+            }
+        }
+        outcome.map(|(attempt, _, _)| attempt)
+    }
+
+    fn expand_local_graph_inner(
+        &self,
+        selected_entities: &[&Entity],
+        max_tokens: usize,
+        entity_tokens: usize,
+        explainability: Option<&QueryExplainabilitySession>,
+    ) -> Result<(LocalExpansionAttempt, usize, usize)> {
         let mut accepted = LocalExpansionAttempt {
             text: Vec::new(),
             tables: BTreeMap::new(),
@@ -1265,7 +1572,15 @@ impl LocalContextBuilder {
             }
             accepted = attempt;
         }
-        Ok(accepted)
+        let candidate_count = relationship_positions
+            .len()
+            .saturating_add(covariate_positions.len());
+        let selected_count = accepted
+            .tables
+            .values()
+            .map(ContextTable::len)
+            .sum::<usize>();
+        Ok((accepted, candidate_count, selected_count))
     }
 
     #[allow(
@@ -1480,6 +1795,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text,
             table: fitted.table,
+            tokens_used: fitted.tokens_used,
             explainability: capture,
         }))
     }
@@ -1561,6 +1877,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text,
             table: fitted.table,
+            tokens_used: fitted.tokens_used,
             explainability: capture,
         }))
     }
@@ -1634,6 +1951,7 @@ impl LocalContextBuilder {
         Ok(Some(Section {
             text,
             table: fitted.table,
+            tokens_used: fitted.tokens_used,
             explainability: capture,
         }))
     }
@@ -1962,6 +2280,7 @@ fn empty_community_section(
     Section {
         text: "[]".to_owned(),
         table: ContextTable::new(["id", "title", "content"], Vec::new()),
+        tokens_used: tokens_used.unwrap_or(0),
         explainability: candidates
             .zip(tokens_used)
             .map(|(candidates, tokens_used)| SectionExplainability {
@@ -1998,6 +2317,7 @@ fn rank_filtered_relationship_section(
             ["id", "source", "target", "description", "weight"],
             Vec::new(),
         ),
+        tokens_used: 0,
         explainability: Some(SectionExplainability {
             kind: ContextSectionKind::Relationships,
             name: None,
@@ -2016,6 +2336,7 @@ fn missing_source_section(candidates: Vec<ExplainabilityCandidate>, max_tokens: 
     Section {
         text: String::new(),
         table: ContextTable::new(["id", "text"], Vec::new()),
+        tokens_used: 0,
         explainability: Some(SectionExplainability {
             kind: ContextSectionKind::Sources,
             name: None,
@@ -2652,6 +2973,7 @@ mod tests {
                     prompt_tokens: 7,
                 }),
                 embedding_model_id: "embedding".to_owned(),
+                embedding_provider: "openai".to_owned(),
                 vector_store: Arc::new(RecordingStore {
                     results,
                     searches: Arc::clone(&searches),
@@ -2798,7 +3120,7 @@ mod tests {
 
         let (selected, usage) = fixture
             .builder
-            .map_entities("question", &[], &[], None)
+            .map_entities("question", &[], &[], None, None)
             .await
             .expect("entity mapping");
 
@@ -2827,7 +3149,7 @@ mod tests {
 
         let (_, usage) = fixture
             .builder
-            .map_entities("zero usage", &[], &[], None)
+            .map_entities("zero usage", &[], &[], None, None)
             .await
             .expect("entity mapping");
 
@@ -2856,7 +3178,7 @@ mod tests {
 
         let (selected, _) = fixture
             .builder
-            .map_entities("question", &[], &[], None)
+            .map_entities("question", &[], &[], None, None)
             .await
             .expect("canonical UUID mapping");
 
@@ -2872,7 +3194,7 @@ mod tests {
 
         let (selected, _) = fixture
             .builder
-            .map_entities("question", &include, &exclude, None)
+            .map_entities("question", &include, &exclude, None, None)
             .await
             .expect("entity filters");
 
@@ -2909,7 +3231,7 @@ mod tests {
             let session = QueryExplainabilitySession::new(&options);
             let (explained, _) = fixture
                 .builder
-                .map_entities("question", &include, &exclude, Some(&session))
+                .map_entities("question", &include, &exclude, Some(&session), None)
                 .await
                 .expect("explained entity filters");
             assert_eq!(
@@ -3973,7 +4295,7 @@ mod tests {
 
         let error = fixture
             .builder
-            .map_entities("question", &[], &[], None)
+            .map_entities("question", &[], &[], None, None)
             .await
             .expect_err("missing vector index");
 
@@ -3993,7 +4315,7 @@ mod tests {
 
         let error = fixture
             .builder
-            .map_entities("question", &[], &[], None)
+            .map_entities("question", &[], &[], None, None)
             .await
             .expect_err("dimension mismatch");
 

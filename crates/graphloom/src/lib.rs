@@ -15,6 +15,7 @@ mod dataframe;
 mod error;
 pub mod explainability;
 pub mod indexing;
+pub mod observability;
 mod operations;
 #[allow(
     unsafe_code,

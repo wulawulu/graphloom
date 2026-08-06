@@ -457,22 +457,24 @@ graphloom.query.global
 graphloom.query.dynamic_global
 graphloom.query.drift
 
-graphloom.query.embedding
-graphloom.query.retrieval
+graphloom.query.runtime
+graphloom.query.entity_mapping
 graphloom.query.graph_expansion
 graphloom.query.context
 graphloom.query.prompt
-graphloom.query.completion
 
 graphloom.llm.request
 graphloom.embedding.request
+graphloom.vector.search
 
 graphloom.storage.read
 graphloom.storage.write
-
-graphloom.vector.search
 graphloom.vector.write
 ```
+
+其中 `graphloom.query.basic`、`graphloom.query.global`、`graphloom.query.dynamic_global`、
+`graphloom.query.drift`、`graphloom.storage.*`、`graphloom.vector.write`、Index/Update/Prompt
+Tune 的详细 Span 属于后续扩展，尚未实现。当前只实现了 Local Query 的详细 Span。
 
 不得将以下动态值写入 Span 名称：
 
@@ -490,26 +492,36 @@ graphloom.vector.write
 ## 9.3 推荐 tracing 字段
 
 ```text
+graphloom.observability.version
 graphloom.run.id
 graphloom.operation
-graphloom.workflow.name
 graphloom.query.method
+graphloom.query.streaming
+graphloom.explainability.enabled
 
 graphloom.model.instance
 graphloom.model.provider
 
-graphloom.cache.hit
-graphloom.retry.attempt
+graphloom.vector.index
+graphloom.retrieval.top_k
 
+graphloom.input.count
 graphloom.input.tokens
 graphloom.output.tokens
 graphloom.context.tokens
+graphloom.embedding.dimensions
 
 graphloom.candidate.count
 graphloom.selected.count
+graphloom.llm.calls
 
+graphloom.status
 graphloom.error.kind
+graphloom.elapsed_ms
 ```
+
+`graphloom.cache.hit`、`graphloom.retry.attempt`、`graphloom.workflow.name` 属于后续扩展，
+当前 Local Query 合同不包含。
 
 OpenTelemetry Adapter 可以将通用字段映射到：
 
@@ -545,6 +557,197 @@ cache_hit=true
   -Authorization Header；
   -Cookie；
   -环境变量值。
+
+---
+
+## 9.5 Observability 合同 Version 1（已实现）
+
+GraphLoom 公开稳定的 Observability 合同，定义在 `crates/graphloom/src/observability.rs`，
+从 `graphloom::observability` 公开。该模块只定义合同，不初始化任何 subscriber。
+
+### 9.5.1 Contract Version
+
+```text
+OBSERVABILITY_CONTRACT_VERSION = 1
+```
+
+版本升级规则：
+
+* 新增可选 Span、Event 或 Field 不要求升级；
+  -删除稳定字段要求升级；
+  -重命名稳定字段要求升级；
+  -改变字段值的语义或类型要求升级；
+  -改变父子 Span 的核心含义要求升级。
+
+### 9.5.2 Span 名称（已实现）
+
+```text
+graphloom.query.local
+graphloom.query.runtime
+graphloom.query.context
+graphloom.query.entity_mapping
+graphloom.embedding.request
+graphloom.vector.search
+graphloom.query.graph_expansion
+graphloom.query.prompt
+graphloom.llm.request
+```
+
+### 9.5.3 Event 名称（已实现）
+
+```text
+graphloom.cli.query.started
+graphloom.cli.query.completed
+graphloom.cli.query.failed
+graphloom.cli.explainability.enabled
+graphloom.cli.explainability.shutdown_failed
+
+graphloom.query.explainability.delivery_failed
+graphloom.query.explainability.contract_failed
+graphloom.query.explainability.sidecar_incomplete
+graphloom.query.explainability.finish_failed
+```
+
+`graphloom.query.explainability.*` 是 Local Explainability 自身的 operational warning，
+不是 Explainability 业务事件。
+
+### 9.5.4 Field 名称与类型
+
+```text
+graphloom.observability.version   u64
+graphloom.run.id                  string
+graphloom.operation               string
+graphloom.query.method            string
+graphloom.query.streaming         bool
+graphloom.explainability.enabled  bool
+graphloom.model.instance          string
+graphloom.model.provider          string
+graphloom.vector.index            string
+graphloom.retrieval.top_k         u64
+graphloom.input.count             u64
+graphloom.input.tokens            u64
+graphloom.output.tokens           u64
+graphloom.context.tokens          u64
+graphloom.embedding.dimensions    u64
+graphloom.candidate.count         u64
+graphloom.selected.count          u64
+graphloom.llm.calls               u64
+graphloom.status                  string
+graphloom.error.kind              string
+graphloom.elapsed_ms              u64
+```
+
+`usize` 不直接进入合同；转换为 `u64` 失败时省略字段，不用 0 伪装未知值，也不让 Query 失败。
+
+### 9.5.5 Status 值
+
+```text
+ok
+error
+abandoned
+```
+
+### 9.5.6 Operation 值
+
+```text
+query
+runtime_load
+context_build
+entity_mapping
+embedding
+vector_search
+graph_expansion
+prompt_render
+completion
+```
+
+Operation 是算法阶段，不使用函数名、模型名或 Query 内容。
+
+### 9.5.7 Local Query 父子 Span（已实现）
+
+```text
+graphloom.query.local
+├── graphloom.query.runtime
+├── graphloom.query.context
+│   ├── graphloom.query.entity_mapping
+│   │   ├── graphloom.embedding.request
+│   │   └── graphloom.vector.search
+│   └── graphloom.query.graph_expansion
+├── graphloom.query.prompt
+└── graphloom.llm.request
+```
+
+父子关系通过真实 `tracing` parent/child 实现：
+
+* `graphloom.query.local` 在请求入口创建，覆盖 project root 校验、runtime lookup、context、
+  prompt 与 provider 请求；一个请求只创建一个；
+  -`graphloom.query.runtime` 覆盖 root 校验、Local requirements 校验、runtime cache
+  lookup/build、table/prompt/vector/model 装配；
+  -`graphloom.query.context` 覆盖一次真实 `build_explainable`；
+  -`graphloom.query.entity_mapping` 覆盖 mapping query 构造、embedding/rank 分支、ANN 解析、
+  stale reference 过滤与 include/exclude；
+  -`graphloom.embedding.request` 只在实际调用 `embedding_model.embed(...)` 时创建；
+  -`graphloom.vector.search` 只在实际调用 `vector_store.search(...)` 时创建；
+  -`graphloom.query.graph_expansion` 覆盖 Relationship/Covariate 收集、progressive expansion、
+  token fitting 与 rollback；
+  -`graphloom.query.prompt` 覆盖 Prompt bind、render、completion input token 计数与请求校验；
+  -`graphloom.llm.request` 从 provider stream handshake 开始，保持到 stream 完整消费结束。
+
+### 9.5.8 生命周期与终态
+
+根 Span 使用同步、原子、幂等的终态门闩，不依赖 Explainability 的异步 `finish_run()`：
+
+* 完整成功：`status = ok`，记录 input/output/context tokens、llm calls、elapsed ms；
+  -业务错误：`status = error`，记录稳定 `error.kind`；
+  -Stream 中途错误：`status = error`，`error.kind = query_completion`；
+  -Stream 正常结束但没有 `Completed`：按业务语义记录 `error.kind = query_completion`；
+  -Stream 提前 drop：根 Span 与 LLM Span 同步记录 `status = abandoned`，不 spawn 隐藏任务、
+  不调用 Explainability finish、不生成 RunCompleted/RunFailed、不改变 QueryEvent。
+
+LLM Span 覆盖 handshake 与完整 stream 消费；`Completed` 到达前不会提前关闭，`Completed` 后
+记录 `ok` 与 token 使用。所有阶段 Span 在返回路径上闭合。
+
+### 9.5.9 tracing 与 Explainability 分离
+
+`tracing` Span/Event 与 `ExplainabilityRecord`/Envelope 是两个独立通道：
+
+* tracing 不依赖 Explainability；Explainability 也不依赖 tracing；
+  -run ID 只在调用方提供 `QueryOptions.explainability` 时写入 `graphloom.run.id`，用于关联；
+  -不通过 Explainability Event 反推 tracing 字段，也不从 JSONL Recorder 生成 tracing；
+  -tracing 失败或缺少 subscriber 不影响 Query；
+  -`graphloom.query.explainability.*` warning 不是 Explainability 业务事件。
+
+### 9.5.10 CLI named events
+
+CLI Query 命令日志改用稳定 named event，保留人类可读 message：
+
+```text
+graphloom.cli.query.started
+graphloom.cli.query.completed
+graphloom.cli.query.failed
+graphloom.cli.explainability.enabled
+graphloom.cli.explainability.shutdown_failed
+```
+
+CLI 的 `query.log` 使用稳定字段（`graphloom.query.method`、`graphloom.query.streaming`、
+`graphloom.status` 等），不写完整错误文本，不写 Explainability output path，不写 API Key。
+最终用户可见错误仍由 CLI 主程序输出到 stderr。
+
+### 9.5.11 当前实现范围与后续扩展
+
+当前只有 Local Query 详细 Span 已实现。以下内容尚未实现，不得描述为可用：
+
+* OpenTelemetry exporter；
+  -OTLP endpoint/transport（本任务未确定）；
+  -`tracing-opentelemetry` / `opentelemetry` 接入；
+  -OpenLIT 接入；
+  -Collector endpoint 配置；
+  -`--otel-*` 与 JSON 日志 CLI 参数；
+  -Basic、Global、DRIFT 的详细 Core Span；
+  -Index、Update、Prompt Tune 的 tracing 重构；
+  -graphloom-llm 通用 Provider wrapper 重构。
+
+OpenTelemetry Layer 是后续任务，以本合同的 Span/Event/Field 作为稳定输入。
 
 ---
 

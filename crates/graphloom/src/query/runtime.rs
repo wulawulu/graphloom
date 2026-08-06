@@ -85,6 +85,7 @@ struct QueryModelResources {
     completion_config: ModelConfig,
     embedding: Arc<dyn EmbeddingModel>,
     embedding_id: String,
+    embedding_provider: String,
     tokenizer: Arc<dyn Tokenizer>,
 }
 
@@ -204,6 +205,7 @@ impl QueryRuntimeFactory {
                 index,
                 embedding_model: models.embedding,
                 embedding_model_id: models.embedding_id,
+                embedding_provider: models.embedding_provider.clone(),
                 vector_store: vectors.store,
                 vector_schema: vectors.schema,
                 tokenizer: models.tokenizer,
@@ -343,6 +345,7 @@ impl QueryRuntimeFactory {
             index,
             embedding_model: Arc::clone(&models.embedding),
             embedding_model_id: models.embedding_id.clone(),
+            embedding_provider: models.embedding_provider.clone(),
             vector_store: Arc::clone(&vectors.store),
             vector_schema: vectors.entity_schema,
             tokenizer: Arc::clone(&models.tokenizer),
@@ -797,6 +800,7 @@ fn create_query_models(
         completion_config,
         embedding,
         embedding_id: embedding_id.to_owned(),
+        embedding_provider: embedding_config.provider_type().to_owned(),
         tokenizer,
     })
 }

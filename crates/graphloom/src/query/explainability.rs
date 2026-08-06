@@ -10,7 +10,13 @@ use std::{
 
 use chrono::Utc;
 
-use super::{QueryError, QueryOptions, SearchMethod};
+use super::{
+    QueryError, QueryOptions, SearchMethod,
+    observability::{
+        duration_millis as convert_duration_millis, graphloom_error_kind, query_error_kind,
+        usize_to_u64 as convert_usize_to_u64,
+    },
+};
 use crate::{
     GraphLoomError,
     explainability::{
@@ -19,6 +25,7 @@ use crate::{
         ExplainabilityRunKind, ExplainabilitySink, ExplainabilitySpanId, QueryStarted,
         RunCompleted, RunFailed, RunStarted,
     },
+    observability::{error_kind, event_name},
 };
 
 const DELIVERY_ERROR_KIND: &str = "explainability_delivery";
@@ -214,10 +221,15 @@ impl QueryExplainabilitySession {
             parent_span_id.cloned(),
             event,
         ));
-        if let Err(error) = self.sink.emit(record).await {
+        if self.sink.emit(record).await.is_err() {
             self.delivery_failure_count.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
-                error = %error,
+                name: event_name::QUERY_EXPLAINABILITY_DELIVERY_FAILED,
+                {
+                    "graphloom.run.id" = %self.run_id,
+                    "graphloom.query.method" = "local",
+                    "graphloom.error.kind" = error_kind::EXPLAINABILITY_DELIVERY,
+                },
                 "Explainability sink rejected a Local Query record"
             );
         }
@@ -229,42 +241,47 @@ impl QueryExplainabilitySession {
         parent_span_id: Option<&ExplainabilitySpanId>,
         event: Result<ExplainabilityEvent, ExplainabilityContractError>,
     ) {
-        match event {
-            Ok(event) => self.emit(span_id, parent_span_id, event).await,
-            Err(error) => {
-                self.mark_sidecar_failure("event_contract");
-                tracing::warn!(
-                    error = %error,
-                    "Explainability event failed Local Query contract validation"
-                );
-            }
+        if let Ok(event) = event {
+            self.emit(span_id, parent_span_id, event).await;
+        } else {
+            self.mark_sidecar_failure("event_contract");
+            tracing::warn!(
+                name: event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
+                {
+                    "graphloom.run.id" = %self.run_id,
+                    "graphloom.error.kind" = error_kind::EVENT_CONTRACT,
+                },
+                "Explainability event failed Local Query contract validation"
+            );
         }
     }
 
     pub(crate) fn mark_sidecar_failure(&self, failure_kind: &'static str) {
         self.delivery_failure_count.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
-            failure_kind,
+            name: event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,
+            {
+                "graphloom.run.id" = %self.run_id,
+                "graphloom.error.kind" = failure_kind,
+            },
             "Local Query Explainability sidecar data is incomplete"
         );
     }
 
     pub(crate) fn usize_to_u64(&self, value: usize) -> Option<u64> {
-        if let Ok(value) = u64::try_from(value) {
-            Some(value)
-        } else {
+        let converted = convert_usize_to_u64(value);
+        if converted.is_none() {
             self.mark_sidecar_failure("numeric_conversion");
-            None
         }
+        converted
     }
 
     pub(crate) fn duration_millis(&self, duration: Duration) -> Option<u64> {
-        if let Ok(value) = u64::try_from(duration.as_millis()) {
-            Some(value)
-        } else {
+        let converted = convert_duration_millis(duration);
+        if converted.is_none() {
             self.mark_sidecar_failure("elapsed_conversion");
-            None
         }
+        converted
     }
 
     pub(crate) async fn finish_success(&self) {
@@ -292,12 +309,8 @@ impl QueryExplainabilitySession {
     }
 
     pub(crate) async fn finish_graphloom_error(&self, error: &GraphLoomError) {
-        let error_kind = match error {
-            GraphLoomError::Query(error) => query_error_kind(error),
-            GraphLoomError::InvalidRoot { .. } => "invalid_query_config",
-            _ => "query_runtime",
-        };
-        self.finish_failure(error_kind, QUERY_ERROR_MESSAGE).await;
+        self.finish_failure(graphloom_error_kind(error), QUERY_ERROR_MESSAGE)
+            .await;
     }
 
     pub(crate) async fn finish_stream_ended(&self) {
@@ -328,8 +341,15 @@ impl QueryExplainabilitySession {
     }
 
     async fn finish_run(&self) {
-        if let Err(error) = self.sink.finish_run(&self.run_id).await {
-            tracing::warn!(error = %error, "Explainability sink failed to finalize a Local Query run");
+        if self.sink.finish_run(&self.run_id).await.is_err() {
+            tracing::warn!(
+                name: event_name::QUERY_EXPLAINABILITY_FINISH_FAILED,
+                {
+                    "graphloom.run.id" = %self.run_id,
+                    "graphloom.error.kind" = error_kind::EXPLAINABILITY_FINISH,
+                },
+                "Explainability sink failed to finalize a Local Query run"
+            );
         }
     }
 }
@@ -339,21 +359,4 @@ fn delivery_failed_event() -> ExplainabilityEvent {
         DELIVERY_ERROR_KIND.to_owned(),
         DELIVERY_ERROR_MESSAGE.to_owned(),
     ))
-}
-
-const fn query_error_kind(error: &QueryError) -> &'static str {
-    match error {
-        QueryError::InvalidQueryConfig { .. } => "invalid_query_config",
-        QueryError::MissingQueryTable { .. } => "missing_query_table",
-        QueryError::InvalidQueryTable { .. } => "invalid_query_table",
-        QueryError::MissingVectorIndex { .. } => "missing_vector_index",
-        QueryError::InvalidVectorIndex { .. } => "invalid_vector_index",
-        QueryError::QueryPrompt { .. } => "query_prompt",
-        QueryError::QueryEmbedding { .. } => "query_embedding",
-        QueryError::QueryCompletion { .. } => "query_completion",
-        QueryError::QueryParse { .. } => "query_parse",
-        QueryError::QueryContext { .. } => "query_context",
-        QueryError::QueryRuntime { .. } => "query_runtime",
-        QueryError::QueryMethod { .. } => "query_method",
-    }
 }

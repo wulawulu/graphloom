@@ -16,7 +16,11 @@ use crate::{
     explainability::{
         JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
     },
-    query::{QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod},
+    observability::{OBSERVABILITY_CONTRACT_VERSION, event_name},
+    query::{
+        QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod,
+        observability::{duration_millis, graphloom_error_kind, usize_to_u64},
+    },
 };
 
 const QUERY_FILE_FILTER: &str = "off,graphloom::cli::query=info,graphloom::query=info";
@@ -45,14 +49,43 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
             .into();
         let explainability = QueryExplainabilityOptions::generated(content_mode, recorder.sink());
         tracing::info!(
-            run_id = %explainability.run_id(),
-            output_path = %recorder.path().display(),
-            content_mode = ?content_mode,
+            name: event_name::CLI_EXPLAINABILITY_ENABLED,
+            {
+                "graphloom.run.id" = %explainability.run_id(),
+                "graphloom.explainability.enabled" = true,
+            },
             "Local Query Explainability JSONL enabled"
         );
         options.explainability = Some(explainability);
     }
-    tracing::info!(method = %args.method, streaming, "query run started");
+    match options.explainability.as_ref().map(|item| item.run_id()) {
+        Some(run_id) => {
+            tracing::info!(
+                name: event_name::CLI_QUERY_STARTED,
+                {
+                    "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
+                    "graphloom.query.method" = %args.method,
+                    "graphloom.query.streaming" = streaming,
+                    "graphloom.explainability.enabled" = options.explainability.is_some(),
+                    "graphloom.run.id" = %run_id,
+                },
+                "query run started"
+            );
+        }
+        None => {
+            tracing::info!(
+                name: event_name::CLI_QUERY_STARTED,
+                {
+                    "graphloom.observability.version" = OBSERVABILITY_CONTRACT_VERSION,
+                    "graphloom.query.method" = %args.method,
+                    "graphloom.query.streaming" = streaming,
+                    "graphloom.explainability.enabled" = options.explainability.is_some(),
+                    "graphloom.run.id" = tracing::field::Empty,
+                },
+                "query run started"
+            );
+        }
+    }
     let query_outcome = if streaming {
         run_streaming(project, options, args.method).await
     } else {
@@ -60,9 +93,12 @@ pub async fn run(args: &QueryArgs) -> Result<()> {
     };
     if let Err(error) = &query_outcome {
         tracing::error!(
-            method = %args.method,
-            streaming,
-            error_category = error_category(error),
+            name: event_name::CLI_QUERY_FAILED,
+            {
+                "graphloom.query.method" = %args.method,
+                "graphloom.query.streaming" = streaming,
+                "graphloom.error.kind" = graphloom_error_kind(error),
+            },
             "query run failed"
         );
     }
@@ -101,10 +137,12 @@ fn combine_query_and_recorder_outcomes(query: Result<()>, recorder: Result<()>) 
         (Ok(()), Ok(())) => Ok(()),
         (Err(query_error), Ok(())) => Err(query_error),
         (Ok(()), Err(recorder_error)) => Err(recorder_error),
-        (Err(query_error), Err(recorder_error)) => {
+        (Err(query_error), Err(_)) => {
             tracing::error!(
-                error_category = "explainability_output",
-                error = %recorder_error,
+                name: event_name::CLI_EXPLAINABILITY_SHUTDOWN_FAILED,
+                {
+                    "graphloom.error.kind" = "explainability_output",
+                },
                 "Explainability Recorder shutdown also failed"
             );
             Err(query_error)
@@ -190,27 +228,36 @@ fn flush_stdout(output: &mut impl Write, operation: &'static str) -> Result<()> 
 }
 
 fn log_completion(result: &QueryResult, method: SearchMethod, streaming: bool) {
-    tracing::info!(
-        method = %method,
-        streaming,
-        elapsed_ms = result.elapsed.as_millis(),
-        llm_calls = result.usage.llm_calls,
-        prompt_tokens = result.usage.prompt_tokens,
-        output_tokens = result.usage.output_tokens,
-        "query run completed"
-    );
-}
-
-fn error_category(error: &GraphLoomError) -> &'static str {
-    match error {
-        GraphLoomError::Query(_) => "query",
-        GraphLoomError::Io { .. } => "io",
-        GraphLoomError::ExplainabilityOutput { .. } => "explainability_output",
-        GraphLoomError::MissingSettings { .. }
-        | GraphLoomError::ConfigParse { .. }
-        | GraphLoomError::MissingEnvironmentVariable { .. }
-        | GraphLoomError::InvalidModel { .. } => "configuration",
-        _ => "runtime",
+    match (
+        duration_millis(result.elapsed),
+        usize_to_u64(result.usage.llm_calls),
+        usize_to_u64(result.usage.prompt_tokens),
+        usize_to_u64(result.usage.output_tokens),
+    ) {
+        (Some(elapsed_ms), Some(llm_calls), Some(input_tokens), Some(output_tokens)) => {
+            tracing::info!(
+                name: event_name::CLI_QUERY_COMPLETED,
+                {
+                    "graphloom.query.method" = %method,
+                    "graphloom.query.streaming" = streaming,
+                    "graphloom.elapsed_ms" = elapsed_ms,
+                    "graphloom.llm.calls" = llm_calls,
+                    "graphloom.input.tokens" = input_tokens,
+                    "graphloom.output.tokens" = output_tokens,
+                },
+                "query run completed"
+            );
+        }
+        _ => {
+            tracing::info!(
+                name: event_name::CLI_QUERY_COMPLETED,
+                {
+                    "graphloom.query.method" = %method,
+                    "graphloom.query.streaming" = streaming,
+                },
+                "query run completed"
+            );
+        }
     }
 }
 
@@ -236,6 +283,7 @@ async fn init_logging(
     let file_layer = fmt::layer()
         .with_target(true)
         .with_ansi(false)
+        .with_span_events(fmt::format::FmtSpan::NEW | fmt::format::FmtSpan::CLOSE)
         .with_writer(writer)
         .with_filter(file_filter);
     let subscriber = tracing_subscriber::registry()

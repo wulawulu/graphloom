@@ -9,14 +9,14 @@ use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
 use super::{
-    BasicQueryRuntime, DriftQueryRuntime, GlobalQueryRuntime, LocalQueryRuntime,
-    QueryCallbackChain, QueryCallbacks, QueryEventStream, QueryOptions, QueryResult,
-    QueryRuntimeFactory, Result, SearchMethod,
+    BasicQueryRuntime, DriftQueryRuntime, GlobalQueryRuntime, LocalQueryInstrumentation,
+    LocalQueryRuntime, QueryCallbackChain, QueryCallbacks, QueryEventStream, QueryOptions,
+    QueryResult, QueryRuntimeFactory, Result, SearchMethod,
     basic::{basic_search, basic_search_streaming},
     drift::{drift_search, drift_search_streaming},
-    explainability::QueryExplainabilitySession,
     global::{global_search, global_search_streaming},
     local::{local_search, local_search_streaming},
+    observability::with_runtime_span,
     runtime::{
         validate_basic_requirements, validate_drift_requirements, validate_global_requirements,
         validate_local_requirements,
@@ -127,18 +127,18 @@ impl QueryEngine {
     /// Returns a typed Query error for invalid request options, missing snapshot resources, or
     /// model/provider failures.
     pub async fn query(&self, options: QueryOptions) -> crate::Result<QueryResult> {
-        let session = QueryExplainabilitySession::start_local(&options).await;
-        self.query_with_session(options, session).await
+        let instrumentation = LocalQueryInstrumentation::start(&options, false).await;
+        self.query_with_session(options, instrumentation).await
     }
 
     pub(crate) async fn query_with_session(
         &self,
         options: QueryOptions,
-        session: Option<Arc<QueryExplainabilitySession>>,
+        instrumentation: Option<LocalQueryInstrumentation>,
     ) -> crate::Result<QueryResult> {
-        let result = self.query_inner(&options, session.clone()).await;
-        if let (Err(error), Some(session)) = (&result, session) {
-            session.finish_graphloom_error(error).await;
+        let result = self.query_inner(&options, instrumentation.clone()).await;
+        if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
+            instrumentation.finish_graphloom_error(error).await;
         }
         result
     }
@@ -146,30 +146,33 @@ impl QueryEngine {
     async fn query_inner(
         &self,
         options: &QueryOptions,
-        session: Option<Arc<QueryExplainabilitySession>>,
+        instrumentation: Option<LocalQueryInstrumentation>,
     ) -> crate::Result<QueryResult> {
-        self.validate_project_root(options).await?;
         match options.method {
             SearchMethod::Basic => {
+                self.validate_project_root(options).await?;
                 let runtime = self.basic_runtime(options).await?;
                 Ok(basic_search(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Local => {
-                let runtime = self.local_runtime(options).await?;
+                let trace = instrumentation.as_ref().and_then(|item| item.trace());
+                let runtime = self.local_runtime_with_trace(options, trace).await?;
                 Ok(local_search(
                     runtime,
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
-                    session,
+                    instrumentation,
                 )
                 .await?)
             }
             SearchMethod::Global => {
+                self.validate_project_root(options).await?;
                 let runtime = self.global_runtime(options).await?;
                 Ok(global_search(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Drift => {
+                self.validate_project_root(options).await?;
                 let runtime = self.drift_runtime(options).await?;
                 Ok(drift_search(runtime, &options.query, &options.response_type).await?)
             }
@@ -183,18 +186,21 @@ impl QueryEngine {
     /// Returns a typed Query error when resource preparation or the provider stream handshake
     /// fails.
     pub async fn query_stream(&self, options: QueryOptions) -> crate::Result<QueryEventStream> {
-        let session = QueryExplainabilitySession::start_local(&options).await;
-        self.query_stream_with_session(options, session).await
+        let instrumentation = LocalQueryInstrumentation::start(&options, true).await;
+        self.query_stream_with_session(options, instrumentation)
+            .await
     }
 
     pub(crate) async fn query_stream_with_session(
         &self,
         options: QueryOptions,
-        session: Option<Arc<QueryExplainabilitySession>>,
+        instrumentation: Option<LocalQueryInstrumentation>,
     ) -> crate::Result<QueryEventStream> {
-        let result = self.query_stream_inner(&options, session.clone()).await;
-        if let (Err(error), Some(session)) = (&result, session) {
-            session.finish_graphloom_error(error).await;
+        let result = self
+            .query_stream_inner(&options, instrumentation.clone())
+            .await;
+        if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
+            instrumentation.finish_graphloom_error(error).await;
         }
         result
     }
@@ -202,26 +208,28 @@ impl QueryEngine {
     async fn query_stream_inner(
         &self,
         options: &QueryOptions,
-        session: Option<Arc<QueryExplainabilitySession>>,
+        instrumentation: Option<LocalQueryInstrumentation>,
     ) -> crate::Result<QueryEventStream> {
-        self.validate_project_root(options).await?;
         match options.method {
             SearchMethod::Basic => {
+                self.validate_project_root(options).await?;
                 let runtime = self.basic_runtime(options).await?;
                 Ok(basic_search_streaming(runtime, &options.query, &options.response_type).await?)
             }
             SearchMethod::Local => {
-                let runtime = self.local_runtime(options).await?;
+                let trace = instrumentation.as_ref().and_then(|item| item.trace());
+                let runtime = self.local_runtime_with_trace(options, trace).await?;
                 Ok(local_search_streaming(
                     runtime,
                     &options.query,
                     &options.response_type,
                     options.conversation_history.as_ref(),
-                    session,
+                    instrumentation,
                 )
                 .await?)
             }
             SearchMethod::Global => {
+                self.validate_project_root(options).await?;
                 let runtime = self.global_runtime(options).await?;
                 Ok(
                     global_search_streaming(runtime, &options.query, &options.response_type)
@@ -229,10 +237,23 @@ impl QueryEngine {
                 )
             }
             SearchMethod::Drift => {
+                self.validate_project_root(options).await?;
                 let runtime = self.drift_runtime(options).await?;
                 Ok(drift_search_streaming(runtime, &options.query, &options.response_type).await?)
             }
         }
+    }
+
+    async fn local_runtime_with_trace(
+        &self,
+        options: &QueryOptions,
+        trace: Option<&crate::query::observability::QueryTraceSession>,
+    ) -> Result<LocalQueryRuntime> {
+        with_runtime_span(trace, async {
+            self.validate_project_root(options).await?;
+            self.local_runtime(options).await
+        })
+        .await
     }
 
     async fn basic_runtime(&self, options: &QueryOptions) -> Result<BasicQueryRuntime> {

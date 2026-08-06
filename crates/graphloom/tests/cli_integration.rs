@@ -234,9 +234,9 @@ async fn test_should_return_exact_query_cli_exit_codes() {
         .expect("query failure log");
     assert!(log.contains("query run started"));
     assert!(log.contains("query run failed"));
-    assert!(log.contains("method=basic"));
-    assert!(log.contains("streaming=false"));
-    assert!(log.contains("error_category=\"query\""));
+    assert!(log.contains("graphloom.query.method=basic"));
+    assert!(log.contains("graphloom.query.streaming=false"));
+    assert!(log.contains("graphloom.error.kind=\"missing_query_table\""));
 }
 
 #[tokio::test]
@@ -503,11 +503,11 @@ async fn test_should_append_safe_query_lifecycle_across_rust_log_values() {
     assert_eq!(log.matches("query run completed").count(), 3);
     assert_eq!(log.matches("query run failed").count(), 1);
     for field in [
-        "method=basic",
-        "streaming=false",
-        "llm_calls",
-        "prompt_tokens",
-        "output_tokens",
+        "graphloom.query.method=basic",
+        "graphloom.query.streaming=false",
+        "graphloom.llm.calls",
+        "graphloom.input.tokens",
+        "graphloom.output.tokens",
     ] {
         assert!(log.contains(field), "missing lifecycle field {field}");
     }
@@ -1218,10 +1218,19 @@ async fn test_should_run_complete_query_cli_dispatch_matrix_and_log_safely() {
     assert_eq!(query_log.matches("query run started").count(), 11);
     assert_eq!(query_log.matches("query run completed").count(), 11);
     for method_name in ["basic", "local", "global", "drift"] {
-        assert!(query_log.contains(&format!("method={method_name} streaming=false")));
-        assert!(query_log.contains(&format!("method={method_name} streaming=true")));
+        assert!(query_log.contains(&format!(
+            "graphloom.query.method={method_name} graphloom.query.streaming=false"
+        )));
+        assert!(query_log.contains(&format!(
+            "graphloom.query.method={method_name} graphloom.query.streaming=true"
+        )));
     }
-    for usage_field in ["elapsed_ms", "llm_calls", "prompt_tokens", "output_tokens"] {
+    for usage_field in [
+        "graphloom.elapsed_ms",
+        "graphloom.llm.calls",
+        "graphloom.input.tokens",
+        "graphloom.output.tokens",
+    ] {
         assert!(query_log.contains(usage_field));
     }
     assert!(!query_log.contains("test-key"));
@@ -1487,6 +1496,82 @@ async fn test_should_export_local_query_explainability_jsonl_from_cli() {
         server.received_requests().await.expect("requests").len(),
         requests_before_failure
     );
+}
+
+#[tokio::test]
+async fn test_should_write_standardized_local_query_log_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(chat_responder)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embedding_responder)
+        .mount(&server)
+        .await;
+    let project = TempDir::new().expect("project");
+    run_minimal_standard_index(project.path(), &server.uri()).await;
+    let settings = tokio::fs::read_to_string(project.path().join("settings.yaml"))
+        .await
+        .expect("settings");
+    let vector_fixture = TempDir::new().expect("vector fixture");
+    let local_vectors = vector_fixture.path().join("local");
+    copy_vector_indices(
+        project.path(),
+        &local_vectors,
+        &[ENTITY_DESCRIPTION_EMBEDDING],
+    )
+    .await;
+    set_query_vector_db(project.path(), &settings, &local_vectors).await;
+    let working = TempDir::new().expect("working directory");
+    let query = "QUERY_SECRET_SENTINEL";
+    let output_path = working.path().join("traces/run.jsonl");
+
+    let output = graphloom_command()
+        .args([
+            "query",
+            "--root",
+            project.path().to_str().expect("UTF-8 project"),
+            "--method",
+            "local",
+            "--no-streaming",
+            "--explain-output",
+            output_path.to_str().expect("UTF-8 output path"),
+            "--explain-content",
+            "metadata",
+            query,
+        ])
+        .output()
+        .expect("local Query");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        normalize_cli_text(&output.stderr)
+    );
+    assert_eq!(normalize_cli_text(&output.stdout), "Local answer.\n");
+    assert!(output.stderr.is_empty());
+
+    let log = tokio::fs::read_to_string(project.path().join("logs").join("query.log"))
+        .await
+        .expect("query log");
+    assert!(log.contains("graphloom.query.method=local"));
+    assert!(log.contains("graphloom.query.streaming=false"));
+    assert!(log.contains("graphloom.status=\"ok\""));
+    assert!(log.contains("graphloom.run.id=\""));
+    for forbidden in [
+        "run.jsonl",
+        "traces",
+        query,
+        "test-key",
+        "Authorization",
+        "GRAPHRAG_API_KEY",
+    ] {
+        assert!(!log.contains(forbidden), "query.log leaked {forbidden}");
+    }
 }
 
 #[test]

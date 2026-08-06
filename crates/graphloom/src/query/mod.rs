@@ -10,6 +10,7 @@ mod engine;
 mod error;
 mod explainability;
 mod indexer_adapters;
+pub(crate) mod observability;
 mod requirements;
 mod result;
 mod runtime;
@@ -33,13 +34,13 @@ pub use data_model::{Community, CommunityReport, Covariate, Entity, Relationship
 pub use engine::QueryEngine;
 pub use error::{QueryError, QueryTableErrorDetails, Result};
 pub use explainability::QueryExplainabilityOptions;
-pub(crate) use explainability::QueryExplainabilitySession;
 pub use global::{DynamicRating, MapPoint, MapSearchResult};
 pub use indexer_adapters::{
     read_indexer_communities, read_indexer_covariates, read_indexer_entities,
     read_indexer_relationships, read_indexer_report_embeddings, read_indexer_reports,
     read_indexer_text_units,
 };
+pub(crate) use observability::LocalQueryInstrumentation;
 pub use requirements::{QueryEmbedding, QueryPrompt, QueryRequirements, QueryTable};
 pub use result::{
     QueryContext, QueryContextRecords, QueryContextText, QueryEvent, QueryEventStream, QueryResult,
