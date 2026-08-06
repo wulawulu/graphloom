@@ -17,14 +17,11 @@ use graphloom::{
         ExplainabilitySink, ExplainabilitySinkError,
     },
     observability::{field_name, span_name},
-    query::{
-        QueryEngine, QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult,
-        SearchMethod,
-    },
+    query::{QueryEvent, QueryExplainabilityOptions, QueryOptions, QueryResult, SearchMethod},
 };
 use graphloom_llm::ModelConfig;
 use graphloom_storage::{ParquetTableProvider, TableProvider};
-use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorIndexSchema, VectorStore};
+use graphloom_vectors::{LanceDbVectorStore, VectorDocument, VectorStore};
 use polars_core::prelude::{Column, DataFrame, NamedFrom, Series};
 use serde_json::{Value, json};
 use wiremock::{
@@ -192,6 +189,14 @@ async fn write_local_tables(root: &std::path::Path) {
 }
 
 async fn local_fixture(server: &MockServer) -> LocalFixture {
+    local_fixture_with_vector_size(server, 2, vec![0.25, 0.75]).await
+}
+
+async fn local_fixture_with_vector_size(
+    server: &MockServer,
+    vector_size: usize,
+    entity_vector: Vec<f32>,
+) -> LocalFixture {
     let project = TempDir::new().expect("project");
     let output = project.path().join("output");
     tokio::fs::create_dir_all(&output)
@@ -207,7 +212,7 @@ async fn local_fixture(server: &MockServer) -> LocalFixture {
         "default_embedding_model".to_owned(),
         model_config(server, "embed-test"),
     );
-    config.vector_store.vector_size = 2;
+    config.vector_store.vector_size = vector_size;
     config.vector_store.db_uri = project
         .path()
         .join("output")
@@ -224,7 +229,7 @@ async fn local_fixture(server: &MockServer) -> LocalFixture {
             &schema,
             &[VectorDocument {
                 id: "entity-a".to_owned(),
-                vector: vec![0.25, 0.75],
+                vector: entity_vector,
             }],
         )
         .await
@@ -788,30 +793,16 @@ async fn test_should_record_embedding_failure_at_the_right_stage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn test_should_record_vector_search_failure_with_warm_runtime() {
+async fn test_should_record_vector_search_failure() {
     let server = mount_query_stub().await;
-    let fixture = local_fixture(&server).await;
-    let engine = QueryEngine::load(fixture.config.clone(), fixture.project.path())
-        .await
-        .expect("engine");
-    engine
-        .query(local_options(fixture.project.path(), "warm up"))
-        .await
-        .expect("warm query");
-
-    let store = LanceDbVectorStore::connect(&fixture.config.vector_store)
-        .await
-        .expect("store");
-    let mismatched = VectorIndexSchema::for_embedding_name(ENTITY_DESCRIPTION_EMBEDDING, 3);
-    store
-        .reset_index(&mismatched)
-        .await
-        .expect("reset entity index to mismatched dimension");
+    let fixture = local_fixture_with_vector_size(&server, 3, vec![0.25, 0.75, 0.0]).await;
 
     let (result, state) = run_with_capture(async {
-        engine
-            .query(local_options(fixture.project.path(), "Who is Alice?"))
-            .await
+        local_search(
+            fixture.config,
+            local_options(fixture.project.path(), "Who is Alice?"),
+        )
+        .await
     })
     .await;
     assert!(result.is_err());
