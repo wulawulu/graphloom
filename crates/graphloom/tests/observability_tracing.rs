@@ -272,6 +272,35 @@ async fn mount_query_stub() -> MockServer {
     server
 }
 
+async fn mount_response_sentinel_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
+            "model": "embed-test",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    let body = format!(
+        "data: {{\"id\":\"chunk-1\",\"model\":\"chat-test\",\"choices\":[{{\"index\":0,\"delta\":\
+         {{\"content\":\"{RESPONSE_SENTINEL}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: \
+         [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
 async fn mount_embedding_failure_stub() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -668,7 +697,7 @@ async fn test_should_correlate_root_run_id_with_explainability_envelope() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_should_not_leak_content_into_tracing_capture() {
-    let server = mount_query_stub().await;
+    let server = mount_response_sentinel_stub().await;
     let mut fixture = local_fixture(&server).await;
     let sink = Arc::new(RecordingExplainabilitySink::default());
     let mut options = local_options(
@@ -688,7 +717,7 @@ async fn test_should_not_leak_content_into_tracing_capture() {
             .expect("Local Query")
     })
     .await;
-    assert!(result.response.contains("Local"));
+    assert!(result.response.contains(RESPONSE_SENTINEL));
     let state = state.lock().expect("capture state");
     assert_no_content_in_capture(
         &state,
@@ -710,6 +739,7 @@ async fn test_should_not_leak_content_into_tracing_capture() {
     assert!(content.contains(QUERY_SENTINEL));
     assert!(content.contains(PROMPT_SENTINEL));
     assert!(content.contains(CONTEXT_SENTINEL));
+    assert!(content.contains(RESPONSE_SENTINEL));
 }
 
 #[tokio::test(flavor = "current_thread")]
