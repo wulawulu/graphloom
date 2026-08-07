@@ -23,6 +23,7 @@ mod event;
 mod jsonl;
 mod record;
 mod sink;
+mod store;
 mod validation;
 
 pub use content_mode::ExplainabilityContentMode;
@@ -49,4 +50,9 @@ pub use record::{
 pub use sink::{
     ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
     ExplainabilitySinkFailure, ExplainabilitySinkOperation, NoopExplainabilitySink,
+};
+pub use store::{
+    DEFAULT_EVENT_QUERY_LIMIT, DEFAULT_RUN_QUERY_LIMIT, EventQuery, ExplainabilityStore,
+    ExplainabilityStoreError, InMemoryExplainabilityStore, MAX_EVENT_QUERY_LIMIT,
+    MAX_RUN_QUERY_LIMIT, RunCompletion, RunListCursor, RunQuery,
 };

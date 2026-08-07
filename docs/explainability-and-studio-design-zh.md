@@ -1927,7 +1927,7 @@ for (const event of storedEvents) {
 
 Studio 不应直接依赖 SQLite API。
 
-应通过业务接口访问：
+已实现公开业务接口 `ExplainabilityStore`（`crates/graphloom/src/explainability/store.rs`）：
 
 ```rust
 #[async_trait::async_trait]
@@ -1935,37 +1935,37 @@ pub trait ExplainabilityStore: Send + Sync + std::fmt::Debug {
     async fn create_run(
         &self,
         run: ExplainabilityRun,
-    ) -> Result<()>;
+    ) -> Result<(), ExplainabilityStoreError>;
 
     async fn append_events(
         &self,
         events: &[ExplainabilityEnvelope],
-    ) -> Result<()>;
+    ) -> Result<(), ExplainabilityStoreError>;
 
     async fn complete_run(
         &self,
         completion: RunCompletion,
-    ) -> Result<()>;
+    ) -> Result<(), ExplainabilityStoreError>;
 
     async fn get_run(
         &self,
-        run_id: &str,
+        run_id: &ExplainabilityRunId,
     ) -> Result<Option<ExplainabilityRun>>;
 
     async fn list_runs(
         &self,
-        query: RunQuery,
+        query: &RunQuery,
     ) -> Result<Vec<ExplainabilityRun>>;
 
     async fn load_events(
         &self,
-        run_id: &str,
-        after_sequence: Option<u64>,
+        run_id: &ExplainabilityRunId,
+        query: &EventQuery,
     ) -> Result<Vec<ExplainabilityEnvelope>>;
 
     async fn delete_run(
         &self,
-        run_id: &str,
+        run_id: &ExplainabilityRunId,
     ) -> Result<()>;
 }
 ```
@@ -1978,13 +1978,69 @@ pub trait ExplainabilityStore: Send + Sync + std::fmt::Debug {
 fn sqlite_connection(&self) -> &Connection;
 ```
 
+## 19.2 业务不变量
+
+Store 合同固定以下 Version 1 不变量，未来 SQLite 实现必须逐条满足：
+
+* `create_run` 只接受 `event_count == 0`、`completed_at == None`、
+  `Pending`/`Running` 初始状态；相同 run ID 返回 `RunAlreadyExists`；
+  非 Query Run 不得携带 `query_method`；
+  -`append_events` 整批 all-or-nothing：空 batch 为 no-op；同一 batch 只能属于
+  一个 Run；Run 必须已存在；terminal Run 拒绝追加；sequence 必须从
+  `event_count + 1` 起严格连续，`u64` 溢出返回明确错误；
+  -`ExplainabilityRun.event_count` 只由 Store 维护，始终等于已成功持久化的
+  Envelope 数量；失败的 batch 不改变 event_count，也不留下部分事件；
+  -`complete_run` 只接受终态（Completed/Failed/Cancelled），要求
+  `completed_at >= started_at`；完全相同的终态重试幂等返回 Ok，任何不同的
+  终态返回 `CompletionConflict`，不得覆盖原终态；
+  -`delete_run` 原子删除 Run 及其全部 Event，幂等（不存在也返回 Ok）；
+  -Run 历史固定 `started_at DESC, run_id DESC`，使用 `(started_at, run_id)`
+  cursor 分页，不用 offset；Event 回放固定 `sequence ASC` 且
+  `sequence > after_sequence`，两个方向都拒绝无界读取；
+  -Store 不根据 `RunStarted`/`RunCompleted`/`RunFailed` Event 推导 Run status，
+  生命周期由宿主服务通过 `create_run`/`complete_run` 显式控制；
+  -Store 不分配、不修改、不重排 Envelope 的 sequence；sequence 由写入方
+  Adapter 分配，Store 只验证并持久化。
+
+公开 DTO：
+
+```text
+RunCompletion      终态 completion（constructor 拒绝非终态）
+RunQuery           过滤 + cursor + limit（默认 50，最大 200）
+RunListCursor      (started_at, run_id) 稳定分页位置
+EventQuery         after_sequence + limit（默认 500，最大 1000）
+ExplainabilityStoreError
+```
+
+## 19.3 InMemory 参考实现
+
+`InMemoryExplainabilityStore` 是 Version 1 reference/development backend：
+
+* 内部为 `RwLock<MemoryState>`（runs + events 两个 HashMap）；
+  -所有写事务（create/append/complete/delete）在同一个 write lock 内验证并
+  提交，一批 append 不会中途释放锁；
+  -读取 clone owned DTO 后释放锁，不把锁 guard 跨 `.await`；
+  -不 spawn、不 blocking、不依赖全局状态，可被多个 async task 共享；
+  -并发同一 Run append 由锁串行化，最终一个成功一个 `SequenceConflict`，
+  不存在 lost update；append 与 complete 竞争只允许两种线性化结果。
+
 ---
 
 # 20. 存储实现选择
 
+```text
+InMemoryExplainabilityStore
+    → reference / tests / embedded development（已实现）
+
+SqliteExplainabilityStore
+    → 下一阶段 Studio 默认持久化实现（尚未实现）
+```
+
+本阶段只交付业务合同与内存参考实现；SQLite Schema 与迁移属于下一阶段。
+
 ## 20.1 SQLite
 
-第一版 Studio 默认使用 SQLite。
+下一阶段 Studio 默认使用 SQLite（当前尚未实现）。
 
 适用场景：
 
