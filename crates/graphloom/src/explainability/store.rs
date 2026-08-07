@@ -508,6 +508,39 @@ impl InMemoryExplainabilityStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Clone the metadata of every run matching `query`.
+    ///
+    /// The read lock is scoped to this function's lexical block and is
+    /// released as soon as the owned metadata has been cloned; ordering and
+    /// truncation happen outside the lock in [`order_and_limit_runs`].
+    #[must_use]
+    async fn collect_matching_runs(&self, query: &RunQuery) -> Vec<ExplainabilityRun> {
+        {
+            let state = self.state.read().await;
+            state
+                .runs
+                .values()
+                .filter(|run| query.kind_filter().is_none_or(|kind| run.kind == kind))
+                .filter(|run| {
+                    query
+                        .status_filter()
+                        .is_none_or(|status| run.status == status)
+                })
+                .filter(|run| {
+                    query
+                        .query_method_filter()
+                        .is_none_or(|method| run.query_method == Some(method))
+                })
+                .filter(|run| {
+                    query
+                        .before_cursor()
+                        .is_none_or(|cursor| is_strictly_older_than(run, cursor))
+                })
+                .cloned()
+                .collect()
+        }
+    }
 }
 
 /// Shared mutable state of the in-memory store.
@@ -639,35 +672,8 @@ impl ExplainabilityStore for InMemoryExplainabilityStore {
         query: &RunQuery,
     ) -> Result<Vec<ExplainabilityRun>, ExplainabilityStoreError> {
         validate_limit(query.limit(), 1, MAX_RUN_QUERY_LIMIT, "run history")?;
-        let state = self.state.read().await;
-        let mut runs: Vec<ExplainabilityRun> = state
-            .runs
-            .values()
-            .filter(|run| query.kind_filter().is_none_or(|kind| run.kind == kind))
-            .filter(|run| {
-                query
-                    .status_filter()
-                    .is_none_or(|status| run.status == status)
-            })
-            .filter(|run| {
-                query
-                    .query_method_filter()
-                    .is_none_or(|method| run.query_method == Some(method))
-            })
-            .filter(|run| {
-                query
-                    .before_cursor()
-                    .is_none_or(|cursor| is_strictly_older_than(run, cursor))
-            })
-            .cloned()
-            .collect();
-        runs.sort_by(|left, right| {
-            right
-                .started_at
-                .cmp(&left.started_at)
-                .then_with(|| right.run_id.as_str().cmp(left.run_id.as_str()))
-        });
-        runs.truncate(limit_to_usize(query.limit()));
+        let mut runs = self.collect_matching_runs(query).await;
+        order_and_limit_runs(&mut runs, query.limit());
         Ok(runs)
     }
 
@@ -704,6 +710,20 @@ impl ExplainabilityStore for InMemoryExplainabilityStore {
         state.events.remove(run_id);
         Ok(())
     }
+}
+
+/// Sort cloned run metadata and apply the page limit.
+///
+/// Runs are ordered by `started_at DESC, run_id DESC` and truncated to
+/// `limit`. This is pure CPU work and must never hold the store lock.
+fn order_and_limit_runs(runs: &mut Vec<ExplainabilityRun>, limit: u32) {
+    runs.sort_by(|left, right| {
+        right
+            .started_at
+            .cmp(&left.started_at)
+            .then_with(|| right.run_id.as_str().cmp(left.run_id.as_str()))
+    });
+    runs.truncate(limit_to_usize(limit));
 }
 
 /// Validate creation invariants for a new run.
@@ -788,11 +808,11 @@ mod tests {
 
     use super::{
         DEFAULT_EVENT_QUERY_LIMIT, DEFAULT_RUN_QUERY_LIMIT, EventQuery, RunListCursor, RunQuery,
-        is_strictly_older_than, is_terminal, validate_limit,
+        is_strictly_older_than, is_terminal, order_and_limit_runs, validate_limit,
     };
     use crate::explainability::{
         ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
-        ExplainabilityStoreError,
+        ExplainabilityStore, ExplainabilityStoreError, InMemoryExplainabilityStore,
     };
 
     fn run_id(value: &str) -> ExplainabilityRunId {
@@ -873,5 +893,41 @@ mod tests {
             EventQuery::new().with_limit(1001),
             Err(ExplainabilityStoreError::InvalidLimit { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_should_release_read_lock_before_ordering_runs() {
+        let store = InMemoryExplainabilityStore::new();
+        for index in 0..100 {
+            let mut run = ExplainabilityRun::new(
+                run_id(&format!("run-{index:03}")),
+                ExplainabilityRunKind::Query,
+                timestamp(index % 24),
+            );
+            run.status = ExplainabilityRunStatus::Running;
+            store.create_run(run).await.expect("create run");
+        }
+        let query = RunQuery::new().with_limit(7).expect("limit");
+
+        let collected = store.collect_matching_runs(&query).await;
+        let write_lock = store.state.try_write();
+        assert!(
+            write_lock.is_ok(),
+            "collect_matching_runs must release the read lock before returning"
+        );
+        drop(write_lock);
+
+        store
+            .delete_run(&run_id("missing-run"))
+            .await
+            .expect("writer must proceed while sorting is pending");
+
+        let mut ordered = collected.clone();
+        order_and_limit_runs(&mut ordered, query.limit());
+        let listed = store.list_runs(&query).await.expect("list runs");
+        assert_eq!(
+            ordered, listed,
+            "collect + order_and_limit must match list_runs exactly"
+        );
     }
 }
