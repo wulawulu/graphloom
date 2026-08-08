@@ -23,8 +23,8 @@ use graphloom::explainability::{
     EventQuery, ExplainabilityContentMode, ExplainabilityEnvelope, ExplainabilityEvent,
     ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRun, ExplainabilityRunId,
     ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityStore, ExplainabilityStoreError,
-    InMemoryExplainabilityStore, QueryStarted, RunCompleted, RunCompletion, RunQuery, RunStarted,
-    SqliteExplainabilityStore,
+    InMemoryExplainabilityStore, QueryStarted, RunCompleted, RunCompletion, RunListCursor,
+    RunQuery, RunStarted, SqliteExplainabilityStore,
 };
 use rusqlite::{Connection, params, types::Value};
 use tempfile::TempDir;
@@ -724,6 +724,104 @@ async fn test_should_match_inmemory_run_pagination_with_tie_break() -> TestResul
 }
 
 #[tokio::test]
+async fn test_should_match_inmemory_ordering_with_canonical_timestamps() -> TestResult {
+    let fixture = open_fixture().await?;
+    let memory = Arc::new(InMemoryExplainabilityStore::new());
+    for (day, hour, id) in [
+        (1, 8, "run-1"),
+        (1, 9, "run-2"),
+        (1, 9, "run-3"),
+        (2, 1, "run-4"),
+        (2, 1, "run-5"),
+    ] {
+        let run = contract::query_run(
+            contract::run_id(id),
+            timestamp(day, hour),
+            ExplainabilityRunStatus::Running,
+            None,
+        );
+        fixture.store.create_run(run.clone()).await?;
+        memory.create_run(run).await?;
+    }
+
+    let query = RunQuery::new().with_limit(3)?;
+    let sqlite_page = fixture.store.list_runs(&query).await?;
+    let memory_page = memory.list_runs(&query).await?;
+    assert_eq!(sqlite_page, memory_page);
+
+    let cursor = RunListCursor::new(sqlite_page[2].started_at, sqlite_page[2].run_id.clone());
+    let sqlite_next = fixture
+        .store
+        .list_runs(&RunQuery::new().with_limit(3)?.before(cursor.clone()))
+        .await?;
+    let memory_next = memory
+        .list_runs(&RunQuery::new().with_limit(3)?.before(cursor))
+        .await?;
+    assert_eq!(sqlite_next, memory_next);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_noncanonical_sqlite_timestamps() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("noncanonical.sqlite");
+    let store = SqliteExplainabilityStore::open(&path).await?;
+    let fixtures = [
+        "2026-01-01T16:00:00.000000000+08:00",
+        "2026-01-01T08:00:00Z",
+        "2026-01-01T08:00:00.1Z",
+        "2026-01-01T08:00:00.123456Z",
+        "2026-01-01T08:00:00.000000000+00:00",
+    ];
+    for (index, started_at) in fixtures.into_iter().enumerate() {
+        let run_id = contract::run_id(&format!("noncanonical-{index}"));
+        store
+            .create_run(contract::query_run(
+                run_id.clone(),
+                timestamp(1, 8),
+                ExplainabilityRunStatus::Running,
+                None,
+            ))
+            .await?;
+        let connection = raw(&path);
+        connection.execute(
+            "UPDATE explainability_runs SET started_at = ?1 WHERE run_id = ?2",
+            params![started_at, run_id.as_str()],
+        )?;
+
+        let read = store
+            .get_run(&run_id)
+            .await
+            .expect_err("non-canonical timestamp must be rejected on read");
+        assert!(
+            matches!(
+                read,
+                ExplainabilityStoreError::Internal {
+                    operation: "read explainability run",
+                    ..
+                }
+            ),
+            "case {index}: {read}"
+        );
+        let listed = store
+            .list_runs(&RunQuery::new())
+            .await
+            .expect_err("non-canonical timestamp must be rejected on list");
+        assert!(
+            matches!(
+                listed,
+                ExplainabilityStoreError::Internal {
+                    operation: "list explainability runs",
+                    ..
+                }
+            ),
+            "case {index}: {listed}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_should_fail_safely_when_appending_beyond_i64_max() -> TestResult {
     let directory = TempDir::new()?;
     let path = directory.path().join("overflow.sqlite");
@@ -854,6 +952,23 @@ async fn test_should_return_internal_for_corrupted_run_rows() -> TestResult {
                 Value::Text("corrupt-8".to_owned()),
             ],
         ),
+        (
+            "corrupt-9",
+            "UPDATE explainability_runs SET started_at = ?1 WHERE run_id = ?2",
+            vec![
+                Value::Text("2026-01-01T16:00:00.000000000+08:00".to_owned()),
+                Value::Text("corrupt-9".to_owned()),
+            ],
+        ),
+        (
+            "corrupt-10",
+            "UPDATE explainability_runs SET status = ?1, completed_at = ?2 WHERE run_id = ?3",
+            vec![
+                Value::Text("completed".to_owned()),
+                Value::Text("2026-01-01T09:00:00.000000000+00:00".to_owned()),
+                Value::Text("corrupt-10".to_owned()),
+            ],
+        ),
     ];
 
     for (index, (id, sql, values)) in cases.into_iter().enumerate() {
@@ -882,6 +997,176 @@ async fn test_should_return_internal_for_corrupted_run_rows() -> TestResult {
                 }
             ),
             "case {index} produced {error}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_append_when_persisted_run_lifecycle_is_corrupted() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("corrupt-append.sqlite");
+    let store = SqliteExplainabilityStore::open(&path).await?;
+    let cases: Vec<(&str, &str, Vec<Value>)> = vec![
+        (
+            "write-corrupt-a",
+            "UPDATE explainability_runs SET completed_at = ?1 WHERE run_id = ?2",
+            vec![
+                Value::Text("2026-01-01T09:00:00.000000000Z".to_owned()),
+                Value::Text("write-corrupt-a".to_owned()),
+            ],
+        ),
+        (
+            "write-corrupt-b",
+            "UPDATE explainability_runs SET status = ?1, completed_at = ?2 WHERE run_id = ?3",
+            vec![
+                Value::Text("completed".to_owned()),
+                Value::Null,
+                Value::Text("write-corrupt-b".to_owned()),
+            ],
+        ),
+        (
+            "write-corrupt-d",
+            "UPDATE explainability_runs SET status = ?1, completed_at = ?2 WHERE run_id = ?3",
+            vec![
+                Value::Text("completed".to_owned()),
+                Value::Text("2026-01-01T07:00:00.000000000Z".to_owned()),
+                Value::Text("write-corrupt-d".to_owned()),
+            ],
+        ),
+        (
+            "write-corrupt-e",
+            "UPDATE explainability_runs SET started_at = ?1 WHERE run_id = ?2",
+            vec![
+                Value::Text("2026-01-01T16:00:00.000000000+08:00".to_owned()),
+                Value::Text("write-corrupt-e".to_owned()),
+            ],
+        ),
+    ];
+
+    for (index, (id, sql, values)) in cases.into_iter().enumerate() {
+        let run_id = contract::run_id(id);
+        store
+            .create_run(contract::query_run(
+                run_id.clone(),
+                timestamp(1, 8),
+                ExplainabilityRunStatus::Running,
+                None,
+            ))
+            .await?;
+        store
+            .append_events(&[simple_envelope(run_id.clone(), 1)])
+            .await?;
+        let connection = raw(&path);
+        connection.execute(sql, rusqlite::params_from_iter(values))?;
+
+        let error = store
+            .append_events(&[simple_envelope(run_id.clone(), 2)])
+            .await
+            .expect_err("corrupted run lifecycle must reject appends");
+        assert!(
+            matches!(
+                error,
+                ExplainabilityStoreError::Internal {
+                    operation: "append explainability events",
+                    ..
+                }
+            ),
+            "case {index}: {error}"
+        );
+
+        let connection = raw(&path);
+        let event_count: i64 = connection.query_row(
+            "SELECT event_count FROM explainability_runs WHERE run_id = ?1",
+            params![run_id.as_str()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            event_count, 1,
+            "case {index}: event_count must stay unchanged"
+        );
+        let events: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM explainability_events WHERE run_id = ?1",
+            params![run_id.as_str()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(events, 1, "case {index}: events must stay unchanged");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_completion_when_persisted_run_lifecycle_is_corrupted() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("corrupt-complete.sqlite");
+    let store = SqliteExplainabilityStore::open(&path).await?;
+    let cases: Vec<(&str, &str, Vec<Value>)> = vec![
+        (
+            "complete-corrupt-a",
+            "UPDATE explainability_runs SET completed_at = ?1 WHERE run_id = ?2",
+            vec![
+                Value::Text("2026-01-01T09:00:00.000000000Z".to_owned()),
+                Value::Text("complete-corrupt-a".to_owned()),
+            ],
+        ),
+        (
+            "complete-corrupt-b",
+            "UPDATE explainability_runs SET status = ?1, completed_at = ?2 WHERE run_id = ?3",
+            vec![
+                Value::Text("completed".to_owned()),
+                Value::Null,
+                Value::Text("complete-corrupt-b".to_owned()),
+            ],
+        ),
+        (
+            "complete-corrupt-d",
+            "UPDATE explainability_runs SET status = ?1, completed_at = ?2 WHERE run_id = ?3",
+            vec![
+                Value::Text("completed".to_owned()),
+                Value::Text("2026-01-01T07:00:00.000000000Z".to_owned()),
+                Value::Text("complete-corrupt-d".to_owned()),
+            ],
+        ),
+        (
+            "complete-corrupt-e",
+            "UPDATE explainability_runs SET started_at = ?1 WHERE run_id = ?2",
+            vec![
+                Value::Text("2026-01-01T16:00:00.000000000+08:00".to_owned()),
+                Value::Text("complete-corrupt-e".to_owned()),
+            ],
+        ),
+    ];
+
+    for (index, (id, sql, values)) in cases.into_iter().enumerate() {
+        let run_id = contract::run_id(id);
+        store
+            .create_run(contract::query_run(
+                run_id.clone(),
+                timestamp(1, 8),
+                ExplainabilityRunStatus::Running,
+                None,
+            ))
+            .await?;
+        let connection = raw(&path);
+        connection.execute(sql, rusqlite::params_from_iter(values))?;
+
+        let error = store
+            .complete_run(RunCompletion::new(
+                run_id.clone(),
+                ExplainabilityRunStatus::Completed,
+                timestamp(1, 9),
+            )?)
+            .await
+            .expect_err("corrupted run lifecycle must reject completion");
+        assert!(
+            matches!(
+                error,
+                ExplainabilityStoreError::Internal {
+                    operation: "complete explainability run",
+                    ..
+                }
+            ),
+            "case {index}: {error}"
         );
     }
     Ok(())

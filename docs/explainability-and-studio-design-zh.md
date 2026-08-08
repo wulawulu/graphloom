@@ -2367,7 +2367,9 @@ open connection
 * 并发首次 open：`BEGIN IMMEDIATE` 保证只有一个连接初始化，另一个等待后
   验证已提交的完整 schema。由于 `PRAGMA journal_mode = WAL` 在另一个连接
   持有写事务时不会调用 SQLite busy handler，open 初始化期间额外使用同目录
-  `<database>.lock` advisory lock 串行化首次配置（进程崩溃后由 OS 自动释放）。
+  `<database>.lock` advisory lock 串行化首次配置，锁获取受
+  `SQLITE_OPEN_LOCK_TIMEOUT`（5s）限制，以 10ms 间隔轮询
+  `File::try_lock()`；进程崩溃后由 OS 释放锁。
 
 ## 21.5 Run / Event 映射
 
@@ -2401,6 +2403,39 @@ event             → explainability_events.payload_json（紧凑 JSON）
 timestamp 与 Event 内容都不允许被后端修改或重新编号。若
 `event_type` 列与 `payload_json["type"]` 不一致，视为数据库损坏并返回
 `Internal`，不猜测修复。
+
+## 21.6 SQLite 持久化不变量
+
+时间戳物理存储合同固定为 canonical 格式：
+
+```text
+UTC
+Z
+exactly 9 fractional nanosecond digits
+RFC3339
+```
+
+读取时先解析 RFC3339 并转换为 UTC，再用唯一 canonical writer
+（`SecondsFormat::Nanos` + `Z`）重新格式化，要求与数据库原始字符串逐字节
+相等。非 canonical 表示（例如 `+08:00` 偏移、无纳秒、不足 9 位纳秒、
+`+00:00`）即使表示同一 instant 也视为数据库损坏 → `Internal`。原因是
+`ORDER BY started_at DESC` / cursor 比较发生在解析之前，SQL 的 lexical
+ordering 依赖 canonical representation。
+
+Run lifecycle 一致性（`Pending`/`Running` → `completed_at = NULL`；终态 →
+`completed_at` 非空且 `>= started_at`）在 read 路径（`run_from_row`）与
+write 路径（`append_events`、`complete_run`）统一验证。损坏的 persisted
+state 一律返回 `Internal`，不会被翻译成 `RunAlreadyTerminal`、
+`SequenceConflict` 或 `CompletionConflict`。
+
+Sidecar `<database>.lock` advisory lock：
+
+```text
+只在 open / configure / schema bootstrap 期间使用
+获取有界：SQLITE_OPEN_LOCK_TIMEOUT = 5s，10ms 固定轮询
+lock file 可以保留在磁盘（Drop 不删除，避免 inode race）
+advisory lock 属于 File handle，进程崩溃由 OS 释放
+```
 
 ---
 

@@ -16,13 +16,13 @@
     clippy::disallowed_types,
     reason = "tokio::fs has no advisory-lock API; std file locking runs on a spawn_blocking thread"
 )]
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::{
     fmt,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -53,6 +53,12 @@ const SQLITE_STORE_SCHEMA_VERSION: u32 = 1;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SQLITE_BUSY_TIMEOUT_MS: i64 = 5_000;
+
+/// Upper bound for acquiring the sidecar open lock.
+const SQLITE_OPEN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval while waiting for the sidecar open lock.
+const SQLITE_OPEN_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const OPEN_OPERATION: &str = "open SQLite explainability store";
 const CREATE_OPERATION: &str = "create explainability run";
@@ -258,6 +264,9 @@ enum SqliteStoreBackendError {
     /// The sidecar open lock could not be acquired.
     #[error("SQLite open lock failed")]
     OpenLock(#[source] std::io::Error),
+    /// The sidecar open lock could not be acquired within its timeout.
+    #[error("SQLite open lock timed out")]
+    OpenLockTimeout,
     /// The blocking worker task was cancelled or panicked.
     #[error("SQLite worker task failed")]
     Worker,
@@ -330,6 +339,13 @@ struct OpenLock {
 )]
 impl OpenLock {
     fn acquire(path: &Path) -> Result<Self, SqliteStoreBackendError> {
+        Self::acquire_with_timeout(path, SQLITE_OPEN_LOCK_TIMEOUT)
+    }
+
+    fn acquire_with_timeout(
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<Self, SqliteStoreBackendError> {
         let mut lock_path = path.as_os_str().to_os_string();
         lock_path.push(".lock");
         let file = OpenOptions::new()
@@ -338,8 +354,25 @@ impl OpenLock {
             .truncate(false)
             .open(PathBuf::from(lock_path))
             .map_err(SqliteStoreBackendError::OpenLock)?;
-        file.lock().map_err(SqliteStoreBackendError::OpenLock)?;
-        Ok(Self { _file: file })
+        let deadline = Instant::now() + timeout;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                // `File::try_lock` reports contention through the dedicated
+                // `TryLockError::WouldBlock` variant on all supported
+                // platforms (flock `LOCK_NB` on Unix, `LockFileEx` with
+                // `LOCKFILE_FAIL_IMMEDIATELY` on Windows).
+                Err(TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(SqliteStoreBackendError::OpenLockTimeout);
+                    }
+                    std::thread::sleep(SQLITE_OPEN_LOCK_POLL_INTERVAL);
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(SqliteStoreBackendError::OpenLock(error));
+                }
+            }
+        }
     }
 }
 
@@ -556,6 +589,7 @@ impl ExplainabilityStore for SqliteExplainabilityStore {
                 .as_deref()
                 .map(datetime_from_sql_text)
                 .transpose()?;
+            validate_persisted_run_lifecycle(stored_status, started_at, stored_completed_at)?;
             if completed_at < started_at {
                 return Err(SqliteStoreFailure::Store(
                     ExplainabilityStoreError::InvalidCompletionTime {
@@ -809,13 +843,23 @@ fn append_prepared_events(
 ) -> Result<(), SqliteStoreFailure> {
     let run_row = transaction
         .query_row(
-            "SELECT status, event_count FROM explainability_runs WHERE run_id = ?1",
+            "SELECT status, started_at, completed_at, event_count
+             FROM explainability_runs
+             WHERE run_id = ?1",
             params![run_id.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )
         .optional()
         .map_err(SqliteStoreBackendError::Sqlite)?;
-    let Some((status_text, event_count_sqlite)) = run_row else {
+    let Some((status_text, started_at_text, completed_at_text, event_count_sqlite)) = run_row
+    else {
         return Err(SqliteStoreFailure::Store(
             ExplainabilityStoreError::RunNotFound {
                 run_id: run_id.clone(),
@@ -823,6 +867,12 @@ fn append_prepared_events(
         ));
     };
     let status = enum_from_sql_text::<ExplainabilityRunStatus>(&status_text)?;
+    let started_at = datetime_from_sql_text(&started_at_text)?;
+    let completed_at = completed_at_text
+        .as_deref()
+        .map(datetime_from_sql_text)
+        .transpose()?;
+    validate_persisted_run_lifecycle(status, started_at, completed_at)?;
     if is_terminal(status) {
         return Err(SqliteStoreFailure::Store(
             ExplainabilityStoreError::RunAlreadyTerminal {
@@ -917,14 +967,7 @@ fn run_from_row(row: &Row<'_>) -> Result<ExplainabilityRun, SqliteStoreBackendEr
     if kind != ExplainabilityRunKind::Query && query_method.is_some() {
         return Err(SqliteStoreBackendError::InvalidPersistedValue);
     }
-    if is_terminal(status) != completed_at.is_some() {
-        return Err(SqliteStoreBackendError::InvalidPersistedValue);
-    }
-    if let Some(completed_at) = completed_at
-        && completed_at < started_at
-    {
-        return Err(SqliteStoreBackendError::InvalidPersistedValue);
-    }
+    validate_persisted_run_lifecycle(status, started_at, completed_at)?;
 
     Ok(ExplainabilityRun {
         run_id,
@@ -1055,9 +1098,39 @@ fn datetime_to_sql_text(value: &DateTime<Utc>) -> String {
 }
 
 fn datetime_from_sql_text(value: &str) -> Result<DateTime<Utc>, SqliteStoreBackendError> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|_| SqliteStoreBackendError::InvalidPersistedValue)
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map_err(|_| SqliteStoreBackendError::InvalidPersistedValue)?
+        .with_timezone(&Utc);
+
+    // SQLite `TEXT COLLATE BINARY` ordering must equal UTC chronological
+    // ordering, which only holds for the exact canonical writer format.
+    // Accepting other RFC3339 spellings would sort before validation.
+    if datetime_to_sql_text(&parsed) != value {
+        return Err(SqliteStoreBackendError::InvalidPersistedValue);
+    }
+
+    Ok(parsed)
+}
+
+/// Validate persisted run lifecycle consistency.
+///
+/// Non-terminal runs must have no completion timestamp; terminal runs must
+/// have one that is not earlier than the start. Violations are persistence
+/// corruption and must never be translated into business errors.
+fn validate_persisted_run_lifecycle(
+    status: ExplainabilityRunStatus,
+    started_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+) -> Result<(), SqliteStoreBackendError> {
+    if is_terminal(status) != completed_at.is_some() {
+        return Err(SqliteStoreBackendError::InvalidPersistedValue);
+    }
+    if let Some(completed_at) = completed_at
+        && completed_at < started_at
+    {
+        return Err(SqliteStoreBackendError::InvalidPersistedValue);
+    }
+    Ok(())
 }
 
 fn u64_to_sqlite_integer(value: u64, field: &'static str) -> Result<i64, SqliteStoreBackendError> {
@@ -1073,6 +1146,7 @@ mod tests {
     use std::{
         str::FromStr,
         sync::{Arc, Mutex},
+        time::{Duration, Instant},
     };
 
     use chrono::{TimeZone, Utc};
@@ -1081,10 +1155,11 @@ mod tests {
     use tokio::sync::Mutex as AsyncMutex;
 
     use super::{
-        EXPLAINABILITY_SCHEMA_VERSION, SQLITE_BUSY_TIMEOUT_MS, SQLITE_STORE_SCHEMA_VERSION,
-        SqliteExplainabilityStore, datetime_from_sql_text, datetime_to_sql_text,
-        enum_from_sql_text, enum_to_sql_text, envelope_from_row, prepare_event, run_from_row,
-        sqlite_integer_to_u64, u64_to_sqlite_integer,
+        EXPLAINABILITY_SCHEMA_VERSION, OpenLock, SQLITE_BUSY_TIMEOUT_MS,
+        SQLITE_STORE_SCHEMA_VERSION, SqliteExplainabilityStore, SqliteStoreBackendError,
+        datetime_from_sql_text, datetime_to_sql_text, enum_from_sql_text, enum_to_sql_text,
+        envelope_from_row, prepare_event, run_from_row, sqlite_integer_to_u64,
+        u64_to_sqlite_integer,
     };
     use crate::explainability::{
         ExplainabilityContentMode, ExplainabilityEnvelope, ExplainabilityEvent,
@@ -1178,6 +1253,59 @@ mod tests {
         assert_eq!(text, "2026-08-07T12:34:56.123456789Z");
         assert_eq!(datetime_from_sql_text(&text).expect("parse"), value);
         assert!(datetime_from_sql_text("2026-08-07 12:34:56").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_noncanonical_sqlite_timestamps() {
+        let canonical = "2026-08-07T12:34:56.123456789Z";
+        assert!(datetime_from_sql_text(canonical).is_ok());
+        for invalid in [
+            "2026-08-07T20:34:56.123456789+08:00",
+            "2026-08-07T12:34:56Z",
+            "2026-08-07T12:34:56.1Z",
+            "2026-08-07T12:34:56.123456Z",
+            "2026-08-07T12:34:56.123456789+00:00",
+        ] {
+            assert!(
+                datetime_from_sql_text(invalid).is_err(),
+                "non-canonical timestamp must be rejected: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_timeout_when_sqlite_open_lock_is_contended() {
+        let directory = TempDir::new().expect("tempdir");
+        let db_path = directory.path().join("db.sqlite");
+        let _holder = OpenLock::acquire(&db_path).expect("first lock");
+
+        let started = Instant::now();
+        let result = OpenLock::acquire_with_timeout(&db_path, Duration::from_millis(50));
+        assert!(matches!(
+            result,
+            Err(SqliteStoreBackendError::OpenLockTimeout)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "contended lock acquisition must not hang"
+        );
+    }
+
+    #[test]
+    fn test_should_acquire_sqlite_open_lock_after_release() {
+        let directory = TempDir::new().expect("tempdir");
+        let db_path = directory.path().join("db.sqlite");
+        {
+            let holder = OpenLock::acquire(&db_path).expect("first lock");
+            assert!(matches!(
+                OpenLock::acquire_with_timeout(&db_path, Duration::from_millis(50)),
+                Err(SqliteStoreBackendError::OpenLockTimeout)
+            ));
+            drop(holder);
+        }
+
+        let acquired = OpenLock::acquire_with_timeout(&db_path, Duration::from_millis(50));
+        assert!(acquired.is_ok(), "lock must be acquirable after release");
     }
 
     #[test]
