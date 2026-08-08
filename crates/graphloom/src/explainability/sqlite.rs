@@ -19,14 +19,17 @@
 use std::fs::{File, OpenOptions};
 use std::{
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Value};
+use rusqlite::{
+    Connection, Error as RusqliteError, OptionalExtension, Row, Transaction, TransactionBehavior,
+    params, params_from_iter, types::Value as SqliteValue,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
@@ -251,7 +254,7 @@ impl SqliteExplainabilityStore {
 enum SqliteStoreBackendError {
     /// A `rusqlite` or `SQLite` operation failed.
     #[error("SQLite operation failed")]
-    Sqlite(#[source] rusqlite::Error),
+    Sqlite(#[source] RusqliteError),
     /// The sidecar open lock could not be acquired.
     #[error("SQLite open lock failed")]
     OpenLock(#[source] std::io::Error),
@@ -299,8 +302,8 @@ impl From<SqliteStoreBackendError> for SqliteStoreFailure {
     }
 }
 
-impl From<rusqlite::Error> for SqliteStoreBackendError {
-    fn from(value: rusqlite::Error) -> Self {
+impl From<RusqliteError> for SqliteStoreBackendError {
+    fn from(value: RusqliteError) -> Self {
         Self::Sqlite(value)
     }
 }
@@ -333,7 +336,7 @@ impl OpenLock {
             .create(true)
             .write(true)
             .truncate(false)
-            .open(std::path::PathBuf::from(lock_path))
+            .open(PathBuf::from(lock_path))
             .map_err(SqliteStoreBackendError::OpenLock)?;
         file.lock().map_err(SqliteStoreBackendError::OpenLock)?;
         Ok(Self { _file: file })
@@ -414,7 +417,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreBacke
 }
 
 fn table_exists(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Transaction<'_>,
     name: &str,
 ) -> Result<bool, SqliteStoreBackendError> {
     let count: i64 = transaction
@@ -427,7 +430,7 @@ fn table_exists(
     Ok(count == 1)
 }
 
-fn schema_version(transaction: &rusqlite::Transaction<'_>) -> Result<u32, SqliteStoreBackendError> {
+fn schema_version(transaction: &Transaction<'_>) -> Result<u32, SqliteStoreBackendError> {
     let version = transaction
         .query_row(
             "SELECT schema_version FROM explainability_store_meta WHERE singleton = 1",
@@ -440,7 +443,7 @@ fn schema_version(transaction: &rusqlite::Transaction<'_>) -> Result<u32, Sqlite
     u32::try_from(version).map_err(|_| SqliteStoreBackendError::InvalidPersistedValue)
 }
 
-fn create_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), SqliteStoreBackendError> {
+fn create_schema(transaction: &Transaction<'_>) -> Result<(), SqliteStoreBackendError> {
     transaction
         .execute_batch(SCHEMA_SQL)
         .map_err(SqliteStoreBackendError::Sqlite)?;
@@ -627,38 +630,38 @@ impl ExplainabilityStore for SqliteExplainabilityStore {
         self.with_connection(LIST_OPERATION, move |connection| {
             let mut sql = RUN_SELECT_SQL.to_owned();
             let mut conditions = Vec::new();
-            let mut values: Vec<Value> = Vec::new();
+            let mut values: Vec<SqliteValue> = Vec::new();
             if let Some(kind) = query.kind_filter() {
                 conditions.push("kind = ?");
-                values.push(Value::Text(enum_to_sql_text(kind)?));
+                values.push(SqliteValue::Text(enum_to_sql_text(kind)?));
             }
             if let Some(status) = query.status_filter() {
                 conditions.push("status = ?");
-                values.push(Value::Text(enum_to_sql_text(status)?));
+                values.push(SqliteValue::Text(enum_to_sql_text(status)?));
             }
             if let Some(method) = query.query_method_filter() {
                 conditions.push("query_method = ?");
-                values.push(Value::Text(enum_to_sql_text(method)?));
+                values.push(SqliteValue::Text(enum_to_sql_text(method)?));
             }
             if let Some(cursor) = query.before_cursor() {
                 conditions.push("(started_at < ? OR (started_at = ? AND run_id < ?))");
                 let started_at = datetime_to_sql_text(&cursor.started_at());
-                values.push(Value::Text(started_at.clone()));
-                values.push(Value::Text(started_at));
-                values.push(Value::Text(cursor.run_id().as_str().to_owned()));
+                values.push(SqliteValue::Text(started_at.clone()));
+                values.push(SqliteValue::Text(started_at));
+                values.push(SqliteValue::Text(cursor.run_id().as_str().to_owned()));
             }
             if !conditions.is_empty() {
                 sql.push_str(" WHERE ");
                 sql.push_str(&conditions.join(" AND "));
             }
             sql.push_str(" ORDER BY started_at DESC, run_id DESC LIMIT ?");
-            values.push(Value::Integer(i64::from(query.limit())));
+            values.push(SqliteValue::Integer(i64::from(query.limit())));
 
             let mut statement = connection
                 .prepare(&sql)
                 .map_err(SqliteStoreBackendError::Sqlite)?;
             let mut rows = statement
-                .query(rusqlite::params_from_iter(values))
+                .query(params_from_iter(values))
                 .map_err(SqliteStoreBackendError::Sqlite)?;
             let mut runs = Vec::new();
             while let Some(row) = rows.next().map_err(SqliteStoreBackendError::Sqlite)? {
@@ -742,7 +745,7 @@ impl ExplainabilityStore for SqliteExplainabilityStore {
 }
 
 fn run_exists(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Transaction<'_>,
     run_id: &str,
 ) -> Result<bool, SqliteStoreBackendError> {
     let exists = transaction
@@ -756,7 +759,7 @@ fn run_exists(
 }
 
 fn insert_run(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Transaction<'_>,
     run: &ExplainabilityRun,
 ) -> Result<(), SqliteStoreFailure> {
     let run_id = run.run_id.clone();
@@ -800,7 +803,7 @@ fn insert_run(
 }
 
 fn append_prepared_events(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Transaction<'_>,
     run_id: &ExplainabilityRunId,
     prepared: &[PreparedEvent],
 ) -> Result<(), SqliteStoreFailure> {
@@ -885,7 +888,7 @@ fn append_prepared_events(
     Ok(())
 }
 
-fn run_from_row(row: &rusqlite::Row<'_>) -> Result<ExplainabilityRun, SqliteStoreBackendError> {
+fn run_from_row(row: &Row<'_>) -> Result<ExplainabilityRun, SqliteStoreBackendError> {
     let run_id_text: String = row.get(0)?;
     let kind_text: String = row.get(1)?;
     let status_text: String = row.get(2)?;
@@ -986,9 +989,7 @@ fn prepare_event(envelope: &ExplainabilityEnvelope) -> Result<PreparedEvent, Sql
     })
 }
 
-fn envelope_from_row(
-    row: &rusqlite::Row<'_>,
-) -> Result<ExplainabilityEnvelope, SqliteStoreBackendError> {
+fn envelope_from_row(row: &Row<'_>) -> Result<ExplainabilityEnvelope, SqliteStoreBackendError> {
     let run_id_text: String = row.get(0)?;
     let sequence_sqlite: i64 = row.get(1)?;
     let schema_version_sqlite: i64 = row.get(2)?;
