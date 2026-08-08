@@ -727,7 +727,7 @@ fn order_and_limit_runs(runs: &mut Vec<ExplainabilityRun>, limit: u32) {
 }
 
 /// Validate creation invariants for a new run.
-fn validate_create_run(run: &ExplainabilityRun) -> Result<(), ExplainabilityStoreError> {
+pub(super) fn validate_create_run(run: &ExplainabilityRun) -> Result<(), ExplainabilityStoreError> {
     if run.event_count != 0 {
         return Err(ExplainabilityStoreError::InvalidRunMetadata {
             run_id: run.run_id.clone(),
@@ -756,7 +756,7 @@ fn validate_create_run(run: &ExplainabilityRun) -> Result<(), ExplainabilityStor
 }
 
 /// Return whether a status is terminal.
-const fn is_terminal(status: ExplainabilityRunStatus) -> bool {
+pub(super) const fn is_terminal(status: ExplainabilityRunStatus) -> bool {
     matches!(
         status,
         ExplainabilityRunStatus::Completed
@@ -766,7 +766,7 @@ const fn is_terminal(status: ExplainabilityRunStatus) -> bool {
 }
 
 /// Validate a query limit against a documented inclusive range.
-fn validate_limit(
+pub(super) fn validate_limit(
     limit: u32,
     min: u32,
     max: u32,

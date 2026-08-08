@@ -6,7 +6,7 @@
 * 适用项目：GraphLoom
 * 兼容基线：`graphrag-3.1.0-compat-v1`
 * 目标阶段：GraphLoom Explainability 与 Studio 实现
-* 最后更新：2026-08-03
+* 最后更新：2026-08-08
 
 本文定义 GraphLoom 在以下方面的职责边界和实现方向：
 
@@ -2012,17 +2012,70 @@ EventQuery         after_sequence + limit（默认 500，最大 1000）
 ExplainabilityStoreError
 ```
 
-## 19.3 InMemory 参考实现
+## 19.3 实现状态
+
+```text
+ExplainabilityStore V1
+    → frozen
+
+InMemoryExplainabilityStore
+    → reference / test backend（已实现）
+
+SqliteExplainabilityStore
+    → persistent backend（已实现）
+
+Studio
+    → not implemented
+```
+
+Store 写入架构：
+
+```text
+GraphLoom Core
+    ↓ ExplainabilityRecord
+
+Future Studio Writer
+    ↓ allocates sequence / envelope
+
+ExplainabilityStore
+    ├── InMemory
+    └── SQLite
+```
+
+当前 `SqliteExplainabilityStore` 是底层持久化 Store：
+
+* 不分配 sequence；
+* 不解释 Event 内容；
+* 不根据 `RunStarted`/`RunCompleted`/`RunFailed` Event 推导 Run status；
+* 不自动修改 Run status；
+* 完整遵守已冻结的 Store V1 合同。
+
+## 19.4 InMemory 参考实现
 
 `InMemoryExplainabilityStore` 是 Version 1 reference/development backend：
 
 * 内部为 `RwLock<MemoryState>`（runs + events 两个 HashMap）；
-  -所有写事务（create/append/complete/delete）在同一个 write lock 内验证并
+* 所有写事务（create/append/complete/delete）在同一个 write lock 内验证并
   提交，一批 append 不会中途释放锁；
-  -读取 clone owned DTO 后释放锁，不把锁 guard 跨 `.await`；
-  -不 spawn、不 blocking、不依赖全局状态，可被多个 async task 共享；
-  -并发同一 Run append 由锁串行化，最终一个成功一个 `SequenceConflict`，
+* 读取 clone owned DTO 后释放锁，不把锁 guard 跨 `.await`；
+* 不 spawn、不 blocking、不依赖全局状态，可被多个 async task 共享；
+* 并发同一 Run append 由锁串行化，最终一个成功一个 `SequenceConflict`，
   不存在 lost update；append 与 complete 竞争只允许两种线性化结果。
+
+## 19.5 SQLite 持久化实现
+
+`SqliteExplainabilityStore`（`crates/graphloom/src/explainability/sqlite.rs`，
+可选 feature `sqlite-store`）：
+
+* 真正的文件持久化，使用 `rusqlite` bundled（0.40.1，内置 SQLite 3.53.2）；
+* 单一 `Connection`，由 `std::sync::Mutex` 保护同一实例内的访问；所有
+  SQLite I/O 运行在 `tokio::task::spawn_blocking`，不阻塞 Tokio worker；
+* 同一实例内的操作由 `operation_gate` 串行化，但业务语义不依赖它；
+  跨 Store instance / 跨进程的写入原子性由 SQLite transaction 保证；
+* 所有写路径使用 `BEGIN IMMEDIATE`；delete 依赖
+  `FOREIGN KEY ... ON DELETE CASCADE`；
+* 错误与 `Debug` 不泄露 DB path、SQL 参数、Query、Event payload 或 Secret；
+* 未来 Studio 通过 `graphloom = { features = ["sqlite-store"] }` 使用该 Store。
 
 ---
 
@@ -2033,32 +2086,38 @@ InMemoryExplainabilityStore
     → reference / tests / embedded development（已实现）
 
 SqliteExplainabilityStore
-    → 下一阶段 Studio 默认持久化实现（尚未实现）
+    → persistent backend（已实现，optional feature `sqlite-store`）
+
+Studio / Studio Sink / Live Hub / SSE / HTTP API
+    → 未实现
 ```
 
-本阶段只交付业务合同与内存参考实现；SQLite Schema 与迁移属于下一阶段。
+本阶段交付业务合同、内存参考实现与 SQLite 持久化实现。
 
 ## 20.1 SQLite
 
-下一阶段 Studio 默认使用 SQLite（当前尚未实现）。
+Studio 默认使用 SQLite。
 
 适用场景：
 
 * 单机 Studio；
-  -一个 writer task；
-  -实时小批量事件写入；
-  -按 `run_id + sequence` 查询；
-  -历史记录列表；
-  -删除 Run；
-  -本地零配置。
+* 一个 writer task；
+* 实时小批量事件写入；
+* 按 `run_id + sequence` 查询；
+* 历史记录列表；
+* 删除 Run；
+* 本地零配置。
 
-推荐实现：
+已实现：
 
 ```text
 SqliteExplainabilityStore
 ```
 
-第一版不需要复杂 ORM，可以使用轻量 SQL 访问层。
+第一版使用 `rusqlite + tokio::task::spawn_blocking`，不使用 ORM、连接池或
+多数据库抽象。SQLite 仅通过可选 feature `sqlite-store` 进入依赖图；普通
+GraphLoom binary 和 Library 用户不编译 rusqlite/libsqlite3-sys，也不产生
+数据库文件。
 
 ---
 
@@ -2188,13 +2247,40 @@ JSONL 不要求承担 Studio 的历史查询、分页和同步功能。
 
 # 21. SQLite Schema
 
-第一版 Studio 可以使用两张表。
+## 21.1 两种版本号
 
-## 21.1 Runs
+```text
+EXPLAINABILITY_SCHEMA_VERSION = 1
+    → Envelope / Event transport schema
+
+SQLITE_STORE_SCHEMA_VERSION = 1
+    → SQLite physical database schema
+```
+
+二者含义不同，未来可以独立升级：
+
+* `EXPLAINABILITY_SCHEMA_VERSION` 由
+  `crates/graphloom/src/explainability/record.rs` 定义，版本化
+  `ExplainabilityEnvelope` 的 JSON transport 形态；
+* `SQLITE_STORE_SCHEMA_VERSION` 由
+  `crates/graphloom/src/explainability/sqlite.rs` 定义，版本化 SQLite
+  物理表结构，保存在独立的 `explainability_store_meta` 表中，不使用
+  `PRAGMA user_version`（未来同一 DB 文件可能还有其他模块的表）。
+
+## 21.2 表结构
+
+第一版创建三张表和一张索引：
 
 ```sql
+CREATE TABLE explainability_store_meta (
+    singleton INTEGER PRIMARY KEY
+        CHECK (singleton = 1),
+
+    schema_version INTEGER NOT NULL
+);
+
 CREATE TABLE explainability_runs (
-    run_id TEXT PRIMARY KEY,
+    run_id TEXT PRIMARY KEY COLLATE BINARY,
 
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -2202,35 +2288,26 @@ CREATE TABLE explainability_runs (
     query TEXT,
     query_method TEXT,
 
-    started_at TEXT NOT NULL,
+    started_at TEXT NOT NULL COLLATE BINARY,
     completed_at TEXT,
 
     compatibility_profile TEXT,
 
-    event_count INTEGER NOT NULL DEFAULT 0
+    event_count INTEGER NOT NULL
+        CHECK (event_count >= 0)
 );
-```
 
-推荐索引：
-
-```sql
-CREATE INDEX explainability_runs_by_started_at
-ON explainability_runs(started_at DESC);
-```
-
----
-
-## 21.2 Events
-
-```sql
 CREATE TABLE explainability_events (
-    run_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
+    run_id TEXT NOT NULL COLLATE BINARY,
+    sequence INTEGER NOT NULL
+        CHECK (sequence > 0),
+
+    schema_version INTEGER NOT NULL,
 
     span_id TEXT NOT NULL,
     parent_span_id TEXT,
 
-    timestamp TEXT NOT NULL,
+    timestamp TEXT NOT NULL COLLATE BINARY,
     event_type TEXT NOT NULL,
 
     payload_json TEXT NOT NULL,
@@ -2241,24 +2318,89 @@ CREATE TABLE explainability_events (
         REFERENCES explainability_runs(run_id)
         ON DELETE CASCADE
 );
+
+CREATE INDEX explainability_runs_by_started_at
+ON explainability_runs(
+    started_at DESC,
+    run_id DESC
+);
 ```
 
-推荐索引：
+`explainability_events` 的 `PRIMARY KEY (run_id, sequence)` 本身支持
+sequence replay，不额外创建重复索引。
 
-```sql
-CREATE INDEX explainability_events_by_run
-ON explainability_events(run_id, sequence);
-```
+## 21.3 PRAGMA
 
-第一版不需要将所有 Event 字段拆成列。
-
-完整 Event 保存在：
+每次创建连接后、schema 初始化前配置并验证：
 
 ```text
-payload_json
+foreign_keys  = ON
+journal_mode  = WAL
+synchronous   = FULL
+busy_timeout  = 5s
 ```
 
-中即可。
+`WAL + FULL` 为第一版固定选择，优先完整 durability；不提供
+`--sqlite-synchronous` 或其他配置参数。SQLite 默认 autocheckpoint 负责
+WAL checkpoint，不在每次 append/complete 后手工 checkpoint。
+
+## 21.4 初始化规则
+
+`open` 流程：
+
+```text
+open connection
+→ configure PRAGMA（并验证）
+→ BEGIN IMMEDIATE
+→ inspect schema metadata
+→ create / validate V1 schema
+→ commit
+```
+
+* 全新 DB：在同一个 `BEGIN IMMEDIATE` transaction 内创建 meta、runs、events
+  和 index，写入 `schema_version = 1`；
+* 已存在 V1：验证必要表存在，不重建、不清空；
+* Future version（例如 2）：拒绝为 `Internal`，不 downgrade、不删除、
+  不重建；
+* Partial schema（例如有 runs 无 meta）：拒绝为 `Internal`，不静默接管
+  不明旧表；
+* 并发首次 open：`BEGIN IMMEDIATE` 保证只有一个连接初始化，另一个等待后
+  验证已提交的完整 schema。由于 `PRAGMA journal_mode = WAL` 在另一个连接
+  持有写事务时不会调用 SQLite busy handler，open 初始化期间额外使用同目录
+  `<database>.lock` advisory lock 串行化首次配置（进程崩溃后由 OS 自动释放）。
+
+## 21.5 Run / Event 映射
+
+时间统一使用与现有 JSON 合同相同的 RFC3339 UTC 固定 9 位纳秒 `Z`
+（`SecondsFormat::Nanos`），因此 `TEXT COLLATE BINARY` 的字典序即 UTC
+时间序。数据库不生成业务时间。
+
+枚举字段通过现有 Serde 字符串合同持久化（不带 JSON 引号）：
+
+```text
+kind            → "index" | "update" | "query" | "prompt_tune" | ...
+status          → "pending" | "running" | "completed" | "failed" | "cancelled"
+query_method    → "basic" | "local" | "global" | "drift"
+```
+
+Event 不作为整条 Envelope 的 opaque JSON blob 保存：
+
+```text
+run_id            → explainability_events.run_id
+sequence          → explainability_events.sequence
+schema_version    → explainability_events.schema_version
+span_id           → explainability_events.span_id
+parent_span_id    → explainability_events.parent_span_id
+timestamp         → explainability_events.timestamp
+event_type        → payload_json["type"]（同一份序列化结果提取，不维护第二套 match）
+event             → explainability_events.payload_json（紧凑 JSON）
+```
+
+读取时从列重建原始 `ExplainabilityRecord`，再通过
+`ExplainabilityEnvelope::new(sequence, record)` 构造 Envelope；sequence、
+timestamp 与 Event 内容都不允许被后端修改或重新编号。若
+`event_type` 列与 `payload_json["type"]` 不一致，视为数据库损坏并返回
+`Internal`，不猜测修复。
 
 ---
 

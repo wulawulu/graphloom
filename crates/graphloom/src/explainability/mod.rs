@@ -23,6 +23,8 @@ mod event;
 mod jsonl;
 mod record;
 mod sink;
+#[cfg(feature = "sqlite-store")]
+mod sqlite;
 mod store;
 mod validation;
 
@@ -51,6 +53,8 @@ pub use sink::{
     ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
     ExplainabilitySinkFailure, ExplainabilitySinkOperation, NoopExplainabilitySink,
 };
+#[cfg(feature = "sqlite-store")]
+pub use sqlite::SqliteExplainabilityStore;
 pub use store::{
     DEFAULT_EVENT_QUERY_LIMIT, DEFAULT_RUN_QUERY_LIMIT, EventQuery, ExplainabilityStore,
     ExplainabilityStoreError, InMemoryExplainabilityStore, MAX_EVENT_QUERY_LIMIT,

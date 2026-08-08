@@ -13,6 +13,10 @@ documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+sqlite-store = ["dep:rusqlite"]
+
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
@@ -38,6 +42,7 @@ polars-core.workspace = true
 rand.workspace = true
 rand_xorshift.workspace = true
 regex.workspace = true
+rusqlite = { workspace = true, optional = true }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
