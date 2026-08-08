@@ -1672,6 +1672,10 @@ LlmRequestCompleted
 
 # 17. 实时通信协议
 
+底层实时 fan-out 已由 `graphloom::explainability::ExplainabilityLiveHub` 实现；本节的
+SSE、HTTP 路由和浏览器协议仍属于下一阶段。Live Hub 只接收成功持久化的
+`ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供 HTTP 能力。
+
 ## 17.1 第一版使用 SSE
 
 GraphLoom Studio 第一版采用：
@@ -1805,17 +1809,18 @@ sequence > 12
 
 ```text
 GraphLoom Core
-      ↓ await ExplainabilitySink::emit
+      ↓ reliable: await ExplainabilitySink::emit
 StoreExplainabilityRecorder
-      ├── bounded adapter queue（已实现）
-      ↓
+      ↓ reliable bounded queue / producer backpressure
 single writer（已实现）
-      ↓ 分配 sequence
-生成并持久化 ExplainabilityEnvelope
+      ↓ 分配 sequence，构造 ExplainabilityEnvelope
+ExplainabilityStore.append_events
+      ↓ durable success
+writer committed sequence update
+      ↓ best effort, bounded, non-blocking
+ExplainabilityLiveHub（已实现，one channel / active Run）
       ↓
-Store
-      ├── 历史回放
-      └── Live Hub / SSE 实时展示（未实现）
+subscriber（SSE adapter 尚未实现）
 ```
 
 核心原则：
@@ -1825,7 +1830,7 @@ Store
 事件 Schema、顺序和语义必须完全相同。
 
 `GraphLoom Core → ExplainabilitySink → 持久化单写者 → Store` 是可靠、可背压、错误
-可见的边界。`Store → Live Hub / SSE 客户端` 位于持久化之后，可以发生暂时的实时
+可见的边界。`Store success → Live Hub → SSE 客户端` 位于持久化之后，可以发生暂时的实时
 丢失；慢客户端或断线不影响 Store，客户端通过 Store 和 `Last-Event-ID` 补发恢复。
 
 ---
@@ -1843,10 +1848,11 @@ Store
 6. 将同一个 Envelope 广播给实时订阅者
 ```
 
-第 1～5 步已由 `StoreExplainabilityRecorder`
-（`crates/graphloom/src/explainability/store_recorder.rs`）实现；第 6 步是
-下一阶段 Live Hub 的固定插入点：`Store.append_events` 成功之后 writer 仍持有
-同一个 Envelope，可直接广播，不需要重新构造。
+第 1～6 步已由 `StoreExplainabilityRecorder` 与 `ExplainabilityLiveHub` 实现：
+`Store.append_events` 成功后，writer 先提交自己的 sequence 状态，再把同一次构造的
+Envelope 包装为 `Arc` 交给 Hub。默认的 `StoreExplainabilityRecorder::new` 不创建 Hub、
+channel 或每事件 `Arc`；只有 `new_with_live_hub` 启用该路径。Hub 的 `publish` 同步、
+非阻塞且不返回 persistence error；无订阅者、订阅者断开或 lag 均不能使 writer 失败。
 
 这样可以保证：
 
@@ -1873,12 +1879,13 @@ Query 可能在浏览器建立 SSE 之前就已经产生事件。
 正确流程是：
 
 ```text
-1. 订阅实时广播
-2. 确定当前事件边界
-3. 从 Store 读取历史事件
-4. 按 sequence 发送历史事件
-5. 继续发送实时广播事件
-6. 使用 sequence 去重
+1. subscription = hub.subscribe(run_id)
+2. 如果为 None，仅从 Store replay
+3. 如果为 Some，先注册 live receiver，再读取 snapshot_sequence = S
+4. 从 last_seen 开始分页读取 Store，至少追到 S
+5. 再消费 live receiver，sequence <= last_seen 的重复项跳过
+6. 收到 Lagged 时，从 Store.load_events(after_sequence = last_seen) 恢复
+7. 收到 Closed 时做最后一次 Store catch-up，然后结束 stream
 ```
 
 客户端只接受：
@@ -1888,6 +1895,14 @@ sequence > last_seen_sequence
 ```
 
 避免重复。
+
+receiver 注册必须先于 `snapshot_sequence` 读取。若并发 publish 在快照之后发生，receiver
+会收到它；若发生在 receiver 注册与快照读取之间，Store catch-up 与 live 可能都包含它，
+由 sequence 去重；若 publish 时没有 subscriber，快照仍前进，Store catch-up 会补齐。
+`snapshot_sequence` 表示 Recorder 已成功 Store commit、并更新 writer committed sequence
+之后提交给 Hub 的最新 sequence；它是 Store catch-up boundary，不是任一 subscriber 的
+delivery ACK。Store 的 `after_sequence + limit` 已足够：分页若读到 `> S` 的事件，仍按
+sequence 去重，无需为 Store V1 增加 upper bound。
 
 ---
 
@@ -2030,10 +2045,16 @@ InMemoryExplainabilityStore
 StoreExplainabilityRecorder
     → bounded queue + single writer persistence adapter（已实现）
 
+ExplainabilityLiveHub
+    → per-run bounded post-persistence realtime fan-out（已实现）
+
 SqliteExplainabilityStore
     → persistent backend（已实现）
 
 Studio
+    → not implemented
+
+SSE / Studio HTTP
     → not implemented
 ```
 
@@ -2049,6 +2070,11 @@ StoreExplainabilityRecorder（已实现）
 ExplainabilityStore
     ├── InMemory
     └── SQLite
+
+Store append success
+    ↓ writer sequence commit
+ExplainabilityLiveHub（已实现）
+    └── one bounded broadcast channel / active Run
 ```
 
 当前 `SqliteExplainabilityStore` 是底层持久化 Store：
@@ -2117,7 +2143,10 @@ InMemoryExplainabilityStore
 SqliteExplainabilityStore
     → persistent backend（已实现，optional feature `sqlite-store`）
 
-Studio / Studio Sink / Live Hub / SSE / HTTP API
+ExplainabilityLiveHub
+    → 已实现
+
+Studio / SSE / HTTP API
     → 未实现
 ```
 
@@ -2513,8 +2542,8 @@ mpsc receiver
 生成 ExplainabilityEnvelope
     ↓
 写入 ExplainabilityStore
-    ↓
-broadcast::Sender（未实现）
+    ↓ writer sequence commit
+ExplainabilityLiveHub / per-run broadcast::Sender（已实现）
     ↓
 SSE subscribers（未实现）
 ```
@@ -2543,7 +2572,9 @@ single writer
       ↓
 Store / JSONL
       ↓ 持久化成功后
-Live Hub / SSE（未实现）
+ExplainabilityLiveHub（已实现）
+      ↓
+SSE（未实现）
 ```
 
 `StoreExplainabilityRecorder` 已实现该数据流（Store 分支）：bounded queue
@@ -2556,13 +2587,26 @@ Store.append_events succeeds
 ↓
 writer sequence committed（state.sequences.insert）
 ↓
-future Live Hub broadcast（使用同一个已持久化 Envelope）
+ExplainabilityLiveHub.publish（使用同一个已持久化 Envelope）
 ```
 
-未来 Live Hub 广播只能插入 committed sequence 更新之后；0 订阅者、慢客户端、
-断线或广播队列满都不能影响已成功的 persistence。当前
-`Store.append_events` 成功点保留同一 Envelope，是未来 Live Hub 广播的唯一
-插入位置。
+Live Hub 广播固定插入 committed sequence 更新之后；0 订阅者、慢客户端、断线或
+广播队列满都不能影响已成功的 persistence。`Store.append_events` 成功点保留的同一
+Envelope 是广播的唯一来源；Hub 不检查、重写、重排或重新分配 sequence。
+
+这里有两个语义完全不同的有界 buffer：
+
+* persistence writer queue：全 Recorder 有界；满时 producer await/backpressure，已经成功
+  接受的 Record 不得丢失，Store failure 会使 writer FAILED；
+* Live Hub broadcast ring：每 active Run 独立有界（默认 256 Envelope）；慢 subscriber
+  收到 `Lagged { skipped }`，writer 不等待且 Store 不受影响。Run A 的高频流量不会使
+  Run B 的 subscriber lag。
+
+Hub map 只保存 active Run 的 channel、固定容量 ring 和 `last_sequence`，不保存完整历史、
+Run metadata 或永久 tombstone。`finish_run` remove channel；recorder shutdown 或 fatal
+writer failure 只关闭该 Recorder 注册的 Run。existing receiver 先 drain buffer，再得到
+`Closed`。Live close 只表示该 Recorder 不再产生实时 Envelope，不等价于 Store Run
+Completed；`RunCompleted` / `RunFailed` Event 也不驱动 channel close。
 
 ## 23.1 Core 到 Store 的可靠投递
 

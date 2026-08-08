@@ -5,7 +5,9 @@
 //! backpressure and reporting delivery or finalization failures. A persistence adapter assigns
 //! the per-run sequence and creates an [`ExplainabilityEnvelope`]. The JSONL Recorder in this
 //! module and the [`StoreExplainabilityRecorder`] provide bounded, single-writer persistence
-//! adapters (file-backed and Store-backed respectively).
+//! adapters (file-backed and Store-backed respectively). An optional [`ExplainabilityLiveHub`]
+//! fans out the exact Store-backed envelope after persistence succeeds and the writer commits its
+//! sequence; realtime lag never weakens the reliable Core-to-Store boundary.
 //!
 //! The JSON schema is versioned by [`EXPLAINABILITY_SCHEMA_VERSION`]. Adding optional fields is a
 //! backward-compatible change. Removing fields or changing their meaning requires a schema-version
@@ -22,6 +24,7 @@ mod content_mode;
 mod dto;
 mod event;
 mod jsonl;
+mod live_hub;
 mod record;
 mod sink;
 #[cfg(feature = "sqlite-store")]
@@ -46,6 +49,10 @@ pub use event::{
 };
 pub use jsonl::{
     JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
+};
+pub use live_hub::{
+    ExplainabilityLiveHub, ExplainabilityLiveHubOptions, ExplainabilityLiveRecvError,
+    ExplainabilityLiveSubscription,
 };
 pub use record::{
     EXPLAINABILITY_SCHEMA_VERSION, ExplainabilityContractError, ExplainabilityEnvelope,

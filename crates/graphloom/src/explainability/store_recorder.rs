@@ -31,7 +31,7 @@ use tokio::{
 use super::{
     ExplainabilityContractError, ExplainabilityEnvelope, ExplainabilityRecord, ExplainabilityRun,
     ExplainabilityRunId, ExplainabilitySink, ExplainabilitySinkError, ExplainabilityStore,
-    ExplainabilityStoreError, RunCompletion,
+    ExplainabilityStoreError, RunCompletion, live_hub::ExplainabilityLiveHub,
 };
 
 const DEFAULT_QUEUE_CAPACITY: usize = 256;
@@ -196,6 +196,36 @@ impl StoreExplainabilityRecorder {
         store: Arc<dyn ExplainabilityStore>,
         options: StoreExplainabilityOptions,
     ) -> Result<Self, StoreExplainabilityError> {
+        Self::start(store, None, &options)
+    }
+
+    /// Start a bounded Store persistence writer with post-persistence realtime fan-out.
+    ///
+    /// The Hub is a runtime dependency rather than recorder configuration. The writer registers
+    /// runs after Store creation, publishes only after durable append and sequence commit, and
+    /// closes its registered channels on finish, shutdown, or fatal failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreExplainabilityError::RuntimeUnavailable`] when called outside an active
+    /// Tokio runtime. Its runtime behavior otherwise matches [`Self::new`].
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "public constructor takes owned options so callers can chain builder methods"
+    )]
+    pub fn new_with_live_hub(
+        store: Arc<dyn ExplainabilityStore>,
+        live_hub: Arc<ExplainabilityLiveHub>,
+        options: StoreExplainabilityOptions,
+    ) -> Result<Self, StoreExplainabilityError> {
+        Self::start(store, Some(live_hub), &options)
+    }
+
+    fn start(
+        store: Arc<dyn ExplainabilityStore>,
+        live_hub: Option<Arc<ExplainabilityLiveHub>>,
+        options: &StoreExplainabilityOptions,
+    ) -> Result<Self, StoreExplainabilityError> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| StoreExplainabilityError::RuntimeUnavailable)?;
         let (sender, receiver) = mpsc::channel(options.queue_capacity().get());
@@ -207,9 +237,12 @@ impl StoreExplainabilityRecorder {
             Arc::clone(&runs),
         ));
         let writer = runtime.spawn(async move {
-            let _status_guard =
-                WriterStatusGuard::new(Arc::clone(&writer_status), Arc::clone(&runs));
-            run_writer(store, receiver, writer_status, runs).await
+            let _status_guard = WriterStatusGuard::new(
+                Arc::clone(&writer_status),
+                Arc::clone(&runs),
+                live_hub.clone(),
+            );
+            run_writer(store, live_hub, receiver, writer_status, runs).await
         });
         Ok(Self { sink, writer })
     }
@@ -529,7 +562,6 @@ impl RunGate {
 
     fn finish(&self, error: &ExplainabilitySinkError) {
         let state = match error {
-            ExplainabilitySinkError::WriterFailed => RUN_FAILED_WRITER,
             ExplainabilitySinkError::Closed => RUN_FAILED_CLOSED,
             _ => RUN_FAILED_WRITER,
         };
@@ -581,16 +613,19 @@ struct StoreWriterState {
 struct WriterStatusGuard {
     writer_status: Arc<AtomicU8>,
     runs: Arc<DashMap<ExplainabilityRunId, Arc<RunGate>>>,
+    live_hub: Option<Arc<ExplainabilityLiveHub>>,
 }
 
 impl WriterStatusGuard {
     fn new(
         writer_status: Arc<AtomicU8>,
         runs: Arc<DashMap<ExplainabilityRunId, Arc<RunGate>>>,
+        live_hub: Option<Arc<ExplainabilityLiveHub>>,
     ) -> Self {
         Self {
             writer_status,
             runs,
+            live_hub,
         }
     }
 }
@@ -606,11 +641,13 @@ impl Drop for WriterStatusGuard {
                 gate.finish(&ExplainabilitySinkError::WriterFailed);
             }
         }
+        close_live_runs(self.live_hub.as_deref(), &self.runs);
     }
 }
 
 async fn run_writer(
     store: Arc<dyn ExplainabilityStore>,
+    live_hub: Option<Arc<ExplainabilityLiveHub>>,
     mut receiver: mpsc::Receiver<StoreWriterCommand>,
     writer_status: Arc<AtomicU8>,
     runs: Arc<DashMap<ExplainabilityRunId, Arc<RunGate>>>,
@@ -619,11 +656,19 @@ async fn run_writer(
     while let Some(command) = receiver.recv().await {
         match command {
             StoreWriterCommand::CreateRun { run, response } => {
-                let result = create_run_for_writer(store.as_ref(), &runs, run).await;
+                let result =
+                    create_run_for_writer(store.as_ref(), live_hub.as_deref(), &runs, run).await;
                 let _ = response.send(result);
             }
             StoreWriterCommand::Record(record) => {
-                if let Err(error) = persist_record(store.as_ref(), &runs, &mut state, record).await
+                if let Err(error) = persist_record(
+                    store.as_ref(),
+                    live_hub.as_deref(),
+                    &runs,
+                    &mut state,
+                    record,
+                )
+                .await
                 {
                     return Err(mark_writer_failed(&writer_status, error));
                 }
@@ -633,7 +678,7 @@ async fn run_writer(
                 gate,
                 response,
             } => {
-                let result = finish_run_for_writer(&mut state, &gate, &run_id);
+                let result = finish_run_for_writer(live_hub.as_deref(), &mut state, &gate, &run_id);
                 let _ = response.send(result);
             }
             StoreWriterCommand::CompleteRun {
@@ -644,6 +689,7 @@ async fn run_writer(
                 let _ = response.send(result);
             }
             StoreWriterCommand::Shutdown { response } => {
+                close_live_runs(live_hub.as_deref(), &runs);
                 writer_status.store(WRITER_CLOSED, Ordering::Release);
                 let _ = response.send(Ok(()));
                 return Ok(());
@@ -655,6 +701,7 @@ async fn run_writer(
 
 async fn create_run_for_writer(
     store: &dyn ExplainabilityStore,
+    live_hub: Option<&ExplainabilityLiveHub>,
     runs: &DashMap<ExplainabilityRunId, Arc<RunGate>>,
     run: ExplainabilityRun,
 ) -> Result<(), StoreExplainabilityError> {
@@ -669,12 +716,16 @@ async fn create_run_for_writer(
             operation: StoreExplainabilityOperation::CreateRun,
             source,
         })?;
+    if let Some(live_hub) = live_hub {
+        live_hub.register_run(run_id.clone());
+    }
     runs.insert(run_id, Arc::new(RunGate::new()));
     Ok(())
 }
 
 async fn persist_record(
     store: &dyn ExplainabilityStore,
+    live_hub: Option<&ExplainabilityLiveHub>,
     runs: &DashMap<ExplainabilityRunId, Arc<RunGate>>,
     state: &mut StoreWriterState,
     record: Arc<ExplainabilityRecord>,
@@ -709,12 +760,14 @@ async fn persist_record(
         })?;
     // Persistence and writer sequence state are now committed.
     state.sequences.insert(run_id, sequence);
-    // Future Live Hub broadcast must be inserted exactly here, using this
-    // same persisted `envelope`.
+    if let Some(live_hub) = live_hub {
+        live_hub.publish(Arc::new(envelope));
+    }
     Ok(())
 }
 
 fn finish_run_for_writer(
+    live_hub: Option<&ExplainabilityLiveHub>,
     state: &mut StoreWriterState,
     gate: &RunGate,
     run_id: &ExplainabilityRunId,
@@ -724,7 +777,21 @@ fn finish_run_for_writer(
     }
     state.finished_runs.insert(run_id.clone());
     gate.complete(RUN_FINISHED);
+    if let Some(live_hub) = live_hub {
+        live_hub.close_run(run_id);
+    }
     Ok(())
+}
+
+fn close_live_runs(
+    live_hub: Option<&ExplainabilityLiveHub>,
+    runs: &DashMap<ExplainabilityRunId, Arc<RunGate>>,
+) {
+    if let Some(live_hub) = live_hub {
+        for run in runs {
+            live_hub.close_run(run.key());
+        }
+    }
 }
 
 async fn complete_run_for_writer(
@@ -846,7 +913,7 @@ mod tests {
         let mut state = StoreWriterState::default();
         state.sequences.insert(id.clone(), u64::MAX);
 
-        let result = persist_record(store.as_ref(), &runs, &mut state, record(&id)).await;
+        let result = persist_record(store.as_ref(), None, &runs, &mut state, record(&id)).await;
         assert!(matches!(
             result,
             Err(super::StoreExplainabilityError::SequenceOverflow)
