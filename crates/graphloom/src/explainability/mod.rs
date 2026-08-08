@@ -4,7 +4,8 @@
 //! span relationships. Sinks accept shared records asynchronously, applying bounded-queue
 //! backpressure and reporting delivery or finalization failures. A persistence adapter assigns
 //! the per-run sequence and creates an [`ExplainabilityEnvelope`]. The JSONL Recorder in this
-//! module provides one bounded, single-writer persistence adapter.
+//! module and the [`StoreExplainabilityRecorder`] provide bounded, single-writer persistence
+//! adapters (file-backed and Store-backed respectively).
 //!
 //! The JSON schema is versioned by [`EXPLAINABILITY_SCHEMA_VERSION`]. Adding optional fields is a
 //! backward-compatible change. Removing fields or changing their meaning requires a schema-version
@@ -26,6 +27,7 @@ mod sink;
 #[cfg(feature = "sqlite-store")]
 mod sqlite;
 mod store;
+mod store_recorder;
 mod validation;
 
 pub use content_mode::ExplainabilityContentMode;
@@ -59,4 +61,8 @@ pub use store::{
     DEFAULT_EVENT_QUERY_LIMIT, DEFAULT_RUN_QUERY_LIMIT, EventQuery, ExplainabilityStore,
     ExplainabilityStoreError, InMemoryExplainabilityStore, MAX_EVENT_QUERY_LIMIT,
     MAX_RUN_QUERY_LIMIT, RunCompletion, RunListCursor, RunQuery,
+};
+pub use store_recorder::{
+    StoreExplainabilityError, StoreExplainabilityOperation, StoreExplainabilityOptions,
+    StoreExplainabilityRecorder,
 };

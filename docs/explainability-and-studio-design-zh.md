@@ -1806,15 +1806,16 @@ sequence > 12
 ```text
 GraphLoom Core
       ↓ await ExplainabilitySink::emit
-bounded adapter queue
+StoreExplainabilityRecorder
+      ├── bounded adapter queue（已实现）
       ↓
-single writer
+single writer（已实现）
       ↓ 分配 sequence
 生成并持久化 ExplainabilityEnvelope
       ↓
 Store
       ├── 历史回放
-      └── Live Hub / SSE 实时展示
+      └── Live Hub / SSE 实时展示（未实现）
 ```
 
 核心原则：
@@ -1841,6 +1842,11 @@ Store
 5. 持久化成功
 6. 将同一个 Envelope 广播给实时订阅者
 ```
+
+第 1～5 步已由 `StoreExplainabilityRecorder`
+（`crates/graphloom/src/explainability/store_recorder.rs`）实现；第 6 步是
+下一阶段 Live Hub 的固定插入点：`Store.append_events` 成功之后 writer 仍持有
+同一个 Envelope，可直接广播，不需要重新构造。
 
 这样可以保证：
 
@@ -2021,6 +2027,9 @@ ExplainabilityStore V1
 InMemoryExplainabilityStore
     → reference / test backend（已实现）
 
+StoreExplainabilityRecorder
+    → bounded queue + single writer persistence adapter（已实现）
+
 SqliteExplainabilityStore
     → persistent backend（已实现）
 
@@ -2034,7 +2043,7 @@ Store 写入架构：
 GraphLoom Core
     ↓ ExplainabilityRecord
 
-Future Studio Writer
+StoreExplainabilityRecorder（已实现）
     ↓ allocates sequence / envelope
 
 ExplainabilityStore
@@ -2049,6 +2058,19 @@ ExplainabilityStore
 * 不根据 `RunStarted`/`RunCompleted`/`RunFailed` Event 推导 Run status；
 * 不自动修改 Run status；
 * 完整遵守已冻结的 Store V1 合同。
+
+`StoreExplainabilityRecorder` 是中间持久化层：
+
+* `create_run`：显式创建 Run metadata（不从 Event 推导）；
+* `emit`：有界队列可靠接受 Record（await capacity，不丢 Record）；
+* `finish_run`：只作为 persistence barrier，不改变 Run status、
+  不生成 RunCompleted；
+* `complete_run`：显式把 Store Run 置为 terminal metadata；
+* `shutdown`：drain 已接受工作并结束 writer，不隐式 finish/complete。
+
+V1 只管理全新 Run：不支持 attach existing Run / resume sequence / 进程重启
+续写。crash/shutdown 后已持久化 prefix 保留，Run 可以保持 Running/Pending，
+但 writer 不会自动续写同一 Run ID。
 
 ## 19.4 InMemory 参考实现
 
@@ -2485,10 +2507,14 @@ mpsc receiver
     ↓
 写入 ExplainabilityStore
     ↓
-broadcast::Sender
+broadcast::Sender（未实现）
     ↓
-SSE subscribers
+SSE subscribers（未实现）
 ```
+
+持久化 writer 层本身已作为 `StoreExplainabilityRecorder` 在 GraphLoom Lib
+实现（`crates/graphloom/src/explainability/store_recorder.rs`），Studio
+服务后续直接复用，不需要再次实现 sequence allocation 或 Envelope 构造。
 
 ---
 
@@ -2501,7 +2527,8 @@ Explainability Sink 不得在 Query 热路径中执行阻塞 I/O。
 ```text
 GraphLoom Core
       ↓ await ExplainabilitySink::emit
-bounded adapter queue
+StoreExplainabilityRecorder
+      ├── bounded adapter queue
       ↓
 single writer
       ↓
@@ -2509,8 +2536,14 @@ single writer
       ↓
 Store / JSONL
       ↓ 持久化成功后
-Live Hub / SSE
+Live Hub / SSE（未实现）
 ```
+
+`StoreExplainabilityRecorder` 已实现该数据流（Store 分支）：bounded queue
+默认容量 256，backpressure 通过 await capacity 提供；`finish_run` 是
+persistence barrier；accepted Record 一旦写入失败，writer 进入 FAILED 并
+向 `finish_run`/`shutdown` 暴露根错误。`Store.append_events` 成功点保留同一
+Envelope，是未来 Live Hub 广播的唯一插入位置。
 
 ## 23.1 Core 到 Store 的可靠投递
 
