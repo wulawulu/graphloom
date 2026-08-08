@@ -154,6 +154,9 @@ pub enum StoreExplainabilityError {
         #[source]
         source: JoinError,
     },
+    /// No Tokio runtime is available to host the persistence writer.
+    #[error("a Tokio runtime is required to start the explainability persistence writer")]
+    RuntimeUnavailable,
 }
 
 /// Owner of one bounded Store Sink and its single writer task.
@@ -174,13 +177,27 @@ impl fmt::Debug for StoreExplainabilityRecorder {
 }
 
 impl StoreExplainabilityRecorder {
-    /// Start a bounded, single-writer persistence adapter over `store`.
-    #[must_use]
+    /// Start a bounded Store persistence writer.
+    ///
+    /// The writer task is spawned on the current Tokio runtime, so this
+    /// constructor must be called from inside an active runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreExplainabilityError::RuntimeUnavailable`] when called
+    /// outside an active Tokio runtime. In that case no writer task is
+    /// spawned, no background resource is created, and the Store is not
+    /// touched.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "public constructor takes owned options so callers can chain builder methods"
     )]
-    pub fn new(store: Arc<dyn ExplainabilityStore>, options: StoreExplainabilityOptions) -> Self {
+    pub fn new(
+        store: Arc<dyn ExplainabilityStore>,
+        options: StoreExplainabilityOptions,
+    ) -> Result<Self, StoreExplainabilityError> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| StoreExplainabilityError::RuntimeUnavailable)?;
         let (sender, receiver) = mpsc::channel(options.queue_capacity().get());
         let writer_status = Arc::new(AtomicU8::new(WRITER_RUNNING));
         let runs = Arc::new(DashMap::new());
@@ -189,12 +206,12 @@ impl StoreExplainabilityRecorder {
             Arc::clone(&writer_status),
             Arc::clone(&runs),
         ));
-        let writer = tokio::spawn(async move {
+        let writer = runtime.spawn(async move {
             let _status_guard =
                 WriterStatusGuard::new(Arc::clone(&writer_status), Arc::clone(&runs));
             run_writer(store, receiver, writer_status, runs).await
         });
-        Self { sink, writer }
+        Ok(Self { sink, writer })
     }
 
     /// Return the shared reliable Sink owned by this Recorder.
@@ -690,9 +707,10 @@ async fn persist_record(
             operation: StoreExplainabilityOperation::AppendEvents,
             source,
         })?;
-    // Persistence succeeded and the writer still owns `envelope`. Future Live
-    // Hub broadcast will be inserted exactly here, after Store confirmation.
+    // Persistence and writer sequence state are now committed.
     state.sequences.insert(run_id, sequence);
+    // Future Live Hub broadcast must be inserted exactly here, using this
+    // same persisted `envelope`.
     Ok(())
 }
 
@@ -749,7 +767,7 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        DEFAULT_QUEUE_CAPACITY, RUN_ACTIVE, StoreExplainabilityOptions,
+        DEFAULT_QUEUE_CAPACITY, RUN_ACTIVE, StoreExplainabilityError, StoreExplainabilityOptions,
         StoreExplainabilityRecorder, StoreWriterState, persist_record,
     };
     use crate::explainability::{
@@ -787,10 +805,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_should_reject_store_recorder_creation_without_tokio_runtime() {
+        let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
+        let result = StoreExplainabilityRecorder::new(store, StoreExplainabilityOptions::new());
+        assert!(matches!(
+            result,
+            Err(StoreExplainabilityError::RuntimeUnavailable)
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_should_redact_recorder_debug_output() {
         let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-        let recorder = StoreExplainabilityRecorder::new(store, StoreExplainabilityOptions::new());
+        let recorder = StoreExplainabilityRecorder::new(store, StoreExplainabilityOptions::new())
+            .expect("recorder");
         let debug = format!("{recorder:?}");
         let sink_debug = format!("{:?}", recorder.sink());
         assert_eq!(debug, "StoreExplainabilityRecorder { .. }");

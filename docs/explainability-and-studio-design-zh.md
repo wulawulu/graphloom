@@ -2061,12 +2061,19 @@ ExplainabilityStore
 
 `StoreExplainabilityRecorder` 是中间持久化层：
 
+* `new(...)` 是可失败的构造函数：必须从活动 Tokio runtime 内调用；
+  没有 runtime 时返回 `RuntimeUnavailable`，不 spawn writer task、
+  不创建后台资源、不调用 Store、不 panic；
 * `create_run`：显式创建 Run metadata（不从 Event 推导）；
 * `emit`：有界队列可靠接受 Record（await capacity，不丢 Record）；
 * `finish_run`：只作为 persistence barrier，不改变 Run status、
   不生成 RunCompleted；
 * `complete_run`：显式把 Store Run 置为 terminal metadata；
 * `shutdown`：drain 已接受工作并结束 writer，不隐式 finish/complete。
+
+控制命令（create/complete/finish）一旦成功进入 writer queue，即使调用方
+Future 随后被取消，writer 仍可能继续执行该 operation；本阶段不实现撤销
+协议。`create_run` 调用方只有收到 `Ok` 后才把 Run 视为可用。
 
 V1 只管理全新 Run：不支持 attach existing Run / resume sequence / 进程重启
 续写。crash/shutdown 后已持久化 prefix 保留，Run 可以保持 Running/Pending，
@@ -2542,8 +2549,20 @@ Live Hub / SSE（未实现）
 `StoreExplainabilityRecorder` 已实现该数据流（Store 分支）：bounded queue
 默认容量 256，backpressure 通过 await capacity 提供；`finish_run` 是
 persistence barrier；accepted Record 一旦写入失败，writer 进入 FAILED 并
-向 `finish_run`/`shutdown` 暴露根错误。`Store.append_events` 成功点保留同一
-Envelope，是未来 Live Hub 广播的唯一插入位置。
+向 `finish_run`/`shutdown` 暴露根错误。post-persistence 顺序固定为：
+
+```text
+Store.append_events succeeds
+↓
+writer sequence committed（state.sequences.insert）
+↓
+future Live Hub broadcast（使用同一个已持久化 Envelope）
+```
+
+未来 Live Hub 广播只能插入 committed sequence 更新之后；0 订阅者、慢客户端、
+断线或广播队列满都不能影响已成功的 persistence。当前
+`Store.append_events` 成功点保留同一 Envelope，是未来 Live Hub 广播的唯一
+插入位置。
 
 ## 23.1 Core 到 Store 的可靠投递
 

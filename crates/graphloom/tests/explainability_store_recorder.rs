@@ -335,10 +335,17 @@ async fn shutdown_shared(recorder: Arc<StoreExplainabilityRecorder>) -> TestResu
     Ok(())
 }
 
+fn new_recorder(
+    store: Arc<dyn ExplainabilityStore>,
+    options: StoreExplainabilityOptions,
+) -> StoreExplainabilityRecorder {
+    StoreExplainabilityRecorder::new(store, options).expect("recorder")
+}
+
 #[tokio::test]
 async fn test_should_persist_create_emit_finish_complete_lifecycle() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -395,8 +402,7 @@ async fn test_should_persist_create_emit_finish_complete_lifecycle() -> TestResu
 #[tokio::test]
 async fn test_should_preserve_run_metadata_from_create_input() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("metadata");
     let mut run = query_run(id.clone(), timestamp(2, 8));
     run.query = Some(QUERY_SECRET_SENTINEL.to_owned());
@@ -428,7 +434,7 @@ async fn test_should_preserve_run_metadata_from_create_input() -> TestResult {
 #[tokio::test]
 async fn test_should_allocate_independent_sequences_per_run() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -465,7 +471,7 @@ async fn test_should_allocate_independent_sequences_per_run() -> TestResult {
 #[tokio::test]
 async fn test_should_preserve_queue_acceptance_order_ignoring_timestamps() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -489,7 +495,7 @@ async fn test_should_preserve_queue_acceptance_order_ignoring_timestamps() -> Te
 #[tokio::test]
 async fn test_should_assign_sequence_from_writer_not_record() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -509,7 +515,7 @@ async fn test_should_assign_sequence_from_writer_not_record() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_should_serialize_concurrent_emits_without_gaps_or_duplicates() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -545,7 +551,7 @@ async fn test_should_serialize_concurrent_emits_without_gaps_or_duplicates() -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_should_apply_bounded_backpressure_without_dropping_records() -> TestResult {
     let store = Arc::new(BlockingExplainabilityStore::with_append_gate());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         small_options(),
     ));
@@ -606,7 +612,7 @@ async fn test_should_apply_bounded_backpressure_without_dropping_records() -> Te
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_should_make_finish_run_a_persistence_barrier() -> TestResult {
     let store = Arc::new(BlockingExplainabilityStore::with_append_gate());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         StoreExplainabilityOptions::new(),
     ));
@@ -656,8 +662,7 @@ async fn test_should_make_finish_run_a_persistence_barrier() -> TestResult {
 #[tokio::test]
 async fn test_should_reject_emit_before_create() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("emit-before-create");
     let error = recorder
         .sink()
@@ -677,7 +682,7 @@ async fn test_should_reject_emit_before_create() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_should_reject_emit_while_create_is_in_flight() -> TestResult {
     let store = Arc::new(BlockingExplainabilityStore::with_create_gate());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         StoreExplainabilityOptions::new(),
     ));
@@ -714,8 +719,7 @@ async fn test_should_reject_emit_while_create_is_in_flight() -> TestResult {
 #[tokio::test]
 async fn test_should_reject_emit_after_finish() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("emit-after-finish");
     recorder
         .create_run(query_run(id.clone(), timestamp(11, 8)))
@@ -739,7 +743,7 @@ async fn test_should_reject_emit_after_finish() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_should_linearize_finish_and_emit_without_late_persistence() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -783,7 +787,7 @@ async fn test_should_linearize_finish_and_emit_without_late_persistence() -> Tes
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_should_make_finish_idempotent() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder = Arc::new(StoreExplainabilityRecorder::new(
+    let recorder = Arc::new(new_recorder(
         Arc::clone(&store),
         StoreExplainabilityOptions::new(),
     ));
@@ -817,8 +821,7 @@ async fn test_should_make_finish_idempotent() -> TestResult {
 #[tokio::test]
 async fn test_should_reject_complete_before_finish() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("complete-before-finish");
     recorder
         .create_run(query_run(id.clone(), timestamp(14, 8)))
@@ -855,8 +858,7 @@ async fn test_should_reject_complete_before_finish() -> TestResult {
 #[tokio::test]
 async fn test_should_not_derive_run_status_from_events() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let completed_run = run_id("event-completed");
     let failed_run = run_id("event-failed");
     recorder
@@ -915,8 +917,7 @@ async fn test_should_not_derive_run_status_from_events() -> TestResult {
 #[tokio::test]
 async fn test_should_apply_completion_retry_and_conflict() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("completion-retry");
     recorder
         .create_run(query_run(id.clone(), timestamp(16, 8)))
@@ -992,8 +993,7 @@ async fn test_should_apply_completion_retry_and_conflict() -> TestResult {
 #[tokio::test]
 async fn test_should_reject_duplicate_create_without_killing_writer() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let run_a = run_id("duplicate-a");
     recorder
         .create_run(query_run(run_a.clone(), timestamp(17, 8)))
@@ -1025,7 +1025,7 @@ async fn test_should_reject_duplicate_create_without_killing_writer() -> TestRes
 async fn test_should_keep_writer_alive_after_create_failure() -> TestResult {
     let store = Arc::new(FailingExplainabilityStore::new());
     store.fail_create.store(true, AtomicOrdering::Release);
-    let recorder = StoreExplainabilityRecorder::new(
+    let recorder = new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         StoreExplainabilityOptions::new(),
     );
@@ -1068,7 +1068,7 @@ async fn test_should_keep_writer_alive_after_create_failure() -> TestResult {
 #[tokio::test]
 async fn test_should_fail_writer_on_append_failure_after_acceptance() -> TestResult {
     let store = Arc::new(FailingExplainabilityStore::new());
-    let recorder = StoreExplainabilityRecorder::new(
+    let recorder = new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         StoreExplainabilityOptions::new(),
     );
@@ -1119,8 +1119,7 @@ async fn test_should_fail_writer_on_append_failure_after_acceptance() -> TestRes
 #[tokio::test]
 async fn test_should_fail_writer_on_external_terminal_mismatch() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("external-terminal");
     recorder
         .create_run(query_run(id.clone(), timestamp(20, 8)))
@@ -1157,8 +1156,7 @@ async fn test_should_fail_writer_on_external_terminal_mismatch() -> TestResult {
 #[tokio::test]
 async fn test_should_fail_writer_on_external_delete() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("external-delete");
     recorder
         .create_run(query_run(id.clone(), timestamp(21, 8)))
@@ -1188,8 +1186,7 @@ async fn test_should_fail_writer_on_external_delete() -> TestResult {
 #[tokio::test]
 async fn test_should_drain_on_shutdown_without_implicit_terminal() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("shutdown-prefix");
     recorder
         .create_run(query_run(id.clone(), timestamp(22, 8)))
@@ -1215,8 +1212,7 @@ async fn test_should_drain_on_shutdown_without_implicit_terminal() -> TestResult
 #[tokio::test]
 async fn test_should_reject_sink_after_shutdown() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("sink-after-shutdown");
     recorder
         .create_run(query_run(id.clone(), timestamp(23, 8)))
@@ -1246,8 +1242,7 @@ async fn test_should_reject_sink_after_shutdown() -> TestResult {
 #[tokio::test]
 async fn test_should_match_jsonl_envelope_round_trip() -> TestResult {
     let store: Arc<dyn ExplainabilityStore> = Arc::new(InMemoryExplainabilityStore::new());
-    let recorder =
-        StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+    let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
     let id = run_id("jsonl-parity");
     recorder
         .create_run(query_run(id.clone(), timestamp(24, 8)))
@@ -1282,7 +1277,7 @@ async fn test_should_match_jsonl_envelope_round_trip() -> TestResult {
 async fn test_should_keep_errors_and_debug_free_of_secrets() -> TestResult {
     let store = Arc::new(FailingExplainabilityStore::new());
     store.fail_create.store(true, AtomicOrdering::Release);
-    let recorder = StoreExplainabilityRecorder::new(
+    let recorder = new_recorder(
         Arc::clone(&store) as Arc<dyn ExplainabilityStore>,
         StoreExplainabilityOptions::new(),
     );
@@ -1335,8 +1330,7 @@ async fn test_should_support_store_recorder_against_sqlite() -> TestResult {
     {
         let store: Arc<dyn ExplainabilityStore> =
             Arc::new(SqliteExplainabilityStore::open(&path).await?);
-        let recorder =
-            StoreExplainabilityRecorder::new(Arc::clone(&store), StoreExplainabilityOptions::new());
+        let recorder = new_recorder(Arc::clone(&store), StoreExplainabilityOptions::new());
         recorder
             .create_run(query_run(id.clone(), timestamp(26, 8)))
             .await?;
