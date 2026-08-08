@@ -1,0 +1,30 @@
+[package]
+name = "graphloom-studio"
+description = "Host-side Studio services for GraphLoom"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = []
+sqlite-store = ["graphloom/sqlite-store"]
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+graphloom.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower = { workspace = true, features = ["util"] }

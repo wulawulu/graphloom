@@ -1636,9 +1636,9 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 阶段通过超时或 abandoned 状态处理。
 
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
-也不会产生 Local 事件。JSONL Recorder、bounded channel Adapter 和每 Run sequence allocator
-已经实现；SQLite、Turso、DuckDB、Store、SSE、Studio 和 OpenTelemetry 仍属于后续阶段，
-尚未实现。
+也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
+sequence allocator、Live Hub 与 host-side Explainability SSE service 已实现；Turso、DuckDB、
+Studio Query/Run/Graph HTTP API、前端和 OpenTelemetry 仍属于后续阶段。
 
 前端可据此处理：
 
@@ -1672,9 +1672,11 @@ LlmRequestCompleted
 
 # 17. 实时通信协议
 
-底层实时 fan-out 已由 `graphloom::explainability::ExplainabilityLiveHub` 实现；本节的
-SSE、HTTP 路由和浏览器协议仍属于下一阶段。Live Hub 只接收成功持久化的
-`ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供 HTTP 能力。
+底层实时 fan-out 已由 `graphloom::explainability::ExplainabilityLiveHub` 实现，host-side
+Explainability SSE 由独立的 `graphloom-studio` crate 实现。依赖方向固定为
+`graphloom-studio → graphloom`；GraphLoom Lib 不依赖 Axum、SSE 或浏览器协议。Live Hub
+只接收成功持久化的 `ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供
+HTTP 能力。Studio Query API、Run History HTTP API、Graph API 和前端尚未实现。
 
 ## 17.1 第一版使用 SSE
 
@@ -1686,11 +1688,11 @@ HTTP + Server-Sent Events
 
 而不是 WebSocket。
 
-交互模式是：
+当前已实现的交互模式是：
 
 ```text
-浏览器 ──POST Query──→ Studio
-浏览器 ←──SSE Events── Studio
+既有宿主流程 ──创建并执行 Run──→ GraphLoom
+浏览器      ←──SSE Events────── graphloom-studio
 ```
 
 这属于典型的后端单向持续推送。
@@ -1718,7 +1720,17 @@ WebSocket 暂不作为第一阶段要求。
 
 ---
 
-## 17.2 推荐 HTTP API
+## 17.2 HTTP API 状态
+
+当前唯一已实现的 route 是：
+
+```http
+GET /api/explainability/runs/{run_id}/events
+```
+
+它只读调用 `ExplainabilityStore::get_run/load_events` 与
+`ExplainabilityLiveHub::subscribe`；不创建、完成、取消或删除 Run，也不绑定 TCP 端口。
+以下接口仍是后续建议，并未实现：
 
 提交 Query：
 
@@ -1734,13 +1746,6 @@ POST /api/queries
 }
 ```
 
-订阅事件：
-
-```http
-GET /api/runs/{run_id}/events
-Accept: text/event-stream
-```
-
 列出历史 Run：
 
 ```http
@@ -1751,12 +1756,6 @@ GET /api/runs
 
 ```http
 GET /api/runs/{run_id}
-```
-
-读取历史事件：
-
-```http
-GET /api/runs/{run_id}/events?after_sequence=0
 ```
 
 取消 Query：
@@ -1781,7 +1780,7 @@ DELETE /api/runs/{run_id}
 
 ```text
 id: 12
-event: entities_selected
+event: explainability
 data: {"schema_version":1,"sequence":12,"record":{"run_id":"01J...",...}}
 ```
 
@@ -1791,6 +1790,8 @@ data: {"schema_version":1,"sequence":12,"record":{"run_id":"01J...",...}}
 Last-Event-ID: 12
 ```
 
+`id` 严格等于 decimal `ExplainabilityEnvelope.sequence`，`data` 是完整 Envelope 的 compact
+JSON；业务事件类型仍从 `data.record.event.type` 读取，不建立第二套 SSE event-name schema。
 服务端应补发：
 
 ```text
@@ -1820,7 +1821,7 @@ writer committed sequence update
       ↓ best effort, bounded, non-blocking
 ExplainabilityLiveHub（已实现，one channel / active Run）
       ↓
-subscriber（SSE adapter 尚未实现）
+graphloom-studio Explainability SSE stream（已实现）
 ```
 
 核心原则：
@@ -1884,7 +1885,7 @@ Query 可能在浏览器建立 SSE 之前就已经产生事件。
 3. 如果为 Some，先注册 live receiver，再读取 snapshot_sequence = S
 4. 从 last_seen 开始分页读取 Store，至少追到 S
 5. 再消费 live receiver，sequence <= last_seen 的重复项跳过
-6. 收到 Lagged 时，从 Store.load_events(after_sequence = last_seen) 恢复
+6. 收到 Lagged 时重新 subscribe，读取新的 snapshot，再从 Store 恢复
 7. 收到 Closed 时做最后一次 Store catch-up，然后结束 stream
 ```
 
@@ -1903,6 +1904,43 @@ receiver 注册必须先于 `snapshot_sequence` 读取。若并发 publish 在�
 之后提交给 Hub 的最新 sequence；它是 Store catch-up boundary，不是任一 subscriber 的
 delivery ACK。Store 的 `after_sequence + limit` 已足够：分页若读到 `> S` 的事件，仍按
 sequence 去重，无需为 Store V1 增加 upper bound。
+
+已实现状态机的完整恢复分支为：
+
+```text
+HTTP Last-Event-ID = L（否则 query after_sequence，否则 0）
+↓
+Store.get_run preflight
+↓
+LiveHub.subscribe
+├── None
+│   └── Store replay after L → exhaustion → EOF
+└── Some(subscription)
+    ↓ receiver 已注册；读取 snapshot S
+    ↓ Store replay after L，至少追到 S
+    ↓ Live recv
+       ├── sequence <= last_seen → overlap dedup
+       ├── sequence == last_seen + 1 → SSE send
+       ├── sequence gap → resubscribe + NEW snapshot + Store recovery
+       ├── Lagged → resubscribe + NEW snapshot + Store recovery
+       └── Closed → final Store catch-up → EOF
+```
+
+Store replay 每连接每次只读取 64 个 Envelope；一页 drain 完才读取下一页，不缓存完整历史，
+也不建立 per-client relay task 或无界 channel。Store page 必须与请求 Run 一致并从
+`last_seen + 1` 严格连续；wrong-run、duplicate、gap 或 out-of-order 都终止连接，不能排序、
+跳过或重新编号。若 snapshot target 在 Store 中不可达，同样作为内部合同损坏终止连接。
+
+`Last-Event-ID` 只接受未 trim 的 ASCII decimal `u64`。Header 优先于 query cursor；cursor
+大于 preflight `event_count` 返回 409。不存在的 Run 返回 404，非法请求返回 400，preflight
+Store failure 返回 500，响应均为固定低信息文本。SSE headers 发出后的 Store/序列化错误只能
+安全终止 stream，客户端随后按最后收到的 SSE ID 重连；不会构造新的 `event: error` schema。
+SSE 使用 15 秒空 comment keepalive，keepalive 不进入 Store 或 sequence。
+
+`Closed → final catch-up → EOF` 只表示当前 server 已无更多实时/持久化事件可发送，绝不表示
+`Run.status == Completed`。`RunCompleted` / `RunFailed` Envelope 与其他 Envelope 一样只是数据，
+不会驱动 SSE 或 Hub 生命周期。客户端断开只 drop stream/subscription，不 cancel、finish 或
+complete Run；服务端不保存 per-client cursor registry 或 durable subscriber ACK。
 
 ---
 
@@ -2051,10 +2089,10 @@ ExplainabilityLiveHub
 SqliteExplainabilityStore
     → persistent backend（已实现）
 
-Studio
-    → not implemented
+graphloom-studio host-side service library
+    → Explainability SSE implemented
 
-SSE / Studio HTTP
+Studio Query / Run History / Graph HTTP API 与 Frontend
     → not implemented
 ```
 
@@ -2545,7 +2583,7 @@ mpsc receiver
     ↓ writer sequence commit
 ExplainabilityLiveHub / per-run broadcast::Sender（已实现）
     ↓
-SSE subscribers（未实现）
+graphloom-studio SSE subscribers（已实现）
 ```
 
 持久化 writer 层本身已作为 `StoreExplainabilityRecorder` 在 GraphLoom Lib
@@ -2574,7 +2612,7 @@ Store / JSONL
       ↓ 持久化成功后
 ExplainabilityLiveHub（已实现）
       ↓
-SSE（未实现）
+graphloom-studio Explainability SSE（已实现）
 ```
 
 `StoreExplainabilityRecorder` 已实现该数据流（Store 分支）：bounded queue
@@ -2627,7 +2665,9 @@ Completed；`RunCompleted` / `RunFailed` Event 也不驱动 channel close。
 普通 `tracing` / OpenTelemetry 属于可采样的运行时观测，不承担完整业务历史。SSE
 实时广播在 Store 持久化成功之后发生：慢客户端、断线或广播队列溢出可以导致客户端
 暂时漏过实时事件，但不能影响 Store，也不能反向定义 Core Sink 为 Best Effort。
-客户端使用 Store 中按 sequence 保存的事件和 `Last-Event-ID` 补发恢复。
+`graphloom-studio` 在 Lagged 或 live sequence gap 时重新订阅获取新 snapshot，再使用 Store
+中按 sequence 保存的事件恢复；Closed 时 final catch-up 后 EOF。HTTP body polling 直接驱动
+该状态机，没有 per-client background task，因此 HTTP backpressure 不会传回 persistence writer。
 
 ---
 
@@ -2920,6 +2960,9 @@ Recording Sink
 ---
 
 ## 28.6 SSE 测试
+
+Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 SQLite feature smoke
+覆盖以下合同：
 
 验证：
 
