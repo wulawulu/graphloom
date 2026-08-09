@@ -1637,8 +1637,10 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
 也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
-sequence allocator、Live Hub 与 host-side Explainability SSE service 已实现；Turso、DuckDB、
-Studio Query/Run/Graph HTTP API、前端和 OpenTelemetry 仍属于后续阶段。
+sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Run metadata
+与 Run history API 已实现；Turso、DuckDB、Graph HTTP API、前端和 OpenTelemetry 仍属于后续阶段。
+Basic、Global 与 DRIFT 尚未接入完整 Explainability 生命周期，因此 Studio 当前对这些 method
+返回 422，不伪造事件或创建无法完成的 Run。
 
 前端可据此处理：
 
@@ -1676,7 +1678,7 @@ LlmRequestCompleted
 Explainability SSE 由独立的 `graphloom-studio` crate 实现。依赖方向固定为
 `graphloom-studio → graphloom`；GraphLoom Lib 不依赖 Axum、SSE 或浏览器协议。Live Hub
 只接收成功持久化的 `ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供
-HTTP 能力。Studio Query API、Run History HTTP API、Graph API 和前端尚未实现。
+HTTP 能力。Studio Local Query、Run metadata/history 与 SSE API 已实现；Graph API 和前端尚未实现。
 
 ## 17.1 第一版使用 SSE
 
@@ -1722,41 +1724,38 @@ WebSocket 暂不作为第一阶段要求。
 
 ## 17.2 HTTP API 状态
 
-当前唯一已实现的 route 是：
+当前已实现的 routes 是：
 
 ```http
+POST /api/query
+GET  /api/explainability/runs
+GET  /api/explainability/runs/{run_id}
 GET /api/explainability/runs/{run_id}/events
 ```
 
-它只读调用 `ExplainabilityStore::get_run/load_events` 与
-`ExplainabilityLiveHub::subscribe`；不创建、完成、取消或删除 Run，也不绑定 TCP 端口。
-以下接口仍是后续建议，并未实现：
+`POST /api/query` 只接受 Local，先进行有界 admission，再由服务端生成 run ID；每个 Query
+拥有独立 Recorder，并在 `create_run` 的 Store ACK 与 LiveHub 注册均完成后才返回 202。
+GET metadata/history 只读 Store；SSE 继续组合 Store replay 与 LiveHub，不绑定 TCP 端口。
 
-提交 Query：
+Query 生命周期固定为：
 
-```http
-POST /api/queries
+```text
+POST /api/query
+→ try_acquire Query permit
+→ server run_id
+→ per-query StoreExplainabilityRecorder
+→ create_run（Store + LiveHub ready）
+→ HTTP 202
+→ GraphLoom Local Query
+→ Core terminal Event + finish_run
+→ Studio complete_run(Completed/Failed)
+→ Recorder shutdown
 ```
 
-返回：
-
-```json
-{
-  "run_id": "01J..."
-}
-```
-
-列出历史 Run：
-
-```http
-GET /api/runs
-```
-
-获取 Run：
-
-```http
-GET /api/runs/{run_id}
-```
+Core 拥有 `RunStarted`/`RunCompleted`/`RunFailed` 与 `finish_run`；Studio 只拥有 Run metadata
+创建、基于 Query 返回结果的 Completed/Failed transition 与 HTTP 编排。Studio 不重复 finish，
+也不直接调用 Store 绕过 Recorder。202 只表示 Run 已创建并接受执行，不保证 Query 成功。
+HTTP/SSE client disconnect 不取消 Query；本阶段没有 cancellation API 或 task registry。
 
 取消 Query：
 
@@ -2090,9 +2089,9 @@ SqliteExplainabilityStore
     → persistent backend（已实现）
 
 graphloom-studio host-side service library
-    → Explainability SSE implemented
+    → Explainability SSE + Local Query + Run metadata/history implemented
 
-Studio Query / Run History / Graph HTTP API 与 Frontend
+Studio Basic/Global/DRIFT Explainability Query、Graph HTTP API 与 Frontend
     → not implemented
 ```
 
@@ -2184,7 +2183,10 @@ SqliteExplainabilityStore
 ExplainabilityLiveHub
     → 已实现
 
-Studio / SSE / HTTP API
+Studio Explainability SSE / Local Query / Run metadata / Run history HTTP API
+    → 已实现
+
+Studio Graph API / Frontend / Auth / Query cancellation
     → 未实现
 ```
 

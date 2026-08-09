@@ -15,16 +15,16 @@ default = []
 sqlite-store = ["graphloom/sqlite-store"]
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 graphloom.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
-chrono.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 tower = { workspace = true, features = ["util"] }
