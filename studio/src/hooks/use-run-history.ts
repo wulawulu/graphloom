@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { listRuns } from "@/api/client"
 import type { ExplainabilityRun, RunHistoryCursor } from "@/api/types"
@@ -12,35 +12,61 @@ interface RunHistoryState {
 
 export function useRunHistory(): RunHistoryState & { refresh: () => void; loadMore: () => void } {
   const [state, setState] = useState<RunHistoryState>({ runs: [], cursor: null, loading: true, error: null })
-  const [revision, setRevision] = useState(0)
-  const refresh = useCallback(() => setRevision((value) => value + 1), [])
+  const activeRequest = useRef<AbortController | null>(null)
 
-  useEffect(() => {
+  const beginRequest = useCallback((): AbortController => {
+    activeRequest.current?.abort()
     const controller = new AbortController()
+    activeRequest.current = controller
+    return controller
+  }, [])
+
+  const refresh = useCallback(() => {
+    const controller = beginRequest()
     setState((current) => ({ ...current, loading: true, error: null }))
     void listRuns(undefined, controller.signal)
-      .then((response) => setState({ runs: response.runs, cursor: response.next_cursor, loading: false, error: null }))
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." }))
-        }
+      .then((response) => {
+        if (activeRequest.current !== controller) return
+        activeRequest.current = null
+        setState({ runs: response.runs, cursor: response.next_cursor, loading: false, error: null })
       })
-    return () => controller.abort()
-  }, [revision])
+      .catch(() => {
+        if (activeRequest.current !== controller || controller.signal.aborted) return
+        activeRequest.current = null
+        setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." }))
+      })
+  }, [beginRequest])
+
+  useEffect(() => {
+    refresh()
+    return () => {
+      activeRequest.current?.abort()
+      activeRequest.current = null
+    }
+  }, [refresh])
 
   const loadMore = useCallback(() => {
     if (state.cursor === null || state.loading) return
     const cursor = state.cursor
+    const controller = beginRequest()
     setState((current) => ({ ...current, loading: true, error: null }))
-    void listRuns(cursor)
-      .then((response) => setState((current) => ({
-        runs: [...current.runs, ...response.runs.filter((run) => !current.runs.some((existing) => existing.run_id === run.run_id))],
-        cursor: response.next_cursor,
-        loading: false,
-        error: null,
-      })))
-      .catch(() => setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." })))
-  }, [state.cursor, state.loading])
+    void listRuns(cursor, controller.signal)
+      .then((response) => {
+        if (activeRequest.current !== controller) return
+        activeRequest.current = null
+        setState((current) => ({
+          runs: [...current.runs, ...response.runs.filter((run) => !current.runs.some((existing) => existing.run_id === run.run_id))],
+          cursor: response.next_cursor,
+          loading: false,
+          error: null,
+        }))
+      })
+      .catch(() => {
+        if (activeRequest.current !== controller || controller.signal.aborted) return
+        activeRequest.current = null
+        setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." }))
+      })
+  }, [beginRequest, state.cursor, state.loading])
 
   return { ...state, refresh, loadMore }
 }

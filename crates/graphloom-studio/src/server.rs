@@ -179,6 +179,7 @@ async fn build_host_router(
     }
     Ok(router
         .route_service("/", ServeFile::new(index.clone()))
+        .nest_service("/assets", ServeDir::new(assets_dir.join("assets")))
         .fallback_service(ServeDir::new(assets_dir).fallback(ServeFile::new(index))))
 }
 
@@ -263,6 +264,18 @@ mod tests {
             .expect("response");
         assert_eq!(asset.status(), axum::http::StatusCode::OK);
         assert_eq!(body(asset).await, "STUDIO_ASSET");
+
+        let missing_asset = router
+            .clone()
+            .oneshot(
+                Request::get("/assets/missing.js")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_asset.status(), axum::http::StatusCode::NOT_FOUND);
+        assert!(!body(missing_asset).await.contains("STUDIO_INDEX"));
 
         let unknown_api = router
             .oneshot(
