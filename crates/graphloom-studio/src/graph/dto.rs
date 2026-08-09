@@ -23,6 +23,64 @@ pub struct GraphSummary {
     pub untyped_entity_count: u64,
 }
 
+/// Bounded, backend-resolved graph visualization projection.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct GraphProjection {
+    /// Entities required to draw this projection.
+    pub entities: Vec<GraphProjectionEntity>,
+    /// Relationships whose endpoints are stable entity identifiers.
+    pub relationships: Vec<GraphProjectionRelationship>,
+    /// Found entity seeds, including endpoints of relationship seeds.
+    pub seed_entity_ids: Vec<String>,
+    /// Found and resolvable relationship seeds.
+    pub seed_relationship_ids: Vec<String>,
+    /// Requested entity identifiers absent from the snapshot.
+    pub missing_entity_ids: Vec<String>,
+    /// Requested relationship identifiers absent from the snapshot.
+    pub missing_relationship_ids: Vec<String>,
+    /// Requested relationships whose endpoint titles cannot be resolved uniquely.
+    pub unresolved_relationship_ids: Vec<String>,
+    /// Number of relationships in the full snapshot with unresolved endpoints.
+    pub unresolved_relationship_count: u64,
+    /// Whether eligible resolved topology was omitted because of projection limits.
+    pub truncated: bool,
+}
+
+/// Compact entity metadata used only for graph visualization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphProjectionEntity {
+    /// Stable entity identifier.
+    pub id: String,
+    /// Display title.
+    pub title: String,
+    /// Optional semantic entity type.
+    pub entity_type: Option<String>,
+    /// Optional degree-derived rank.
+    pub rank: Option<i64>,
+}
+
+/// Compact relationship with backend-resolved stable endpoint identifiers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct GraphProjectionRelationship {
+    /// Stable relationship identifier.
+    pub id: String,
+    /// Stable source entity identifier.
+    pub source_entity_id: String,
+    /// Stable target entity identifier.
+    pub target_entity_id: String,
+    /// Original source entity title.
+    pub source: String,
+    /// Original target entity title.
+    pub target: String,
+    /// Optional relationship weight.
+    pub weight: Option<f64>,
+    /// Optional combined-degree rank.
+    pub rank: Option<i64>,
+}
+
 /// Compact entity list item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]

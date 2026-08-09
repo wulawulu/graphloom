@@ -6,7 +6,7 @@ use axum::{
     Json,
     extract::{
         Path, Query, State,
-        rejection::{PathRejection, QueryRejection},
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -15,17 +15,48 @@ use serde::{Deserialize, Serialize};
 
 use super::StudioApiState;
 use crate::graph::{
-    GraphCommunity, GraphDataSnapshot, GraphEntity, GraphRelationship, GraphSummary,
+    GraphCommunity, GraphDataSnapshot, GraphEntity, GraphProjectionError, GraphRelationship,
+    GraphSummary, overview, subgraph as project_subgraph,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 200;
 const MAX_ID_BYTES: usize = 256;
 const MAX_FILTER_BYTES: usize = 1024;
+const DEFAULT_PROJECTION_ENTITY_LIMIT: usize = 80;
+const DEFAULT_PROJECTION_RELATIONSHIP_LIMIT: usize = 160;
+const MAX_PROJECTION_ENTITY_LIMIT: usize = 200;
+const MAX_PROJECTION_RELATIONSHIP_LIMIT: usize = 400;
+const MAX_ENTITY_SEEDS: usize = 200;
+const MAX_RELATIONSHIP_SEEDS: usize = 400;
 
 const INVALID_GRAPH_REQUEST_BODY: &str = "invalid graph request";
 const GRAPH_ITEM_NOT_FOUND_BODY: &str = "graph item not found";
 const GRAPH_UNAVAILABLE_BODY: &str = "graph data is unavailable";
+const SUBGRAPH_LIMITS_TOO_SMALL_BODY: &str =
+    "graph subgraph limits are too small for the requested seeds";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GraphOverviewQuery {
+    max_entities: Option<usize>,
+    max_relationships: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GraphSubgraphRequest {
+    #[serde(default)]
+    entity_ids: Vec<String>,
+    #[serde(default)]
+    relationship_ids: Vec<String>,
+    #[serde(default = "default_subgraph_depth")]
+    depth: u8,
+    #[serde(default = "default_projection_entity_limit")]
+    max_entities: usize,
+    #[serde(default = "default_projection_relationship_limit")]
+    max_relationships: usize,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +99,56 @@ pub(super) async fn get_summary(State(state): State<Arc<StudioApiState>>) -> Res
     match summarize(&snapshot) {
         Ok(summary) => Json(summary).into_response(),
         Err(()) => fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY),
+    }
+}
+
+pub(super) async fn get_overview(
+    State(state): State<Arc<StudioApiState>>,
+    query: Result<Query<GraphOverviewQuery>, QueryRejection>,
+) -> Response {
+    let Ok(Query(query)) = query else {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    };
+    let max_entities = query
+        .max_entities
+        .unwrap_or(DEFAULT_PROJECTION_ENTITY_LIMIT);
+    let max_relationships = query
+        .max_relationships
+        .unwrap_or(DEFAULT_PROJECTION_RELATIONSHIP_LIMIT);
+    if !valid_projection_limits(max_entities, max_relationships) {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    }
+    let Ok(snapshot) = load_snapshot(&state).await else {
+        return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
+    };
+    Json(overview(&snapshot, max_entities, max_relationships)).into_response()
+}
+
+pub(super) async fn get_subgraph(
+    State(state): State<Arc<StudioApiState>>,
+    request: Result<Json<GraphSubgraphRequest>, JsonRejection>,
+) -> Response {
+    let Ok(Json(request)) = request else {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    };
+    if !valid_subgraph_request(&request) {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    }
+    let Ok(snapshot) = load_snapshot(&state).await else {
+        return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
+    };
+    match project_subgraph(
+        &snapshot,
+        &request.entity_ids,
+        &request.relationship_ids,
+        request.depth,
+        request.max_entities,
+        request.max_relationships,
+    ) {
+        Ok(projection) => Json(projection).into_response(),
+        Err(GraphProjectionError::SeedLimitsTooSmall) => {
+            fixed_error(StatusCode::BAD_REQUEST, SUBGRAPH_LIMITS_TOO_SMALL_BODY)
+        }
     }
 }
 
@@ -337,6 +418,38 @@ fn validated_page<const N: usize>(
         return Err(());
     }
     Ok(limit)
+}
+
+fn valid_subgraph_request(request: &GraphSubgraphRequest) -> bool {
+    (!request.entity_ids.is_empty() || !request.relationship_ids.is_empty())
+        && request.entity_ids.len() <= MAX_ENTITY_SEEDS
+        && request.relationship_ids.len() <= MAX_RELATIONSHIP_SEEDS
+        && request.depth <= 1
+        && valid_projection_limits(request.max_entities, request.max_relationships)
+        && request
+            .entity_ids
+            .iter()
+            .chain(&request.relationship_ids)
+            .all(|id| valid_id(id))
+}
+
+const fn valid_projection_limits(max_entities: usize, max_relationships: usize) -> bool {
+    max_entities > 0
+        && max_entities <= MAX_PROJECTION_ENTITY_LIMIT
+        && max_relationships > 0
+        && max_relationships <= MAX_PROJECTION_RELATIONSHIP_LIMIT
+}
+
+const fn default_subgraph_depth() -> u8 {
+    1
+}
+
+const fn default_projection_entity_limit() -> usize {
+    DEFAULT_PROJECTION_ENTITY_LIMIT
+}
+
+const fn default_projection_relationship_limit() -> usize {
+    DEFAULT_PROJECTION_RELATIONSHIP_LIMIT
 }
 
 fn valid_path_id(path: Result<Path<String>, PathRejection>) -> Option<String> {

@@ -85,6 +85,20 @@ async fn get_json(router: &Router, uri: &str) -> TestResult<(StatusCode, Value)>
     Ok((status, serde_json::from_slice(&bytes)?))
 }
 
+async fn post_json(router: &Router, uri: &str, body: Value) -> TestResult<(StatusCode, Value)> {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, serde_json::from_slice(&bytes)?))
+}
+
 #[tokio::test]
 async fn test_should_return_graph_summary_with_typed_and_untyped_counts() -> TestResult {
     let (service, router) = router(Arc::new(FakeGraphDataSource {
@@ -102,6 +116,148 @@ async fn test_should_return_graph_summary_with_typed_and_untyped_counts() -> Tes
     assert_eq!(value["untyped_entity_count"], 1);
     assert_eq!(format!("{service:?}"), "StudioApiService { .. }");
     assert!(!format!("{service:?}").contains("GRAPH_PATH_SECRET_SENTINEL"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_return_resolved_bounded_graph_overview() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+    let (status, value) = get_json(
+        &router,
+        "/api/graph/overview?max_entities=2&max_relationships=1",
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["entities"].as_array().map(Vec::len), Some(2));
+    assert_eq!(value["relationships"].as_array().map(Vec::len), Some(1));
+    let entity_ids = value["entities"]
+        .as_array()
+        .ok_or("overview entities")?
+        .iter()
+        .filter_map(|entity| entity["id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let relationship = value["relationships"]
+        .as_array()
+        .and_then(|relationships| relationships.first())
+        .ok_or("overview relationship")?;
+    assert!(entity_ids.contains(relationship["source_entity_id"].as_str().ok_or("source")?));
+    assert!(entity_ids.contains(relationship["target_entity_id"].as_str().ok_or("target")?));
+    assert_eq!(value["seed_entity_ids"], json!([]));
+    assert_eq!(value["unresolved_relationship_ids"], json!([]));
+    assert_eq!(value["truncated"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_return_seed_preserving_graph_subgraph() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+    let (status, value) = post_json(
+        &router,
+        "/api/graph/subgraph",
+        json!({
+            "entity_ids": ["entity-a"],
+            "relationship_ids": ["relationship-a"],
+            "depth": 1,
+            "max_entities": 80,
+            "max_relationships": 160
+        }),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(value["seed_entity_ids"].as_array().is_some_and(|ids| {
+        ids.iter().any(|id| id == "entity-a") && ids.iter().any(|id| id == "entity-b")
+    }));
+    assert_eq!(value["seed_relationship_ids"], json!(["relationship-a"]));
+    assert!(
+        value["relationships"]
+            .as_array()
+            .is_some_and(|relationships| {
+                relationships.iter().any(|relationship| {
+                    relationship["id"] == "relationship-a"
+                        && relationship["source_entity_id"] == "entity-a"
+                        && relationship["target_entity_id"] == "entity-b"
+                })
+            })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_invalid_projection_requests_with_fixed_errors() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+    for uri in [
+        "/api/graph/overview?max_entities=0",
+        "/api/graph/overview?max_entities=201",
+        "/api/graph/overview?max_relationships=0",
+        "/api/graph/overview?max_relationships=401",
+        "/api/graph/overview?unknown=1",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+            b"invalid graph request"
+        );
+    }
+
+    for body in [
+        json!({}),
+        json!({"entity_ids": ["entity-a"], "depth": 2}),
+        json!({"entity_ids": ["entity-a"], "max_entities": 0}),
+        json!({"entity_ids": ["entity-a"], "max_entities": 201}),
+        json!({"entity_ids": ["entity-a"], "max_relationships": 0}),
+        json!({"entity_ids": ["entity-a"], "max_relationships": 401}),
+        json!({"entity_ids": ["bad id"]}),
+        json!({"entity_ids": ["entity-a"], "unknown": true}),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/graph/subgraph")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+            b"invalid graph request"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_subgraph_limits_that_would_drop_seeds() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+    let response = router
+        .oneshot(
+            Request::post("/api/graph/subgraph")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "relationship_ids": ["relationship-a"],
+                    "max_entities": 1
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+        b"graph subgraph limits are too small for the requested seeds"
+    );
     Ok(())
 }
 

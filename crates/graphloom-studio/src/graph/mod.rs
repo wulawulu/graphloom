@@ -7,10 +7,13 @@
 mod data_source;
 mod dto;
 mod parquet;
+mod projection;
 
 pub use data_source::{GraphDataSnapshot, GraphDataSource, GraphDataSourceError};
 pub use dto::{
     GraphCommunity, GraphCommunityReportDetail, GraphCommunityReportSummary, GraphEntity,
-    GraphEntityDetail, GraphRelationship, GraphRelationshipDetail, GraphSummary,
+    GraphEntityDetail, GraphProjection, GraphProjectionEntity, GraphProjectionRelationship,
+    GraphRelationship, GraphRelationshipDetail, GraphSummary,
 };
 pub use parquet::ParquetGraphDataSource;
+pub(crate) use projection::{GraphProjectionError, overview, subgraph};

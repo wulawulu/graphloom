@@ -17,8 +17,8 @@ use tokio::sync::Semaphore;
 pub use self::query_result::{StudioQueryResult, StudioQueryUsage, StudioQueryUsageCategory};
 use self::{
     graph::{
-        get_community, get_community_report, get_entity, get_relationship, get_summary,
-        list_communities, list_entities, list_relationships,
+        get_community, get_community_report, get_entity, get_overview, get_relationship,
+        get_subgraph, get_summary, list_communities, list_entities, list_relationships,
     },
     query::{GraphLoomQueryRunner, QueryRunner, start_query},
     query_result::{QueryResultRegistry, get_query_result},
@@ -233,6 +233,8 @@ impl StudioApiService {
             .route("/api/explainability/runs", get(list_runs))
             .route("/api/explainability/runs/{run_id}", get(get_run))
             .route("/api/graph/summary", get(get_summary))
+            .route("/api/graph/overview", get(get_overview))
+            .route("/api/graph/subgraph", axum::routing::post(get_subgraph))
             .route("/api/graph/entities", get(list_entities))
             .route("/api/graph/entities/{entity_id}", get(get_entity))
             .route("/api/graph/relationships", get(list_relationships))
