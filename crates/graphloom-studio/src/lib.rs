@@ -12,3 +12,5 @@
 pub mod api;
 pub mod explainability;
 pub mod graph;
+#[cfg(feature = "server")]
+pub mod server;

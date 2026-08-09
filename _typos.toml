@@ -1,6 +1,8 @@
 [default.extend-words]
 # Preserved verbatim from GraphRAG 3.1.0's DRIFT primer prompt.
 communites = "communites"
+# Cytoscape Compound Spring Embedder layout identifier.
+cose = "cose"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "vendors/"]

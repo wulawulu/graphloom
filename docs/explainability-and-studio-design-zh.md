@@ -2,11 +2,11 @@
 
 ## 1. 文档状态
 
-* 状态：设计草案
+* 状态：已实现的架构合同（持续演进）
 * 适用项目：GraphLoom
 * 兼容基线：`graphrag-3.1.0-compat-v1`
 * 目标阶段：GraphLoom Explainability 与 Studio 实现
-* 最后更新：2026-08-08
+* 最后更新：2026-08-09
 
 本文定义 GraphLoom 在以下方面的职责边界和实现方向：
 
@@ -29,7 +29,8 @@ GraphLoom 当前既是：
 * 一个可被其他 Rust 应用调用的 Library；
 * 一个 GraphRAG 兼容的 Index、Update 和 Query 引擎。
 
-后续计划实现 GraphLoom Studio。
+GraphLoom Studio Frontend MVP 已实现，当前界面建立在已冻结的 Query、Result、Run、SSE 与
+Graph Explorer HTTP 合同之上。
 
 Studio 的主要界面包括：
 
@@ -1671,7 +1672,7 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
 也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
 sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Query Result、
-Run metadata、Run history API 与 Query-visible Graph Explorer API 已实现；Turso、DuckDB、前端和 OpenTelemetry
+Run metadata、Run history API、Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 OpenTelemetry
 仍属于后续阶段。
 Basic、Global 与 DRIFT 尚未接入完整 Explainability 生命周期，因此 Studio 当前对这些 method
 返回 422，不伪造事件或创建无法完成的 Run。
@@ -1712,8 +1713,8 @@ LlmRequestCompleted
 Explainability SSE 由独立的 `graphloom-studio` crate 实现。依赖方向固定为
 `graphloom-studio → graphloom`；GraphLoom Lib 不依赖 Axum、SSE 或浏览器协议。Live Hub
 只接收成功持久化的 `ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供
-HTTP 能力。Studio Local Query、Query Result、Run metadata/history、SSE 与 Graph Explorer read API
-已实现；前端尚未实现。
+HTTP 能力。Studio Local Query、Query Result、Run metadata/history、SSE、Graph Explorer read API
+与 React Frontend MVP 已实现。
 
 ## 17.1 第一版使用 SSE
 
@@ -2178,7 +2179,10 @@ SqliteExplainabilityStore
 graphloom-studio host-side service library
     → Explainability SSE + Local Query + Query Result + Run metadata/history + Graph Explorer implemented
 
-Studio Basic/Global/DRIFT Explainability Query 与 Frontend
+Studio React Frontend MVP
+    → Query + Result + Explainability Timeline + Run History + Graph Explorer implemented
+
+Studio Basic/Global/DRIFT Explainability Query
     → not implemented
 ```
 
@@ -2273,7 +2277,10 @@ ExplainabilityLiveHub
 Studio Explainability SSE / Local Query / Query Result / Run metadata / Run history / Graph Explorer HTTP API
     → 已实现
 
-Studio Frontend / Auth / Query cancellation
+Studio Frontend MVP
+    → 已实现
+
+Auth / Query cancellation
     → 未实现
 ```
 
@@ -3083,10 +3090,11 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 ## 29.2 Query Chat
 
 * 输入问题；
-  -选择 Query Method；
-  -流式回答；
-  -展示最终 Context；
-  -展示 usage。
+  -Local Query（Basic/Global/DRIFT 尚未开放完整 Explainability 生命周期）；
+  -Metadata/Content/Debug Explainability 模式；
+  -异步接受 Run；
+  -通过独立 Query Result API 展示最终回答；
+  -展示 elapsed 与 usage。
 
 ## 29.3 Local Query Explainability
 
@@ -3106,17 +3114,50 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
   -按时间排序；
   -按 Query Method 过滤；
   -查看运行状态；
-  -删除 Run；
   -加载历史事件。
 
-## 29.5 Offline Replay
+## 29.5 Explainability 与图谱联动
 
-* 从头回放；
-  -暂停；
-  -继续；
-  -单步；
-  -调整速度；
-  -直接跳转最终状态。
+* SSE 与 Store replay 共用 `ExplainabilityEnvelope`；
+  -按 sequence 排序与去重；
+  -未知 Event 使用 forward-compatible fallback；
+  -点击 Entity/Relationship/Graph Expansion Event 后高亮当前图谱预览中的稳定 ID；
+  -预览外或 title 歧义的节点/边不会被伪造。
+
+## 29.6 Frontend 与 Host 部署
+
+Frontend 使用 React 19、TypeScript、Vite、Tailwind CSS v4、shadcn/Radix 与 Cytoscape.js。
+浏览器只使用同源相对 `/api/*` URL，不使用外部 CDN、遥测或 raw HTML 渲染。开发模式为：
+
+```text
+Browser
+↓
+Vite :5173
+↓ /api proxy
+Rust Studio :8080
+```
+
+production-like 模式为：
+
+```text
+Browser
+↓
+Rust Studio :8080
+├── /api/*
+└── Vite static dist + SPA fallback
+```
+
+未知 `/api/*` 固定返回 404，不进入 SPA fallback。Host 默认只监听 `127.0.0.1:8080`，
+不提供认证；非本机暴露必须由部署层增加认证。
+
+Explainability Run 与 Event 默认持久化到项目下的
+`.graphloom-studio/explainability.sqlite`。Query Result V1 仍是 bounded、process-local FIFO
+registry：Run History 与 Explainability 可跨重启保留，而最终 Result 重启或淘汰后可返回 410。
+`ExplainabilityContentMode` 只控制解释过程的内容披露，不控制 Result API 中用户主动请求的最终回答。
+
+Graph Preview 每次只请求 bounded 的 Entity/Relationship page，限制浏览器 payload 与 Cytoscape
+元素数量；这不改变 `ParquetGraphDataSource` 当前 whole-table DataFrame read 的后端边界。
+每个新 HTTP request 重新读取 snapshot，当前未增加 cache。
 
 第一版不要求：
 
@@ -3220,11 +3261,15 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 
 ## Phase 8：Studio 前端
 
-1. Graph Explorer；
-   2.Query Chat；
-   3.Live Explainability；
-   4.Run History；
-   5.Offline Replay。
+已实现 MVP：
+
+1. Local Query composer；
+   2.Run History；
+   3.Live/historical Explainability Timeline；
+   4.Query Result Answer panel；
+   5.Query-visible Graph Explorer 与 Cytoscape preview；
+   6.Explainability stable ID → Graph highlight；
+   7.feature-gated Rust API/static host。
 
 ## Phase 9：后续扩展
 

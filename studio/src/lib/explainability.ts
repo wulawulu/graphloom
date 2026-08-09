@@ -1,0 +1,102 @@
+import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
+
+export type TimelineCategory = "Lifecycle" | "Retrieval" | "Graph" | "Context" | "LLM" | "Warning"
+
+export interface TimelineDescriptor {
+  label: string
+  category: TimelineCategory
+}
+
+const knownEvents: Record<string, TimelineDescriptor> = {
+  run_started: { label: "Run started", category: "Lifecycle" },
+  run_completed: { label: "Run completed", category: "Lifecycle" },
+  run_failed: { label: "Run failed", category: "Lifecycle" },
+  query_started: { label: "Query started", category: "Lifecycle" },
+  mapping_query_built: { label: "Mapping query built", category: "Retrieval" },
+  embedding_started: { label: "Embedding started", category: "Retrieval" },
+  embedding_completed: { label: "Embedding completed", category: "Retrieval" },
+  candidates_retrieved: { label: "Candidates retrieved", category: "Retrieval" },
+  candidates_filtered: { label: "Candidates filtered", category: "Retrieval" },
+  entities_selected: { label: "Entities selected", category: "Graph" },
+  graph_expansion_started: { label: "Graph expansion", category: "Graph" },
+  relationships_selected: { label: "Relationships selected", category: "Graph" },
+  community_reports_selected: { label: "Community reports selected", category: "Graph" },
+  covariates_selected: { label: "Covariates selected", category: "Graph" },
+  text_units_selected: { label: "Text units selected", category: "Context" },
+  context_budget_allocated: { label: "Context budget allocated", category: "Context" },
+  context_section_built: { label: "Context section built", category: "Context" },
+  context_completed: { label: "Context completed", category: "Context" },
+  llm_request_started: { label: "LLM request started", category: "LLM" },
+  llm_request_completed: { label: "LLM request completed", category: "LLM" },
+  warning: { label: "Warning", category: "Warning" },
+}
+
+export function describeEvent(event: ExplainabilityEventPayload): TimelineDescriptor {
+  return knownEvents[event.type] ?? {
+    label: event.type.replaceAll("_", " "),
+    category: "Lifecycle",
+  }
+}
+
+export function isTerminalEvent(event: ExplainabilityEventPayload): boolean {
+  return event.type === "run_completed" || event.type === "run_failed"
+}
+
+export function mergeEnvelopes(
+  current: readonly ExplainabilityEnvelope[],
+  incoming: ExplainabilityEnvelope,
+): ExplainabilityEnvelope[] {
+  if (current.some((value) => value.sequence === incoming.sequence)) {
+    return [...current]
+  }
+  return [...current, incoming].sort((left, right) => left.sequence - right.sequence)
+}
+
+interface CandidateLike { id?: unknown }
+
+function candidateIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((candidate: unknown) => {
+    if (typeof candidate !== "object" || candidate === null) return []
+    const id = (candidate as CandidateLike).id
+    return typeof id === "string" ? [id] : []
+  })
+}
+
+export interface GraphHighlight {
+  entityIds: string[]
+  relationshipIds: string[]
+}
+
+export function highlightFromEvent(event: ExplainabilityEventPayload): GraphHighlight | null {
+  if (event.type === "entities_selected") {
+    return { entityIds: candidateIds(event.entities), relationshipIds: [] }
+  }
+  if (event.type === "relationships_selected") {
+    return { entityIds: [], relationshipIds: candidateIds(event.relationships) }
+  }
+  if (event.type === "graph_expansion_started" && Array.isArray(event.seed_entity_ids)) {
+    return {
+      entityIds: event.seed_entity_ids.filter((value): value is string => typeof value === "string"),
+      relationshipIds: [],
+    }
+  }
+  return null
+}
+
+export function eventSummary(event: ExplainabilityEventPayload): string {
+  const numeric = (name: string): string | null =>
+    typeof event[name] === "number" ? `${name.replaceAll("_", " ")}: ${String(event[name])}` : null
+  const model = typeof event.model_id === "string" ? `model: ${event.model_id}` : null
+  const section = typeof event.section === "string"
+    ? `section: ${event.section}`
+    : typeof event.section === "object" && event.section !== null && "section" in event.section
+      ? `section: ${String(event.section.section)}`
+      : null
+  const candidates = ["entities", "relationships", "community_reports", "covariates", "text_units", "candidates"]
+    .map((key) => Array.isArray(event[key]) ? `${key.replaceAll("_", " ")}: ${String(event[key].length)}` : null)
+    .find((value) => value !== null)
+  return [model, section, candidates, numeric("elapsed_ms"), numeric("tokens_used"), numeric("input_tokens"), numeric("output_tokens")]
+    .filter((value): value is string => value !== null)
+    .join(" · ")
+}

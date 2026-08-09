@@ -8,3 +8,7 @@ __pycache__/
 
 debug
 /prompt_tune_real_llm/
+studio/node_modules/
+studio/dist/
+studio/coverage/
+**/.graphloom-studio/

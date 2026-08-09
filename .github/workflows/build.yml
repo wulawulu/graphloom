@@ -15,6 +15,32 @@ permissions:
   contents: read
 
 jobs:
+  studio-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.12"
+          cache: pnpm
+          cache-dependency-path: studio/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint frontend sources
+        run: pnpm lint
+      - name: Check frontend types
+        run: pnpm typecheck
+      - name: Test frontend
+        run: pnpm run test --run
+      - name: Build frontend
+        run: pnpm build
+
   build-rust:
     strategy:
       fail-fast: false

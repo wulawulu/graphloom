@@ -52,6 +52,7 @@ thiserror = "2.0.18"
 tiktoken-rs = "0.12.0"
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync"] }
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
+tower-http = { version = "0.6.11", default-features = false, features = ["fs"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.5"
 tracing-opentelemetry = { version = "0.33.0", default-features = false }

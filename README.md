@@ -18,6 +18,57 @@ For development:
 cargo run -p graphloom -- --help
 ```
 
+## GraphLoom Studio
+
+GraphLoom Studio is a trusted/local, desktop-first browser interface for Local
+Query, Explainability, final answers, Run history, and the query-visible graph.
+The server listens on `127.0.0.1:8080` by default and does not provide
+authentication. Binding it to a non-loopback address should only be done behind
+an appropriate authentication layer.
+
+For frontend development, run the API host and Vite separately:
+
+```bash
+# Terminal 1: API-only Rust host
+cargo run \
+  -p graphloom-studio \
+  --features server \
+  -- \
+  --root <project>
+
+# Terminal 2: Vite frontend with /api proxied to 127.0.0.1:8080
+cd studio
+pnpm install
+pnpm dev
+```
+
+Open `http://127.0.0.1:5173`. Set `VITE_DEV_API_TARGET` when the API host uses a
+different development address.
+
+For a production-like local build served entirely by Rust:
+
+```bash
+cd studio
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+
+cargo run \
+  -p graphloom-studio \
+  --features server \
+  -- \
+  --root <project> \
+  --assets-dir studio/dist
+```
+
+Open `http://127.0.0.1:8080`. The host serves `/api/*`, Vite assets, and the SPA
+fallback without turning unknown API routes into HTML responses. Explainability
+history is durable in `<project>/.graphloom-studio/explainability.sqlite` by
+default. Final Query results use the bounded, process-local Studio registry, so
+a historical completed Run can legitimately return HTTP 410 for its result
+after restart or eviction. Use `--explainability-db <path>` to override the
+database path; relative paths resolve from the project root.
+
 ## Architecture
 
 The `graphloom` crate is both the Rust library and the command-line binary.

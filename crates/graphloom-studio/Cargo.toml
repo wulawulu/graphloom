@@ -13,16 +13,24 @@ readme.workspace = true
 [features]
 default = []
 sqlite-store = ["graphloom/sqlite-store"]
+server = ["sqlite-store", "dep:clap", "dep:tower-http"]
 
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+clap = { workspace = true, optional = true }
 futures-util.workspace = true
 graphloom.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "signal"] }
+tower-http = { workspace = true, optional = true }
+
+[[bin]]
+name = "graphloom-studio"
+path = "src/main.rs"
+required-features = ["server"]
 
 [dev-dependencies]
 serde_json.workspace = true

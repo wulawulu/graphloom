@@ -134,6 +134,15 @@ update-reference-config-gate:
 test-all:
 	@cargo nextest run --all-features
 
+studio-build:
+	@cd studio && pnpm build
+
+studio-check:
+	@cd studio && pnpm lint
+	@cd studio && pnpm typecheck
+	@cd studio && pnpm run test --run
+	@cd studio && pnpm build
+
 bench-query:
 	@cargo test --workspace --all-features performance -- --ignored --nocapture
 
@@ -147,4 +156,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay prompt-tune-real-llm-check prompt-tune-real-llm-run prompt-tune-update-debug prompt-tune-random-real-llm prompt-tune-auto-real-llm llm-cache-proxy query-record-replay update-debug-audit test-update-debug-audit update-reference-config-gate test-all bench-query release update-submodule
+.PHONY: build test test-cli test-api test-integration test-compat test-query-record-replay prompt-tune-real-llm-check prompt-tune-real-llm-run prompt-tune-update-debug prompt-tune-random-real-llm prompt-tune-auto-real-llm llm-cache-proxy query-record-replay update-debug-audit test-update-debug-audit update-reference-config-gate test-all studio-build studio-check bench-query release update-submodule
