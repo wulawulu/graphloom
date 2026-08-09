@@ -25,8 +25,9 @@ use tokio::sync::{Semaphore, mpsc};
 use tower::ServiceExt;
 
 use super::{
-    StudioApiOptions, StudioApiService,
+    StudioApiOptions, StudioApiService, StudioQueryUsage, StudioQueryUsageCategory,
     query::{QueryRunner, QueryRunnerError},
+    query_result::{QueryExecutionResult, QueryResultRegistry},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +35,7 @@ enum RunnerOutcome {
     Success,
     Failure,
     MissingFinish,
+    ResultMaterializationFailure,
 }
 
 #[derive(Debug)]
@@ -53,6 +55,7 @@ struct ControlledRunner {
 #[derive(Debug, Clone, Copy)]
 enum StoreFailure {
     Create,
+    Complete,
     Get,
     List,
 }
@@ -67,6 +70,49 @@ struct FailingStore {
 struct CompletionProbeStore {
     inner: InMemoryExplainabilityStore,
     completed: Semaphore,
+}
+
+#[derive(Debug)]
+struct BlockingCompletionStore {
+    inner: InMemoryExplainabilityStore,
+    completion_entered: Semaphore,
+    completion_release: Semaphore,
+    completion_finished: Semaphore,
+}
+
+impl Default for BlockingCompletionStore {
+    fn default() -> Self {
+        Self {
+            inner: InMemoryExplainabilityStore::new(),
+            completion_entered: Semaphore::new(0),
+            completion_release: Semaphore::new(0),
+            completion_finished: Semaphore::new(0),
+        }
+    }
+}
+
+impl BlockingCompletionStore {
+    async fn wait_for_completion_entry(&self) {
+        let permit = self
+            .completion_entered
+            .acquire()
+            .await
+            .expect("completion entry probe open");
+        permit.forget();
+    }
+
+    fn release_completion(&self) {
+        self.completion_release.add_permits(1);
+    }
+
+    async fn wait_for_completion_finish(&self) {
+        let permit = self
+            .completion_finished
+            .acquire()
+            .await
+            .expect("completion finish probe open");
+        permit.forget();
+    }
 }
 
 impl Default for CompletionProbeStore {
@@ -142,6 +188,65 @@ impl ExplainabilityStore for CompletionProbeStore {
 }
 
 #[async_trait]
+impl ExplainabilityStore for BlockingCompletionStore {
+    async fn create_run(&self, run: ExplainabilityRun) -> Result<(), ExplainabilityStoreError> {
+        self.inner.create_run(run).await
+    }
+
+    async fn append_events(
+        &self,
+        events: &[ExplainabilityEnvelope],
+    ) -> Result<(), ExplainabilityStoreError> {
+        self.inner.append_events(events).await
+    }
+
+    async fn complete_run(
+        &self,
+        completion: RunCompletion,
+    ) -> Result<(), ExplainabilityStoreError> {
+        self.completion_entered.add_permits(1);
+        let permit = self
+            .completion_release
+            .acquire()
+            .await
+            .map_err(|_| store_failure("wait for Studio test completion release"))?;
+        permit.forget();
+        self.inner.complete_run(completion).await?;
+        self.completion_finished.add_permits(1);
+        Ok(())
+    }
+
+    async fn get_run(
+        &self,
+        run_id: &ExplainabilityRunId,
+    ) -> Result<Option<ExplainabilityRun>, ExplainabilityStoreError> {
+        self.inner.get_run(run_id).await
+    }
+
+    async fn list_runs(
+        &self,
+        query: &RunQuery,
+    ) -> Result<Vec<ExplainabilityRun>, ExplainabilityStoreError> {
+        self.inner.list_runs(query).await
+    }
+
+    async fn load_events(
+        &self,
+        run_id: &ExplainabilityRunId,
+        query: &EventQuery,
+    ) -> Result<Vec<ExplainabilityEnvelope>, ExplainabilityStoreError> {
+        self.inner.load_events(run_id, query).await
+    }
+
+    async fn delete_run(
+        &self,
+        run_id: &ExplainabilityRunId,
+    ) -> Result<(), ExplainabilityStoreError> {
+        self.inner.delete_run(run_id).await
+    }
+}
+
+#[async_trait]
 impl ExplainabilityStore for FailingStore {
     async fn create_run(&self, run: ExplainabilityRun) -> Result<(), ExplainabilityStoreError> {
         if matches!(self.failure, StoreFailure::Create) {
@@ -161,6 +266,9 @@ impl ExplainabilityStore for FailingStore {
         &self,
         completion: RunCompletion,
     ) -> Result<(), ExplainabilityStoreError> {
+        if matches!(self.failure, StoreFailure::Complete) {
+            return Err(store_failure("complete Studio test run"));
+        }
         self.inner.complete_run(completion).await
     }
 
@@ -215,7 +323,7 @@ impl fmt::Debug for ControlledRunner {
 
 #[async_trait]
 impl QueryRunner for ControlledRunner {
-    async fn run(&self, options: QueryOptions) -> Result<(), QueryRunnerError> {
+    async fn run(&self, options: QueryOptions) -> Result<QueryExecutionResult, QueryRunnerError> {
         let explainability = options
             .explainability
             .as_ref()
@@ -237,7 +345,7 @@ impl QueryRunner for ControlledRunner {
         permit.forget();
 
         if matches!(self.outcome, RunnerOutcome::MissingFinish) {
-            return Ok(());
+            return Ok(test_execution_result(&options.query));
         }
         let sink = explainability.sink();
         let run_id = explainability.run_id().clone();
@@ -257,7 +365,7 @@ impl QueryRunner for ControlledRunner {
             .then(|| options.query.clone());
         emit(sink, &run_id, ExplainabilityEvent::QueryStarted(started)).await?;
         match self.outcome {
-            RunnerOutcome::Success => {
+            RunnerOutcome::Success | RunnerOutcome::ResultMaterializationFailure => {
                 emit(
                     sink,
                     &run_id,
@@ -267,7 +375,11 @@ impl QueryRunner for ControlledRunner {
                 sink.finish_run(&run_id)
                     .await
                     .map_err(|_| QueryRunnerError::Failed)?;
-                Ok(())
+                if matches!(self.outcome, RunnerOutcome::ResultMaterializationFailure) {
+                    Err(QueryRunnerError::ResultMaterialization)
+                } else {
+                    Ok(test_execution_result(&options.query))
+                }
             }
             RunnerOutcome::Failure => {
                 emit(
@@ -284,9 +396,39 @@ impl QueryRunner for ControlledRunner {
                     .map_err(|_| QueryRunnerError::Failed)?;
                 Err(QueryRunnerError::Failed)
             }
-            RunnerOutcome::MissingFinish => Ok(()),
+            RunnerOutcome::MissingFinish => Ok(test_execution_result(&options.query)),
         }
     }
+}
+
+fn test_execution_result(query: &str) -> QueryExecutionResult {
+    QueryExecutionResult::for_test(
+        format!("final answer for {query}"),
+        42,
+        StudioQueryUsage {
+            llm_calls: 2,
+            prompt_tokens: 30,
+            output_tokens: 12,
+            categories: std::collections::BTreeMap::from([
+                (
+                    "completion".to_owned(),
+                    StudioQueryUsageCategory {
+                        llm_calls: 1,
+                        prompt_tokens: 20,
+                        output_tokens: 12,
+                    },
+                ),
+                (
+                    "selection".to_owned(),
+                    StudioQueryUsageCategory {
+                        llm_calls: 1,
+                        prompt_tokens: 10,
+                        output_tokens: 0,
+                    },
+                ),
+            ]),
+        },
+    )
 }
 
 async fn emit(
@@ -312,9 +454,18 @@ struct Harness {
     observations: mpsc::Receiver<ObservedQuery>,
     release: Arc<Semaphore>,
     query_permits: Arc<Semaphore>,
+    query_results: Arc<QueryResultRegistry>,
 }
 
 fn harness(outcome: RunnerOutcome, maximum: usize) -> Harness {
+    harness_with_retention(outcome, maximum, 128)
+}
+
+fn harness_with_retention(
+    outcome: RunnerOutcome,
+    maximum: usize,
+    retained_results: usize,
+) -> Harness {
     let store = Arc::new(CompletionProbeStore::default());
     let hub = Arc::new(ExplainabilityLiveHub::new(
         ExplainabilityLiveHubOptions::new(),
@@ -331,12 +482,17 @@ fn harness(outcome: RunnerOutcome, maximum: usize) -> Harness {
         PathBuf::from("."),
         store_dependency,
         Arc::clone(&hub),
-        StudioApiOptions::new().with_max_concurrent_queries(
-            NonZeroUsize::new(maximum).expect("non-zero test concurrency"),
-        ),
+        StudioApiOptions::new()
+            .with_max_concurrent_queries(
+                NonZeroUsize::new(maximum).expect("non-zero test concurrency"),
+            )
+            .with_max_retained_query_results(
+                NonZeroUsize::new(retained_results).expect("non-zero test retention"),
+            ),
         runner,
     );
     let query_permits = Arc::clone(&service.state.query_permits);
+    let query_results = Arc::clone(&service.state.query_results);
     Harness {
         router: service.router(),
         store,
@@ -344,6 +500,7 @@ fn harness(outcome: RunnerOutcome, maximum: usize) -> Harness {
         observations,
         release,
         query_permits,
+        query_results,
     }
 }
 
@@ -376,6 +533,7 @@ struct Accepted {
     run_id: ExplainabilityRunId,
     run_url: String,
     events_url: String,
+    result_url: String,
 }
 
 async fn post(router: &Router, body: Value) -> axum::response::Response {
@@ -399,6 +557,33 @@ async fn accepted(response: axum::response::Response) -> Accepted {
             .expect("response body"),
     )
     .expect("accepted response")
+}
+
+async fn get_result(router: &Router, run_id: &ExplainabilityRunId) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/query/{run_id}/result"))
+                .body(Body::empty())
+                .expect("result request"),
+        )
+        .await
+        .expect("result response")
+}
+
+async fn assert_status_and_body(
+    response: axum::response::Response,
+    status: StatusCode,
+    expected_body: &'static [u8],
+) {
+    assert_eq!(response.status(), status);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .as_ref(),
+        expected_body
+    );
 }
 
 async fn drain_closed(
@@ -426,6 +611,10 @@ async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query(
         Some(accepted.run_url.clone())
     );
     assert_eq!(accepted.events_url, format!("{}/events", accepted.run_url));
+    assert_eq!(
+        accepted.result_url,
+        format!("/api/query/{}/result", accepted.run_id)
+    );
     let mut live = harness
         .hub
         .subscribe(&accepted.run_id)
@@ -443,6 +632,10 @@ async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query(
         .expect("run");
     assert_eq!(running.status, ExplainabilityRunStatus::Running);
     assert!(running.query.is_none());
+    assert_eq!(
+        get_result(&harness.router, &accepted.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
     harness.release.add_permits(1);
     drain_closed(&mut live).await;
     harness.store.wait_for_completion().await;
@@ -465,6 +658,18 @@ async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query(
             ExplainabilityEvent::QueryStarted(event) if event.query.is_none()
         )
     }));
+    let result = get_result(&harness.router, &accepted.run_id).await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let result_json: Value = serde_json::from_slice(
+        &to_bytes(result.into_body(), usize::MAX)
+            .await
+            .expect("result body"),
+    )
+    .expect("result JSON");
+    assert_eq!(result_json["run_id"], accepted.run_id.to_string());
+    assert_eq!(result_json["response"], "final answer for Who is Alice?");
+    assert_eq!(result_json["elapsed_ms"], 42);
+    assert!(result_json.get("context").is_none());
 }
 
 #[tokio::test]
@@ -483,6 +688,11 @@ async fn test_should_complete_failed_query_as_failed_and_keep_post_accepted() {
         .expect("store read")
         .expect("run");
     assert_eq!(run.status, ExplainabilityRunStatus::Failed);
+    assert!(harness.query_results.get(&accepted.run_id).await.is_none());
+    assert_eq!(
+        get_result(&harness.router, &accepted.run_id).await.status(),
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]
@@ -501,6 +711,58 @@ async fn test_should_leave_run_running_when_executor_does_not_finish() {
         .expect("run");
     assert_eq!(run.status, ExplainabilityRunStatus::Running);
     assert!(run.completed_at.is_none());
+    let released = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task completed");
+    drop(released);
+    assert_eq!(
+        harness
+            .router
+            .clone()
+            .oneshot(
+                Request::get(&accepted.result_url)
+                    .body(Body::empty())
+                    .expect("request")
+            )
+            .await
+            .expect("response")
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    assert!(harness.query_results.get(&accepted.run_id).await.is_none());
+}
+
+#[tokio::test]
+async fn test_should_leave_run_running_when_result_materialization_fails() {
+    let mut harness = harness(RunnerOutcome::ResultMaterializationFailure, 1);
+    let accepted =
+        accepted(post(&harness.router, json!({"query":"conversion failure"})).await).await;
+    let mut live = harness.hub.subscribe(&accepted.run_id).expect("live run");
+    let _observed = harness.observations.recv().await.expect("runner entered");
+    harness.release.add_permits(1);
+    drain_closed(&mut live).await;
+    let task_done = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task complete");
+    drop(task_done);
+
+    assert_eq!(
+        harness
+            .store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run")
+            .status,
+        ExplainabilityRunStatus::Running
+    );
+    assert_eq!(
+        get_result(&harness.router, &accepted.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
+    assert!(harness.query_results.get(&accepted.run_id).await.is_none());
 }
 
 #[tokio::test]
@@ -622,12 +884,22 @@ async fn test_should_preserve_content_mode_in_run_and_events() {
     assert_eq!(running.query.as_deref(), Some("visible query"));
     harness.release.add_permits(1);
     drain_closed(&mut live).await;
+    harness.store.wait_for_completion().await;
     let events = harness
         .store
         .load_events(&accepted.run_id, &EventQuery::new())
         .await
         .expect("events");
     assert!(events.iter().any(|envelope| matches!(&envelope.record.event, ExplainabilityEvent::QueryStarted(event) if event.query.as_deref() == Some("visible query"))));
+    let result = get_result(&harness.router, &accepted.run_id).await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(
+        &to_bytes(result.into_body(), usize::MAX)
+            .await
+            .expect("result body"),
+    )
+    .expect("result JSON");
+    assert_eq!(value["response"], "final answer for visible query");
 }
 
 #[tokio::test]
@@ -711,6 +983,292 @@ async fn test_should_continue_query_after_sse_client_disconnects() {
         .expect("read")
         .expect("run");
     assert_eq!(run.status, ExplainabilityRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_should_return_query_result_statuses_from_store_lifecycle() {
+    let harness = harness(RunnerOutcome::Success, 1);
+    let started = Utc::now();
+
+    let cancelled_id: ExplainabilityRunId = "cancelled-result".parse().expect("run id");
+    let mut cancelled =
+        ExplainabilityRun::new(cancelled_id.clone(), ExplainabilityRunKind::Query, started);
+    cancelled.status = ExplainabilityRunStatus::Running;
+    cancelled.query_method = Some(ExplainabilityQueryMethod::Local);
+    harness.store.create_run(cancelled).await.expect("create");
+    harness
+        .store
+        .complete_run(
+            RunCompletion::new(
+                cancelled_id.clone(),
+                ExplainabilityRunStatus::Cancelled,
+                started,
+            )
+            .expect("completion"),
+        )
+        .await
+        .expect("complete");
+    assert_status_and_body(
+        get_result(&harness.router, &cancelled_id).await,
+        StatusCode::CONFLICT,
+        b"query did not complete successfully",
+    )
+    .await;
+
+    let completed_id: ExplainabilityRunId = "gone-result".parse().expect("run id");
+    let mut completed =
+        ExplainabilityRun::new(completed_id.clone(), ExplainabilityRunKind::Query, started);
+    completed.status = ExplainabilityRunStatus::Running;
+    completed.query_method = Some(ExplainabilityQueryMethod::Local);
+    harness.store.create_run(completed).await.expect("create");
+    harness
+        .store
+        .complete_run(
+            RunCompletion::new(
+                completed_id.clone(),
+                ExplainabilityRunStatus::Completed,
+                started,
+            )
+            .expect("completion"),
+        )
+        .await
+        .expect("complete");
+    assert_status_and_body(
+        get_result(&harness.router, &completed_id).await,
+        StatusCode::GONE,
+        b"query result is no longer available",
+    )
+    .await;
+
+    let pending_id: ExplainabilityRunId = "pending-result".parse().expect("run id");
+    let mut pending =
+        ExplainabilityRun::new(pending_id.clone(), ExplainabilityRunKind::Query, started);
+    pending.status = ExplainabilityRunStatus::Pending;
+    pending.query_method = Some(ExplainabilityQueryMethod::Local);
+    harness.store.create_run(pending).await.expect("create");
+    assert_status_and_body(
+        get_result(&harness.router, &pending_id).await,
+        StatusCode::ACCEPTED,
+        b"query result is not ready",
+    )
+    .await;
+
+    let index_id: ExplainabilityRunId = "index-result".parse().expect("run id");
+    harness
+        .store
+        .create_run(ExplainabilityRun::new(
+            index_id.clone(),
+            ExplainabilityRunKind::Index,
+            started,
+        ))
+        .await
+        .expect("create");
+    assert_status_and_body(
+        get_result(&harness.router, &index_id).await,
+        StatusCode::NOT_FOUND,
+        b"query run not found",
+    )
+    .await;
+    let missing_id: ExplainabilityRunId = "missing-result".parse().expect("run id");
+    assert_status_and_body(
+        get_result(&harness.router, &missing_id).await,
+        StatusCode::NOT_FOUND,
+        b"query run not found",
+    )
+    .await;
+    assert_status_and_body(
+        harness
+            .router
+            .clone()
+            .oneshot(
+                Request::get("/api/query/%20/result")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response"),
+        StatusCode::BAD_REQUEST,
+        b"invalid Studio query result request",
+    )
+    .await;
+
+    let unavailable = failing_router(StoreFailure::Get)
+        .oneshot(
+            Request::get("/api/query/valid-run/result")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(unavailable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        to_bytes(unavailable.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .as_ref(),
+        b"Studio query result service unavailable"
+    );
+}
+
+#[tokio::test]
+async fn test_should_evict_oldest_successful_result_without_deleting_run_history() {
+    let mut harness = harness_with_retention(RunnerOutcome::Success, 1, 1);
+    let first = accepted(post(&harness.router, json!({"query":"first retained"})).await).await;
+    let _first_observed = harness.observations.recv().await.expect("runner entered");
+    harness.release.add_permits(1);
+    harness.store.wait_for_completion().await;
+    let first_task_done = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("first query task complete");
+    drop(first_task_done);
+    assert_eq!(
+        get_result(&harness.router, &first.run_id).await.status(),
+        StatusCode::OK
+    );
+
+    let second = accepted(post(&harness.router, json!({"query":"second retained"})).await).await;
+    let _second_observed = harness.observations.recv().await.expect("runner entered");
+    harness.release.add_permits(1);
+    harness.store.wait_for_completion().await;
+    let second_task_done = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("second query task complete");
+    drop(second_task_done);
+
+    assert_eq!(
+        harness
+            .store
+            .get_run(&first.run_id)
+            .await
+            .expect("store read")
+            .expect("first run")
+            .status,
+        ExplainabilityRunStatus::Completed
+    );
+    assert_eq!(
+        get_result(&harness.router, &first.run_id).await.status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        get_result(&harness.router, &second.run_id).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn test_should_publish_result_before_completed_metadata_becomes_visible() {
+    let store = Arc::new(BlockingCompletionStore::default());
+    let hub = Arc::new(ExplainabilityLiveHub::new(
+        ExplainabilityLiveHubOptions::new(),
+    ));
+    let (entered, mut observations) = mpsc::channel(1);
+    let release = Arc::new(Semaphore::new(0));
+    let runner = Arc::new(ControlledRunner {
+        entered,
+        release: Arc::clone(&release),
+        outcome: RunnerOutcome::Success,
+    });
+    let store_dependency: Arc<dyn ExplainabilityStore> = store.clone();
+    let service = StudioApiService::with_runner(
+        PathBuf::from("."),
+        store_dependency,
+        hub,
+        StudioApiOptions::new(),
+        runner,
+    );
+    let router = service.router();
+    let accepted = accepted(post(&router, json!({"query":"ordered result"})).await).await;
+    let _observed = observations.recv().await.expect("runner entered");
+    release.add_permits(1);
+    store.wait_for_completion_entry().await;
+
+    assert!(
+        service
+            .state
+            .query_results
+            .get(&accepted.run_id)
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run")
+            .status,
+        ExplainabilityRunStatus::Running
+    );
+    assert_eq!(
+        get_result(&router, &accepted.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
+
+    store.release_completion();
+    store.wait_for_completion_finish().await;
+    assert_eq!(
+        get_result(&router, &accepted.run_id).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn test_should_remove_unpublished_result_when_completion_fails() {
+    let store = Arc::new(FailingStore {
+        inner: InMemoryExplainabilityStore::new(),
+        failure: StoreFailure::Complete,
+    });
+    let hub = Arc::new(ExplainabilityLiveHub::new(
+        ExplainabilityLiveHubOptions::new(),
+    ));
+    let (entered, mut observations) = mpsc::channel(1);
+    let release = Arc::new(Semaphore::new(0));
+    let runner = Arc::new(ControlledRunner {
+        entered,
+        release: Arc::clone(&release),
+        outcome: RunnerOutcome::Success,
+    });
+    let store_dependency: Arc<dyn ExplainabilityStore> = store.clone();
+    let service = StudioApiService::with_runner(
+        PathBuf::from("."),
+        store_dependency,
+        hub,
+        StudioApiOptions::new().with_max_concurrent_queries(NonZeroUsize::MIN),
+        runner,
+    );
+    let router = service.router();
+    let accepted = accepted(post(&router, json!({"query":"completion failure"})).await).await;
+    let _observed = observations.recv().await.expect("runner entered");
+    release.add_permits(1);
+    let task_done = Arc::clone(&service.state.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task complete");
+    drop(task_done);
+
+    assert!(
+        service
+            .state
+            .query_results
+            .get(&accepted.run_id)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run")
+            .status,
+        ExplainabilityRunStatus::Running
+    );
+    assert_eq!(
+        get_result(&router, &accepted.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 #[tokio::test]
@@ -998,4 +1556,8 @@ fn test_should_keep_service_debug_opaque_and_options_bounded() {
     );
     assert_eq!(format!("{service:?}"), "StudioApiService { .. }");
     assert_eq!(StudioApiOptions::new().max_concurrent_queries().get(), 4);
+    assert_eq!(
+        StudioApiOptions::new().max_retained_query_results().get(),
+        128
+    );
 }

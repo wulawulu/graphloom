@@ -1637,8 +1637,9 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
 也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
-sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Run metadata
-与 Run history API 已实现；Turso、DuckDB、Graph HTTP API、前端和 OpenTelemetry 仍属于后续阶段。
+sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Query Result、
+Run metadata 与 Run history API 已实现；Turso、DuckDB、Graph HTTP API、前端和 OpenTelemetry
+仍属于后续阶段。
 Basic、Global 与 DRIFT 尚未接入完整 Explainability 生命周期，因此 Studio 当前对这些 method
 返回 422，不伪造事件或创建无法完成的 Run。
 
@@ -1678,7 +1679,8 @@ LlmRequestCompleted
 Explainability SSE 由独立的 `graphloom-studio` crate 实现。依赖方向固定为
 `graphloom-studio → graphloom`；GraphLoom Lib 不依赖 Axum、SSE 或浏览器协议。Live Hub
 只接收成功持久化的 `ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供
-HTTP 能力。Studio Local Query、Run metadata/history 与 SSE API 已实现；Graph API 和前端尚未实现。
+HTTP 能力。Studio Local Query、Query Result、Run metadata/history 与 SSE API 已实现；Graph API
+和前端尚未实现。
 
 ## 17.1 第一版使用 SSE
 
@@ -1728,9 +1730,10 @@ WebSocket 暂不作为第一阶段要求。
 
 ```http
 POST /api/query
+GET  /api/query/{run_id}/result
 GET  /api/explainability/runs
 GET  /api/explainability/runs/{run_id}
-GET /api/explainability/runs/{run_id}/events
+GET  /api/explainability/runs/{run_id}/events
 ```
 
 `POST /api/query` 只接受 Local，先进行有界 admission，再由服务端生成 run ID；每个 Query
@@ -1748,6 +1751,8 @@ POST /api/query
 → HTTP 202
 → GraphLoom Local Query
 → Core terminal Event + finish_run
+→ QueryResult conversion
+→ successful Result registry insertion
 → Studio complete_run(Completed/Failed)
 → Recorder shutdown
 ```
@@ -1756,6 +1761,47 @@ Core 拥有 `RunStarted`/`RunCompleted`/`RunFailed` 与 `finish_run`；Studio �
 创建、基于 Query 返回结果的 Completed/Failed transition 与 HTTP 编排。Studio 不重复 finish，
 也不直接调用 Store 绕过 Recorder。202 只表示 Run 已创建并接受执行，不保证 Query 成功。
 HTTP/SSE client disconnect 不取消 Query；本阶段没有 cancellation API 或 task registry。
+
+### 17.2.1 Query Result 与 Explainability 的边界
+
+`GET /api/query/{run_id}/result` 是最终业务答案的正式 API。它返回 `run_id`、`response`、
+`elapsed_ms` 和 provider usage（总量及按 category 的稳定映射），不会暴露 `QueryContext`、
+DataFrame、候选 records、prompt 或 raw provider body。`POST /api/query` 的 202 JSON 同时返回
+`result_url`；`Location` 仍指向 Run metadata。
+
+```text
+Query Result
+    = 用户请求的最终业务答案
+
+Explainability
+    = 为什么以及如何得到答案的持久化执行轨迹
+```
+
+`ExplainabilityContentMode` 只决定 Explainability 轨迹可以持久化多少内容，不控制业务结果
+的可见性。因此 `metadata` 模式仍可从 Result API 得到完整 answer，同时 Run.query 与
+`QueryStarted.query` 保持省略。成功路径先发布内存结果，再写入 Completed metadata：
+
+```text
+GraphLoom Query Ok(QueryResult)
+→ checked result conversion（usize/Duration → u64）
+→ bounded Result registry insert
+→ recorder.complete_run(Completed)
+→ recorder.shutdown
+```
+
+这保证一旦 Store 对外可见 `Completed`，同一进程中的结果已先准备好。若 completion 失败，
+registry entry 会被移除，Run 保留 truthful `Running` prefix；若结果转换失败，同样不伪造
+terminal metadata。Query 本身失败时不存成功结果，并由 Studio 写入 `Failed` metadata。
+
+V1 Result registry 属于 Studio 当前进程，默认最多保留 128 个成功结果，按成功插入顺序 FIFO
+淘汰；它没有无界队列，也不写入 `ExplainabilityStore`。进程重启或淘汰后，Explainability Run
+与 Event 仍可由 Store 持久化存在，但 `Completed` Run 的 Result GET 返回 `410 Gone`。未来如需
+跨重启保留 answer，应新增独立的 Studio Query Result persistence，而不是扩展
+`ExplainabilityStore`。
+
+Result GET 先读取 Store lifecycle，再读取 registry：Running/Pending 返回 202，Failed/Cancelled
+返回 409，Completed 且 retained 返回 200，Completed 但缺失返回 410；非法 ID 返回 400，未知
+或非 Query Run 返回 404，Store failure 返回固定安全的 500。
 
 取消 Query：
 
@@ -2089,7 +2135,7 @@ SqliteExplainabilityStore
     → persistent backend（已实现）
 
 graphloom-studio host-side service library
-    → Explainability SSE + Local Query + Run metadata/history implemented
+    → Explainability SSE + Local Query + Query Result + Run metadata/history implemented
 
 Studio Basic/Global/DRIFT Explainability Query、Graph HTTP API 与 Frontend
     → not implemented
@@ -2183,7 +2229,7 @@ SqliteExplainabilityStore
 ExplainabilityLiveHub
     → 已实现
 
-Studio Explainability SSE / Local Query / Run metadata / Run history HTTP API
+Studio Explainability SSE / Local Query / Query Result / Run metadata / Run history HTTP API
     → 已实现
 
 Studio Graph API / Frontend / Auth / Query cancellation

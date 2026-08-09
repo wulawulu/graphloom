@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
-use super::StudioApiState;
+use super::{
+    StudioApiState,
+    query_result::{QueryExecutionResult, QueryResultConversionError, QueryResultRegistry},
+};
 
 const MAX_QUERY_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_TYPE_BYTES: usize = 256;
@@ -57,17 +60,20 @@ struct StartQueryResponse {
     run_id: ExplainabilityRunId,
     run_url: String,
     events_url: String,
+    result_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(super) enum QueryRunnerError {
     #[error("Studio Query execution failed")]
     Failed,
+    #[error("Studio Query result materialization failed")]
+    ResultMaterialization,
 }
 
 #[async_trait]
 pub(super) trait QueryRunner: Send + Sync + fmt::Debug {
-    async fn run(&self, options: QueryOptions) -> Result<(), QueryRunnerError>;
+    async fn run(&self, options: QueryOptions) -> Result<QueryExecutionResult, QueryRunnerError>;
 }
 
 pub(super) struct GraphLoomQueryRunner {
@@ -88,12 +94,13 @@ impl fmt::Debug for GraphLoomQueryRunner {
 
 #[async_trait]
 impl QueryRunner for GraphLoomQueryRunner {
-    async fn run(&self, options: QueryOptions) -> Result<(), QueryRunnerError> {
+    async fn run(&self, options: QueryOptions) -> Result<QueryExecutionResult, QueryRunnerError> {
         let config = self.config.clone();
-        Box::pin(graphloom::api::query(config, options))
+        let result = Box::pin(graphloom::api::query(config, options))
             .await
-            .map(|_| ())
-            .map_err(|_| QueryRunnerError::Failed)
+            .map_err(|_| QueryRunnerError::Failed)?;
+        QueryExecutionResult::try_from(result)
+            .map_err(|QueryResultConversionError::Failed| QueryRunnerError::ResultMaterialization)
     }
 }
 
@@ -122,6 +129,7 @@ pub(super) async fn start_query(
         store: Arc::clone(&state.store),
         live_hub: Arc::clone(&state.live_hub),
         query_runner: Arc::clone(&state.query_runner),
+        query_results: Arc::clone(&state.query_results),
         request,
         run_id: run_id.clone(),
         run,
@@ -159,6 +167,7 @@ fn make_run(run_id: &ExplainabilityRunId, request: &StartQueryRequest) -> Explai
 fn accepted_response(run_id: ExplainabilityRunId) -> Response {
     let run_url = format!("/api/explainability/runs/{run_id}");
     let events_url = format!("{run_url}/events");
+    let result_url = format!("/api/query/{run_id}/result");
     let Ok(location) = HeaderValue::from_str(&run_url) else {
         return fixed_error(StatusCode::INTERNAL_SERVER_ERROR, QUERY_UNAVAILABLE_BODY);
     };
@@ -168,6 +177,7 @@ fn accepted_response(run_id: ExplainabilityRunId) -> Response {
             run_id,
             run_url,
             events_url,
+            result_url,
         }),
     )
         .into_response();
@@ -192,6 +202,7 @@ struct QueryExecution {
     store: Arc<dyn graphloom::explainability::ExplainabilityStore>,
     live_hub: Arc<graphloom::explainability::ExplainabilityLiveHub>,
     query_runner: Arc<dyn QueryRunner>,
+    query_results: Arc<QueryResultRegistry>,
     request: StartQueryRequest,
     run_id: ExplainabilityRunId,
     run: ExplainabilityRun,
@@ -210,6 +221,7 @@ async fn execute_query(execution: QueryExecution) {
         store,
         live_hub,
         query_runner,
+        query_results,
         request,
         run_id,
         run,
@@ -238,12 +250,30 @@ async fn execute_query(execution: QueryExecution) {
         request.content_mode,
         recorder.sink(),
     ));
-    let status = match query_runner.run(options).await {
-        Ok(()) => ExplainabilityRunStatus::Completed,
-        Err(QueryRunnerError::Failed) => ExplainabilityRunStatus::Failed,
-    };
-    if let Ok(completion) = RunCompletion::new(run_id, status, Utc::now()) {
-        let _completion_result = recorder.complete_run(completion).await;
+    match query_runner.run(options).await {
+        Ok(result) => {
+            let studio_result = result.with_run_id(run_id.clone());
+            query_results.insert(studio_result).await;
+            let completion_succeeded = match RunCompletion::new(
+                run_id.clone(),
+                ExplainabilityRunStatus::Completed,
+                Utc::now(),
+            ) {
+                Ok(completion) => recorder.complete_run(completion).await.is_ok(),
+                Err(_) => false,
+            };
+            if !completion_succeeded {
+                query_results.remove(&run_id).await;
+            }
+        }
+        Err(QueryRunnerError::Failed) => {
+            if let Ok(completion) =
+                RunCompletion::new(run_id, ExplainabilityRunStatus::Failed, Utc::now())
+            {
+                let _completion_result = recorder.complete_run(completion).await;
+            }
+        }
+        Err(QueryRunnerError::ResultMaterialization) => {}
     }
     let _shutdown_result = recorder.shutdown().await;
 }
