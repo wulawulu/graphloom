@@ -1481,77 +1481,110 @@ Studio 还需要在没有运行 Query 时浏览完整图谱，因此需要独立
 ```rust
 #[async_trait::async_trait]
 pub trait GraphDataSource: Send + Sync + std::fmt::Debug {
-    async fn entities(
+    async fn load_snapshot(
         &self,
-        query: EntityQuery,
-    ) -> Result<Vec<EntityView>>;
-
-    async fn relationships(
-        &self,
-        query: RelationshipQuery,
-    ) -> Result<Vec<RelationshipView>>;
-
-    async fn communities(
-        &self,
-        query: CommunityQuery,
-    ) -> Result<Vec<CommunityView>>;
-
-    async fn community_reports(
-        &self,
-        query: CommunityReportQuery,
-    ) -> Result<Vec<CommunityReportView>>;
-
-    async fn text_units(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<TextUnitView>>;
+    ) -> Result<GraphDataSnapshot, GraphDataSourceError>;
 }
 ```
 
-第一阶段可基于现有 Table Provider 和 Parquet 读取实现。
+`GraphDataSnapshot` 承载 Studio-owned typed entity/relationship/community/report records；它们
+有公开、安全的构造入口，使 crate 外的 datasource backend 能真正实现该 trait。第一版
+`ParquetGraphDataSource` 基于现有 `TableProvider` 实现，并只把 Query-side adapter 输出单向映射
+成这些 records。HTTP 只依赖 `Arc<dyn GraphDataSource>`，后续 `PostgresGraphDataSource` 可以
+保持相同 wire API。
+
+V1 明确定义为 **Query-visible final graph**，不是 raw Parquet debugger，也不展示中间 index
+表。数据流为：
+
+```text
+┌───────────────────────────────┐
+│ GraphLoom Index Output        │
+│ entities / relationships /   │
+│ communities / reports        │
+└───────────────┬───────────────┘
+                ▼
+┌───────────────────────────────┐
+│ ParquetTableProvider          │
+└───────────────┬───────────────┘
+                ▼
+┌───────────────────────────────┐
+│ GraphRAG-compatible Query     │
+│ read_indexer_* adapters       │
+└───────────────┬───────────────┘
+                ▼
+┌───────────────────────────────┐
+│ GraphDataSnapshot             │
+└───────────────┬───────────────┘
+                ▼
+┌───────────────────────────────┐
+│ Studio Graph DTO → HTTP       │
+└───────────────────────────────┘
+```
+
+Studio 不自行解析 Polars `AnyValue`、nullable/list 兼容列、human-readable id 或 community
+roll-up。这样 Query 与 Explorer 对同一份 output 使用相同兼容语义，避免 “Query sees A,
+Studio shows B”。
 
 ---
 
-## 15.2 Entity View
+## 15.2 Query-visible community/report 语义
 
-```rust
-pub struct EntityView {
-    pub id: String,
-    pub short_id: String,
+`read_indexer_communities` 只返回有 report 的 Query-visible community；因此 community HTTP
+API 表示 report-backed/query-visible communities，不保证覆盖 `communities.parquet` 的每一条
+raw row。
 
-    pub title: String,
-    pub entity_type: Option<String>,
-    pub description: Option<String>,
+Entity membership 使用：
 
-    pub rank: Option<u64>,
-    pub degree: Option<u64>,
-
-    pub community_ids: Vec<String>,
-}
+```text
+read_indexer_entities(community_level=i64::MAX, method=Local)
 ```
+
+避免把普通 Query 的 level=2 默认值误当 Explorer 的展示边界。Report snapshot 使用：
+
+```text
+read_indexer_reports(community_level=i64::MAX, dynamic=true, method=Local)
+```
+
+这里的 dynamic=true 只为复用 schema-compatible adapter 并绕开 non-dynamic 的 title roll-up；
+两个不同 community 即使 report title 相同也都保留。HTTP 不输出
+`full_content_embedding`；relationship `source`/`target` 继续表示 entity title，不伪造 entity
+stable ID。
 
 ---
 
-## 15.3 Relationship View
+## 15.3 Graph Explorer HTTP 合同
 
-```rust
-pub struct RelationshipView {
-    pub id: String,
-    pub short_id: String,
+已实现 routes：
 
-    pub source_id: Option<String>,
-    pub target_id: Option<String>,
-
-    pub source_title: String,
-    pub target_title: String,
-
-    pub description: Option<String>,
-    pub weight: Option<f64>,
-    pub rank: Option<u64>,
-}
+```http
+GET /api/graph/summary
+GET /api/graph/entities
+GET /api/graph/entities/{entity_id}
+GET /api/graph/relationships
+GET /api/graph/relationships/{relationship_id}
+GET /api/graph/communities
+GET /api/graph/communities/{community_id}
+GET /api/graph/communities/{community_id}/report
 ```
 
-Studio 不得直接读取内部 DataFrame 后自行猜测列语义。
+三个 list endpoint 统一使用 `limit`（默认 50、最大 200）与 lexical `after` cursor；服务端按
+stable id ASC 排序、过滤 `id > after` 后取一页。Entity 支持 exact `type`/`community`，
+Relationship 支持 exact `source`/`target`，Community 支持 exact `level`/`parent`。list DTO
+省略长 description/text-unit 内容；完整 report 只由 report detail endpoint 返回，任何 Graph
+HTTP JSON 都不包含 embedding/vector。
+
+每次 request 都重新读取 current output，不缓存 snapshot，因此 Index/Update 发布后新 request
+自然看到新数据。Snapshot 验证 Entity/Relationship/Community/Report stable id、community
+short id 和 report community id 的唯一性；不一致时返回固定低信息的 503，不静默 dedup。
+
+HTTP pagination 只限制 response payload。当前 `TableProvider::read_dataframe` 合同仍会读取四张
+完整 Parquet 表，本版本没有 backend-side row pushdown，不能把磁盘扫描复杂度声称为
+`O(page_size)`。未来可以用 Postgres、DuckDB/DataFusion、Arrow pushdown 或 indexed graph
+backend 实现同一 `GraphDataSource`，无需修改 frontend API。
+
+非法 query/path 返回固定 400，item 不存在返回固定 404，output 尚未生成、缺表、schema 损坏
+或 snapshot invariant 失败返回固定 503；response 不包含 filesystem path、table/Polars error 或
+row content。
 
 ---
 
@@ -1638,7 +1671,7 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
 也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
 sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Query Result、
-Run metadata 与 Run history API 已实现；Turso、DuckDB、Graph HTTP API、前端和 OpenTelemetry
+Run metadata、Run history API 与 Query-visible Graph Explorer API 已实现；Turso、DuckDB、前端和 OpenTelemetry
 仍属于后续阶段。
 Basic、Global 与 DRIFT 尚未接入完整 Explainability 生命周期，因此 Studio 当前对这些 method
 返回 422，不伪造事件或创建无法完成的 Run。
@@ -1679,8 +1712,8 @@ LlmRequestCompleted
 Explainability SSE 由独立的 `graphloom-studio` crate 实现。依赖方向固定为
 `graphloom-studio → graphloom`；GraphLoom Lib 不依赖 Axum、SSE 或浏览器协议。Live Hub
 只接收成功持久化的 `ExplainabilityEnvelope`，不持有 Store、不分配 sequence，也不提供
-HTTP 能力。Studio Local Query、Query Result、Run metadata/history 与 SSE API 已实现；Graph API
-和前端尚未实现。
+HTTP 能力。Studio Local Query、Query Result、Run metadata/history、SSE 与 Graph Explorer read API
+已实现；前端尚未实现。
 
 ## 17.1 第一版使用 SSE
 
@@ -1734,6 +1767,14 @@ GET  /api/query/{run_id}/result
 GET  /api/explainability/runs
 GET  /api/explainability/runs/{run_id}
 GET  /api/explainability/runs/{run_id}/events
+GET  /api/graph/summary
+GET  /api/graph/entities
+GET  /api/graph/entities/{entity_id}
+GET  /api/graph/relationships
+GET  /api/graph/relationships/{relationship_id}
+GET  /api/graph/communities
+GET  /api/graph/communities/{community_id}
+GET  /api/graph/communities/{community_id}/report
 ```
 
 `POST /api/query` 只接受 Local，先进行有界 admission，再由服务端生成 run ID；每个 Query
@@ -2135,9 +2176,9 @@ SqliteExplainabilityStore
     → persistent backend（已实现）
 
 graphloom-studio host-side service library
-    → Explainability SSE + Local Query + Query Result + Run metadata/history implemented
+    → Explainability SSE + Local Query + Query Result + Run metadata/history + Graph Explorer implemented
 
-Studio Basic/Global/DRIFT Explainability Query、Graph HTTP API 与 Frontend
+Studio Basic/Global/DRIFT Explainability Query 与 Frontend
     → not implemented
 ```
 
@@ -2229,10 +2270,10 @@ SqliteExplainabilityStore
 ExplainabilityLiveHub
     → 已实现
 
-Studio Explainability SSE / Local Query / Query Result / Run metadata / Run history HTTP API
+Studio Explainability SSE / Local Query / Query Result / Run metadata / Run history / Graph Explorer HTTP API
     → 已实现
 
-Studio Graph API / Frontend / Auth / Query cancellation
+Studio Frontend / Auth / Query cancellation
     → 未实现
 ```
 
@@ -3155,14 +3196,16 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 
 ## Phase 6：GraphDataSource
 
-1. Entity View；
-   2.Relationship View；
-   3.Community View；
-   4.Community Report View；
-   5.Text Unit View；
-   6.分页；
-   7.过滤；
-   8.基于现有 Provider 实现。
+已实现 Query-visible V1：
+
+1. typed snapshot 与 backend-independent datasource trait；
+   2.Entity list/detail；
+   3.Relationship list/detail；
+   4.report-backed Community list/detail；
+   5.Community Report summary/detail；
+   6.stable-id pagination；
+   7.exact filters；
+   8.基于 Parquet Provider 与 Core adapters 的实现。
 
 ## Phase 7：Studio Store 与 SSE
 
@@ -3249,27 +3292,23 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 ```text
                          GraphLoom Lib
                               │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-     tracing          ExplainabilityRecord    GraphDataSource
-        │                     │                     │
-   ┌────┴────┐        ┌───────┴────────┐            │
-   │         │        │                │            │
-Logging     OTLP     CLI             Studio     Graph Explorer
-                      │                │
-                    JSONL      ExplainabilityService
-                                       │
-                         ┌─────────────┴─────────────┐
-                         │                           │
-               ExplainabilityStore             Live Hub
-                         │                           │
-                  SQLite 默认实现                    SSE
-                         │                           │
-                  Offline Replay              Live Explainability
-                         │                           │
-                         └─────────────┬─────────────┘
-                                       │
-                                Same UI Reducer
+        ┌─────────────────────┴─────────────────────┐
+        │                                           │
+     tracing                              ExplainabilityRecord
+        │                                           │
+   ┌────┴────┐                              ┌───────┴────────┐
+   │         │                              │                │
+Logging     OTLP                           CLI             Studio
+                                                graphloom-studio
+        GraphLoom Index Output                     │
+                 │                   ┌──────────────┼──────────────┐
+        Query read_indexer_*          │              │              │
+                 │           ExplainabilityStore  Live Hub   GraphDataSource
+                 │                   │              │              │
+          GraphDataSnapshot      SQLite/SSE     Live SSE      Graph Explorer
+                 └───────────────────────────────────────────────┐
+                                                                 ▼
+                                                       Studio Frontend MVP
 ```
 
 最终决策如下：
@@ -3277,7 +3316,8 @@ Logging     OTLP     CLI             Studio     Graph Explorer
 1. 统一使用名称 **Explainability**。
 2. 日志和 OpenTelemetry 共用 `tracing` 插桩。
 3. Explainability 与普通日志分离。
-4. GraphLoom Lib 提供 Explainability Event 和图谱数据能力。
+4. GraphLoom Lib 提供 Explainability Event、Query data models 与兼容 adapters；Studio 提供
+   `GraphDataSource` 和 Graph Explorer HTTP DTO。
 5. CLI 提供日志、OTLP 和 JSONL Adapter。
 6. Studio 第一版使用 HTTP + SSE。
 7. 实时展示和离线回放共用同一持久化事件流。

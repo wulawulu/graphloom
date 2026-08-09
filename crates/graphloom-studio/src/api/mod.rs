@@ -1,5 +1,6 @@
 //! Composable Studio Query and Explainability Run HTTP APIs.
 
+mod graph;
 mod query;
 mod query_result;
 mod runs;
@@ -15,11 +16,18 @@ use tokio::sync::Semaphore;
 
 pub use self::query_result::{StudioQueryResult, StudioQueryUsage, StudioQueryUsageCategory};
 use self::{
+    graph::{
+        get_community, get_community_report, get_entity, get_relationship, get_summary,
+        list_communities, list_entities, list_relationships,
+    },
     query::{GraphLoomQueryRunner, QueryRunner, start_query},
     query_result::{QueryResultRegistry, get_query_result},
     runs::{get_run, list_runs},
 };
-use crate::explainability::ExplainabilitySseService;
+use crate::{
+    explainability::ExplainabilitySseService,
+    graph::{GraphDataSource, ParquetGraphDataSource},
+};
 
 const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 4;
 const DEFAULT_MAX_RETAINED_QUERY_RESULTS: usize = 128;
@@ -85,7 +93,7 @@ impl Default for StudioApiOptions {
     }
 }
 
-/// Host-side Studio API bound to one project and Explainability namespace.
+/// Host-side Studio API bound to one project, graph, and Explainability namespace.
 ///
 /// The returned Router does not bind a socket. It is intended for trusted/local deployment;
 /// production exposure requires an authorization layer outside this service.
@@ -102,7 +110,8 @@ impl fmt::Debug for StudioApiService {
 }
 
 impl StudioApiService {
-    /// Bind Studio APIs to a `GraphLoom` project, Store, and matching Live Hub namespace.
+    /// Bind Studio APIs to a `GraphLoom` project, its configured output graph,
+    /// Store, and matching Live Hub namespace.
     ///
     /// # Examples
     ///
@@ -139,21 +148,67 @@ impl StudioApiService {
         live_hub: Arc<ExplainabilityLiveHub>,
         options: StudioApiOptions,
     ) -> Self {
-        Self::with_runner(
+        let table_root = resolve_table_root(&project_root, &config.output_storage.base_dir);
+        Self::with_runner_and_graph_data_source(
             project_root,
             store,
             live_hub,
             options,
             Arc::new(GraphLoomQueryRunner::new(config)),
+            Arc::new(ParquetGraphDataSource::new(table_root)),
         )
     }
 
+    /// Bind Studio APIs to a custom graph datasource.
+    ///
+    /// The datasource must represent the same project graph used by the supplied
+    /// Query configuration. This constructor is useful for alternate graph
+    /// backends while preserving every HTTP contract.
+    #[must_use]
+    pub fn new_with_graph_data_source(
+        config: GraphRagConfig,
+        project_root: PathBuf,
+        store: Arc<dyn ExplainabilityStore>,
+        live_hub: Arc<ExplainabilityLiveHub>,
+        graph_data_source: Arc<dyn GraphDataSource>,
+        options: StudioApiOptions,
+    ) -> Self {
+        Self::with_runner_and_graph_data_source(
+            project_root,
+            store,
+            live_hub,
+            options,
+            Arc::new(GraphLoomQueryRunner::new(config)),
+            graph_data_source,
+        )
+    }
+
+    #[cfg(test)]
     fn with_runner(
         project_root: PathBuf,
         store: Arc<dyn ExplainabilityStore>,
         live_hub: Arc<ExplainabilityLiveHub>,
         options: StudioApiOptions,
         query_runner: Arc<dyn QueryRunner>,
+    ) -> Self {
+        let graph_data_source = Arc::new(ParquetGraphDataSource::new(project_root.join("output")));
+        Self::with_runner_and_graph_data_source(
+            project_root,
+            store,
+            live_hub,
+            options,
+            query_runner,
+            graph_data_source,
+        )
+    }
+
+    fn with_runner_and_graph_data_source(
+        project_root: PathBuf,
+        store: Arc<dyn ExplainabilityStore>,
+        live_hub: Arc<ExplainabilityLiveHub>,
+        options: StudioApiOptions,
+        query_runner: Arc<dyn QueryRunner>,
+        graph_data_source: Arc<dyn GraphDataSource>,
     ) -> Self {
         Self {
             state: Arc::new(StudioApiState {
@@ -165,17 +220,32 @@ impl StudioApiService {
                 query_results: Arc::new(QueryResultRegistry::new(
                     options.max_retained_query_results(),
                 )),
+                graph_data_source,
             }),
         }
     }
 
-    /// Build a Router containing Query, Run metadata/history, and existing SSE routes.
+    /// Build a Router containing Query, Run metadata/history, SSE, and Graph Explorer routes.
     pub fn router(&self) -> Router {
         let api = Router::new()
             .route("/api/query", axum::routing::post(start_query))
             .route("/api/query/{run_id}/result", get(get_query_result))
             .route("/api/explainability/runs", get(list_runs))
             .route("/api/explainability/runs/{run_id}", get(get_run))
+            .route("/api/graph/summary", get(get_summary))
+            .route("/api/graph/entities", get(list_entities))
+            .route("/api/graph/entities/{entity_id}", get(get_entity))
+            .route("/api/graph/relationships", get(list_relationships))
+            .route(
+                "/api/graph/relationships/{relationship_id}",
+                get(get_relationship),
+            )
+            .route("/api/graph/communities", get(list_communities))
+            .route("/api/graph/communities/{community_id}", get(get_community))
+            .route(
+                "/api/graph/communities/{community_id}/report",
+                get(get_community_report),
+            )
             .with_state(Arc::clone(&self.state));
         let sse = ExplainabilitySseService::new(
             Arc::clone(&self.state.store),
@@ -193,6 +263,16 @@ struct StudioApiState {
     query_runner: Arc<dyn QueryRunner>,
     query_permits: Arc<Semaphore>,
     query_results: Arc<QueryResultRegistry>,
+    graph_data_source: Arc<dyn GraphDataSource>,
+}
+
+fn resolve_table_root(project_root: &std::path::Path, base_dir: &str) -> PathBuf {
+    let configured = std::path::Path::new(base_dir);
+    if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        project_root.join(configured)
+    }
 }
 
 impl fmt::Debug for StudioApiState {
@@ -203,3 +283,6 @@ impl fmt::Debug for StudioApiState {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod graph_tests;
