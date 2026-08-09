@@ -1,8 +1,15 @@
 //! Bounded, fail-fast Query concurrency helpers.
 
-use std::future::Future;
+use std::{future::Future, pin::Pin};
 
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{StreamExt, stream::FuturesUnordered};
+
+async fn await_indexed<F, T, E>((index, future): (usize, F)) -> std::result::Result<(usize, T), E>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    future.await.map(|value| (index, value))
+}
 
 pub(crate) async fn try_buffered_ordered<I, F, T, E>(
     futures: I,
@@ -10,16 +17,30 @@ pub(crate) async fn try_buffered_ordered<I, F, T, E>(
 ) -> std::result::Result<Vec<T>, E>
 where
     I: IntoIterator<Item = F>,
-    F: Future<Output = std::result::Result<T, E>>,
+    I::IntoIter: Send,
+    F: Future<Output = std::result::Result<T, E>> + Send,
+    T: Send,
+    E: Send,
 {
-    let indexed = futures
-        .into_iter()
-        .enumerate()
-        .map(|(index, future)| async move { future.await.map(|value| (index, value)) });
-    let mut completed = stream::iter(indexed)
-        .buffer_unordered(concurrency.max(1))
-        .try_collect::<Vec<_>>()
-        .await?;
+    let concurrency = concurrency.max(1);
+    let mut futures = futures.into_iter().enumerate();
+    let mut pending = FuturesUnordered::<
+        Pin<Box<dyn Future<Output = std::result::Result<(usize, T), E>> + Send + '_>>,
+    >::new();
+    for _ in 0..concurrency {
+        let Some(indexed) = futures.next() else {
+            break;
+        };
+        pending.push(Box::pin(await_indexed(indexed)));
+    }
+
+    let mut completed = Vec::new();
+    while let Some(result) = pending.next().await {
+        completed.push(result?);
+        if let Some(indexed) = futures.next() {
+            pending.push(Box::pin(await_indexed(indexed)));
+        }
+    }
     completed.sort_unstable_by_key(|(index, _)| *index);
     Ok(completed.into_iter().map(|(_, value)| value).collect())
 }

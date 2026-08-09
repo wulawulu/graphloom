@@ -247,8 +247,7 @@ impl DynamicCommunitySelection {
         reports: &HashMap<String, &CommunityReport>,
         query: &str,
     ) -> Result<Vec<CommunityVote>> {
-        let futures = queue.iter().map(|community_id| {
-            let community_id = community_id.clone();
+        let futures = queue.iter().cloned().map(|community_id| {
             let report = reports.get(&community_id).copied().cloned();
             let query = query.to_owned();
             async move {
