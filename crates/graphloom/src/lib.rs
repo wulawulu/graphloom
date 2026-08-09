@@ -38,7 +38,7 @@ pub use config::{
     DriftSearchConfig, ENTITY_DESCRIPTION_EMBEDDING, EmbedTextConfig, ExtractClaimsConfig,
     ExtractGraphConfig, GlobalSearchConfig, GraphRagConfig, InputConfig, LocalSearchConfig,
     ReportingConfig, SnapshotsConfig, StorageConfig, SummarizeDescriptionsConfig,
-    TEXT_UNIT_TEXT_EMBEDDING,
+    TEXT_UNIT_TEXT_EMBEDDING, load::load_project_config,
 };
 pub(crate) use context::IndexPipelineContext;
 pub use error::{GraphLoomError, Result};
@@ -48,6 +48,7 @@ pub use indexing::{
     NoopIndexWorkflowCallbacks,
 };
 pub(crate) use pipeline::{IndexPipeline, IndexPipelineFactory};
+pub use project::LoadedProject;
 pub(crate) use runtime::{IndexRuntimeServices, ModelRegistry};
 pub(crate) use workflow::{IndexWorkflow, IndexWorkflowRegistry, IndexWorkflowRequirements};
 #[cfg(test)]
