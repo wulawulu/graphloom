@@ -92,7 +92,7 @@ function eventContent(event: ExplainabilityEventPayload, onFocusGraph: (() => vo
 }
 
 function GraphExpansionDetail({ ids, onFocusGraph }: { ids: string[]; onFocusGraph: (() => void) | null }): React.ReactElement {
-  return <div className="space-y-3"><KeyValues values={[["Seed entities", ids.length], ["Expansion depth", 1]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}{onFocusGraph !== null ? <Button size="sm" onClick={onFocusGraph}>Focus expansion in graph</Button> : null}</div>
+  return <div className="space-y-3"><KeyValues values={[["Seed entities", ids.length]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}{onFocusGraph !== null ? <Button size="sm" onClick={onFocusGraph}>Focus expansion in graph</Button> : null}</div>
 }
 
 function ContextBudgetDetail({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {

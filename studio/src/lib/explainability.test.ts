@@ -16,9 +16,12 @@ describe("Explainability presentation helpers", () => {
   })
 
   it("extracts graph highlights only from supported graph events", () => {
-    expect(highlightFromEvent({ type: "entities_selected", entities: [{ id: "e1" }, { id: "e2" }] })?.entityIds).toEqual(["e1", "e2"])
-    expect(highlightFromEvent({ type: "relationships_selected", relationships: [{ id: "r1" }] })?.relationshipIds).toEqual(["r1"])
+    expect(highlightFromEvent({ type: "entities_selected", entities: [{ id: "e1", selected: true }, { id: "e2", selected: false }] })?.entityIds).toEqual(["e1"])
+    expect(highlightFromEvent({ type: "relationships_selected", relationships: [{ id: "r1", selected: true }, { id: "r2", selected: false }] })?.relationshipIds).toEqual(["r1"])
     expect(highlightFromEvent({ type: "graph_expansion_started", seed_entity_ids: ["e3", 4] })?.entityIds).toEqual(["e3"])
+    expect(highlightFromEvent({ type: "entities_selected", entities: [{ id: "e1", selected: false }] })).toBeNull()
+    expect(highlightFromEvent({ type: "relationships_selected", relationships: [] })).toBeNull()
+    expect(highlightFromEvent({ type: "graph_expansion_started", seed_entity_ids: [] })).toBeNull()
     expect(highlightFromEvent({ type: "future_event" })).toBeNull()
   })
 

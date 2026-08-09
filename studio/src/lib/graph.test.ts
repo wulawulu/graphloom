@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
-import { buildProjectionElements, projectionFocusIds } from "@/lib/graph"
+import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 const projection: GraphProjection = {
   entities: [
@@ -44,5 +44,11 @@ describe("graph projection transformation", () => {
   it("focuses seed nodes in focus mode and all nodes in overview mode", () => {
     expect(projectionFocusIds(projection, true)).toEqual(["entity-seed"])
     expect(projectionFocusIds(projection, false)).toEqual(["entity-seed", "entity-neighbor"])
+  })
+
+  it("initializes when a hidden graph first receives a positive viewport", () => {
+    expect(graphViewportAction(0, false)).toBe("none")
+    expect(graphViewportAction(640, false)).toBe("initialize")
+    expect(graphViewportAction(800, true)).toBe("resize")
   })
 })

@@ -89,4 +89,9 @@ describe("Timeline", () => {
     expect(screen.getByText("entity-b")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Focus expansion in graph" })).toBeInTheDocument()
   })
+
+  it("does not offer Focus for empty or all-rejected selection events", () => {
+    renderEvent({ type: "entities_selected", entities: [{ id: "entity-rejected", title: "Rejected", record_type: "entity", selected: false }] })
+    expect(screen.queryByRole("button", { name: "Focus in graph" })).not.toBeInTheDocument()
+  })
 })

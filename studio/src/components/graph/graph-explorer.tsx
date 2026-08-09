@@ -13,6 +13,7 @@ import {
 } from "@/api/client"
 import type { GraphProjection, GraphSubgraphRequest, GraphSummary } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
@@ -31,6 +32,7 @@ function isAbort(error: unknown): boolean {
 
 export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactElement {
   const [summary, setSummary] = useState<GraphSummary | null>(null)
+  const [summaryError, setSummaryError] = useState(false)
   const [projection, setProjection] = useState<GraphProjection | null>(null)
   const [mode, setMode] = useState<GraphViewMode>("overview")
   const [unavailable, setUnavailable] = useState(false)
@@ -43,6 +45,7 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
   const projectionRef = useRef<GraphProjection | null>(null)
   const projectionRequest = useRef<AbortController | null>(null)
   const detailRequest = useRef<AbortController | null>(null)
+  const initialFocusIntent = useRef(focusIntent)
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
     projectionRef.current = value
@@ -99,9 +102,9 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
   useEffect(() => {
     const controller = new AbortController()
     void getGraphSummary(controller.signal)
-      .then((value) => { if (!controller.signal.aborted) setSummary(value) })
-      .catch((reason: unknown) => { if (!isAbort(reason)) setUnavailable(true) })
-    loadOverview()
+      .then((value) => { if (!controller.signal.aborted) { setSummary(value); setSummaryError(false) } })
+      .catch((reason: unknown) => { if (!isAbort(reason)) setSummaryError(true) })
+    if (initialFocusIntent.current === null) loadOverview()
     return () => {
       controller.abort()
       projectionRequest.current?.abort()
@@ -181,17 +184,16 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
     <section className="flex size-full min-h-0 flex-col" aria-label="Graph Explorer">
       <header className="flex h-12 shrink-0 items-center justify-between border-b px-4">
         <div className="flex items-center gap-2"><Database className="size-4 text-primary" /><h2 className="text-sm font-semibold">Graph Explorer</h2></div>
-        {summary !== null ? <Badge variant="success">ready</Badge> : <Badge variant={unavailable ? "destructive" : "outline"}>{unavailable ? "unavailable" : "loading"}</Badge>}
+        {projection !== null ? <Badge variant="success">ready</Badge> : <Badge variant={unavailable ? "destructive" : "outline"}>{unavailable ? "unavailable" : "loading"}</Badge>}
       </header>
       {projection === null && loading ? <div className="space-y-3 p-4"><Skeleton className="h-16" /><Skeleton className="h-80" /></div> : null}
       {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
-      {projection !== null && summary !== null ? (
+      {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
+      {projection !== null ? (
         <div className="flex min-h-0 flex-1 flex-col p-3">
-          <div className="mb-3 grid grid-cols-4 gap-1.5">{[["Entities", summary.entity_count], ["Edges", summary.relationship_count], ["Communities", summary.community_count], ["Reports", summary.community_report_count]].map(([label, count]) => <div key={String(label)} className="rounded-md border bg-card p-2 text-center"><div className="text-base font-semibold">{count}</div><div className="text-[10px] text-muted-foreground">{label}</div></div>)}</div>
-          <div className="mb-3 space-y-1.5 text-[10px] text-muted-foreground">
-            <p>Community levels: {summary.community_levels.length > 0 ? summary.community_levels.join(", ") : "none"} · Untyped entities: {summary.untyped_entity_count}</p>
-            <div className="flex flex-wrap gap-1">{Object.entries(summary.entity_types).map(([name, count]) => <Badge key={name} variant="outline">{name}: {count}</Badge>)}</div>
-          </div>
+          {summary !== null ? <><div className="mb-3 grid grid-cols-4 gap-1.5">{[["Entities", summary.entity_count], ["Edges", summary.relationship_count], ["Communities", summary.community_count], ["Reports", summary.community_report_count]].map(([label, count]) => <div key={String(label)} className="rounded-md border bg-card p-2 text-center"><div className="text-base font-semibold">{count}</div><div className="text-[10px] text-muted-foreground">{label}</div></div>)}</div><div className="mb-3 space-y-1.5 text-[10px] text-muted-foreground"><p>Community levels: {summary.community_levels.length > 0 ? summary.community_levels.join(", ") : "none"} · Untyped entities: {summary.untyped_entity_count}</p><div className="flex flex-wrap gap-1">{Object.entries(summary.entity_types).map(([name, count]) => <Badge key={name} variant="outline">{name}: {count}</Badge>)}</div></div></> : null}
+          {summary === null && summaryError ? <p className="mb-3 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">Graph summary is unavailable. The bounded visualization is still available.</p> : null}
+          {summary === null && !summaryError ? <Skeleton className="mb-3 h-16" /> : null}
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <TabsList className="grid w-full grid-cols-4"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Communities</TabsTrigger></TabsList>
             <TabsContent value="graph" className="flex min-h-0 flex-1"><NetworkPreview projection={projection} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={loadOverview} onReload={loadOverview} /></TabsContent>

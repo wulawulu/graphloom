@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react"
 import { Waypoints } from "lucide-react"
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
@@ -13,6 +14,7 @@ interface StudioShellProps {
 }
 
 export function StudioShell(props: StudioShellProps): React.ReactElement {
+  const desktop = useDesktopLayout()
   return (
     <main className="flex h-screen min-h-[42rem] flex-col overflow-hidden bg-background">
       <header className="flex h-12 shrink-0 items-center justify-between border-b px-4">
@@ -20,7 +22,7 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
         <div className="font-mono text-[10px] text-muted-foreground">trusted local MVP</div>
       </header>
 
-      <div className="hidden min-h-0 flex-1 lg:block">
+      {desktop ? <div className="min-h-0 flex-1">
         <ResizablePanelGroup orientation="horizontal">
           <ResizablePanel defaultSize="22%" minSize="16%" maxSize="32%"><div className="size-full overflow-hidden border-r p-3">{props.navigation}</div></ResizablePanel>
           <ResizableHandle withHandle />
@@ -34,9 +36,9 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize="33%" minSize="24%"><div className="size-full overflow-hidden border-l">{props.graph}</div></ResizablePanel>
         </ResizablePanelGroup>
-      </div>
+      </div> : null}
 
-      <div className="flex min-h-0 flex-1 flex-col lg:hidden">
+      {!desktop ? <div className="flex min-h-0 flex-1 flex-col">
         <Tabs value={props.mobileTab} onValueChange={props.onMobileTabChange} className="flex min-h-0 flex-1 flex-col p-2">
           <TabsList className="grid w-full grid-cols-3"><TabsTrigger value="runs">Query / Runs</TabsTrigger><TabsTrigger value="timeline">Timeline</TabsTrigger><TabsTrigger value="graph">Graph</TabsTrigger></TabsList>
           <TabsContent value="runs" className="min-h-0 flex-1 overflow-hidden p-2">{props.navigation}</TabsContent>
@@ -44,7 +46,22 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
           <TabsContent value="graph" className="min-h-0 flex-1 overflow-hidden">{props.graph}</TabsContent>
         </Tabs>
         <div className="h-[38vh] min-h-64 border-t">{props.answer}</div>
-      </div>
+      </div> : null}
     </main>
   )
+}
+
+function useDesktopLayout(): boolean {
+  const [desktop, setDesktop] = useState(() => (
+    typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1024px)").matches
+  ))
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined
+    const query = window.matchMedia("(min-width: 1024px)")
+    const update = (event: MediaQueryListEvent): void => setDesktop(event.matches)
+    setDesktop(query.matches)
+    query.addEventListener("change", update)
+    return () => query.removeEventListener("change", update)
+  }, [])
+  return desktop
 }

@@ -52,14 +52,14 @@ export function mergeEnvelopes(
   return [...current, incoming].sort((left, right) => left.sequence - right.sequence)
 }
 
-interface CandidateLike { id?: unknown }
+interface CandidateLike { id?: unknown; selected?: unknown }
 
 function candidateIds(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.flatMap((candidate: unknown) => {
     if (typeof candidate !== "object" || candidate === null) return []
-    const id = (candidate as CandidateLike).id
-    return typeof id === "string" ? [id] : []
+    const { id, selected } = candidate as CandidateLike
+    return typeof id === "string" && selected === true ? [id] : []
   })
 }
 
@@ -68,18 +68,22 @@ export interface GraphHighlight {
   relationshipIds: string[]
 }
 
+function nonEmptyHighlight(highlight: GraphHighlight): GraphHighlight | null {
+  return highlight.entityIds.length === 0 && highlight.relationshipIds.length === 0 ? null : highlight
+}
+
 export function highlightFromEvent(event: ExplainabilityEventPayload): GraphHighlight | null {
   if (event.type === "entities_selected") {
-    return { entityIds: candidateIds(event.entities), relationshipIds: [] }
+    return nonEmptyHighlight({ entityIds: candidateIds(event.entities), relationshipIds: [] })
   }
   if (event.type === "relationships_selected") {
-    return { entityIds: [], relationshipIds: candidateIds(event.relationships) }
+    return nonEmptyHighlight({ entityIds: [], relationshipIds: candidateIds(event.relationships) })
   }
   if (event.type === "graph_expansion_started" && Array.isArray(event.seed_entity_ids)) {
-    return {
+    return nonEmptyHighlight({
       entityIds: event.seed_entity_ids.filter((value): value is string => typeof value === "string"),
       relationshipIds: [],
-    }
+    })
   }
   return null
 }

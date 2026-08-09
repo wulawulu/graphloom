@@ -13,6 +13,7 @@ import {
 } from "@/api/client"
 import type { GraphProjection } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent } from "@/components/graph/graph-explorer"
+import { highlightFromEvent } from "@/lib/explainability"
 
 vi.mock("@/api/client", () => ({
   ApiError: class extends Error { status = 500 },
@@ -71,6 +72,17 @@ describe("GraphExplorer focus flow", () => {
     expect(screen.getByText("focus")).toBeInTheDocument()
   })
 
+  it("posts only selected candidate IDs and excludes rejected records", async () => {
+    vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
+    const entities = highlightFromEvent({ type: "entities_selected", entities: [{ id: "entity-selected", selected: true }, { id: "entity-rejected", selected: false }] })
+    const relationships = highlightFromEvent({ type: "relationships_selected", relationships: [{ id: "relationship-selected", selected: true }, { id: "relationship-rejected", selected: false }] })
+    if (entities === null || relationships === null) throw new Error("selection fixtures must produce graph focus")
+    render(<GraphExplorer focusIntent={{ entity_ids: entities.entityIds, relationship_ids: relationships.relationshipIds, depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }} />)
+
+    await waitFor(() => expect(getGraphSubgraph).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(getGraphSubgraph).mock.calls[0]?.[0]).toEqual({ entity_ids: ["entity-selected"], relationship_ids: ["relationship-selected"], depth: 1, max_entities: 80, max_relationships: 160 })
+  })
+
   it("aborts stale focus A and lets focus B own the projection", async () => {
     let resolveA: ((value: GraphProjection) => void) | undefined
     const pendingA = new Promise<GraphProjection>((resolve) => { resolveA = resolve })
@@ -90,7 +102,7 @@ describe("GraphExplorer focus flow", () => {
   })
 
   it("returns from focus mode to a freshly loaded overview", async () => {
-    vi.mocked(getGraphOverview).mockResolvedValueOnce(projection("overview")).mockResolvedValueOnce(projection("overview-new"))
+    vi.mocked(getGraphOverview).mockResolvedValueOnce(projection("overview-new"))
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
     const user = userEvent.setup()
     render(<GraphExplorer focusIntent={{ entity_ids: ["focused"], relationship_ids: [], revision: 1 }} />)
@@ -98,7 +110,7 @@ describe("GraphExplorer focus flow", () => {
     await user.click(screen.getByRole("button", { name: "Back test" }))
 
     expect(await screen.findByText("OVERVIEW-NEW")).toBeInTheDocument()
-    expect(getGraphOverview).toHaveBeenCalledTimes(2)
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
     expect(screen.getByText("overview")).toBeInTheDocument()
   })
 
@@ -111,5 +123,27 @@ describe("GraphExplorer focus flow", () => {
     expect(await screen.findByText("Could not load focused graph.")).toBeInTheDocument()
     expect(screen.getByText("OVERVIEW")).toBeInTheDocument()
     expect(screen.getByText("overview")).toBeInTheDocument()
+  })
+
+  it("offers overview recovery when the initial focused graph fails", async () => {
+    vi.mocked(getGraphSubgraph).mockRejectedValue(new Error("unavailable"))
+    const user = userEvent.setup()
+    render(<GraphExplorer focusIntent={{ entity_ids: ["missing"], relationship_ids: [], revision: 1 }} />)
+
+    expect(await screen.findByText("Could not load focused graph.")).toBeInTheDocument()
+    expect(getGraphOverview).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Load overview" }))
+
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
+    expect(screen.getByText("overview")).toBeInTheDocument()
+  })
+
+  it("keeps a successful overview usable when summary loading fails", async () => {
+    vi.mocked(getGraphSummary).mockRejectedValue(new Error("summary unavailable"))
+    render(<GraphExplorer focusIntent={null} />)
+
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    expect(screen.getByText("Graph summary is unavailable. The bounded visualization is still available.")).toBeInTheDocument()
   })
 })

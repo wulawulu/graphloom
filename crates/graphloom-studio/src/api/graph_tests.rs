@@ -235,6 +235,25 @@ async fn test_should_reject_invalid_projection_requests_with_fixed_errors() -> T
             b"invalid graph request"
         );
     }
+
+    for body in [
+        json!({"entity_ids": vec!["entity-a"; 201]}),
+        json!({"relationship_ids": vec!["relationship-a"; 401]}),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/graph/subgraph")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+            b"invalid graph request"
+        );
+    }
     Ok(())
 }
 

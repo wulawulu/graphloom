@@ -5,7 +5,7 @@ import { Focus, LoaderCircle, RefreshCcw, RotateCw } from "lucide-react"
 import type { GraphProjection } from "@/api/types"
 import type { GraphViewMode } from "@/components/graph/graph-explorer"
 import { Button } from "@/components/ui/button"
-import { buildProjectionElements, projectionFocusIds } from "@/lib/graph"
+import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 interface NetworkPreviewProps {
   projection: GraphProjection
@@ -65,17 +65,23 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
 
   useEffect(() => {
     const container = containerRef.current
-    if (container === null || container.clientWidth === 0) return undefined
+    if (container === null) return undefined
     let disposed = false
+    let initializing = false
     let instance: Core | null = null
-    void import("cytoscape").then(({ default: cytoscape }) => {
-      if (disposed) return
-      const styles = getComputedStyle(document.documentElement)
-      const foreground = cssVariable(styles, "--foreground")
-      const background = cssVariable(styles, "--background")
-      const border = cssVariable(styles, "--border")
-      const seed = cssVariable(styles, "--graph-seed")
-      const cy = cytoscape({
+    let wasVisible = false
+
+    const initialize = (): void => {
+      if (disposed || initializing || instance !== null) return
+      initializing = true
+      void import("cytoscape").then(({ default: cytoscape }) => {
+        if (disposed) return
+        const styles = getComputedStyle(document.documentElement)
+        const foreground = cssVariable(styles, "--foreground")
+        const background = cssVariable(styles, "--background")
+        const border = cssVariable(styles, "--border")
+        const seed = cssVariable(styles, "--graph-seed")
+        const cy = cytoscape({
         container,
         elements,
         layout: { name: "preset" },
@@ -96,19 +102,36 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         ],
         minZoom: 0.2,
         maxZoom: 3,
-      })
-      cy.on("mouseover", "node", (event) => event.target.addClass("hovered"))
-      cy.on("mouseout", "node", (event) => event.target.removeClass("hovered"))
-      cy.on("select", "node, edge", (event) => event.target.addClass("ui-selected"))
-      cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
-      cy.on("tap", "node", (event) => onEntity(event.target.id()))
-      cy.on("tap", "edge", (event) => onRelationship(event.target.id()))
-      instance = cy
-      cytoscapeRef.current = cy
-      runLayout(cy, projection, mode, false)
-    }).catch(() => undefined)
+        })
+        cy.on("mouseover", "node", (event) => event.target.addClass("hovered"))
+        cy.on("mouseout", "node", (event) => event.target.removeClass("hovered"))
+        cy.on("select", "node, edge", (event) => event.target.addClass("ui-selected"))
+        cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
+        cy.on("tap", "node", (event) => onEntity(event.target.id()))
+        cy.on("tap", "edge", (event) => onRelationship(event.target.id()))
+        instance = cy
+        cytoscapeRef.current = cy
+        runLayout(cy, projection, mode, false)
+      }).catch(() => { initializing = false })
+    }
+
+    const updateViewport = (): void => {
+      const width = container.clientWidth
+      const action = graphViewportAction(width, instance !== null || initializing)
+      const becameVisible = width > 0 && !wasVisible
+      wasVisible = width > 0
+      if (action === "initialize") initialize()
+      if (action === "resize" && instance !== null) {
+        instance.resize()
+        if (becameVisible) focusCollection(instance, projection, mode)
+      }
+    }
+    const observer = new ResizeObserver(updateViewport)
+    observer.observe(container)
+    updateViewport()
     return () => {
       disposed = true
+      observer.disconnect()
       if (cytoscapeRef.current === instance) cytoscapeRef.current = null
       instance?.destroy()
     }

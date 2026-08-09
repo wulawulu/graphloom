@@ -26,3 +26,10 @@ export function projectionFocusIds(projection: GraphProjection, focusMode: boole
   if (focusMode && projection.seed_entity_ids.length > 0) return [...projection.seed_entity_ids]
   return projection.entities.map((entity) => entity.id)
 }
+
+export type GraphViewportAction = "none" | "initialize" | "resize"
+
+export function graphViewportAction(width: number, initialized: boolean): GraphViewportAction {
+  if (width <= 0) return "none"
+  return initialized ? "resize" : "initialize"
+}
