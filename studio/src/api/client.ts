@@ -7,9 +7,12 @@ import type {
   GraphEntity,
   GraphEntityDetail,
   GraphListResponse,
+  GraphOverviewParameters,
+  GraphProjection,
   GraphRelationship,
   GraphRelationshipDetail,
   GraphSummary,
+  GraphSubgraphRequest,
   QueryResultState,
   RelationshipListParameters,
   RunHistoryCursor,
@@ -103,6 +106,25 @@ export async function getQueryResult(runId: string, signal?: AbortSignal): Promi
 
 export function getGraphSummary(signal?: AbortSignal): Promise<GraphSummary> {
   return requestJson<GraphSummary>("/api/graph/summary", { signal })
+}
+
+export function getGraphOverview(
+  parameters: GraphOverviewParameters = {},
+  signal?: AbortSignal,
+): Promise<GraphProjection> {
+  return requestJson<GraphProjection>(`/api/graph/overview${queryString({
+    max_entities: parameters.max_entities,
+    max_relationships: parameters.max_relationships,
+  })}`, { signal })
+}
+
+export function getGraphSubgraph(body: GraphSubgraphRequest, signal?: AbortSignal): Promise<GraphProjection> {
+  return requestJson<GraphProjection>("/api/graph/subgraph", {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+    signal,
+  })
 }
 
 export function listEntities(parameters: EntityListParameters, signal?: AbortSignal): Promise<GraphListResponse<GraphEntity>> {

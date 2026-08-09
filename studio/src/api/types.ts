@@ -68,6 +68,31 @@ export interface ExplainabilityEventPayload {
   [key: string]: unknown
 }
 
+export interface ExplainabilityCandidate {
+  id: string
+  short_id?: string
+  title?: string
+  record_type: string
+  score?: number
+  rank?: number
+  selected: boolean
+  reason?: string
+  source_id?: string
+  relationship_id?: string
+  expansion_depth?: number
+}
+
+export interface ExplainabilityContextSection {
+  section: string
+  name?: string
+  token_budget: number
+  tokens_used: number
+  candidate_count: number
+  selected_count: number
+  truncated: boolean
+  selected_record_ids: string[]
+}
+
 export interface ExplainabilityRecord {
   run_id: string
   timestamp: string
@@ -90,6 +115,48 @@ export interface GraphSummary {
   community_levels: number[]
   entity_types: Record<string, number>
   untyped_entity_count: number
+}
+
+export interface GraphProjectionEntity {
+  id: string
+  title: string
+  entity_type: string | null
+  rank: number | null
+}
+
+export interface GraphProjectionRelationship {
+  id: string
+  source_entity_id: string
+  target_entity_id: string
+  source: string
+  target: string
+  weight: number | null
+  rank: number | null
+}
+
+export interface GraphProjection {
+  entities: GraphProjectionEntity[]
+  relationships: GraphProjectionRelationship[]
+  seed_entity_ids: string[]
+  seed_relationship_ids: string[]
+  missing_entity_ids: string[]
+  missing_relationship_ids: string[]
+  unresolved_relationship_ids: string[]
+  unresolved_relationship_count: number
+  truncated: boolean
+}
+
+export interface GraphOverviewParameters {
+  max_entities?: number
+  max_relationships?: number
+}
+
+export interface GraphSubgraphRequest {
+  entity_ids: string[]
+  relationship_ids: string[]
+  depth?: 0 | 1
+  max_entities?: number
+  max_relationships?: number
 }
 
 export interface GraphEntity {

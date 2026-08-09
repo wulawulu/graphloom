@@ -27,6 +27,12 @@
   --ring: oklch(0.68 0.14 195);
   --warning: oklch(0.78 0.16 80);
   --success: oklch(0.72 0.16 150);
+  --graph-person: oklch(0.72 0.14 205);
+  --graph-organization: oklch(0.73 0.14 305);
+  --graph-geo: oklch(0.72 0.14 150);
+  --graph-event: oklch(0.78 0.14 75);
+  --graph-default: oklch(0.63 0.035 260);
+  --graph-seed: oklch(0.83 0.17 85);
 }
 
 @theme inline {

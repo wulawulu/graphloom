@@ -4,6 +4,7 @@ import type { ExplainabilityEnvelope } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { EventDetail } from "@/components/explainability/details/event-detail"
 import { describeEvent, eventSummary, highlightFromEvent, type TimelineCategory } from "@/lib/explainability"
 
 interface TimelineEventProps {
@@ -26,7 +27,6 @@ export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): R
   const descriptor = describeEvent(event)
   const summary = eventSummary(event)
   const highlight = highlightFromEvent(event)
-  const structuredEntries = Object.entries(event).filter(([key]) => key !== "type" && !["context", "prompt", "response"].includes(key))
 
   return (
     <article className="relative pl-8">
@@ -50,21 +50,7 @@ export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): R
             </div>
           </div>
           <CollapsibleContent className="mt-3 space-y-3 border-t pt-3">
-            {structuredEntries.length > 0 ? (
-              <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] gap-x-3 gap-y-1 text-xs">
-                {structuredEntries.map(([key, value]) => (
-                  <div key={key} className="contents">
-                    <dt className="font-mono text-muted-foreground">{key}</dt>
-                    <dd className="min-w-0 overflow-hidden text-ellipsis whitespace-pre-wrap">{typeof value === "string" ? value : JSON.stringify(value)}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : null}
-            {event.type === "context_completed" && event.context === undefined ? <p className="text-xs text-muted-foreground">Content hidden by explainability mode.</p> : null}
-            <details>
-              <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Raw JSON</summary>
-              <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-5">{JSON.stringify(event, null, 2)}</pre>
-            </details>
+            <EventDetail event={event} onFocusGraph={highlight === null ? null : () => onFocusGraph(envelope)} />
           </CollapsibleContent>
         </div>
       </Collapsible>

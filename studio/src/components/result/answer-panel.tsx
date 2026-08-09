@@ -1,8 +1,6 @@
 import { AlertCircle, Clock3, MessageSquareText, Sparkles } from "lucide-react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-
 import type { QueryResultState } from "@/api/types"
+import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -24,7 +22,7 @@ export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React
           {!loading && result.state === "missing" ? <AnswerState title="Result unavailable" detail="The Query Run does not exist in this Store namespace." /> : null}
           {!loading && result.state === "ready" ? (
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
-              <article className="markdown-answer min-w-0"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: ({ alt }) => <span>[Remote image omitted{alt === undefined ? "" : `: ${alt}`}]</span>, a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer noopener">{children}</a> }}>{result.result.response}</ReactMarkdown></article>
+              <article className="min-w-0"><SafeMarkdown>{result.result.response}</SafeMarkdown></article>
               <aside className="space-y-3">
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="outline"><Clock3 /> {result.result.elapsed_ms} ms</Badge>

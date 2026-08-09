@@ -1,33 +1,48 @@
 import { describe, expect, it } from "vitest"
 
-import type { GraphEntity, GraphRelationship } from "@/api/types"
-import { applyGraphHighlights, buildGraphElements, type HighlightableGraph } from "@/lib/graph"
+import type { GraphProjection } from "@/api/types"
+import { buildProjectionElements, projectionFocusIds } from "@/lib/graph"
 
-const entity = (id: string, title: string): GraphEntity => ({ id, title, short_id: null, entity_type: null, rank: null, community_ids: [] })
-const relationship = (id: string, source: string, target: string): GraphRelationship => ({ id, source, target, short_id: null, weight: null, rank: null })
+const projection: GraphProjection = {
+  entities: [
+    { id: "entity-seed", title: "Alice", entity_type: "PERSON", rank: 9 },
+    { id: "entity-neighbor", title: "Acme", entity_type: "ORGANIZATION", rank: 4 },
+  ],
+  relationships: [{
+    id: "relationship-seed",
+    source_entity_id: "entity-neighbor",
+    target_entity_id: "entity-seed",
+    source: "Acme",
+    target: "Alice",
+    weight: 0.8,
+    rank: 5,
+  }],
+  seed_entity_ids: ["entity-seed"],
+  seed_relationship_ids: ["relationship-seed"],
+  missing_entity_ids: [],
+  missing_relationship_ids: [],
+  unresolved_relationship_ids: [],
+  unresolved_relationship_count: 0,
+  truncated: false,
+}
 
-describe("graph preview transformation", () => {
-  it("resolves only unique loaded title endpoints", () => {
-    const result = buildGraphElements(
-      [entity("a1", "Alice"), entity("a2", "Alice"), entity("b", "Bob"), entity("c", "Carol")],
-      [relationship("ambiguous", "Alice", "Bob"), relationship("missing", "Nobody", "Bob"), relationship("resolved", "Bob", "Carol")],
-    )
-    expect(result.resolvedRelationshipCount).toBe(1)
-    expect(result.omittedRelationshipCount).toBe(2)
-    expect(result.elements.some((value) => value.data.id === "resolved")).toBe(true)
-    expect(result.elements.some((value) => value.data.id === "ambiguous")).toBe(false)
+describe("graph projection transformation", () => {
+  it("uses backend-resolved endpoint IDs without title lookup", () => {
+    const elements = buildProjectionElements(projection)
+    const edge = elements.find((element) => element.data.id === "relationship-seed")
+    expect(edge?.data.source).toBe("entity-neighbor")
+    expect(edge?.data.target).toBe("entity-seed")
   })
 
-  it("applies highlights that existed before the graph instance became ready", () => {
-    const added: string[] = []
-    let removed = false
-    const graph: HighlightableGraph = {
-      batch: (callback) => callback(),
-      elements: () => ({ removeClass: () => { removed = true } }),
-      getElementById: (id) => ({ addClass: () => added.push(id) }),
-    }
-    applyGraphHighlights(graph, new Set(["entity-1"]), new Set(["relationship-2"]))
-    expect(removed).toBe(true)
-    expect(added).toEqual(["entity-1", "relationship-2"])
+  it("marks entity and relationship seeds with distinct classes", () => {
+    const elements = buildProjectionElements(projection)
+    expect(elements.find((element) => element.data.id === "entity-seed")?.classes).toBe("seed")
+    expect(elements.find((element) => element.data.id === "entity-neighbor")?.classes).toBe("neighbor")
+    expect(elements.find((element) => element.data.id === "relationship-seed")?.classes).toBe("seed-relationship")
+  })
+
+  it("focuses seed nodes in focus mode and all nodes in overview mode", () => {
+    expect(projectionFocusIds(projection, true)).toEqual(["entity-seed"])
+    expect(projectionFocusIds(projection, false)).toEqual(["entity-seed", "entity-neighbor"])
   })
 })

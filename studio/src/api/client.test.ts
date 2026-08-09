@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { getGraphSummary, getQueryResult, listRuns, startQuery } from "@/api/client"
+import { getGraphOverview, getGraphSubgraph, getGraphSummary, getQueryResult, listRuns, startQuery } from "@/api/client"
 
 function response(status: number, body: unknown): Response {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -42,5 +42,19 @@ describe("Studio API client", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(503, "GRAPH_PATH_SECRET_SENTINEL")))
     await expect(getGraphSummary()).rejects.toMatchObject({ status: 503 })
     await expect(getGraphSummary()).rejects.not.toThrow("GRAPH_PATH_SECRET_SENTINEL")
+  })
+
+  it("uses the bounded graph projection contracts", async () => {
+    const projection = { entities: [], relationships: [], seed_entity_ids: [], seed_relationship_ids: [], missing_entity_ids: [], missing_relationship_ids: [], unresolved_relationship_ids: [], unresolved_relationship_count: 0, truncated: false }
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(response(200, projection)))
+    vi.stubGlobal("fetch", fetchMock)
+    await getGraphOverview({ max_entities: 20, max_relationships: 30 })
+    await getGraphSubgraph({ entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160 })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/graph/overview?max_entities=20&max_relationships=30")
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/graph/subgraph")
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(String(init.body))).toEqual({ entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160 })
   })
 })

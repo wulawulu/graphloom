@@ -1,70 +1,28 @@
 import type { ElementDefinition } from "cytoscape"
 
-import type { GraphEntity, GraphRelationship } from "@/api/types"
+import type { GraphProjection } from "@/api/types"
 
-export interface HighlightableGraph {
-  batch(callback: () => void): void
-  elements(): { removeClass(name: string): void }
-  getElementById(id: string): { addClass(name: string): void }
-}
-
-export function applyGraphHighlights(
-  graph: HighlightableGraph,
-  entityIds: ReadonlySet<string>,
-  relationshipIds: ReadonlySet<string>,
-): void {
-  graph.batch(() => {
-    graph.elements().removeClass("highlighted")
-    for (const id of [...entityIds, ...relationshipIds]) {
-      graph.getElementById(id).addClass("highlighted")
-    }
-  })
-}
-
-export interface GraphPreviewElements {
-  elements: ElementDefinition[]
-  resolvedRelationshipCount: number
-  omittedRelationshipCount: number
-}
-
-export function buildGraphElements(
-  entities: readonly GraphEntity[],
-  relationships: readonly GraphRelationship[],
-): GraphPreviewElements {
-  const byTitle = new Map<string, GraphEntity[]>()
-  for (const entity of entities) {
-    const existing = byTitle.get(entity.title) ?? []
-    existing.push(entity)
-    byTitle.set(entity.title, existing)
-  }
-
-  const elements: ElementDefinition[] = entities.map((entity) => ({
+export function buildProjectionElements(projection: GraphProjection): ElementDefinition[] {
+  const seedEntityIds = new Set(projection.seed_entity_ids)
+  const seedRelationshipIds = new Set(projection.seed_relationship_ids)
+  const nodes: ElementDefinition[] = projection.entities.map((entity) => ({
     group: "nodes",
-    data: { id: entity.id, label: entity.title, entityType: entity.entity_type ?? "untyped" },
+    classes: seedEntityIds.has(entity.id) ? "seed" : "neighbor",
+    data: { id: entity.id, label: entity.title, entityType: (entity.entity_type ?? "OTHER").toUpperCase() },
   }))
-  let resolvedRelationshipCount = 0
-  for (const relationship of relationships) {
-    const sources = byTitle.get(relationship.source)
-    const targets = byTitle.get(relationship.target)
-    if (sources?.length !== 1 || targets?.length !== 1) continue
-    const source = sources[0]
-    const target = targets[0]
-    if (source === undefined || target === undefined) continue
-    elements.push({
+  const edges: ElementDefinition[] = projection.relationships.map((relationship) => ({
       group: "edges",
+      classes: seedRelationshipIds.has(relationship.id) ? "seed-relationship" : undefined,
       data: {
         id: relationship.id,
-        source: source.id,
-        target: target.id,
-        label: relationship.short_id ?? "",
+        source: relationship.source_entity_id,
+        target: relationship.target_entity_id,
       },
-    })
-    resolvedRelationshipCount += 1
-  }
+    }))
+  return [...nodes, ...edges]
+}
 
-  return {
-    elements,
-    resolvedRelationshipCount,
-    omittedRelationshipCount: relationships.length - resolvedRelationshipCount,
-  }
+export function projectionFocusIds(projection: GraphProjection, focusMode: boolean): string[] {
+  if (focusMode && projection.seed_entity_ids.length > 0) return [...projection.seed_entity_ids]
+  return projection.entities.map((entity) => entity.id)
 }

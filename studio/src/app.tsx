@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from "react"
 
-import type { ExplainabilityEnvelope, StartQueryResponse } from "@/api/types"
+import type { ExplainabilityEnvelope, GraphSubgraphRequest, StartQueryResponse } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
 import { StudioShell } from "@/components/layout/studio-shell"
 import { QueryComposer } from "@/components/query/query-composer"
@@ -19,9 +19,7 @@ const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((
 
 export function App(): React.ReactElement {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [entityHighlights, setEntityHighlights] = useState<ReadonlySet<string>>(new Set())
-  const [relationshipHighlights, setRelationshipHighlights] = useState<ReadonlySet<string>>(new Set())
-  const [focusRevision, setFocusRevision] = useState(0)
+  const [graphFocus, setGraphFocus] = useState<(GraphSubgraphRequest & { revision: number }) | null>(null)
   const [mobileTab, setMobileTab] = useState("runs")
   const history = useRunHistory()
   const selected = useRun(selectedRunId)
@@ -36,8 +34,7 @@ export function App(): React.ReactElement {
 
   const onAccepted = useCallback((response: StartQueryResponse) => {
     setSelectedRunId(response.run_id)
-    setEntityHighlights(new Set())
-    setRelationshipHighlights(new Set())
+    setGraphFocus(null)
     setMobileTab("timeline")
     refreshHistory()
   }, [refreshHistory])
@@ -45,9 +42,14 @@ export function App(): React.ReactElement {
   const onFocusGraph = useCallback((envelope: ExplainabilityEnvelope) => {
     const highlight = highlightFromEvent(envelope.record.event)
     if (highlight === null) return
-    setEntityHighlights(new Set(highlight.entityIds))
-    setRelationshipHighlights(new Set(highlight.relationshipIds))
-    setFocusRevision((value) => value + 1)
+    setGraphFocus((current) => ({
+      entity_ids: highlight.entityIds,
+      relationship_ids: highlight.relationshipIds,
+      depth: 1,
+      max_entities: 80,
+      max_relationships: 160,
+      revision: (current?.revision ?? 0) + 1,
+    }))
     setMobileTab("graph")
   }, [])
 
@@ -64,7 +66,7 @@ export function App(): React.ReactElement {
       <StudioShell
         navigation={navigation}
         timeline={<Timeline runId={selectedRunId} envelopes={stream.envelopes} streamStatus={stream.status} onFocusGraph={onFocusGraph} />}
-        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer entityHighlights={entityHighlights} relationshipHighlights={relationshipHighlights} focusRevision={focusRevision} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer focusIntent={graphFocus} /></Suspense>}
         answer={<Suspense fallback={<PanelLoading label="Loading Final Answer" />}><AnswerPanel runId={selectedRunId} result={selected.result} loading={selected.loading} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}

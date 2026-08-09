@@ -1559,6 +1559,8 @@ stable ID。
 
 ```http
 GET /api/graph/summary
+GET /api/graph/overview
+POST /api/graph/subgraph
 GET /api/graph/entities
 GET /api/graph/entities/{entity_id}
 GET /api/graph/relationships
@@ -1586,6 +1588,51 @@ backend 实现同一 `GraphDataSource`，无需修改 frontend API。
 非法 query/path 返回固定 400，item 不存在返回固定 404，output 尚未生成、缺表、schema 损坏
 或 snapshot invariant 失败返回固定 503；response 不包含 filesystem path、table/Polars error 或
 row content。
+
+### 15.3.1 Graph Overview V2 与 Query-linked Subgraph
+
+旧 Studio MVP 分别读取 bounded Entity page 与 Relationship page，再由浏览器按 title 解析边：
+
+```text
+first N entities + first M relationships
+                ↓
+       frontend title resolution
+```
+
+这两个独立 page 不保证形成同一个 topology。完整图中真实存在的 endpoint 只要不在 Entity page，
+对应 Relationship 就会被误报为 unresolved。V2 把解析顺序改为：
+
+```text
+┌──────────────────────── Full GraphDataSnapshot ────────────────────────┐
+│ entities_by_id / entities_by_title / relationships_by_id / adjacency  │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 ▼
+                 endpoint title 必须唯一匹配 Entity
+                                 ▼
+                     deterministic resolved topology
+                                 ▼
+           edge-first Overview 或 seed-preserving 1-hop Subgraph
+                                 ▼
+                 bounded HTTP response → bounded Cytoscape graph
+```
+
+`GET /api/graph/overview` 默认最多 80 个 Entity、160 个 Relationship，硬上限分别为
+200/400。resolved Relationship 按 `rank DESC`、`weight DESC`、relationship stable ID ASC
+排序；只有加入所需 endpoint 后仍不超过 Entity limit 的边才进入 projection。只要存在
+resolved topology，就不会用无关孤立节点填满 Entity limit；仅当 resolved Relationship 为零时，
+才按 Entity `rank DESC`、ID ASC 返回 fallback 节点。
+
+`POST /api/graph/subgraph` 是无状态的 depth 0/1 projection。Entity seed 若存在必须保留；
+resolved Relationship seed 的两个 endpoint 自动成为 Entity seed。不存在的 seed 分别进入
+`missing_entity_ids`/`missing_relationship_ids`，存在但 endpoint title 缺失或歧义的 Relationship
+seed 进入 `unresolved_relationship_ids`。有效 seed 自身超过请求 limit 时固定返回 400，不能静默
+丢 seed；depth 1 只从初始 seed Entity 扩展真实相邻边，并以同一确定性 priority 在 limits 内选择。
+
+`unresolved_relationship_count` 统计完整 `GraphDataSnapshot` 中 endpoint title 缺失或不能唯一匹配
+而真正无法稳定解析的 Relationship；它不再表示 frontend page sampling 缺少 endpoint。
+Projection 是 Studio visualization concern，不参与 GraphRAG Query、Context、retrieval 或 ranking，
+Overview 的显示顺序也不会改变任何 GraphRAG observable semantics。HTTP response 和浏览器图是
+bounded 的，但 Parquet datasource 仍执行 whole-table snapshot read，本阶段没有解决磁盘 scan pushdown。
 
 ---
 
@@ -3078,7 +3125,9 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 
 ## 29.1 Graph Explorer
 
-* Entity 节点；
+* Full-snapshot resolution 后的 bounded Overview；
+  -Query-linked bounded depth-1 Subgraph；
+  -Entity 节点；
   -Relationship 边；
   -Community 基础展示；
   -节点详情；
@@ -3121,8 +3170,12 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 * SSE 与 Store replay 共用 `ExplainabilityEnvelope`；
   -按 sequence 排序与去重；
   -未知 Event 使用 forward-compatible fallback；
-  -点击 Entity/Relationship/Graph Expansion Event 后高亮当前图谱预览中的稳定 ID；
-  -预览外或 title 歧义的节点/边不会被伪造。
+  -点击 Entity/Relationship/Graph Expansion Event 后，以 stable ID 请求新的 bounded Subgraph；
+  -found Entity seed 与 resolved Relationship endpoint 必须实际进入 projection；
+  -layout 完成后 viewport 自动 fit Query seed，seed 与普通 neighbor 使用不同视觉状态；
+  -missing/unresolved seed 明确展示，不伪造节点或边；
+  -Details 对已知 Event 使用 typed presenter，未知 Event 使用 forward-compatible fallback；
+  -Raw JSON 只保留在默认折叠的 Developer data 中。
 
 ## 29.6 Frontend 与 Host 部署
 
@@ -3155,9 +3208,10 @@ Explainability Run 与 Event 默认持久化到项目下的
 registry：Run History 与 Explainability 可跨重启保留，而最终 Result 重启或淘汰后可返回 410。
 `ExplainabilityContentMode` 只控制解释过程的内容披露，不控制 Result API 中用户主动请求的最终回答。
 
-Graph Preview 每次只请求 bounded 的 Entity/Relationship page，限制浏览器 payload 与 Cytoscape
-元素数量；这不改变 `ParquetGraphDataSource` 当前 whole-table DataFrame read 的后端边界。
-每个新 HTTP request 重新读取 snapshot，当前未增加 cache。
+Graph Preview V2 每次请求 bounded Overview 或 Query-linked Subgraph，Relationship endpoint 已由
+backend 在完整 snapshot 上解析成 stable Entity ID。浏览器不循环 page 加载 whole graph，也不再按
+title 猜边；这不改变 `ParquetGraphDataSource` 当前 whole-table DataFrame read 的后端边界。每个新
+HTTP request 重新读取 snapshot，当前未增加 cache。
 
 第一版不要求：
 
