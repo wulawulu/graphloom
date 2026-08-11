@@ -121,6 +121,19 @@ impl<'a> ResolutionIndex<'a> {
     }
 }
 
+fn additional_endpoint_count(
+    entity_ids: &BTreeSet<&str>,
+    source_entity_id: &str,
+    target_entity_id: &str,
+) -> usize {
+    let source_is_missing = !entity_ids.contains(source_entity_id);
+    if source_entity_id == target_entity_id {
+        return usize::from(source_is_missing);
+    }
+    usize::from(source_is_missing)
+        .saturating_add(usize::from(!entity_ids.contains(target_entity_id)))
+}
+
 /// Build an edge-first overview from resolved full-snapshot topology.
 pub(crate) fn overview(
     snapshot: &GraphDataSnapshot,
@@ -136,10 +149,11 @@ pub(crate) fn overview(
     let mut selected_relationships = Vec::new();
     let mut truncated = false;
     for relationship in &index.resolved_relationships {
-        let additional_entities = usize::from(!entity_ids.contains(relationship.source_entity_id))
-            .saturating_add(usize::from(
-                !entity_ids.contains(relationship.target_entity_id),
-            ));
+        let additional_entities = additional_endpoint_count(
+            &entity_ids,
+            relationship.source_entity_id,
+            relationship.target_entity_id,
+        );
         if selected_relationships.len() >= max_relationships
             || entity_ids.len().saturating_add(additional_entities) > max_entities
         {
@@ -321,10 +335,11 @@ fn expand_subgraph<'a>(
     let mut truncated = false;
     for relationship_index in candidates {
         let relationship = &index.resolved_relationships[relationship_index];
-        let additional_entities = usize::from(!entity_ids.contains(relationship.source_entity_id))
-            .saturating_add(usize::from(
-                !entity_ids.contains(relationship.target_entity_id),
-            ));
+        let additional_entities = additional_endpoint_count(
+            &entity_ids,
+            relationship.source_entity_id,
+            relationship.target_entity_id,
+        );
         if relationship_indexes.len() >= max_relationships
             || entity_ids.len().saturating_add(additional_entities) > max_entities
         {
@@ -495,6 +510,37 @@ mod tests {
     }
 
     #[test]
+    fn test_should_count_unique_missing_relationship_endpoints() {
+        let mut selected = BTreeSet::new();
+        assert_eq!(additional_endpoint_count(&selected, "a", "b"), 2);
+        assert_eq!(additional_endpoint_count(&selected, "a", "a"), 1);
+
+        selected.insert("a");
+        assert_eq!(additional_endpoint_count(&selected, "a", "b"), 1);
+        assert_eq!(additional_endpoint_count(&selected, "a", "a"), 0);
+
+        selected.insert("b");
+        assert_eq!(additional_endpoint_count(&selected, "a", "b"), 0);
+    }
+
+    #[test]
+    fn test_should_count_self_loop_endpoint_once_in_overview() -> TestResult {
+        let snapshot = snapshot(
+            vec![entity("a", "Alice", 1)],
+            vec![relationship("loop", "Alice", "Alice", 1, 1.0)],
+        )?;
+
+        let projection = overview(&snapshot, 1, 1);
+
+        assert_eq!(projection.entities.len(), 1);
+        assert_eq!(projection.entities[0].id, "a");
+        assert_eq!(projection.relationships.len(), 1);
+        assert_eq!(projection.relationships[0].id, "loop");
+        assert!(!projection.truncated);
+        Ok(())
+    }
+
+    #[test]
     fn test_should_build_deterministic_edge_first_overview() -> TestResult {
         let mut snapshot = topology_snapshot()?;
         snapshot.relationships[0].weight = Some(f64::NAN);
@@ -612,6 +658,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["r-high", "r-low"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_include_self_loop_with_tight_subgraph_budget() -> TestResult {
+        let snapshot = snapshot(
+            vec![entity("a", "Alice", 1)],
+            vec![relationship("loop", "Alice", "Alice", 1, 1.0)],
+        )?;
+
+        let projection = subgraph(&snapshot, &["a".to_owned()], &[], 1, 1, 1)?;
+
+        assert_eq!(projection.entities.len(), 1);
+        assert_eq!(projection.entities[0].id, "a");
+        assert_eq!(projection.relationships.len(), 1);
+        assert_eq!(projection.relationships[0].id, "loop");
+        assert!(!projection.truncated);
         Ok(())
     }
 

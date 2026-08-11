@@ -30,7 +30,7 @@ vi.mock("@/api/client", () => ({
 }))
 
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, mode, error, onBackOverview }: { projection: GraphProjection; mode: string; error: string | null; onBackOverview: () => void }) => <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{error === null ? null : <span>{error}</span>}{mode === "focus" ? <button onClick={onBackOverview}>Back test</button> : null}</div>,
+  NetworkPreview: ({ projection, mode, error, onBackOverview, onReload }: { projection: GraphProjection; mode: string; error: string | null; onBackOverview: () => void; onReload: () => void }) => <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{error === null ? null : <span>{error}</span>}{mode === "focus" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={onReload}>Reload test</button></div>,
 }))
 
 const summary = { entity_count: 10, relationship_count: 20, community_count: 2, community_report_count: 2, community_levels: [0], entity_types: { PERSON: 1 }, untyped_entity_count: 0 }
@@ -111,6 +111,38 @@ describe("GraphExplorer focus flow", () => {
 
     expect(await screen.findByText("OVERVIEW-NEW")).toBeInTheDocument()
     expect(getGraphOverview).toHaveBeenCalledTimes(1)
+    expect(getGraphSummary).toHaveBeenCalledTimes(1)
+    expect(screen.getByText("overview")).toBeInTheDocument()
+  })
+
+  it("returns to overview when the focus intent is cleared", async () => {
+    vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
+    vi.mocked(getGraphOverview).mockResolvedValue(projection("overview-after-focus"))
+    const { rerender } = render(<GraphExplorer focusIntent={{ entity_ids: ["focused"], relationship_ids: [], revision: 1 }} />)
+    expect(await screen.findByText("FOCUSED")).toBeInTheDocument()
+
+    rerender(<GraphExplorer focusIntent={null} />)
+
+    expect(await screen.findByText("OVERVIEW-AFTER-FOCUS")).toBeInTheDocument()
+    expect(screen.getByText("overview")).toBeInTheDocument()
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
+  })
+
+  it("aborts a pending focus when cleared and lets overview own the projection", async () => {
+    let resolveFocus: ((value: GraphProjection) => void) | undefined
+    vi.mocked(getGraphSubgraph).mockReturnValue(new Promise((resolve) => { resolveFocus = resolve }))
+    vi.mocked(getGraphOverview).mockResolvedValue(projection("overview-new"))
+    const { rerender } = render(<GraphExplorer focusIntent={{ entity_ids: ["focused"], relationship_ids: [], revision: 1 }} />)
+    await waitFor(() => expect(getGraphSubgraph).toHaveBeenCalledTimes(1))
+    const focusSignal = vi.mocked(getGraphSubgraph).mock.calls[0]?.[1]
+
+    rerender(<GraphExplorer focusIntent={null} />)
+
+    expect(await screen.findByText("OVERVIEW-NEW")).toBeInTheDocument()
+    expect(focusSignal?.aborted).toBe(true)
+    resolveFocus?.(projection("stale-focus", true))
+    await Promise.resolve()
+    expect(screen.queryByText("STALE-FOCUS")).not.toBeInTheDocument()
     expect(screen.getByText("overview")).toBeInTheDocument()
   })
 
@@ -145,5 +177,64 @@ describe("GraphExplorer focus flow", () => {
 
     expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
     expect(screen.getByText("Graph summary is unavailable. The bounded visualization is still available.")).toBeInTheDocument()
+  })
+
+  it("reloads both the overview and summary", async () => {
+    vi.mocked(getGraphSummary)
+      .mockResolvedValueOnce({ ...summary, entity_count: 362 })
+      .mockResolvedValueOnce({ ...summary, entity_count: 410 })
+    vi.mocked(getGraphOverview)
+      .mockResolvedValueOnce(projection("overview-old"))
+      .mockResolvedValueOnce(projection("overview-new"))
+    const user = userEvent.setup()
+    render(<GraphExplorer focusIntent={null} />)
+    expect(await screen.findByText("362")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Reload test" }))
+
+    expect(await screen.findByText("410")).toBeInTheDocument()
+    expect(await screen.findByText("OVERVIEW-NEW")).toBeInTheDocument()
+    expect(getGraphSummary).toHaveBeenCalledTimes(2)
+    expect(getGraphOverview).toHaveBeenCalledTimes(2)
+  })
+
+  it("recovers an unavailable summary without hiding the graph", async () => {
+    vi.mocked(getGraphSummary)
+      .mockRejectedValueOnce(new Error("summary unavailable"))
+      .mockResolvedValueOnce({ ...summary, entity_count: 410 })
+    const user = userEvent.setup()
+    render(<GraphExplorer focusIntent={null} />)
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    expect(screen.getByText("Graph summary is unavailable. The bounded visualization is still available.")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Reload test" }))
+
+    expect(await screen.findByText("410")).toBeInTheDocument()
+    expect(screen.queryByText("Graph summary is unavailable. The bounded visualization is still available.")).not.toBeInTheDocument()
+    expect(screen.getByText("OVERVIEW")).toBeInTheDocument()
+  })
+
+  it("aborts a stale summary reload and keeps the latest summary", async () => {
+    let resolveStaleSummary: ((value: typeof summary) => void) | undefined
+    const staleSummary = new Promise<typeof summary>((resolve) => { resolveStaleSummary = resolve })
+    vi.mocked(getGraphSummary)
+      .mockResolvedValueOnce(summary)
+      .mockReturnValueOnce(staleSummary)
+      .mockResolvedValueOnce({ ...summary, entity_count: 420 })
+    const user = userEvent.setup()
+    render(<GraphExplorer focusIntent={null} />)
+    expect(await screen.findByText("10")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Reload test" }))
+    await waitFor(() => expect(getGraphSummary).toHaveBeenCalledTimes(2))
+    const staleSignal = vi.mocked(getGraphSummary).mock.calls[1]?.[0]
+    await user.click(screen.getByRole("button", { name: "Reload test" }))
+
+    expect(await screen.findByText("420")).toBeInTheDocument()
+    expect(staleSignal?.aborted).toBe(true)
+    resolveStaleSummary?.({ ...summary, entity_count: 410 })
+    await Promise.resolve()
+    expect(screen.queryByText("410")).not.toBeInTheDocument()
+    expect(screen.getByText("420")).toBeInTheDocument()
   })
 })

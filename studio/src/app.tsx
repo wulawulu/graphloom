@@ -32,12 +32,16 @@ export function App(): React.ReactElement {
   }, [refreshHistory, refreshSelectedRun])
   const stream = useExplainabilityStream(selectedRunId, selected.run?.status, onTerminal)
 
-  const onAccepted = useCallback((response: StartQueryResponse) => {
-    setSelectedRunId(response.run_id)
+  const selectRun = useCallback((runId: string | null) => {
+    setSelectedRunId(runId)
     setGraphFocus(null)
+  }, [])
+
+  const onAccepted = useCallback((response: StartQueryResponse) => {
+    selectRun(response.run_id)
     setMobileTab("timeline")
     refreshHistory()
-  }, [refreshHistory])
+  }, [refreshHistory, selectRun])
 
   const onFocusGraph = useCallback((envelope: ExplainabilityEnvelope) => {
     const highlight = highlightFromEvent(envelope.record.event)
@@ -57,9 +61,9 @@ export function App(): React.ReactElement {
     <div className="flex size-full min-h-0 flex-col">
       <QueryComposer onAccepted={onAccepted} />
       <Separator className="my-3" />
-      <RunList runs={history.runs} selectedRunId={selectedRunId} loading={history.loading} error={history.error} hasMore={history.cursor !== null} onSelect={setSelectedRunId} onRefresh={history.refresh} onLoadMore={history.loadMore} />
+      <RunList runs={history.runs} selectedRunId={selectedRunId} loading={history.loading} error={history.error} hasMore={history.cursor !== null} onSelect={selectRun} onRefresh={history.refresh} onLoadMore={history.loadMore} />
     </div>
-  ), [history.cursor, history.error, history.loadMore, history.loading, history.refresh, history.runs, onAccepted, selectedRunId])
+  ), [history.cursor, history.error, history.loadMore, history.loading, history.refresh, history.runs, onAccepted, selectRun, selectedRunId])
 
   return (
     <TooltipProvider delayDuration={250}>

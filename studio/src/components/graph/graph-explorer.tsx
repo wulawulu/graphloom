@@ -44,8 +44,10 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
   const [detailError, setDetailError] = useState(false)
   const projectionRef = useRef<GraphProjection | null>(null)
   const projectionRequest = useRef<AbortController | null>(null)
+  const summaryRequest = useRef<AbortController | null>(null)
   const detailRequest = useRef<AbortController | null>(null)
   const initialFocusIntent = useRef(focusIntent)
+  const previousFocusIntent = useRef(focusIntent)
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
     projectionRef.current = value
@@ -99,29 +101,54 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
       })
   }, [commitProjection])
 
-  useEffect(() => {
+  const loadSummary = useCallback((): void => {
+    summaryRequest.current?.abort()
     const controller = new AbortController()
+    summaryRequest.current = controller
     void getGraphSummary(controller.signal)
-      .then((value) => { if (!controller.signal.aborted) { setSummary(value); setSummaryError(false) } })
-      .catch((reason: unknown) => { if (!isAbort(reason)) setSummaryError(true) })
+      .then((value) => {
+        if (summaryRequest.current === controller && !controller.signal.aborted) {
+          setSummary(value)
+          setSummaryError(false)
+        }
+      })
+      .catch((reason: unknown) => {
+        if (summaryRequest.current === controller && !isAbort(reason)) setSummaryError(true)
+      })
+      .finally(() => {
+        if (summaryRequest.current === controller) summaryRequest.current = null
+      })
+  }, [])
+
+  useEffect(() => {
+    loadSummary()
     if (initialFocusIntent.current === null) loadOverview()
     return () => {
-      controller.abort()
+      summaryRequest.current?.abort()
       projectionRequest.current?.abort()
       detailRequest.current?.abort()
     }
-  }, [loadOverview])
+  }, [loadOverview, loadSummary])
 
   useEffect(() => {
-    if (focusIntent === null) return
-    loadFocus({
-      entity_ids: focusIntent.entity_ids,
-      relationship_ids: focusIntent.relationship_ids,
-      depth: focusIntent.depth,
-      max_entities: focusIntent.max_entities,
-      max_relationships: focusIntent.max_relationships,
-    })
-  }, [focusIntent, loadFocus])
+    if (focusIntent === null) {
+      if (previousFocusIntent.current !== null) loadOverview()
+    } else {
+      loadFocus({
+        entity_ids: focusIntent.entity_ids,
+        relationship_ids: focusIntent.relationship_ids,
+        depth: focusIntent.depth,
+        max_entities: focusIntent.max_entities,
+        max_relationships: focusIntent.max_relationships,
+      })
+    }
+    previousFocusIntent.current = focusIntent
+  }, [focusIntent, loadFocus, loadOverview])
+
+  const reloadGraphData = useCallback((): void => {
+    loadSummary()
+    loadOverview()
+  }, [loadOverview, loadSummary])
 
   const beginDetailRequest = useCallback((): AbortController => {
     detailRequest.current?.abort()
@@ -196,7 +223,7 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
           {summary === null && !summaryError ? <Skeleton className="mb-3 h-16" /> : null}
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <TabsList className="grid w-full grid-cols-4"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Communities</TabsTrigger></TabsList>
-            <TabsContent value="graph" className="flex min-h-0 flex-1"><NetworkPreview projection={projection} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={loadOverview} onReload={loadOverview} /></TabsContent>
+            <TabsContent value="graph" className="flex min-h-0 flex-1"><NetworkPreview projection={projection} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={loadOverview} onReload={reloadGraphData} /></TabsContent>
             <TabsContent value="entities" className="flex min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
             <TabsContent value="relationships" className="flex min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
             <TabsContent value="communities" className="flex min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>
