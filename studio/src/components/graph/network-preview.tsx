@@ -31,10 +31,11 @@ const layoutOptions = {
 } as const
 
 function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewMode): void {
-  const ids = new Set(projectionFocusIds(projection, mode === "focus"))
+  const focused = mode !== "overview"
+  const ids = new Set(projectionFocusIds(projection, focused))
   const targets = cy.elements().filter((element) => ids.has(element.id()))
   if (targets.length === 0) return
-  if (mode === "focus") {
+  if (focused) {
     const animation = {
       // Cytoscape's public fit option spells this element collection key as two joined fragments.
       fit: { ["el" + "es"]: targets, padding: 56 },
@@ -146,23 +147,26 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
     ...projection.missing_relationship_ids,
     ...projection.unresolved_relationship_ids,
   ]
+  const focused = mode !== "overview"
+  const title = mode === "query-focus" ? "Query focus" : mode === "explorer-focus" ? "Focused subgraph" : "Overview"
+  const seedLabel = mode === "query-focus" ? "Query seed" : "Seed"
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card/50 px-2.5 py-2">
         <div className="min-w-0 text-[11px]">
           <div className="flex items-center gap-2 font-medium">
-            <span>{mode === "focus" ? "Query focus" : "Overview"}</span>
+            <span>{title}</span>
             {props.loading ? <LoaderCircle className="size-3.5 animate-spin text-primary" aria-label="Loading graph data" /> : null}
           </div>
           <p className="text-muted-foreground">
-            {mode === "focus" ? `${seedCount} seeds · ` : ""}{projection.entities.length} nodes · {projection.relationships.length} edges
+            {focused ? `${seedCount} seeds · ` : ""}{projection.entities.length} nodes · {projection.relationships.length} edges
             {mode === "overview" && projection.unresolved_relationship_count > 0 ? ` · ${projection.unresolved_relationship_count} unresolved relationships in source graph` : ""}
             {projection.truncated ? " · bounded view" : ""}
           </p>
         </div>
         <div className="flex items-center gap-1">
-          {mode === "focus" ? <Button variant="outline" size="sm" onClick={props.onBackOverview}>Back to overview</Button> : null}
+          {focused ? <Button variant="outline" size="sm" onClick={props.onBackOverview}>Back to overview</Button> : null}
           <Button variant="ghost" size="icon" title="Fit the current projection" aria-label="Fit graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode) }}><Focus /></Button>
           <Button variant="ghost" size="icon" title="Re-run layout without loading data" aria-label="Re-layout graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, true) }}><RefreshCcw /></Button>
           <Button variant="ghost" size="icon" title="Reload graph data from the backend" aria-label="Reload graph data" onClick={props.onReload}><RotateCw /></Button>
@@ -177,7 +181,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
       ) : null}
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground" aria-label="Graph legend">
         <Legend color="var(--graph-person)" label="PERSON" /><Legend color="var(--graph-organization)" label="ORGANIZATION" /><Legend color="var(--graph-geo)" label="GEO" /><Legend color="var(--graph-event)" label="EVENT" /><Legend color="var(--graph-default)" label="Other" />
-        <span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />Query seed</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)]" />Neighbor</span>
+        <span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{seedLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)]" />Neighbor</span>
       </div>
       <div ref={containerRef} className="min-h-80 flex-1 rounded-md border bg-background" aria-label="Knowledge graph network preview" />
     </div>

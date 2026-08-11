@@ -13,8 +13,8 @@ vi.mock("@/components/explainability/timeline", () => ({
 }))
 
 vi.mock("@/components/graph/graph-explorer", () => ({
-  GraphExplorer: ({ focusIntent }: { focusIntent: { entity_ids: string[] } | null }) => (
-    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}`}</div>
+  GraphExplorer: ({ focusIntent, runId }: { focusIntent: { entity_ids: string[] } | null; runId: string | null }) => (
+    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}`}<span>Graph run {runId ?? "none"}</span></div>
   ),
 }))
 
@@ -73,6 +73,7 @@ describe("App graph focus ownership", () => {
 
     await user.click(screen.getByRole("button", { name: "Select Run B" }))
     expect(screen.getByText("Selected run-b")).toBeInTheDocument()
+    expect(screen.getByText("Graph run run-b")).toBeInTheDocument()
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.queryByText("Graph focus entity-a")).not.toBeInTheDocument()
   })
@@ -87,6 +88,7 @@ describe("App graph focus ownership", () => {
 
     await user.click(screen.getByRole("button", { name: "Accept new Query" }))
     expect(screen.getByText("Selected run-new")).toBeInTheDocument()
+    expect(screen.getByText("Graph run run-new")).toBeInTheDocument()
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.queryByText("Graph focus entity-a")).not.toBeInTheDocument()
   })

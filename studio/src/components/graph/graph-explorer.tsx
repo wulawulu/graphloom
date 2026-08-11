@@ -21,16 +21,35 @@ import { GraphDetailSheet, type GraphDetail } from "./graph-detail"
 import { CommunityList, EntityList, RelationshipList } from "./graph-lists"
 import { NetworkPreview } from "./network-preview"
 
-export type GraphViewMode = "overview" | "focus"
+export type GraphViewMode = "overview" | "query-focus" | "explorer-focus"
 export type GraphFocusIntent = GraphSubgraphRequest & { revision: number }
 
-interface GraphExplorerProps { focusIntent: GraphFocusIntent | null }
+interface GraphExplorerProps {
+  runId: string | null
+  focusIntent: GraphFocusIntent | null
+  onClearFocus: () => void
+}
+
+interface ProjectionRequest {
+  controller: AbortController
+  kind: GraphViewMode
+}
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
 }
 
-export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactElement {
+function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
+  return {
+    entity_ids: intent.entity_ids,
+    relationship_ids: intent.relationship_ids,
+    depth: intent.depth,
+    max_entities: intent.max_entities,
+    max_relationships: intent.max_relationships,
+  }
+}
+
+export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
   const [projection, setProjection] = useState<GraphProjection | null>(null)
@@ -43,58 +62,72 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
   const projectionRef = useRef<GraphProjection | null>(null)
-  const projectionRequest = useRef<AbortController | null>(null)
+  const modeRef = useRef<GraphViewMode>("overview")
+  const projectionRequest = useRef<ProjectionRequest | null>(null)
   const summaryRequest = useRef<AbortController | null>(null)
   const detailRequest = useRef<AbortController | null>(null)
   const initialFocusIntent = useRef(focusIntent)
+  const lifecycleInitialized = useRef(false)
   const previousFocusIntent = useRef(focusIntent)
+  const previousRunId = useRef(runId)
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
     projectionRef.current = value
+    modeRef.current = nextMode
     setProjection(value)
     setMode(nextMode)
     setUnavailable(false)
   }, [])
 
+  const invalidateCommittedFocus = useCallback((): void => {
+    if (modeRef.current === "overview") return
+    modeRef.current = "overview"
+    projectionRef.current = null
+    setMode("overview")
+    setProjection(null)
+  }, [])
+
   const loadOverview = useCallback((): void => {
-    projectionRequest.current?.abort()
+    projectionRequest.current?.controller.abort()
     const controller = new AbortController()
-    projectionRequest.current = controller
+    const request: ProjectionRequest = { controller, kind: "overview" }
+    projectionRequest.current = request
     setLoading(true)
     setError(null)
     void getGraphOverview({}, controller.signal)
       .then((value) => {
-        if (projectionRequest.current === controller && !controller.signal.aborted) commitProjection(value, "overview")
+        if (projectionRequest.current === request && !controller.signal.aborted) commitProjection(value, "overview")
       })
       .catch((reason: unknown) => {
-        if (projectionRequest.current !== controller || isAbort(reason)) return
+        if (projectionRequest.current !== request || isAbort(reason)) return
         if (projectionRef.current === null) setUnavailable(true)
         else setError("Could not reload graph overview.")
       })
       .finally(() => {
-        if (projectionRequest.current === controller) {
+        if (projectionRequest.current === request) {
           projectionRequest.current = null
           setLoading(false)
         }
       })
   }, [commitProjection])
 
-  const loadFocus = useCallback((request: GraphSubgraphRequest): void => {
-    projectionRequest.current?.abort()
+  const loadFocus = useCallback((subgraphRequest: GraphSubgraphRequest, nextMode: Exclude<GraphViewMode, "overview">): void => {
+    projectionRequest.current?.controller.abort()
     const controller = new AbortController()
-    projectionRequest.current = controller
+    const request: ProjectionRequest = { controller, kind: nextMode }
+    projectionRequest.current = request
     setTab("graph")
     setLoading(true)
     setError(null)
-    void getGraphSubgraph(request, controller.signal)
+    void getGraphSubgraph(subgraphRequest, controller.signal)
       .then((value) => {
-        if (projectionRequest.current === controller && !controller.signal.aborted) commitProjection(value, "focus")
+        if (projectionRequest.current === request && !controller.signal.aborted) commitProjection(value, nextMode)
       })
       .catch((reason: unknown) => {
-        if (projectionRequest.current === controller && !isAbort(reason)) setError("Could not load focused graph.")
+        if (projectionRequest.current === request && !isAbort(reason)) setError("Could not load focused graph.")
       })
       .finally(() => {
-        if (projectionRequest.current === controller) {
+        if (projectionRequest.current === request) {
           projectionRequest.current = null
           setLoading(false)
         }
@@ -125,25 +158,53 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
     if (initialFocusIntent.current === null) loadOverview()
     return () => {
       summaryRequest.current?.abort()
-      projectionRequest.current?.abort()
+      projectionRequest.current?.controller.abort()
       detailRequest.current?.abort()
     }
   }, [loadOverview, loadSummary])
 
   useEffect(() => {
-    if (focusIntent === null) {
-      if (previousFocusIntent.current !== null) loadOverview()
-    } else {
-      loadFocus({
-        entity_ids: focusIntent.entity_ids,
-        relationship_ids: focusIntent.relationship_ids,
-        depth: focusIntent.depth,
-        max_entities: focusIntent.max_entities,
-        max_relationships: focusIntent.max_relationships,
-      })
+    if (!lifecycleInitialized.current) {
+      lifecycleInitialized.current = true
+      if (focusIntent !== null) {
+        loadFocus(subgraphRequest(focusIntent), "query-focus")
+      }
+      return
     }
-    previousFocusIntent.current = focusIntent
-  }, [focusIntent, loadFocus, loadOverview])
+
+    const runChanged = previousRunId.current !== runId
+    const previousIntent = previousFocusIntent.current
+    previousRunId.current = runId
+
+    if (runChanged) {
+      const hadFocusedProjection = modeRef.current !== "overview"
+      const hadPendingFocus = projectionRequest.current?.kind === "query-focus" || projectionRequest.current?.kind === "explorer-focus"
+      invalidateCommittedFocus()
+      if (focusIntent !== null && focusIntent.revision !== previousIntent?.revision) {
+        previousFocusIntent.current = focusIntent
+        loadFocus(subgraphRequest(focusIntent), "query-focus")
+      } else if (focusIntent !== null) {
+        previousFocusIntent.current = null
+        onClearFocus()
+        loadOverview()
+      } else {
+        previousFocusIntent.current = null
+        if (hadFocusedProjection || hadPendingFocus) loadOverview()
+      }
+    } else {
+      previousFocusIntent.current = focusIntent
+      if (focusIntent === null) {
+        if (previousIntent !== null) loadOverview()
+      } else {
+        loadFocus(subgraphRequest(focusIntent), "query-focus")
+      }
+    }
+  }, [focusIntent, invalidateCommittedFocus, loadFocus, loadOverview, onClearFocus, runId])
+
+  const backToOverview = useCallback((): void => {
+    if (focusIntent !== null) onClearFocus()
+    else loadOverview()
+  }, [focusIntent, loadOverview, onClearFocus])
 
   const reloadGraphData = useCallback((): void => {
     loadSummary()
@@ -223,14 +284,14 @@ export function GraphExplorer({ focusIntent }: GraphExplorerProps): React.ReactE
           {summary === null && !summaryError ? <Skeleton className="mb-3 h-16" /> : null}
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <TabsList className="grid w-full grid-cols-4"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Communities</TabsTrigger></TabsList>
-            <TabsContent value="graph" className="flex min-h-0 flex-1"><NetworkPreview projection={projection} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={loadOverview} onReload={reloadGraphData} /></TabsContent>
+            <TabsContent value="graph" className="flex min-h-0 flex-1"><NetworkPreview projection={projection} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={backToOverview} onReload={reloadGraphData} /></TabsContent>
             <TabsContent value="entities" className="flex min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
             <TabsContent value="relationships" className="flex min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
             <TabsContent value="communities" className="flex min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>
           </Tabs>
         </div>
       ) : null}
-      <GraphDetailSheet detail={detail} loading={detailLoading} error={detailError} onOpenChange={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 })} />
+      <GraphDetailSheet detail={detail} loading={detailLoading} error={detailError} onOpenChange={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} />
     </section>
   )
 }

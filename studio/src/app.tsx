@@ -37,6 +37,8 @@ export function App(): React.ReactElement {
     setGraphFocus(null)
   }, [])
 
+  const clearGraphFocus = useCallback(() => setGraphFocus(null), [])
+
   const onAccepted = useCallback((response: StartQueryResponse) => {
     selectRun(response.run_id)
     setMobileTab("timeline")
@@ -70,7 +72,7 @@ export function App(): React.ReactElement {
       <StudioShell
         navigation={navigation}
         timeline={<Timeline runId={selectedRunId} envelopes={stream.envelopes} streamStatus={stream.status} onFocusGraph={onFocusGraph} />}
-        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer focusIntent={graphFocus} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} onClearFocus={clearGraphFocus} /></Suspense>}
         answer={<Suspense fallback={<PanelLoading label="Loading Final Answer" />}><AnswerPanel runId={selectedRunId} result={selected.result} loading={selected.loading} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
