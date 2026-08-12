@@ -40,10 +40,13 @@ describe("StudioShell responsive ownership", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => mobileMediaQuery()))
     const props = { queryWorkspace: <div>Query owner</div>, graph: <div>Graph owner</div>, onMobileTabChange: vi.fn() }
     const { rerender } = render(<StudioShell {...props} mobileTab="query" />)
-    expect(screen.getByText("Graph owner")).toBeInTheDocument()
+    const graphOwner = screen.getByText("Graph owner")
+    expect(graphOwner).toBeInTheDocument()
+    expect(graphOwner.closest("[class~='!pointer-events-none']")).not.toBeNull()
 
     rerender(<StudioShell {...props} mobileTab="graph" />)
     expect(screen.getAllByText("Graph owner")).toHaveLength(1)
+    expect(graphOwner.closest("[class~='!pointer-events-auto']")).not.toBeNull()
   })
 
   it("keeps the primary graph mounted when the query workspace collapses", async () => {

@@ -35,7 +35,7 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
             maxSize="440px"
             collapsedSize="44px"
             collapsible
-            className={desktop ? "" : "!absolute !inset-0 !size-full"}
+            className={desktop ? "" : `!absolute !inset-0 !size-full ${props.mobileTab === "query" ? "!visible !pointer-events-auto !z-10" : "!invisible !pointer-events-none"}`}
             onResize={(size) => setQueryCollapsed(size.inPixels <= 48)}
           >
             <div className={`relative size-full overflow-hidden border-r ${!desktop && props.mobileTab !== "query" ? "hidden" : ""}`}>
@@ -53,7 +53,7 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
             </div>
           </ResizablePanel>
           <ResizableHandle withHandle className={desktop ? "" : "hidden"} />
-          <ResizablePanel minSize="520px" className={desktop ? "" : "!absolute !inset-0 !size-full"}><div className={`size-full overflow-hidden ${!desktop && props.mobileTab !== "graph" ? "hidden" : ""}`}>{props.graph}</div></ResizablePanel>
+          <ResizablePanel minSize="520px" className={desktop ? "" : `!absolute !inset-0 !size-full ${props.mobileTab === "graph" ? "!visible !pointer-events-auto !z-10" : "!invisible !pointer-events-none"}`}><div className={`size-full overflow-hidden ${!desktop && props.mobileTab !== "graph" ? "hidden" : ""}`}>{props.graph}</div></ResizablePanel>
         </ResizablePanelGroup>
       </div>
     </main>
