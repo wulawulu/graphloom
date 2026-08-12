@@ -68,6 +68,31 @@ export interface GraphHighlight {
   relationshipIds: string[]
 }
 
+export function deriveFinalGraphFocus(envelopes: readonly ExplainabilityEnvelope[]): GraphHighlight | null {
+  const entityIds: string[] = []
+  const relationshipIds: string[] = []
+  const seenEntities = new Set<string>()
+  const seenRelationships = new Set<string>()
+  const ordered = [...envelopes].sort((left, right) => left.sequence - right.sequence)
+
+  for (const envelope of ordered) {
+    const highlight = highlightFromEvent(envelope.record.event)
+    if (highlight === null) continue
+    appendFirstSeen(entityIds, seenEntities, highlight.entityIds)
+    appendFirstSeen(relationshipIds, seenRelationships, highlight.relationshipIds)
+  }
+
+  return nonEmptyHighlight({ entityIds, relationshipIds })
+}
+
+function appendFirstSeen(target: string[], seen: Set<string>, values: readonly string[]): void {
+  for (const value of values) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    target.push(value)
+  }
+}
+
 function nonEmptyHighlight(highlight: GraphHighlight): GraphHighlight | null {
   return highlight.entityIds.length === 0 && highlight.relationshipIds.length === 0 ? null : highlight
 }

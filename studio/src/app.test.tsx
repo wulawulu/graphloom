@@ -6,7 +6,7 @@ import { App } from "@/app"
 afterEach(() => vi.unstubAllGlobals())
 
 describe("App", () => {
-  it("renders the Studio shell, Query composer, empty timeline, and unavailable graph state", async () => {
+  it("renders the Studio shell, bottom composer, single QA empty state, and unavailable graph state", async () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.startsWith("/api/explainability/runs")) return Promise.resolve(new Response(JSON.stringify({ runs: [], next_cursor: null }), { status: 200 }))
@@ -15,8 +15,8 @@ describe("App", () => {
     }))
     render(<App />)
     expect(screen.getByText("GraphLoom Studio")).toBeInTheDocument()
-    expect(screen.getByLabelText("New Local Query")).toBeInTheDocument()
-    expect(screen.getByText("No Run selected")).toBeInTheDocument()
+    expect(screen.getByLabelText("Ask about the graph")).toBeInTheDocument()
+    expect(screen.getByText("Ask a question about the indexed graph.")).toBeInTheDocument()
     expect(await screen.findByText("Graph data unavailable")).toBeInTheDocument()
   })
 })

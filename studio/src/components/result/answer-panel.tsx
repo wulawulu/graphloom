@@ -2,7 +2,6 @@ import { AlertCircle, Clock3, MessageSquareText, Sparkles } from "lucide-react"
 import type { QueryResultState } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { Badge } from "@/components/ui/badge"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
@@ -10,8 +9,7 @@ interface AnswerPanelProps { runId: string | null; result: QueryResultState; loa
 
 export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React.ReactElement {
   return (
-    <section className="flex size-full min-h-0 flex-col" aria-label="Final answer">
-      <ScrollArea className="min-h-0 flex-1">
+    <section aria-label="Final answer">
         <div className="px-3 pb-3">
           {loading ? <><Skeleton className="mb-3 h-4 w-1/3" /><Skeleton className="h-20" /></> : null}
           {!loading && runId === null ? <AnswerState title="No result yet" detail="Select or submit a Query Run." /> : null}
@@ -39,11 +37,10 @@ export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React
             </div>
           ) : null}
         </div>
-      </ScrollArea>
     </section>
   )
 }
 
 function AnswerState({ title, detail, tone = "neutral" }: { title: string; detail: string; tone?: "neutral" | "error" }): React.ReactElement {
-  return <div className="flex min-h-36 flex-col items-center justify-center text-center">{tone === "error" ? <AlertCircle className="mb-2 size-7 text-destructive" /> : <MessageSquareText className="mb-2 size-7 text-muted-foreground/50" />}<p className="text-sm font-medium">{title}</p><p className="mt-1 max-w-xl text-xs text-muted-foreground">{detail}</p></div>
+  return <div className="flex flex-col items-start py-3">{tone === "error" ? <AlertCircle className="mb-2 size-5 text-destructive" /> : <MessageSquareText className="mb-2 size-5 text-muted-foreground/50" />}<p className="text-sm font-medium">{title}</p><p className="mt-1 max-w-xl text-xs text-muted-foreground">{detail}</p></div>
 }

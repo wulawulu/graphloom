@@ -1,11 +1,33 @@
 import { describe, expect, it } from "vitest"
 
-import { describeEvent, eventSummary, highlightFromEvent, mergeEnvelopes } from "@/lib/explainability"
+import { deriveFinalGraphFocus, describeEvent, eventSummary, highlightFromEvent, mergeEnvelopes } from "@/lib/explainability"
 import type { ExplainabilityEnvelope } from "@/api/types"
 
 const frame = (sequence: number): ExplainabilityEnvelope => ({ schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event: { type: "warning" } } })
+const eventFrame = (sequence: number, event: ExplainabilityEnvelope["record"]["event"]): ExplainabilityEnvelope => ({ schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event } })
 
 describe("Explainability presentation helpers", () => {
+  it("derives a first-seen final graph focus from selected records and expansion seeds", () => {
+    const envelopes = [
+      eventFrame(4, { type: "relationships_selected", relationships: [{ id: "r-2", selected: true }, { id: "r-rejected", selected: false }, { id: "r-1", selected: true }] }),
+      eventFrame(2, { type: "graph_expansion_started", seed_entity_ids: ["e-2", "e-1"] }),
+      eventFrame(3, { type: "entities_selected", entities: [{ id: "e-1", selected: true }, { id: "e-rejected", selected: false }] }),
+      eventFrame(5, { type: "relationships_selected", relationships: [{ id: "r-1", selected: true }] }),
+    ]
+
+    expect(deriveFinalGraphFocus(envelopes)).toEqual({
+      entityIds: ["e-2", "e-1"],
+      relationshipIds: ["r-2", "r-1"],
+    })
+  })
+
+  it("returns no final focus when a Run has no selected graph evidence", () => {
+    expect(deriveFinalGraphFocus([
+      eventFrame(1, { type: "entities_selected", entities: [{ id: "e-rejected", selected: false }] }),
+      eventFrame(2, { type: "run_completed" }),
+    ])).toBeNull()
+  })
+
   it("orders and deduplicates frames", () => {
     expect(mergeEnvelopes([frame(3), frame(1)], frame(2)).map((value) => value.sequence)).toEqual([1, 2, 3])
     expect(mergeEnvelopes([frame(1)], frame(1))).toHaveLength(1)

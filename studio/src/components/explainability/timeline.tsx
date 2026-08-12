@@ -8,13 +8,23 @@ import type { StreamStatus } from "@/hooks/use-explainability-stream"
 import { TimelineEvent } from "./timeline-event"
 
 interface TimelineProps {
+  embedded?: boolean
   runId: string | null
   envelopes: ExplainabilityEnvelope[]
   streamStatus: StreamStatus
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
 }
 
-export function Timeline({ runId, envelopes, streamStatus, onFocusGraph }: TimelineProps): React.ReactElement {
+export function Timeline({ embedded = false, runId, envelopes, streamStatus, onFocusGraph }: TimelineProps): React.ReactElement {
+  const orderedEnvelopes = [...envelopes].sort((left, right) => left.sequence - right.sequence)
+  const content = (
+    <div className="space-y-2 p-3">
+      {runId === null ? <EmptyTimeline title="No Run selected" detail="Choose a historical Run or submit a new Local Query." /> : null}
+      {runId !== null && envelopes.length === 0 ? <EmptyTimeline title="Waiting for explainability" detail={streamStatus === "reconnecting" ? "The live connection is reconnecting. Persisted history will be replayed." : "The Run has not emitted any events yet."} /> : null}
+      {orderedEnvelopes.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}
+    </div>
+  )
+  if (embedded) return <section aria-label="Analysis process">{content}</section>
   return (
     <section className="flex size-full min-h-0 flex-col" aria-label="Execution trace">
       <header className="flex h-10 shrink-0 items-center justify-between border-b px-3">
@@ -24,11 +34,7 @@ export function Timeline({ runId, envelopes, streamStatus, onFocusGraph }: Timel
         </Badge>
       </header>
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-2 p-3">
-          {runId === null ? <EmptyTimeline title="No Run selected" detail="Choose a historical Run or submit a new Local Query." /> : null}
-          {runId !== null && envelopes.length === 0 ? <EmptyTimeline title="Waiting for explainability" detail={streamStatus === "reconnecting" ? "The live connection is reconnecting. Persisted history will be replayed." : "The Run has not emitted any events yet."} /> : null}
-          {envelopes.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}
-        </div>
+        {content}
       </ScrollArea>
     </section>
   )
