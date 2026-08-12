@@ -11,7 +11,7 @@ import {
   getGraphSummary,
   getRelationship,
 } from "@/api/client"
-import type { GraphProjection } from "@/api/types"
+import type { GraphProjection, GraphSummary } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent } from "@/components/graph/graph-explorer"
 import { highlightFromEvent } from "@/lib/explainability"
 
@@ -30,7 +30,7 @@ vi.mock("@/api/client", () => ({
 }))
 
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, mode, error, onBackOverview, onEntity, onRelationship, onReload }: { projection: GraphProjection; mode: string; error: string | null; onBackOverview: () => void; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>,
+  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBackOverview, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBackOverview: () => void; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>,
 }))
 
 const summary = { entity_count: 10, relationship_count: 20, community_count: 2, community_report_count: 2, community_levels: [0], entity_types: { PERSON: 1 }, untyped_entity_count: 0 }
@@ -329,7 +329,7 @@ describe("GraphExplorer focus flow", () => {
     await user.click(screen.getByRole("button", { name: "Open relationship test" }))
     await user.click(await screen.findByRole("button", { name: "Focus relationship" }))
     expect(await screen.findByText("RELATIONSHIP-FOCUS")).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Close detail panel" }))
+    await user.click(screen.getByRole("button", { name: "Clear graph selection" }))
 
     await user.click(screen.getByRole("button", { name: "Back test" }))
 

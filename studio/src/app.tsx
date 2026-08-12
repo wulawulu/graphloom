@@ -5,7 +5,6 @@ import { Timeline } from "@/components/explainability/timeline"
 import { StudioShell } from "@/components/layout/studio-shell"
 import { QueryComposer } from "@/components/query/query-composer"
 import { RunList } from "@/components/runs/run-list"
-import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -13,6 +12,7 @@ import { useExplainabilityStream } from "@/hooks/use-explainability-stream"
 import { useRun } from "@/hooks/use-run"
 import { useRunHistory } from "@/hooks/use-run-history"
 import { highlightFromEvent } from "@/lib/explainability"
+import { QueryWorkspace } from "@/components/workspace/query-workspace"
 
 const GraphExplorer = lazy(() => import("@/components/graph/graph-explorer").then((module) => ({ default: module.GraphExplorer })))
 const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((module) => ({ default: module.AnswerPanel })))
@@ -20,7 +20,7 @@ const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((
 export function App(): React.ReactElement {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [graphFocus, setGraphFocus] = useState<(GraphSubgraphRequest & { revision: number }) | null>(null)
-  const [mobileTab, setMobileTab] = useState("runs")
+  const [mobileTab, setMobileTab] = useState("query")
   const history = useRunHistory()
   const selected = useRun(selectedRunId)
   const refreshHistory = history.refresh
@@ -41,7 +41,7 @@ export function App(): React.ReactElement {
 
   const onAccepted = useCallback((response: StartQueryResponse) => {
     selectRun(response.run_id)
-    setMobileTab("timeline")
+    setMobileTab("query")
     refreshHistory()
   }, [refreshHistory, selectRun])
 
@@ -59,21 +59,20 @@ export function App(): React.ReactElement {
     setMobileTab("graph")
   }, [])
 
-  const navigation = useMemo(() => (
-    <div className="flex size-full min-h-0 flex-col">
-      <QueryComposer onAccepted={onAccepted} />
-      <Separator className="my-3" />
-      <RunList runs={history.runs} selectedRunId={selectedRunId} loading={history.loading} error={history.error} hasMore={history.cursor !== null} onSelect={selectRun} onRefresh={history.refresh} onLoadMore={history.loadMore} />
-    </div>
-  ), [history.cursor, history.error, history.loadMore, history.loading, history.refresh, history.runs, onAccepted, selectRun, selectedRunId])
+  const queryWorkspace = useMemo(() => (
+    <QueryWorkspace
+      composer={<QueryComposer onAccepted={onAccepted} />}
+      answer={<Suspense fallback={<PanelLoading label="Loading Final Answer" />}><AnswerPanel runId={selectedRunId} result={selected.result} loading={selected.loading} /></Suspense>}
+      trace={<Timeline runId={selectedRunId} envelopes={stream.envelopes} streamStatus={stream.status} onFocusGraph={onFocusGraph} />}
+      runs={<RunList runs={history.runs} selectedRunId={selectedRunId} loading={history.loading} error={history.error} hasMore={history.cursor !== null} onSelect={selectRun} onRefresh={history.refresh} onLoadMore={history.loadMore} />}
+    />
+  ), [history.cursor, history.error, history.loadMore, history.loading, history.refresh, history.runs, onAccepted, onFocusGraph, selectRun, selected.loading, selected.result, selectedRunId, stream.envelopes, stream.status])
 
   return (
     <TooltipProvider delayDuration={250}>
       <StudioShell
-        navigation={navigation}
-        timeline={<Timeline runId={selectedRunId} envelopes={stream.envelopes} streamStatus={stream.status} onFocusGraph={onFocusGraph} />}
+        queryWorkspace={queryWorkspace}
         graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} onClearFocus={clearGraphFocus} /></Suspense>}
-        answer={<Suspense fallback={<PanelLoading label="Loading Final Answer" />}><AnswerPanel runId={selectedRunId} result={selected.result} loading={selected.loading} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
       />

@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { Core } from "cytoscape"
 import { Focus, LoaderCircle, RefreshCcw, RotateCw } from "lucide-react"
 
-import type { GraphProjection } from "@/api/types"
+import type { GraphProjection, GraphSummary } from "@/api/types"
 import type { GraphViewMode } from "@/components/graph/graph-explorer"
+import { GraphTooltip, type GraphTooltipContent } from "@/components/graph/graph-tooltip"
 import { Button } from "@/components/ui/button"
 import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 interface NetworkPreviewProps {
   projection: GraphProjection
+  summary: GraphSummary | null
+  summaryError: boolean
   mode: GraphViewMode
   loading: boolean
   error: string | null
@@ -62,7 +65,10 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const { mode, onEntity, onRelationship, projection } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const cytoscapeRef = useRef<Core | null>(null)
+  const [tooltip, setTooltip] = useState<{ content: GraphTooltipContent; x: number; y: number; bounds: { width: number; height: number } } | null>(null)
   const elements = useMemo(() => buildProjectionElements(projection), [projection])
+  const entities = useMemo(() => new Map(projection.entities.map((entity) => [entity.id, entity])), [projection.entities])
+  const relationships = useMemo(() => new Map(projection.relationships.map((relationship) => [relationship.id, relationship])), [projection.relationships])
 
   useEffect(() => {
     const container = containerRef.current
@@ -87,25 +93,34 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         elements,
         layout: { name: "preset" },
         style: [
-          { selector: "node", style: { "background-color": cssVariable(styles, "--graph-default"), "border-color": background, "border-width": 2, label: "", width: 21, height: 21 } },
+          { selector: "node", style: { "background-color": cssVariable(styles, "--graph-default"), "border-color": background, "border-width": 2, label: "", shape: "roundrectangle", width: 32, height: 22 } },
           { selector: 'node[entityType = "PERSON"]', style: { "background-color": cssVariable(styles, "--graph-person") } },
           { selector: 'node[entityType = "ORGANIZATION"], node[entityType = "ORG"]', style: { "background-color": cssVariable(styles, "--graph-organization") } },
           { selector: 'node[entityType = "GEO"]', style: { "background-color": cssVariable(styles, "--graph-geo") } },
           { selector: 'node[entityType = "EVENT"]', style: { "background-color": cssVariable(styles, "--graph-event") } },
-          { selector: "node.neighbor", style: { width: 22, height: 22 } },
-          { selector: "node.hovered, node.seed, node.ui-selected", style: { label: "data(label)", color: foreground, "font-size": 10, "text-background-color": background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "text-margin-y": -12, "z-index": 10 } },
-          { selector: "node.hovered", style: { width: 25, height: 25, "border-width": 3 } },
-          { selector: "node.seed", style: { width: 30, height: 30, "border-color": seed, "border-width": 4 } },
+          { selector: "node.permanent-label, node.hovered, node.seed, node.ui-selected", style: { label: "data(label)", color: foreground, "font-size": 10, "text-wrap": "ellipsis", "text-max-width": "112px", width: "label", padding: "8px", "text-background-color": background, "text-background-opacity": 0.88, "text-background-padding": "2px", "text-background-shape": "roundrectangle", "z-index": 10 } },
+          { selector: "node.hovered", style: { "border-width": 3 } },
+          { selector: "node.seed", style: { "font-size": 11, padding: "10px", "border-color": seed, "border-width": 4 } },
           { selector: "node.ui-selected", style: { "border-color": foreground, "border-style": "double", "border-width": 4 } },
-          { selector: "edge", style: { width: 1.4, opacity: 0.72, "line-color": border, "target-arrow-color": border, "target-arrow-shape": "triangle", "arrow-scale": 0.75, "curve-style": "bezier" } },
-          { selector: "edge.seed-relationship", style: { width: 4, opacity: 1, "line-color": seed, "target-arrow-color": seed, "arrow-scale": 1.15, "z-index": 8 } },
+          { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": border, "target-arrow-color": border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
+          { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": seed, "target-arrow-color": seed, "arrow-scale": 0.9, "z-index": 8 } },
           { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": foreground, "target-arrow-color": foreground } },
         ],
         minZoom: 0.2,
         maxZoom: 3,
         })
-        cy.on("mouseover", "node", (event) => event.target.addClass("hovered"))
-        cy.on("mouseout", "node", (event) => event.target.removeClass("hovered"))
+        const showTooltip = (content: GraphTooltipContent, event: { renderedPosition?: { x: number; y: number } }): void => {
+          const position = event.renderedPosition ?? { x: 0, y: 0 }
+          setTooltip({ content, x: position.x, y: position.y, bounds: { width: container.clientWidth, height: container.clientHeight } })
+        }
+        cy.on("mouseover", "node", (event) => {
+          event.target.addClass("hovered")
+          const entity = entities.get(event.target.id())
+          if (entity !== undefined) showTooltip({ kind: "entity", value: entity }, event)
+        })
+        cy.on("mouseout", "node", (event) => { event.target.removeClass("hovered"); setTooltip(null) })
+        cy.on("mouseover", "edge", (event) => { const relationship = relationships.get(event.target.id()); if (relationship !== undefined) showTooltip({ kind: "relationship", value: relationship }, event) })
+        cy.on("mouseout", "edge", () => setTooltip(null))
         cy.on("select", "node, edge", (event) => event.target.addClass("ui-selected"))
         cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
         cy.on("tap", "node", (event) => onEntity(event.target.id()))
@@ -136,7 +151,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
       if (cytoscapeRef.current === instance) cytoscapeRef.current = null
       instance?.destroy()
     }
-  }, [elements, mode, onEntity, onRelationship, projection])
+  }, [elements, entities, mode, onEntity, onRelationship, projection, relationships])
 
   const missingCount = projection.missing_entity_ids.length
     + projection.missing_relationship_ids.length
@@ -164,6 +179,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
             {mode === "overview" && projection.unresolved_relationship_count > 0 ? ` · ${projection.unresolved_relationship_count} unresolved relationships in source graph` : ""}
             {projection.truncated ? " · bounded view" : ""}
           </p>
+          {props.summary !== null ? <p className="text-muted-foreground">{props.summary.entity_count.toLocaleString()} entities · {props.summary.relationship_count.toLocaleString()} relationships · {props.summary.community_count.toLocaleString()} communities · {props.summary.community_report_count.toLocaleString()} reports</p> : null}
         </div>
         <div className="flex items-center gap-1">
           {focused ? <Button variant="outline" size="sm" onClick={props.onBackOverview}>Back to overview</Button> : null}
@@ -173,6 +189,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         </div>
       </div>
       {props.error !== null ? <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-red-300">{props.error}</p> : null}
+      {props.summary === null && props.summaryError ? <p className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">Graph summary is unavailable. The bounded visualization is still available.</p> : null}
       {missingCount > 0 ? (
         <details className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs">
           <summary className="cursor-pointer text-warning">{missingCount} selected records could not be represented in the graph.</summary>
@@ -183,7 +200,10 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         <Legend color="var(--graph-person)" label="PERSON" /><Legend color="var(--graph-organization)" label="ORGANIZATION" /><Legend color="var(--graph-geo)" label="GEO" /><Legend color="var(--graph-event)" label="EVENT" /><Legend color="var(--graph-default)" label="Other" />
         <span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{seedLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)]" />Neighbor</span>
       </div>
-      <div ref={containerRef} className="min-h-80 flex-1 rounded-md border bg-background" aria-label="Knowledge graph network preview" />
+      <div className="relative min-h-80 flex-1 overflow-hidden rounded-md border bg-background">
+        <div ref={containerRef} className="absolute inset-0" aria-label="Knowledge graph network preview" />
+        {tooltip !== null ? <GraphTooltip {...tooltip} /> : null}
+      </div>
     </div>
   )
 }

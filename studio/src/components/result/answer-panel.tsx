@@ -11,9 +11,8 @@ interface AnswerPanelProps { runId: string | null; result: QueryResultState; loa
 export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React.ReactElement {
   return (
     <section className="flex size-full min-h-0 flex-col" aria-label="Final answer">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b px-4"><MessageSquareText className="size-4 text-primary" /><h2 className="text-sm font-semibold">Final answer</h2></header>
       <ScrollArea className="min-h-0 flex-1">
-        <div className="p-4">
+        <div className="px-3 pb-3">
           {loading ? <><Skeleton className="mb-3 h-4 w-1/3" /><Skeleton className="h-20" /></> : null}
           {!loading && runId === null ? <AnswerState title="No result yet" detail="Select or submit a Query Run." /> : null}
           {!loading && result.state === "waiting" && runId !== null ? <AnswerState title="Query is running" detail="The final business result will appear here when the Run completes." /> : null}
@@ -21,7 +20,7 @@ export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React
           {!loading && result.state === "gone" ? <AnswerState title="Result no longer retained" detail="This run completed, but its process-local result is no longer available. Explainability history is still available." /> : null}
           {!loading && result.state === "missing" ? <AnswerState title="Result unavailable" detail="The Query Run does not exist in this Store namespace." /> : null}
           {!loading && result.state === "ready" ? (
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
+            <div className="grid gap-4">
               <article className="min-w-0"><SafeMarkdown>{result.result.response}</SafeMarkdown></article>
               <aside className="space-y-3">
                 <div className="flex flex-wrap gap-2">

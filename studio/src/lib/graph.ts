@@ -1,14 +1,34 @@
 import type { ElementDefinition } from "cytoscape"
 
-import type { GraphProjection } from "@/api/types"
+import type { GraphProjection, GraphProjectionEntity } from "@/api/types"
+
+export const PERMANENT_GRAPH_LABEL_LIMIT = 24
+
+export function permanentEntityLabelIds(
+  projection: GraphProjection,
+  limit = PERMANENT_GRAPH_LABEL_LIMIT,
+): Set<string> {
+  const seeds = new Set(projection.seed_entity_ids)
+  const ranked = [...projection.entities]
+    .filter((entity) => !seeds.has(entity.id))
+    .sort(compareEntityLabelPriority)
+    .slice(0, limit)
+  return new Set([...seeds, ...ranked.map((entity) => entity.id)])
+}
+
+function compareEntityLabelPriority(left: GraphProjectionEntity, right: GraphProjectionEntity): number {
+  const rankDifference = (right.rank ?? Number.NEGATIVE_INFINITY) - (left.rank ?? Number.NEGATIVE_INFINITY)
+  return rankDifference === 0 ? left.id.localeCompare(right.id) : rankDifference
+}
 
 export function buildProjectionElements(projection: GraphProjection): ElementDefinition[] {
   const seedEntityIds = new Set(projection.seed_entity_ids)
   const seedRelationshipIds = new Set(projection.seed_relationship_ids)
+  const labeledEntityIds = permanentEntityLabelIds(projection)
   const nodes: ElementDefinition[] = projection.entities.map((entity) => ({
     group: "nodes",
-    classes: seedEntityIds.has(entity.id) ? "seed" : "neighbor",
-    data: { id: entity.id, label: entity.title, entityType: (entity.entity_type ?? "OTHER").toUpperCase() },
+    classes: [seedEntityIds.has(entity.id) ? "seed" : "neighbor", labeledEntityIds.has(entity.id) ? "permanent-label" : ""].filter(Boolean).join(" "),
+    data: { id: entity.id, label: entity.title, entityType: (entity.entity_type ?? "OTHER").toUpperCase(), rank: entity.rank },
   }))
   const edges: ElementDefinition[] = projection.relationships.map((relationship) => ({
       group: "edges",
@@ -17,6 +37,10 @@ export function buildProjectionElements(projection: GraphProjection): ElementDef
         id: relationship.id,
         source: relationship.source_entity_id,
         target: relationship.target_entity_id,
+        sourceLabel: relationship.source,
+        targetLabel: relationship.target,
+        weight: relationship.weight,
+        rank: relationship.rank,
       },
     }))
   return [...nodes, ...edges]

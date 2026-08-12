@@ -8,6 +8,7 @@ function ResizablePanelGroup({ className, ...props }: React.ComponentProps<typeo
 }
 
 const ResizablePanel = ResizablePrimitive.Panel
+const usePanelRef = ResizablePrimitive.usePanelRef
 
 function ResizableHandle({ className, withHandle = false, ...props }: React.ComponentProps<typeof ResizablePrimitive.Separator> & { withHandle?: boolean }) {
   return (
@@ -20,4 +21,4 @@ function ResizableHandle({ className, withHandle = false, ...props }: React.Comp
   )
 }
 
-export { ResizableHandle, ResizablePanel, ResizablePanelGroup }
+export { ResizableHandle, ResizablePanel, ResizablePanelGroup, usePanelRef }

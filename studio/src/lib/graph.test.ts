@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
-import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
+import { buildProjectionElements, graphViewportAction, permanentEntityLabelIds, projectionFocusIds } from "@/lib/graph"
 
 const projection: GraphProjection = {
   entities: [
@@ -36,8 +36,8 @@ describe("graph projection transformation", () => {
 
   it("marks entity and relationship seeds with distinct classes", () => {
     const elements = buildProjectionElements(projection)
-    expect(elements.find((element) => element.data.id === "entity-seed")?.classes).toBe("seed")
-    expect(elements.find((element) => element.data.id === "entity-neighbor")?.classes).toBe("neighbor")
+    expect(elements.find((element) => element.data.id === "entity-seed")?.classes).toContain("seed")
+    expect(elements.find((element) => element.data.id === "entity-neighbor")?.classes).toContain("neighbor")
     expect(elements.find((element) => element.data.id === "relationship-seed")?.classes).toBe("seed-relationship")
   })
 
@@ -50,5 +50,21 @@ describe("graph projection transformation", () => {
     expect(graphViewportAction(0, false)).toBe("none")
     expect(graphViewportAction(640, false)).toBe("initialize")
     expect(graphViewportAction(800, true)).toBe("resize")
+  })
+
+  it("labels seeds first, then higher ranks with a stable ID tiebreak", () => {
+    const labels = permanentEntityLabelIds({
+      ...projection,
+      entities: [
+        { id: "seed", title: "Seed", entity_type: null, rank: null },
+        { id: "z-low", title: "Low", entity_type: null, rank: 1 },
+        { id: "b-high", title: "B", entity_type: null, rank: 9 },
+        { id: "a-high", title: "A", entity_type: null, rank: 9 },
+      ],
+      seed_entity_ids: ["seed"],
+    }, 2)
+
+    expect([...labels]).toEqual(["seed", "a-high", "b-high"])
+    expect(labels.has("z-low")).toBe(false)
   })
 })

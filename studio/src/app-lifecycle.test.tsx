@@ -19,9 +19,13 @@ vi.mock("@/components/graph/graph-explorer", () => ({
 }))
 
 vi.mock("@/components/layout/studio-shell", () => ({
-  StudioShell: ({ navigation, timeline, graph, answer }: { navigation: ReactNode; timeline: ReactNode; graph: ReactNode; answer: ReactNode }) => (
-    <div>{navigation}{timeline}{graph}{answer}</div>
+  StudioShell: ({ queryWorkspace, graph }: { queryWorkspace: ReactNode; graph: ReactNode }) => (
+    <div>{queryWorkspace}{graph}</div>
   ),
+}))
+
+vi.mock("@/components/workspace/query-workspace", () => ({
+  QueryWorkspace: ({ composer, answer, trace, runs }: { composer: ReactNode; answer: ReactNode; trace: ReactNode; runs: ReactNode }) => <div>{composer}{answer}{trace}{runs}</div>,
 }))
 
 vi.mock("@/components/query/query-composer", () => ({

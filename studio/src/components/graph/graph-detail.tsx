@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { ArrowDown, Building2, Check, Copy, GitBranch, Network, UsersRound } from "lucide-react"
+import { ArrowDown, Building2, Check, Copy, GitBranch, Network, UsersRound, X } from "lucide-react"
 
 import type { GraphCommunity, GraphCommunityReportDetail, GraphEntityDetail, GraphRelationshipDetail } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
@@ -7,23 +7,22 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 
 export type GraphDetail =
   | { kind: "entity"; value: GraphEntityDetail }
   | { kind: "relationship"; value: GraphRelationshipDetail }
   | { kind: "community"; value: GraphCommunity; report: GraphCommunityReportDetail | null }
 
-interface GraphDetailSheetProps {
+interface GraphInspectorProps {
   detail: GraphDetail | null
   loading: boolean
   error: boolean
-  onOpenChange: (open: boolean) => void
+  onClear: () => void
   onFocusEntity: (id: string) => void
   onFocusRelationship: (id: string) => void
 }
 
-export function GraphDetailSheet(props: GraphDetailSheetProps): React.ReactElement {
+export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
   const { detail } = props
   const title = detail === null
     ? "Graph item"
@@ -31,21 +30,28 @@ export function GraphDetailSheet(props: GraphDetailSheetProps): React.ReactEleme
       ? "Relationship"
       : detail.value.title
   return (
-    <Sheet open={detail !== null || props.loading || props.error} onOpenChange={props.onOpenChange}>
-      <SheetContent className="flex flex-col gap-4 sm:max-w-lg">
-        <SheetHeader>
-          <SheetTitle>{props.loading ? "Loading graph detail" : title}</SheetTitle>
-          <SheetDescription>{detail === null ? "Fetching the selected graph record." : detail.kind}</SheetDescription>
-        </SheetHeader>
-        <ScrollArea className="min-h-0 flex-1 pr-3">
+    <section className="flex size-full min-h-0 flex-col" aria-label="Graph Inspector">
+      <header className="flex h-11 shrink-0 items-center justify-between border-b px-3">
+        <div className="min-w-0"><h2 className="truncate text-sm font-semibold">{props.loading ? "Loading graph detail" : title}</h2><p className="text-[10px] text-muted-foreground">{detail?.kind ?? "Inspector"}</p></div>
+        {detail !== null || props.loading || props.error ? <Button variant="ghost" size="icon" className="size-8" aria-label="Clear graph selection" onClick={props.onClear}><X /></Button> : null}
+      </header>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-3">
+          {detail === null && !props.loading && !props.error ? <div className="flex min-h-64 flex-col items-center justify-center px-5 text-center"><Network className="mb-3 size-8 text-muted-foreground/40" /><p className="text-sm font-medium">Select a graph object</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Select a node, relationship, or community to inspect it.</p></div> : null}
+          {props.loading ? <p className="py-10 text-center text-sm text-muted-foreground">Loading structured detail…</p> : null}
           {props.error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-red-300">Graph detail is unavailable.</p> : null}
           {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} /> : null}
           {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} /> : null}
           {detail?.kind === "community" ? <CommunityDetail value={detail.value} report={detail.report} /> : null}
-        </ScrollArea>
-      </SheetContent>
-    </Sheet>
+          {detail !== null ? <RawData value={detail} /> : null}
+        </div>
+      </ScrollArea>
+    </section>
   )
+}
+
+function RawData({ value }: { value: GraphDetail }): React.ReactElement {
+  return <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-semibold text-muted-foreground">Developer · Raw JSON</summary><pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4">{JSON.stringify(value, null, 2)}</pre></details>
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }): React.ReactElement {
