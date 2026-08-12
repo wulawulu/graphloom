@@ -101,10 +101,10 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
 }
 
 function analysisSummary(eventCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
+  if (runStatus === "completed") return `Analysis process · ${eventCount} steps · completed`
+  if (runStatus === "failed" || runStatus === "cancelled") return `Analysis process · ${eventCount} steps · ${runStatus}`
   if (runStatus === "running" || runStatus === "pending" || streamStatus === "open" || streamStatus === "connecting" || streamStatus === "reconnecting") {
     return `Analysis process · ${eventCount} steps · running`
   }
-  if (runStatus === "completed") return `Analysis process · ${eventCount} steps · completed`
-  if (runStatus === "failed" || runStatus === "cancelled") return `Analysis process · ${eventCount} steps · ${runStatus}`
   return `Analysis process · ${eventCount} steps`
 }

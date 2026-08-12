@@ -50,6 +50,15 @@ describe("QaWorkspace", () => {
     expect(screen.queryByRole("region", { name: "Query run history" })).not.toBeInTheDocument()
   })
 
+  it("keeps terminal Run status authoritative while persisted events replay", () => {
+    const values = props()
+    const { rerender } = render(<QaWorkspace {...values} streamStatus="open" />)
+    expect(screen.getByText("Analysis process · 2 steps · completed")).toBeInTheDocument()
+
+    rerender(<QaWorkspace {...values} runStatus="failed" streamStatus="connecting" />)
+    expect(screen.getByText("Analysis process · 2 steps · failed")).toBeInTheDocument()
+  })
+
   it("expands ordered events with typed Details and keeps manual graph focus", async () => {
     const user = userEvent.setup()
     const values = props()
