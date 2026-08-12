@@ -67,4 +67,16 @@ describe("graph projection transformation", () => {
     expect([...labels]).toEqual(["seed", "a-high", "b-high"])
     expect(labels.has("z-low")).toBe(false)
   })
+
+  it("uses stable ID order when nullable ranks are tied", () => {
+    const labels = permanentEntityLabelIds({
+      ...projection,
+      entities: [
+        { id: "z-null", title: "Z", entity_type: null, rank: null },
+        { id: "a-null", title: "A", entity_type: null, rank: null },
+      ],
+      seed_entity_ids: [],
+    }, 1)
+    expect([...labels]).toEqual(["a-null"])
+  })
 })

@@ -17,8 +17,10 @@ export function permanentEntityLabelIds(
 }
 
 function compareEntityLabelPriority(left: GraphProjectionEntity, right: GraphProjectionEntity): number {
-  const rankDifference = (right.rank ?? Number.NEGATIVE_INFINITY) - (left.rank ?? Number.NEGATIVE_INFINITY)
-  return rankDifference === 0 ? left.id.localeCompare(right.id) : rankDifference
+  if (left.rank === null && right.rank !== null) return 1
+  if (left.rank !== null && right.rank === null) return -1
+  if (left.rank !== null && right.rank !== null && left.rank !== right.rank) return right.rank - left.rank
+  return left.id < right.id ? -1 : Number(left.id > right.id)
 }
 
 export function buildProjectionElements(projection: GraphProjection): ElementDefinition[] {

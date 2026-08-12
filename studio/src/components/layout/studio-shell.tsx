@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, Waypoints } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, usePanelRef } from "@/components/ui/resizable"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 import { useDesktopLayout } from "./use-desktop-layout"
 
@@ -25,8 +25,9 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
         <div className="font-mono text-[10px] text-muted-foreground">graph-first explainable QA</div>
       </header>
 
-      {desktop ? <div className="min-h-0 flex-1">
-        <ResizablePanelGroup orientation="horizontal">
+      {!desktop ? <Tabs value={props.mobileTab} onValueChange={props.onMobileTabChange} className="shrink-0 p-2 pb-0"><TabsList className="grid w-full grid-cols-2"><TabsTrigger value="query">Query</TabsTrigger><TabsTrigger value="graph">Graph / Detail</TabsTrigger></TabsList></Tabs> : null}
+      <div className="relative min-h-0 flex-1">
+        <ResizablePanelGroup orientation="horizontal" className={desktop ? "" : "relative"}>
           <ResizablePanel
             panelRef={queryPanelRef}
             defaultSize="350px"
@@ -34,11 +35,12 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
             maxSize="440px"
             collapsedSize="44px"
             collapsible
+            className={desktop ? "" : "!absolute !inset-0 !size-full"}
             onResize={(size) => setQueryCollapsed(size.inPixels <= 48)}
           >
-            <div className="relative size-full overflow-hidden border-r">
-              <div className={queryCollapsed ? "invisible size-full" : "size-full"}>{props.queryWorkspace}</div>
-              <Button
+            <div className={`relative size-full overflow-hidden border-r ${!desktop && props.mobileTab !== "query" ? "hidden" : ""}`}>
+              <div className={desktop && queryCollapsed ? "invisible size-full" : "size-full"}>{props.queryWorkspace}</div>
+              {desktop ? <Button
                 variant="ghost"
                 size="icon"
                 className={`absolute top-2 z-10 size-8 ${queryCollapsed ? "left-1.5" : "right-2"}`}
@@ -47,21 +49,13 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
                 onClick={() => queryCollapsed ? queryPanelRef.current?.expand() : queryPanelRef.current?.collapse()}
               >
                 {queryCollapsed ? <ChevronRight /> : <ChevronLeft />}
-              </Button>
+              </Button> : null}
             </div>
           </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel minSize="520px"><div className="size-full overflow-hidden">{props.graph}</div></ResizablePanel>
+          <ResizableHandle withHandle className={desktop ? "" : "hidden"} />
+          <ResizablePanel minSize="520px" className={desktop ? "" : "!absolute !inset-0 !size-full"}><div className={`size-full overflow-hidden ${!desktop && props.mobileTab !== "graph" ? "hidden" : ""}`}>{props.graph}</div></ResizablePanel>
         </ResizablePanelGroup>
-      </div> : null}
-
-      {!desktop ? <div className="flex min-h-0 flex-1 flex-col">
-        <Tabs value={props.mobileTab} onValueChange={props.onMobileTabChange} className="flex min-h-0 flex-1 flex-col p-2">
-          <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="query">Query</TabsTrigger><TabsTrigger value="graph">Graph / Detail</TabsTrigger></TabsList>
-          <TabsContent forceMount value="query" className={`min-h-0 flex-1 overflow-hidden ${props.mobileTab === "query" ? "" : "hidden"}`}>{props.queryWorkspace}</TabsContent>
-          <TabsContent forceMount value="graph" className={`min-h-0 flex-1 overflow-hidden ${props.mobileTab === "graph" ? "" : "hidden"}`}>{props.graph}</TabsContent>
-        </Tabs>
-      </div> : null}
+      </div>
     </main>
   )
 }
