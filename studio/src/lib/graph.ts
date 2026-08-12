@@ -61,7 +61,7 @@ export function projectionFocusIds(projection: GraphProjection, focusMode: boole
 
 export type GraphViewportAction = "none" | "initialize" | "resize"
 
-export function graphViewportAction(width: number, initialized: boolean): GraphViewportAction {
-  if (width <= 0) return "none"
+export function graphViewportAction(width: number, height: number, initialized: boolean): GraphViewportAction {
+  if (width <= 0 || height <= 0) return "none"
   return initialized ? "resize" : "initialize"
 }

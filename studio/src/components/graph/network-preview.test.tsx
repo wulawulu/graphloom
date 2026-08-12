@@ -25,7 +25,10 @@ const graphMock = vi.hoisted(() => ({
   handlers: new Map<string, (event: CytoscapeTestEvent) => void>(),
   instances: [] as unknown[],
   observers: [] as ResizeObserverCallback[],
+  layoutCalls: 0,
+  fitCalls: 0,
   width: 640,
+  height: 480,
 }))
 
 vi.mock("cytoscape", () => ({
@@ -34,8 +37,11 @@ vi.mock("cytoscape", () => ({
     const instance = {
       on: vi.fn((event: string, selector: string, handler: (value: CytoscapeTestEvent) => void) => graphMock.handlers.set(`${event}:${selector}`, handler)),
       elements: vi.fn(() => ({ filter: vi.fn(() => ({ length: 1 })) })),
-      layout: vi.fn(() => ({ one: vi.fn((_event: string, handler: () => void) => { onLayoutStop = handler }), run: vi.fn(() => onLayoutStop?.()) })),
-      animate: vi.fn(), fit: vi.fn(), resize: vi.fn(), destroy: vi.fn(),
+      layout: vi.fn(() => {
+        graphMock.layoutCalls += 1
+        return { one: vi.fn((_event: string, handler: () => void) => { onLayoutStop = handler }), run: vi.fn(() => onLayoutStop?.()) }
+      }),
+      animate: vi.fn(), fit: vi.fn(() => { graphMock.fitCalls += 1 }), resize: vi.fn(), destroy: vi.fn(),
     }
     graphMock.instances.push(instance)
     return instance
@@ -65,12 +71,15 @@ beforeEach(() => {
   graphMock.handlers.clear()
   graphMock.instances.length = 0
   graphMock.observers.length = 0
+  graphMock.layoutCalls = 0
+  graphMock.fitCalls = 0
   graphMock.width = 640
+  graphMock.height = 480
   for (const [name, value] of Object.entries(rendererTheme)) {
     document.documentElement.style.setProperty(name, value)
   }
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => graphMock.width)
-  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(480)
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => graphMock.height)
   vi.stubGlobal("ResizeObserver", class {
     constructor(private readonly callback: ResizeObserverCallback) { graphMock.observers.push(callback) }
     observe(): void { this.callback([], this) }
@@ -87,6 +96,45 @@ afterEach(() => {
 })
 
 describe("NetworkPreview focus labels", () => {
+  it("separates the layout wrapper from the full-size Cytoscape container", () => {
+    render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
+
+    const container = screen.getByLabelText("Knowledge graph network preview")
+    expect(container).toHaveClass("size-full")
+    expect(container).not.toHaveClass("absolute", "inset-0")
+    expect(container.parentElement).toHaveClass("absolute", "inset-0")
+    expect(container.parentElement).not.toBe(container)
+  })
+
+  it("waits for a positive height before initializing Cytoscape exactly once", async () => {
+    const { default: cytoscape } = await import("cytoscape")
+    const initialConstructorCalls = vi.mocked(cytoscape).mock.calls.length
+    graphMock.width = 1_396
+    graphMock.height = 0
+
+    render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
+
+    expect(cytoscape).toHaveBeenCalledTimes(initialConstructorCalls)
+    expect(graphMock.instances).toHaveLength(0)
+    expect(graphMock.layoutCalls).toBe(0)
+    expect(graphMock.fitCalls).toBe(0)
+
+    graphMock.height = 474
+    act(() => graphMock.observers[0]?.([], {} as ResizeObserver))
+
+    await waitFor(() => expect(cytoscape).toHaveBeenCalledTimes(initialConstructorCalls + 1))
+    expect(graphMock.instances).toHaveLength(1)
+    const instance = graphMock.instances[0] as {
+      layout: ReturnType<typeof vi.fn>
+      fit: ReturnType<typeof vi.fn>
+    }
+    expect(instance.layout).toHaveBeenCalledOnce()
+    expect(instance.fit).toHaveBeenCalledOnce()
+
+    act(() => graphMock.observers[0]?.([], {} as ResizeObserver))
+    expect(cytoscape).toHaveBeenCalledTimes(initialConstructorCalls + 1)
+  })
+
   it("initializes Cytoscape with supported colors and deterministic label width", async () => {
     const { default: cytoscape } = await import("cytoscape")
     render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)

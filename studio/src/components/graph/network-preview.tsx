@@ -144,7 +144,8 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
 
     const updateViewport = (): void => {
       const width = container.clientWidth
-      const action = graphViewportAction(width, instance !== null || initializing)
+      const height = container.clientHeight
+      const action = graphViewportAction(width, height, instance !== null || initializing)
       if (action === "initialize") initialize()
       if (action === "resize" && instance !== null) {
         instance.resize()
@@ -209,7 +210,9 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         <span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{seedLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)]" />Neighbor</span>
       </div>
       <div className="relative min-h-80 flex-1 overflow-hidden rounded-md border bg-background">
-        <div ref={containerRef} className="absolute inset-0" aria-label="Knowledge graph network preview" />
+        <div className="absolute inset-0">
+          <div ref={containerRef} className="size-full" aria-label="Knowledge graph network preview" />
+        </div>
         {rendererError ? <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-background/95 p-6 text-center" role="alert"><p className="text-sm font-medium text-destructive">Graph visualization failed to initialize.</p><p className="mt-1 text-xs text-muted-foreground">Check the browser console for renderer diagnostics.</p></div> : null}
         {tooltip !== null ? <GraphTooltip {...tooltip} /> : null}
       </div>

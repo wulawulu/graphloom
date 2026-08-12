@@ -52,10 +52,11 @@ describe("graph projection transformation", () => {
     expect(projectionFocusIds(projection, false)).toEqual(["entity-seed", "entity-neighbor"])
   })
 
-  it("initializes when a hidden graph first receives a positive viewport", () => {
-    expect(graphViewportAction(0, false)).toBe("none")
-    expect(graphViewportAction(640, false)).toBe("initialize")
-    expect(graphViewportAction(800, true)).toBe("resize")
+  it("initializes only when both viewport dimensions are positive", () => {
+    expect(graphViewportAction(1_396, 0, false)).toBe("none")
+    expect(graphViewportAction(0, 474, false)).toBe("none")
+    expect(graphViewportAction(1_396, 474, false)).toBe("initialize")
+    expect(graphViewportAction(1_396, 474, true)).toBe("resize")
   })
 
   it("labels seeds first, then higher ranks with a stable ID tiebreak", () => {
