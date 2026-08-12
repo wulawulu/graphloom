@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef, useState } from "react"
+
 import type { GraphProjectionEntity, GraphProjectionRelationship } from "@/api/types"
 import { clampTooltipPosition } from "@/lib/graph-tooltip"
 
@@ -13,11 +15,18 @@ interface GraphTooltipProps {
 }
 
 export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): React.ReactElement {
-  const position = clampTooltipPosition(x, y, bounds.width, bounds.height)
+  const tooltipRef = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState({ x: 8, y: 8 })
+  useLayoutEffect(() => {
+    const element = tooltipRef.current
+    if (element === null) return
+    setPosition(clampTooltipPosition(x, y, bounds.width, bounds.height, element.offsetWidth, element.offsetHeight))
+  }, [bounds.height, bounds.width, x, y])
   return (
     <div
-      className="pointer-events-none absolute z-30 max-w-64 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-xl"
-      style={{ left: position.x, top: position.y }}
+      ref={tooltipRef}
+      className="pointer-events-none absolute z-30 max-h-[calc(100%-1rem)] overflow-hidden rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-xl"
+      style={{ left: position.x, top: position.y, maxWidth: Math.max(0, bounds.width - 16) }}
       role="tooltip"
     >
       {content.kind === "entity" ? (

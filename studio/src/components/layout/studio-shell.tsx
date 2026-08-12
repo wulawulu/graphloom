@@ -58,8 +58,8 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
       {!desktop ? <div className="flex min-h-0 flex-1 flex-col">
         <Tabs value={props.mobileTab} onValueChange={props.onMobileTabChange} className="flex min-h-0 flex-1 flex-col p-2">
           <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="query">Query</TabsTrigger><TabsTrigger value="graph">Graph / Detail</TabsTrigger></TabsList>
-          <TabsContent value="query" className="min-h-0 flex-1 overflow-hidden">{props.queryWorkspace}</TabsContent>
-          <TabsContent value="graph" className="min-h-0 flex-1 overflow-hidden">{props.graph}</TabsContent>
+          <TabsContent forceMount value="query" className={`min-h-0 flex-1 overflow-hidden ${props.mobileTab === "query" ? "" : "hidden"}`}>{props.queryWorkspace}</TabsContent>
+          <TabsContent forceMount value="graph" className={`min-h-0 flex-1 overflow-hidden ${props.mobileTab === "graph" ? "" : "hidden"}`}>{props.graph}</TabsContent>
         </Tabs>
       </div> : null}
     </main>

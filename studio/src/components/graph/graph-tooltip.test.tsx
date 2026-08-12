@@ -17,6 +17,7 @@ describe("GraphTooltip", () => {
     render(<GraphTooltip content={{ kind: "relationship", value: { id: "r", source_entity_id: "a", target_entity_id: "b", source: "Alice", target: "Bob", weight: 3.2, rank: 8 } }} x={630} y={470} bounds={{ width: 640, height: 480 }} />)
     expect(screen.getByText("Alice → Bob")).toBeInTheDocument()
     expect(screen.getByText("Weight 3.2 · Rank 8")).toBeInTheDocument()
-    expect(clampTooltipPosition(630, 470, 640, 480)).toEqual({ x: 392, y: 384 })
+    expect(clampTooltipPosition(630, 470, 640, 480, 240, 88)).toEqual({ x: 392, y: 384 })
+    expect(clampTooltipPosition(20, 20, 180, 120, 164, 104)).toEqual({ x: 8, y: 8 })
   })
 })

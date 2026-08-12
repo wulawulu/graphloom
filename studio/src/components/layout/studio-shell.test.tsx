@@ -13,7 +13,7 @@ afterEach(() => {
 function mobileMediaQuery(): MediaQueryList {
   return {
     matches: false,
-    media: "(min-width: 1024px)",
+    media: "(min-width: 1280px)",
     onchange: null,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
@@ -24,11 +24,11 @@ function mobileMediaQuery(): MediaQueryList {
 }
 
 describe("StudioShell responsive ownership", () => {
-  it("does not mount a hidden Graph Explorer on mobile and mounts one when selected", () => {
+  it("keeps one Graph Explorer mounted while switching mobile tabs", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => mobileMediaQuery()))
     const props = { queryWorkspace: <div>Query owner</div>, graph: <div>Graph owner</div>, onMobileTabChange: vi.fn() }
     const { rerender } = render(<StudioShell {...props} mobileTab="query" />)
-    expect(screen.queryByText("Graph owner")).not.toBeInTheDocument()
+    expect(screen.getByText("Graph owner")).toBeInTheDocument()
 
     rerender(<StudioShell {...props} mobileTab="graph" />)
     expect(screen.getAllByText("Graph owner")).toHaveLength(1)
@@ -37,12 +37,12 @@ describe("StudioShell responsive ownership", () => {
   it("keeps the primary graph mounted when the query workspace collapses", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ ...mobileMediaQuery(), matches: true })))
     const onUnmount = vi.fn()
-    function GraphOwner(): React.ReactElement {
+    function PersistentOwner({ children }: { children: React.ReactNode }): React.ReactElement {
       useEffect(() => () => onUnmount(), [])
-      return <div>Persistent graph</div>
+      return <div>{children}</div>
     }
     const user = userEvent.setup()
-    render(<StudioShell queryWorkspace={<div>Query owner</div>} graph={<GraphOwner />} mobileTab="query" onMobileTabChange={vi.fn()} />)
+    render(<StudioShell queryWorkspace={<PersistentOwner>Query owner</PersistentOwner>} graph={<PersistentOwner>Persistent graph</PersistentOwner>} mobileTab="query" onMobileTabChange={vi.fn()} />)
 
     await user.click(screen.getByRole("button", { name: "Collapse query workspace" }))
     expect(screen.getByText("Persistent graph")).toBeInTheDocument()

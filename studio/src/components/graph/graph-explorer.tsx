@@ -61,6 +61,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [inspectorTab, setInspectorTab] = useState("inspect")
+  const [mobileView, setMobileView] = useState("graph")
   const [inspectorCollapsed, setInspectorCollapsed] = useState(!desktop)
   const [detail, setDetail] = useState<GraphDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -234,24 +235,30 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
 
   const openEntity = useCallback((id: string) => {
     setInspectorTab("inspect")
+    setMobileView("detail")
+    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getEntity(id, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "entity", value }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, finishDetailRequest])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
 
   const openRelationship = useCallback((id: string) => {
     setInspectorTab("inspect")
+    setMobileView("detail")
+    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getRelationship(id, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "relationship", value }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, finishDetailRequest])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
 
   const openCommunity = useCallback((id: string) => {
     setInspectorTab("inspect")
+    setMobileView("detail")
+    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void Promise.all([
       getCommunity(id, controller.signal),
@@ -264,7 +271,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
       .then(([value, report]) => { if (!controller.signal.aborted) setDetail({ kind: "community", value, report }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, finishDetailRequest])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
 
   const closeDetail = (): void => {
     detailRequest.current?.abort()
@@ -274,11 +281,8 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
     setDetailError(false)
   }
 
-  return (
-    <section className="size-full min-h-0" aria-label="Graph Explorer">
-      <ResizablePanelGroup orientation="horizontal">
-        <ResizablePanel minSize={desktop ? "480px" : "280px"}>
-          <div className="flex size-full min-h-0 flex-col p-2">
+  const graphCanvas = (
+    <div className="flex size-full min-h-0 flex-col p-2">
             <header className="flex h-9 shrink-0 items-center justify-between px-1">
               <div className="flex items-center gap-2"><Database className="size-4 text-primary" /><h2 className="text-sm font-semibold">Knowledge Graph</h2></div>
               {projection !== null ? <Badge variant="success">ready</Badge> : <Badge variant={unavailable ? "destructive" : "outline"}>{unavailable ? "unavailable" : "loading"}</Badge>}
@@ -287,24 +291,37 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
             {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
             {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
             {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={backToOverview} onReload={reloadGraphData} /> : null}
-          </div>
+    </div>
+  )
+  const inspector = (
+    <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
+      <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">Inspect</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Groups</TabsTrigger></TabsList>
+      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} /></TabsContent>
+      <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
+      <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
+      <TabsContent value="communities" className="min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>
+    </Tabs>
+  )
+
+  return (
+    <section className="size-full min-h-0" aria-label="Graph Explorer">
+      {desktop ? <ResizablePanelGroup orientation="horizontal">
+        <ResizablePanel minSize="480px">{graphCanvas}
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel panelRef={inspectorPanelRef} defaultSize={desktop ? "330px" : "44px"} minSize={desktop ? "300px" : "180px"} maxSize="420px" collapsedSize="44px" collapsible onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}>
+        <ResizablePanel panelRef={inspectorPanelRef} defaultSize="330px" minSize="300px" maxSize="420px" collapsedSize="44px" collapsible onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}>
           <aside className="relative size-full min-h-0 border-l bg-card/20">
-            <div className={inspectorCollapsed ? "invisible size-full" : "size-full"}>
-              <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
-                <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">Inspect</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Groups</TabsTrigger></TabsList>
-                <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} /></TabsContent>
-                <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
-                <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
-                <TabsContent value="communities" className="min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>
-              </Tabs>
-            </div>
+            <div className={inspectorCollapsed ? "invisible size-full" : "size-full"}>{inspector}</div>
             <Button variant="ghost" size="icon" className={`absolute top-2 z-20 size-8 ${inspectorCollapsed ? "left-1.5" : "right-2"}`} aria-label={inspectorCollapsed ? "Expand graph inspector" : "Collapse graph inspector"} aria-expanded={!inspectorCollapsed} onClick={() => inspectorCollapsed ? inspectorPanelRef.current?.expand() : inspectorPanelRef.current?.collapse()}>{inspectorCollapsed ? <ChevronLeft /> : <ChevronRight />}</Button>
           </aside>
         </ResizablePanel>
-      </ResizablePanelGroup>
+      </ResizablePanelGroup> : (
+        <Tabs value={mobileView} onValueChange={setMobileView} className="flex size-full min-h-0 flex-col p-2">
+          <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="detail">Detail</TabsTrigger></TabsList>
+          <TabsContent forceMount value="graph" className={`min-h-0 flex-1 ${mobileView === "graph" ? "" : "hidden"}`}>{graphCanvas}</TabsContent>
+          <TabsContent forceMount value="detail" className={`min-h-0 flex-1 ${mobileView === "detail" ? "" : "hidden"}`}>{inspector}</TabsContent>
+        </Tabs>
+      )}
     </section>
   )
 }

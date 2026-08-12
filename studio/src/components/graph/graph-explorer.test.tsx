@@ -61,7 +61,7 @@ beforeEach(() => {
   vi.mocked(getCommunity).mockReset()
   vi.mocked(getCommunityReport).mockReset()
 })
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe("GraphExplorer focus flow", () => {
   it("posts entity and relationship seeds with bounded depth-one defaults", async () => {
@@ -351,6 +351,29 @@ describe("GraphExplorer focus flow", () => {
 
     await user.click(screen.getByRole("button", { name: "Collapse graph inspector" }))
     expect(screen.getByText("Selected entity")).toBeInTheDocument()
+  })
+
+  it("opens mobile Inspector detail without unmounting the focused graph", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: false, media: "(min-width: 1280px)", onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    })))
+    vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      description: "Mobile detail", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: [], revision: 1 }
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={intent} />)
+    expect(await screen.findByText("FOCUSED")).toBeInTheDocument()
+    expect(screen.getByText("query-focus")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Mobile detail")).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "Detail" })).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByText("FOCUSED")).toBeInTheDocument()
+    expect(getGraphSubgraph).toHaveBeenCalledTimes(1)
   })
 
   it("does not reload overview when the Run changes while already in overview", async () => {
