@@ -96,7 +96,7 @@ function EntityDetail({ value, onFocus }: { value: GraphEntityDetail; onFocus: (
   return (
     <div className="space-y-5 pb-5">
       <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
-        <div className="flex min-w-0 gap-3"><div className="rounded-full bg-primary/10 p-2 text-primary"><Building2 className="size-5" /></div><div><h3 className="truncate font-semibold">{value.title}</h3><div className="mt-1 flex gap-1"><Badge variant="outline">{value.entity_type ?? "Untyped"}</Badge><Badge variant="outline">Rank {value.rank ?? "—"}</Badge></div></div></div>
+        <div className="flex min-w-0 gap-3"><div className="rounded-full bg-primary/10 p-2 text-primary"><Building2 className="size-5" /></div><div><h3 className="truncate font-semibold">{value.title}</h3><div className="mt-1 flex gap-1"><Badge variant="outline">{value.entity_type ?? "Untyped"}</Badge><Badge variant="outline">Degree {value.degree ?? "—"}</Badge><Badge variant="outline">Rank {value.rank ?? "—"}</Badge></div></div></div>
         <Button size="sm" onClick={() => onFocus(value.id)}><Network /> Focus neighborhood</Button>
       </div>
       <Section title="Description"><p className="whitespace-pre-wrap text-sm leading-6">{value.description ?? "No description"}</p></Section>

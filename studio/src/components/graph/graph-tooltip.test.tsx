@@ -8,9 +8,10 @@ afterEach(cleanup)
 
 describe("GraphTooltip", () => {
   it("renders projection entity fields without requesting detail data", () => {
-    render(<GraphTooltip content={{ kind: "entity", value: { id: "a", title: "Alice", entity_type: "PERSON", rank: 12 } }} x={20} y={20} bounds={{ width: 640, height: 480 }} />)
+    render(<GraphTooltip content={{ kind: "entity", value: { id: "a", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12 } }} x={20} y={20} bounds={{ width: 640, height: 480 }} />)
     expect(screen.getByRole("tooltip")).toHaveTextContent("Alice")
-    expect(screen.getByText("PERSON · Rank 12")).toBeInTheDocument()
+    expect(screen.getByText("PERSON")).toBeInTheDocument()
+    expect(screen.getByText("Degree 12 · Rank 12")).toBeInTheDocument()
   })
 
   it("renders relationship direction and clamps within the graph canvas", () => {
@@ -22,7 +23,7 @@ describe("GraphTooltip", () => {
   })
 
   it("remeasures when tooltip content changes at the same graph position", () => {
-    const { rerender } = render(<GraphTooltip content={{ kind: "entity", value: { id: "a", title: "A", entity_type: null, rank: null } }} x={100} y={100} bounds={{ width: 300, height: 200 }} />)
+    const { rerender } = render(<GraphTooltip content={{ kind: "entity", value: { id: "a", title: "A", entity_type: null, degree: null, rank: null } }} x={100} y={100} bounds={{ width: 300, height: 200 }} />)
     const tooltip = screen.getByRole("tooltip")
     Object.defineProperty(tooltip, "offsetWidth", { configurable: true, value: 260 })
     Object.defineProperty(tooltip, "offsetHeight", { configurable: true, value: 120 })

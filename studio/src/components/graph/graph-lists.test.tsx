@@ -25,7 +25,7 @@ describe("Graph list filter submission", () => {
     vi.mocked(listEntities)
       .mockResolvedValueOnce(emptyPage)
       .mockResolvedValueOnce({
-        items: [{ id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", rank: null, community_ids: [] }],
+        items: [{ id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: null, rank: null, community_ids: [] }],
         next_cursor: "entity-1",
       })
       .mockResolvedValueOnce(emptyPage)
@@ -54,7 +54,7 @@ describe("Graph list filter submission", () => {
       .mockResolvedValueOnce(emptyPage)
       .mockReturnValueOnce(personPage)
       .mockResolvedValueOnce({
-        items: [{ id: "entity-2", short_id: null, title: "Acme", entity_type: "ORG", rank: null, community_ids: [] }],
+        items: [{ id: "entity-2", short_id: null, title: "Acme", entity_type: "ORG", degree: null, rank: null, community_ids: [] }],
         next_cursor: null,
       })
     const user = userEvent.setup()

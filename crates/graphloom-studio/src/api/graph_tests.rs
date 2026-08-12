@@ -143,6 +143,11 @@ async fn test_should_return_resolved_bounded_graph_overview() -> TestResult {
         .as_array()
         .and_then(|relationships| relationships.first())
         .ok_or("overview relationship")?;
+    assert!(
+        value["entities"]
+            .as_array()
+            .is_some_and(|entities| entities.iter().all(|entity| entity.get("degree").is_some()))
+    );
     assert!(entity_ids.contains(relationship["source_entity_id"].as_str().ok_or("source")?));
     assert!(entity_ids.contains(relationship["target_entity_id"].as_str().ok_or("target")?));
     assert_eq!(value["seed_entity_ids"], json!([]));
@@ -298,6 +303,7 @@ async fn test_should_paginate_entities_by_stable_id_and_apply_exact_filters() ->
     let (_, filtered) = get_json(&router, "/api/graph/entities?type=PERSON&community=5").await?;
     assert_eq!(filtered["items"].as_array().map(Vec::len), Some(1));
     assert_eq!(filtered["items"][0]["id"], "entity-a");
+    assert_eq!(filtered["items"][0]["degree"], filtered["items"][0]["rank"]);
     assert!(filtered["items"][0].get("description").is_none());
     assert!(filtered["items"][0].get("text_unit_ids").is_none());
     Ok(())
@@ -364,6 +370,8 @@ async fn test_should_return_graph_details_without_exposing_embeddings() -> TestR
     }
     let (_, report) = get_json(&router, "/api/graph/communities/community-a/report").await?;
     assert_eq!(report["full_content"], "GRAPH_REPORT_SECRET_SENTINEL");
+    let (_, entity) = get_json(&router, "/api/graph/entities/entity-a").await?;
+    assert_eq!(entity["degree"], entity["rank"]);
     Ok(())
 }
 

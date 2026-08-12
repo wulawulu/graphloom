@@ -7,7 +7,7 @@ import type { GraphViewMode } from "@/components/graph/graph-explorer"
 import { GraphTooltip, type GraphTooltipContent } from "@/components/graph/graph-tooltip"
 import { Button } from "@/components/ui/button"
 import { readCytoscapeTheme } from "@/lib/cytoscape-theme"
-import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
+import { buildProjectionElements, GRAPH_LAYOUT_OPTIONS, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 interface NetworkPreviewProps {
   projection: GraphProjection
@@ -22,18 +22,6 @@ interface NetworkPreviewProps {
   onReload: () => void
 }
 
-const layoutOptions = {
-  // Cytoscape's compound spring embedder layout name is assembled to keep spellcheck signal clean.
-  name: "co" + "se",
-  animate: false,
-  randomize: true,
-  nodeRepulsion: () => 9_000,
-  idealEdgeLength: () => 72,
-  gravity: 0.22,
-  componentSpacing: 72,
-  padding: 36,
-} as const
-
 function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewMode): void {
   const focused = mode !== "overview"
   const ids = new Set(projectionFocusIds(projection, focused))
@@ -47,12 +35,12 @@ function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewM
     } as unknown as Parameters<Core["animate"]>[0]
     cy.animate(animation)
   } else {
-    cy.fit(targets, 36)
+    cy.fit(targets, 64)
   }
 }
 
 function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, animate: boolean): void {
-  const options = { ...layoutOptions, animate } as unknown as Parameters<Core["layout"]>[0]
+  const options = { ...GRAPH_LAYOUT_OPTIONS, animate } as unknown as Parameters<Core["layout"]>[0]
   const layout = cy.layout(options)
   layout.one("layoutstop", () => focusCollection(cy, projection, mode))
   layout.run()
@@ -103,14 +91,13 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         elements,
         layout: { name: "preset" },
         style: [
-          { selector: "node", style: { "background-color": theme.defaultNode, "border-color": theme.background, "border-width": 2, label: "", shape: "roundrectangle", width: 32, height: 22 } },
+          { selector: "node", style: { "background-color": theme.defaultNode, "border-color": theme.background, "border-width": 2, label: "data(label)", color: theme.foreground, "font-size": 10, shape: "roundrectangle", width: "data(displayWidth)", height: "data(displayHeight)", "text-wrap": "ellipsis", "text-max-width": "data(textMaxWidth)", "text-halign": "center", "text-valign": "center", "text-justification": "center", "z-index": 10 } },
           { selector: 'node[entityType = "PERSON"]', style: { "background-color": theme.person } },
           { selector: 'node[entityType = "ORGANIZATION"], node[entityType = "ORG"]', style: { "background-color": theme.organization } },
           { selector: 'node[entityType = "GEO"]', style: { "background-color": theme.geo } },
           { selector: 'node[entityType = "EVENT"]', style: { "background-color": theme.event } },
-          { selector: "node.permanent-label, node.hovered, node.seed, node.ui-selected", style: { label: "data(label)", color: theme.foreground, "font-size": 10, "text-wrap": "ellipsis", "text-max-width": "112px", width: "data(displayWidth)", padding: "8px", "text-background-color": theme.background, "text-background-opacity": 0.88, "text-background-padding": "2px", "text-background-shape": "roundrectangle", "z-index": 10 } },
           { selector: "node.hovered", style: { "border-width": 3 } },
-          { selector: "node.seed", style: { "font-size": 11, padding: "10px", "border-color": theme.seed, "border-width": 4 } },
+          { selector: "node.seed", style: { "font-size": 11, "border-color": theme.seed, "border-width": 4 } },
           { selector: "node.ui-selected", style: { "border-color": theme.foreground, "border-style": "double", "border-width": 4 } },
           { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": theme.border, "target-arrow-color": theme.border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
           { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.9, "z-index": 8 } },
@@ -119,6 +106,8 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         ],
         minZoom: 0.2,
         maxZoom: 3,
+        userZoomingEnabled: true,
+        userPanningEnabled: true,
         })
         const showTooltip = (content: GraphTooltipContent, event: { renderedPosition?: { x: number; y: number } }): void => {
           const position = event.renderedPosition ?? { x: 0, y: 0 }

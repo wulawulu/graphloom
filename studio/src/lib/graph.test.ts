@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
-import { buildProjectionElements, graphNodeDisplayWidth, graphViewportAction, permanentEntityLabelIds, projectionFocusIds } from "@/lib/graph"
+import {
+  MAX_GRAPH_NODE_HEIGHT,
+  MAX_GRAPH_NODE_WIDTH,
+  MIN_GRAPH_NODE_HEIGHT,
+  buildProjectionElements,
+  graphNodeDimensions,
+  graphViewportAction,
+  projectionFocusIds,
+} from "@/lib/graph"
 
 const projection: GraphProjection = {
   entities: [
-    { id: "entity-seed", title: "Alice", entity_type: "PERSON", rank: 9 },
-    { id: "entity-neighbor", title: "Acme", entity_type: "ORGANIZATION", rank: 4 },
+    { id: "entity-seed", title: "Alice", entity_type: "PERSON", degree: 9, rank: 9 },
+    { id: "entity-neighbor", title: "Acme", entity_type: "ORGANIZATION", degree: 4, rank: 4 },
   ],
   relationships: [{
     id: "relationship-seed",
@@ -27,10 +35,26 @@ const projection: GraphProjection = {
 }
 
 describe("graph projection transformation", () => {
-  it("derives deterministic node widths and clamps long labels", () => {
-    expect(graphNodeDisplayWidth("A")).toBe(32)
-    expect(graphNodeDisplayWidth("Alice")).toBe(46)
-    expect(graphNodeDisplayWidth("A".repeat(100))).toBe(112)
+  it("uses a stable monotonic logarithmic degree scale with clamps", () => {
+    const dimensions = (degree: number | null) => graphNodeDimensions({ title: "Hub", degree })
+
+    expect(dimensions(null).height).toBe(MIN_GRAPH_NODE_HEIGHT)
+    expect(dimensions(0).height).toBe(MIN_GRAPH_NODE_HEIGHT)
+    expect(dimensions(1).height).toBeGreaterThanOrEqual(MIN_GRAPH_NODE_HEIGHT)
+    expect(dimensions(10).height).toBeGreaterThan(dimensions(1).height)
+    expect(dimensions(100).height).toBeGreaterThan(dimensions(10).height)
+    expect(dimensions(Number.MAX_SAFE_INTEGER).height).toBe(MAX_GRAPH_NODE_HEIGHT)
+    expect(dimensions(Number.MAX_SAFE_INTEGER).width).toBeLessThanOrEqual(MAX_GRAPH_NODE_WIDTH)
+  })
+
+  it("uses code-point-aware bounded dimensions for Unicode labels", () => {
+    const short = graphNodeDimensions({ title: "甲", degree: 0 })
+    const medium = graphNodeDimensions({ title: "西门庆与潘金莲", degree: 0 })
+    const long = graphNodeDimensions({ title: "非常长的中文实体名称".repeat(20), degree: 100 })
+
+    expect(medium.width).toBeGreaterThan(short.width)
+    expect(long.width).toBe(MAX_GRAPH_NODE_WIDTH)
+    expect(long.height).toBe(MAX_GRAPH_NODE_HEIGHT)
   })
 
   it("uses backend-resolved endpoint IDs without title lookup", () => {
@@ -47,6 +71,30 @@ describe("graph projection transformation", () => {
     expect(elements.find((element) => element.data.id === "relationship-seed")?.classes).toBe("seed-relationship")
   })
 
+  it("shows every entity title by default with final dimensions before layout", () => {
+    const nodes = buildProjectionElements(projection).filter((element) => element.group === "nodes")
+
+    expect(nodes).toHaveLength(projection.entities.length)
+    for (const entity of projection.entities) {
+      const node = nodes.find((element) => element.data.id === entity.id)
+      expect(node?.data.label).toBe(entity.title)
+      expect(node?.data.displayWidth).toEqual(expect.any(Number))
+      expect(node?.data.displayHeight).toEqual(expect.any(Number))
+      expect(node?.classes).not.toContain("permanent-label")
+    }
+  })
+
+  it("keeps identical entity dimensions across different projections", () => {
+    const entity = { id: "same", title: "Same entity", entity_type: "PERSON", degree: 30, rank: 30 }
+    const seed = projection.entities.at(0)
+    if (seed === undefined) throw new Error("projection fixture must contain a seed")
+    const first = buildProjectionElements({ ...projection, entities: [entity] })[0]
+    const second = buildProjectionElements({ ...projection, entities: [seed, entity] })[1]
+
+    expect(first?.data.displayWidth).toBe(second?.data.displayWidth)
+    expect(first?.data.displayHeight).toBe(second?.data.displayHeight)
+  })
+
   it("focuses seed nodes in focus mode and all nodes in overview mode", () => {
     expect(projectionFocusIds(projection, true)).toEqual(["entity-seed"])
     expect(projectionFocusIds(projection, false)).toEqual(["entity-seed", "entity-neighbor"])
@@ -59,31 +107,4 @@ describe("graph projection transformation", () => {
     expect(graphViewportAction(1_396, 474, true)).toBe("resize")
   })
 
-  it("labels seeds first, then higher ranks with a stable ID tiebreak", () => {
-    const labels = permanentEntityLabelIds({
-      ...projection,
-      entities: [
-        { id: "seed", title: "Seed", entity_type: null, rank: null },
-        { id: "z-low", title: "Low", entity_type: null, rank: 1 },
-        { id: "b-high", title: "B", entity_type: null, rank: 9 },
-        { id: "a-high", title: "A", entity_type: null, rank: 9 },
-      ],
-      seed_entity_ids: ["seed"],
-    }, 2)
-
-    expect([...labels]).toEqual(["seed", "a-high", "b-high"])
-    expect(labels.has("z-low")).toBe(false)
-  })
-
-  it("uses stable ID order when nullable ranks are tied", () => {
-    const labels = permanentEntityLabelIds({
-      ...projection,
-      entities: [
-        { id: "z-null", title: "Z", entity_type: null, rank: null },
-        { id: "a-null", title: "A", entity_type: null, rank: null },
-      ],
-      seed_entity_ids: [],
-    }, 1)
-    expect([...labels]).toEqual(["a-null"])
-  })
 })

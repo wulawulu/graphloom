@@ -13,10 +13,11 @@ describe("GraphInspector", () => {
   it("renders structured entity detail, collapses long sources, and focuses explicitly", async () => {
     const user = userEvent.setup()
     const onFocusEntity = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 12, description: "Alice description", community_ids: ["5"], text_unit_ids: Array.from({ length: 25 }, (_, index) => `text-${index + 1}`) }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12, description: "Alice description", community_ids: ["5"], text_unit_ids: Array.from({ length: 25 }, (_, index) => `text-${index + 1}`) }
     render(<GraphInspector {...common} onFocusEntity={onFocusEntity} detail={{ kind: "entity", value: entity }} />)
 
     expect(screen.getByText("PERSON")).toBeInTheDocument()
+    expect(screen.getByText("Degree 12")).toBeInTheDocument()
     expect(screen.getByText("Rank 12")).toBeInTheDocument()
     expect(screen.getByText("Alice description")).toBeInTheDocument()
     expect(screen.getByText("Developer · Raw JSON")).toBeInTheDocument()
@@ -55,7 +56,7 @@ describe("GraphInspector", () => {
   it("clears the persistent Inspector selection with Escape", async () => {
     const user = userEvent.setup()
     const onClear = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", rank: 1, description: null, community_ids: [], text_unit_ids: [] }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: [], text_unit_ids: [] }
     render(<GraphInspector {...common} onClear={onClear} detail={{ kind: "entity", value: entity }} />)
 
     await user.click(screen.getByRole("region", { name: "Graph Inspector" }))

@@ -1,43 +1,65 @@
-import type { ElementDefinition } from "cytoscape"
+import type { CoseLayoutOptions, ElementDefinition } from "cytoscape"
 
 import type { GraphProjection, GraphProjectionEntity } from "@/api/types"
 
-export const PERMANENT_GRAPH_LABEL_LIMIT = 24
-export const MIN_GRAPH_NODE_WIDTH = 32
-export const MAX_GRAPH_NODE_WIDTH = 112
+export const MIN_GRAPH_NODE_WIDTH = 56
+export const MAX_GRAPH_NODE_WIDTH = 136
+export const MIN_GRAPH_NODE_HEIGHT = 28
+export const MAX_GRAPH_NODE_HEIGHT = 54
 
-export function graphNodeDisplayWidth(label: string): number {
-  return Math.min(MAX_GRAPH_NODE_WIDTH, Math.max(MIN_GRAPH_NODE_WIDTH, 16 + Array.from(label).length * 6))
+export const GRAPH_LAYOUT_OPTIONS = {
+  // Cytoscape's compound spring embedder layout name is assembled to keep spellcheck signal clean.
+  name: ("co" + "se") as CoseLayoutOptions["name"],
+  animate: false,
+  randomize: true,
+  nodeRepulsion: () => 22_000,
+  nodeOverlap: 40,
+  idealEdgeLength: () => 130,
+  gravity: 0.18,
+  componentSpacing: 120,
+  padding: 64,
+} as const satisfies CoseLayoutOptions
+
+export interface GraphNodeDimensions {
+  width: number
+  height: number
 }
 
-export function permanentEntityLabelIds(
-  projection: GraphProjection,
-  limit = PERMANENT_GRAPH_LABEL_LIMIT,
-): Set<string> {
-  const seeds = new Set(projection.seed_entity_ids)
-  const ranked = [...projection.entities]
-    .filter((entity) => !seeds.has(entity.id))
-    .sort(compareEntityLabelPriority)
-    .slice(0, limit)
-  return new Set([...seeds, ...ranked.map((entity) => entity.id)])
+function graphDegreeSizeBonus(degree: number | null): number {
+  if (degree === null || !Number.isFinite(degree) || degree <= 0) return 0
+  const normalized = Math.min(1, Math.log2(degree + 1) / 6)
+  return Math.round((MAX_GRAPH_NODE_HEIGHT - MIN_GRAPH_NODE_HEIGHT) * normalized)
 }
 
-function compareEntityLabelPriority(left: GraphProjectionEntity, right: GraphProjectionEntity): number {
-  if (left.rank === null && right.rank !== null) return 1
-  if (left.rank !== null && right.rank === null) return -1
-  if (left.rank !== null && right.rank !== null && left.rank !== right.rank) return right.rank - left.rank
-  return left.id < right.id ? -1 : Number(left.id > right.id)
+export function graphNodeDimensions(entity: Pick<GraphProjectionEntity, "degree" | "title">): GraphNodeDimensions {
+  const degreeBonus = graphDegreeSizeBonus(entity.degree)
+  const labelWidth = 16 + Array.from(entity.title).length * 6
+  return {
+    width: Math.min(MAX_GRAPH_NODE_WIDTH, Math.max(MIN_GRAPH_NODE_WIDTH, labelWidth + Math.round(degreeBonus * 0.55))),
+    height: MIN_GRAPH_NODE_HEIGHT + degreeBonus,
+  }
 }
 
 export function buildProjectionElements(projection: GraphProjection): ElementDefinition[] {
   const seedEntityIds = new Set(projection.seed_entity_ids)
   const seedRelationshipIds = new Set(projection.seed_relationship_ids)
-  const labeledEntityIds = permanentEntityLabelIds(projection)
-  const nodes: ElementDefinition[] = projection.entities.map((entity) => ({
-    group: "nodes",
-    classes: [seedEntityIds.has(entity.id) ? "seed" : "neighbor", labeledEntityIds.has(entity.id) ? "permanent-label" : ""].filter(Boolean).join(" "),
-    data: { id: entity.id, label: entity.title, displayWidth: graphNodeDisplayWidth(entity.title), entityType: (entity.entity_type ?? "OTHER").toUpperCase(), rank: entity.rank },
-  }))
+  const nodes: ElementDefinition[] = projection.entities.map((entity) => {
+    const dimensions = graphNodeDimensions(entity)
+    return {
+      group: "nodes",
+      classes: seedEntityIds.has(entity.id) ? "seed" : "neighbor",
+      data: {
+        id: entity.id,
+        label: entity.title,
+        displayWidth: dimensions.width,
+        displayHeight: dimensions.height,
+        textMaxWidth: `${dimensions.width - 16}px`,
+        entityType: (entity.entity_type ?? "OTHER").toUpperCase(),
+        degree: entity.degree,
+        rank: entity.rank,
+      },
+    }
+  })
   const edges: ElementDefinition[] = projection.relationships.map((relationship) => ({
       group: "edges",
       classes: seedRelationshipIds.has(relationship.id) ? "seed-relationship" : undefined,

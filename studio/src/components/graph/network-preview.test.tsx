@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
 import { NetworkPreview } from "@/components/graph/network-preview"
+import { GRAPH_LAYOUT_OPTIONS } from "@/lib/graph"
 
 const rendererTheme = {
   "--cy-background": "#080a0e",
@@ -49,7 +50,7 @@ vi.mock("cytoscape", () => ({
 }))
 
 const projection: GraphProjection = {
-  entities: [{ id: "entity-1", title: "Alice", entity_type: "PERSON", rank: 1 }],
+  entities: [{ id: "entity-1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1 }],
   relationships: [],
   seed_entity_ids: ["entity-1"],
   seed_relationship_ids: [],
@@ -143,14 +144,29 @@ describe("NetworkPreview focus labels", () => {
     const options = vi.mocked(cytoscape).mock.calls.at(-1)?.[0] as unknown as {
       elements?: unknown
       style?: unknown
+      userZoomingEnabled?: boolean
+      userPanningEnabled?: boolean
     }
     const serializedStyles = JSON.stringify(options?.style)
     expect(serializedStyles).not.toContain("oklch")
     expect(serializedStyles).not.toContain('"width":"label"')
     for (const color of Object.values(rendererTheme)) expect(serializedStyles).toContain(color)
     expect(options?.elements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ data: expect.objectContaining({ displayWidth: expect.any(Number) }) }),
+      expect.objectContaining({ data: expect.objectContaining({ displayWidth: expect.any(Number), displayHeight: expect.any(Number), label: "Alice" }) }),
     ]))
+    expect(serializedStyles).toContain('"text-halign":"center"')
+    expect(serializedStyles).toContain('"text-valign":"center"')
+    expect(serializedStyles).toContain('"label":"data(label)"')
+    expect(options?.userZoomingEnabled).toBe(true)
+    expect(options?.userPanningEnabled).toBe(true)
+  })
+
+  it("uses the expanded topology layout parameters", () => {
+    expect(GRAPH_LAYOUT_OPTIONS.nodeRepulsion()).toBe(22_000)
+    expect(GRAPH_LAYOUT_OPTIONS.nodeOverlap).toBe(40)
+    expect(GRAPH_LAYOUT_OPTIONS.idealEdgeLength()).toBe(130)
+    expect(GRAPH_LAYOUT_OPTIONS.componentSpacing).toBe(120)
+    expect(GRAPH_LAYOUT_OPTIONS.padding).toBe(64)
   })
 
   it("shows a safe error and logs diagnostics when a renderer token is invalid", async () => {
@@ -209,6 +225,7 @@ describe("NetworkPreview focus labels", () => {
 
     act(() => graphMock.handlers.get("mouseover:node")?.({ target, renderedPosition: { x: 30, y: 40 } }))
     expect(screen.getByRole("tooltip")).toHaveTextContent("Alice")
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Degree 1")
     act(() => graphMock.handlers.get("mouseout:node")?.({ target }))
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
 

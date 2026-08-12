@@ -30,7 +30,7 @@ export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): Reac
       role="tooltip"
     >
       {content.kind === "entity" ? (
-        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? "Untyped"} · Rank {content.value.rank ?? "—"}</p></>
+        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? "Untyped"}</p><p className="mt-1 text-xs text-muted-foreground">Degree {content.value.degree ?? "—"} · Rank {content.value.rank ?? "—"}</p></>
       ) : (
         <><p className="font-semibold">{content.value.source} → {content.value.target}</p><p className="mt-0.5 text-xs text-muted-foreground">Weight {content.value.weight ?? "—"} · Rank {content.value.rank ?? "—"}</p></>
       )}

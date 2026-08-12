@@ -46,7 +46,7 @@ const summary = { entity_count: 10, relationship_count: 20, community_count: 2, 
 
 function projection(id: string, seed = false): GraphProjection {
   return {
-    entities: [{ id, title: id.toUpperCase(), entity_type: "PERSON", rank: 1 }],
+    entities: [{ id, title: id.toUpperCase(), entity_type: "PERSON", degree: 1, rank: 1 }],
     relationships: [],
     seed_entity_ids: seed ? [id] : [],
     seed_relationship_ids: [],
@@ -247,6 +247,7 @@ describe("GraphExplorer focus flow", () => {
       short_id: "E1",
       title: "Alice",
       entity_type: "PERSON",
+      degree: 1,
       rank: 1,
       description: "Alice description",
       community_ids: [],
@@ -281,6 +282,7 @@ describe("GraphExplorer focus flow", () => {
       short_id: "E1",
       title: "Alice",
       entity_type: "PERSON",
+      degree: 1,
       rank: 1,
       description: null,
       community_ids: [],
@@ -367,7 +369,7 @@ describe("GraphExplorer focus flow", () => {
 
   it("keeps Inspector selection mounted while the right panel is collapsed", async () => {
     vi.mocked(getEntity).mockResolvedValue({
-      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
       description: "Selected entity", community_ids: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
@@ -387,7 +389,7 @@ describe("GraphExplorer focus flow", () => {
     })))
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
     vi.mocked(getEntity).mockResolvedValue({
-      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
       description: "Mobile detail", community_ids: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
@@ -407,7 +409,7 @@ describe("GraphExplorer focus flow", () => {
     const media = changeableMediaQuery(true)
     vi.stubGlobal("matchMedia", vi.fn(() => media))
     vi.mocked(getEntity).mockResolvedValue({
-      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
       description: "Persistent Inspector detail", community_ids: [], text_unit_ids: [],
     })
     const user = userEvent.setup()

@@ -121,6 +121,7 @@ export interface GraphProjectionEntity {
   id: string
   title: string
   entity_type: string | null
+  degree: number | null
   rank: number | null
 }
 
@@ -164,6 +165,7 @@ export interface GraphEntity {
   short_id: string | null
   title: string
   entity_type: string | null
+  degree: number | null
   rank: number | null
   community_ids: string[]
 }
