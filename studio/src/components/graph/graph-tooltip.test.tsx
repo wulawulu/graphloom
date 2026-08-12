@@ -20,4 +20,14 @@ describe("GraphTooltip", () => {
     expect(clampTooltipPosition(630, 470, 640, 480, 240, 88)).toEqual({ x: 392, y: 384 })
     expect(clampTooltipPosition(20, 20, 180, 120, 164, 104)).toEqual({ x: 8, y: 8 })
   })
+
+  it("remeasures when tooltip content changes at the same graph position", () => {
+    const { rerender } = render(<GraphTooltip content={{ kind: "entity", value: { id: "a", title: "A", entity_type: null, rank: null } }} x={100} y={100} bounds={{ width: 300, height: 200 }} />)
+    const tooltip = screen.getByRole("tooltip")
+    Object.defineProperty(tooltip, "offsetWidth", { configurable: true, value: 260 })
+    Object.defineProperty(tooltip, "offsetHeight", { configurable: true, value: 120 })
+
+    rerender(<GraphTooltip content={{ kind: "relationship", value: { id: "r", source_entity_id: "a", target_entity_id: "b", source: "A long relationship source", target: "A long relationship target", weight: 1, rank: 2 } }} x={100} y={100} bounds={{ width: 300, height: 200 }} />)
+    expect(tooltip).toHaveStyle({ left: "32px", top: "72px" })
+  })
 })

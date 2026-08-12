@@ -65,10 +65,15 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const { mode, onEntity, onRelationship, projection } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const cytoscapeRef = useRef<Core | null>(null)
+  const onEntityRef = useRef(onEntity)
+  const onRelationshipRef = useRef(onRelationship)
   const [tooltip, setTooltip] = useState<{ content: GraphTooltipContent; x: number; y: number; bounds: { width: number; height: number } } | null>(null)
   const elements = useMemo(() => buildProjectionElements(projection), [projection])
   const entities = useMemo(() => new Map(projection.entities.map((entity) => [entity.id, entity])), [projection.entities])
   const relationships = useMemo(() => new Map(projection.relationships.map((relationship) => [relationship.id, relationship])), [projection.relationships])
+
+  useEffect(() => { onEntityRef.current = onEntity }, [onEntity])
+  useEffect(() => { onRelationshipRef.current = onRelationship }, [onRelationship])
 
   useEffect(() => {
     const container = containerRef.current
@@ -124,8 +129,8 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         cy.on("mouseout", "edge", (event) => { event.target.removeClass("hovered"); setTooltip(null) })
         cy.on("select", "node, edge", (event) => event.target.addClass("ui-selected"))
         cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
-        cy.on("tap", "node", (event) => onEntity(event.target.id()))
-        cy.on("tap", "edge", (event) => onRelationship(event.target.id()))
+        cy.on("tap", "node", (event) => onEntityRef.current(event.target.id()))
+        cy.on("tap", "edge", (event) => onRelationshipRef.current(event.target.id()))
         instance = cy
         cytoscapeRef.current = cy
         runLayout(cy, projection, mode, false)
@@ -152,7 +157,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
       if (cytoscapeRef.current === instance) cytoscapeRef.current = null
       instance?.destroy()
     }
-  }, [elements, entities, mode, onEntity, onRelationship, projection, relationships])
+  }, [elements, entities, mode, projection, relationships])
 
   const missingCount = projection.missing_entity_ids.length
     + projection.missing_relationship_ids.length

@@ -21,7 +21,7 @@ export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): Reac
     const element = tooltipRef.current
     if (element === null) return
     setPosition(clampTooltipPosition(x, y, bounds.width, bounds.height, element.offsetWidth, element.offsetHeight))
-  }, [bounds.height, bounds.width, x, y])
+  }, [bounds.height, bounds.width, content, x, y])
   return (
     <div
       ref={tooltipRef}

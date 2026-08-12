@@ -98,4 +98,14 @@ describe("NetworkPreview focus labels", () => {
     act(() => graphMock.handlers.get("tap:node")?.({ target }))
     expect(callbacks.onEntity).toHaveBeenCalledWith("entity-1")
   })
+
+  it("keeps the Cytoscape owner when click callback identities change", async () => {
+    const { default: cytoscape } = await import("cytoscape")
+    const initialCalls = vi.mocked(cytoscape).mock.calls.length
+    const { rerender } = render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
+    await waitFor(() => expect(cytoscape).toHaveBeenCalledTimes(initialCalls + 1))
+
+    rerender(<NetworkPreview {...callbacks} onEntity={vi.fn()} onRelationship={vi.fn()} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
+    expect(cytoscape).toHaveBeenCalledTimes(initialCalls + 1)
+  })
 })

@@ -236,29 +236,29 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   const openEntity = useCallback((id: string) => {
     setInspectorTab("inspect")
     setMobileView("detail")
-    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
+    if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getEntity(id, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "entity", value }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
   const openRelationship = useCallback((id: string) => {
     setInspectorTab("inspect")
     setMobileView("detail")
-    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
+    if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getRelationship(id, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "relationship", value }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
   const openCommunity = useCallback((id: string) => {
     setInspectorTab("inspect")
     setMobileView("detail")
-    if (desktop && inspectorCollapsed) inspectorPanelRef.current?.expand()
+    if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void Promise.all([
       getCommunity(id, controller.signal),
@@ -271,7 +271,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
       .then(([value, report]) => { if (!controller.signal.aborted) setDetail({ kind: "community", value, report }) })
       .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorCollapsed, inspectorPanelRef])
+  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
   const closeDetail = (): void => {
     detailRequest.current?.abort()
