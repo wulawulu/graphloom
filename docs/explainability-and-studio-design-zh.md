@@ -32,19 +32,23 @@ GraphLoom 当前既是：
 GraphLoom Studio Frontend MVP 已实现，当前界面建立在已冻结的 Query、Result、Run、SSE 与
 Graph Explorer HTTP 合同之上。
 
-Studio 的主要界面包括：
+Studio V3 Phase 1 使用 Graph-first Explainable QA Workspace：
 
 ```text
-┌──────────────────────────┬────────────────────────────────────┐
-│ 左侧：Query Chat         │ 右侧：Graph Explorer              │
-│                          │                                    │
-│ 问题输入                 │ Entity ───── Relationship          │
-│ 流式回答                 │    │                               │
-│ Context                  │ Community                          │
-│ Explainability Timeline  │                                    │
-│                          │ Query 期间动态高亮节点和关系       │
-└──────────────────────────┴────────────────────────────────────┘
+┌──────────────────┬────────────────────────────┬──────────────────┐
+│ Query Composer   │                            │ Graph Inspector  │
+│ Answer           │ Main Knowledge Graph Canvas│ Entity           │
+│ Execution Trace │                            │ Relationship     │
+│ Run History      │                            │ Community        │
+└──────────────────┴────────────────────────────┴──────────────────┘
 ```
+
+左右面板可调整宽度或折叠；折叠只改变 presentation，不中断 Query/SSE、不清空 Run 或
+Inspector selection，也不会重新读取 Graph projection。中央画布保持单一 Graph Explorer
+state owner，并占用桌面布局的主要空间。
+
+Phase 1 主画布仍只呈现现有 API 提供的 query-visible Entity/Relationship projection。
+Document、Text Unit、Community 与 Report 不会在本阶段伪装成 Cytoscape graph node。
 
 Studio 应同时支持：
 
@@ -3336,6 +3340,19 @@ HTTP request 重新读取 snapshot，当前未增加 cache。
    7.Turso Store；
    8.DuckDB Analytics；
    9.compatible/optimized 对比。
+
+### Future：Provenance Graph（V3 Phase 2，尚未实现）
+
+未来 Studio 可以建立独立的 provenance visualization model：
+
+```text
+Document → Text Unit → Entity / Relationship → Community → Report
+```
+
+这些 Document/Text Unit/Community/Report visualization nodes 需要新的、明确的 Studio
+数据合同。本模型用于解释知识来源与聚合路径，不表示 GraphRAG 原生 Entity/Relationship
+graph 已经包含所有这些 node type，也不改变 GraphRAG Query 或 indexing semantics。Phase 1
+不读取 raw Parquet 来绕过 API，亦不实现 provenance Graph API。
 
 ---
 

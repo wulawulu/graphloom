@@ -30,7 +30,7 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
       ? "Relationship"
       : detail.value.title
   return (
-    <section className="flex size-full min-h-0 flex-col" aria-label="Graph Inspector">
+    <section className="flex size-full min-h-0 flex-col" aria-label="Graph Inspector" tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") props.onClear() }}>
       <header className="flex h-11 shrink-0 items-center justify-between border-b px-3">
         <div className="min-w-0"><h2 className="truncate text-sm font-semibold">{props.loading ? "Loading graph detail" : title}</h2><p className="text-[10px] text-muted-foreground">{detail?.kind ?? "Inspector"}</p></div>
         {detail !== null || props.loading || props.error ? <Button variant="ghost" size="icon" className="size-8" aria-label="Clear graph selection" onClick={props.onClear}><X /></Button> : null}

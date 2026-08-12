@@ -338,6 +338,21 @@ describe("GraphExplorer focus flow", () => {
     expect(getGraphOverview).toHaveBeenCalledTimes(2)
   })
 
+  it("keeps Inspector selection mounted while the right panel is collapsed", async () => {
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      description: "Selected entity", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Selected entity")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Collapse graph inspector" }))
+    expect(screen.getByText("Selected entity")).toBeInTheDocument()
+  })
+
   it("does not reload overview when the Run changes while already in overview", async () => {
     const { rerender } = render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
     expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()

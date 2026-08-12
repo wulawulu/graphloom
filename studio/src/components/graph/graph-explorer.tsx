@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, usePanelRef } from "@/components/ui/resizable"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useDesktopLayout } from "@/components/layout/use-desktop-layout"
 
 import { GraphInspector, type GraphDetail } from "./graph-detail"
 import { CommunityList, EntityList, RelationshipList } from "./graph-lists"
@@ -51,6 +52,7 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
 }
 
 export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
+  const desktop = useDesktopLayout()
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
   const [projection, setProjection] = useState<GraphProjection | null>(null)
@@ -59,7 +61,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [inspectorTab, setInspectorTab] = useState("inspect")
-  const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(!desktop)
   const [detail, setDetail] = useState<GraphDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
@@ -275,7 +277,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   return (
     <section className="size-full min-h-0" aria-label="Graph Explorer">
       <ResizablePanelGroup orientation="horizontal">
-        <ResizablePanel minSize="480px">
+        <ResizablePanel minSize={desktop ? "480px" : "280px"}>
           <div className="flex size-full min-h-0 flex-col p-2">
             <header className="flex h-9 shrink-0 items-center justify-between px-1">
               <div className="flex items-center gap-2"><Database className="size-4 text-primary" /><h2 className="text-sm font-semibold">Knowledge Graph</h2></div>
@@ -288,7 +290,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
           </div>
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel panelRef={inspectorPanelRef} defaultSize="330px" minSize="300px" maxSize="420px" collapsedSize="44px" collapsible onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}>
+        <ResizablePanel panelRef={inspectorPanelRef} defaultSize={desktop ? "330px" : "44px"} minSize={desktop ? "300px" : "180px"} maxSize="420px" collapsedSize="44px" collapsible onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}>
           <aside className="relative size-full min-h-0 border-l bg-card/20">
             <div className={inspectorCollapsed ? "invisible size-full" : "size-full"}>
               <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">

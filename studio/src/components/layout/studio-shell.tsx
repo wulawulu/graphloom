@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { ChevronLeft, ChevronRight, Waypoints } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, usePanelRef } from "@/components/ui/resizable"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+
+import { useDesktopLayout } from "./use-desktop-layout"
 
 interface StudioShellProps {
   queryWorkspace: React.ReactNode
@@ -62,19 +64,4 @@ export function StudioShell(props: StudioShellProps): React.ReactElement {
       </div> : null}
     </main>
   )
-}
-
-function useDesktopLayout(): boolean {
-  const [desktop, setDesktop] = useState(() => (
-    typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1024px)").matches
-  ))
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return undefined
-    const query = window.matchMedia("(min-width: 1024px)")
-    const update = (event: MediaQueryListEvent): void => setDesktop(event.matches)
-    setDesktop(query.matches)
-    query.addEventListener("change", update)
-    return () => query.removeEventListener("change", update)
-  }, [])
-  return desktop
 }

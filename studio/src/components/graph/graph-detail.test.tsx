@@ -51,4 +51,15 @@ describe("GraphInspector", () => {
     expect(screen.getByRole("heading", { name: "Report heading" })).toBeInTheDocument()
     expect(screen.getByText("[Remote image omitted: remote]")).toBeInTheDocument()
   })
+
+  it("clears the persistent Inspector selection with Escape", async () => {
+    const user = userEvent.setup()
+    const onClear = vi.fn()
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", rank: 1, description: null, community_ids: [], text_unit_ids: [] }
+    render(<GraphInspector {...common} onClear={onClear} detail={{ kind: "entity", value: entity }} />)
+
+    await user.click(screen.getByRole("region", { name: "Graph Inspector" }))
+    await user.keyboard("{Escape}")
+    expect(onClear).toHaveBeenCalledOnce()
+  })
 })

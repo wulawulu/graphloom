@@ -26,6 +26,21 @@ The server listens on `127.0.0.1:8080` by default and does not provide
 authentication. Binding it to a non-loopback address should only be done behind
 an appropriate authentication layer.
 
+Studio uses a graph-first explainable QA workspace:
+
+```text
+┌──────────────────┬────────────────────────────┬──────────────────┐
+│ Query + Answer   │ Main Knowledge Graph Canvas│ Graph Inspector  │
+│ Execution Trace │                            │ Entity / Edge /  │
+│ Run History     │                            │ Community detail │
+└──────────────────┴────────────────────────────┴──────────────────┘
+```
+
+The resizable side panels can collapse without restarting a Query, closing its
+Explainability stream, or reloading the graph. Phase 1 visualizes the existing
+query-visible Entity/Relationship projection only; provenance visualization is
+deferred and does not change GraphRAG's native graph semantics.
+
 For frontend development, run the API host and Vite separately:
 
 ```bash

@@ -104,6 +104,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           { selector: "node.ui-selected", style: { "border-color": foreground, "border-style": "double", "border-width": 4 } },
           { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": border, "target-arrow-color": border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
           { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": seed, "target-arrow-color": seed, "arrow-scale": 0.9, "z-index": 8 } },
+          { selector: "edge.hovered, edge.ui-selected", style: { label: "data(sourceLabel) → data(targetLabel)", color: foreground, "font-size": 9, "text-background-color": background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "z-index": 12 } },
           { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": foreground, "target-arrow-color": foreground } },
         ],
         minZoom: 0.2,
@@ -119,8 +120,8 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           if (entity !== undefined) showTooltip({ kind: "entity", value: entity }, event)
         })
         cy.on("mouseout", "node", (event) => { event.target.removeClass("hovered"); setTooltip(null) })
-        cy.on("mouseover", "edge", (event) => { const relationship = relationships.get(event.target.id()); if (relationship !== undefined) showTooltip({ kind: "relationship", value: relationship }, event) })
-        cy.on("mouseout", "edge", () => setTooltip(null))
+        cy.on("mouseover", "edge", (event) => { event.target.addClass("hovered"); const relationship = relationships.get(event.target.id()); if (relationship !== undefined) showTooltip({ kind: "relationship", value: relationship }, event) })
+        cy.on("mouseout", "edge", (event) => { event.target.removeClass("hovered"); setTooltip(null) })
         cy.on("select", "node, edge", (event) => event.target.addClass("ui-selected"))
         cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
         cy.on("tap", "node", (event) => onEntity(event.target.id()))
