@@ -9,17 +9,24 @@ interface CytoscapeTestEvent {
   renderedPosition?: { x: number; y: number }
 }
 
-const graphMock = vi.hoisted(() => ({ handlers: new Map<string, (event: CytoscapeTestEvent) => void>() }))
+const graphMock = vi.hoisted(() => ({
+  handlers: new Map<string, (event: CytoscapeTestEvent) => void>(),
+  instances: [] as unknown[],
+  observers: [] as ResizeObserverCallback[],
+  width: 640,
+}))
 
 vi.mock("cytoscape", () => ({
   default: vi.fn(() => {
     let onLayoutStop: (() => void) | undefined
-    return {
+    const instance = {
       on: vi.fn((event: string, selector: string, handler: (value: CytoscapeTestEvent) => void) => graphMock.handlers.set(`${event}:${selector}`, handler)),
       elements: vi.fn(() => ({ filter: vi.fn(() => ({ length: 1 })) })),
       layout: vi.fn(() => ({ one: vi.fn((_event: string, handler: () => void) => { onLayoutStop = handler }), run: vi.fn(() => onLayoutStop?.()) })),
       animate: vi.fn(), fit: vi.fn(), resize: vi.fn(), destroy: vi.fn(),
     }
+    graphMock.instances.push(instance)
+    return instance
   }),
 }))
 
@@ -44,10 +51,13 @@ const callbacks = {
 
 beforeEach(() => {
   graphMock.handlers.clear()
-  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(640)
+  graphMock.instances.length = 0
+  graphMock.observers.length = 0
+  graphMock.width = 640
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => graphMock.width)
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(480)
   vi.stubGlobal("ResizeObserver", class {
-    constructor(private readonly callback: ResizeObserverCallback) {}
+    constructor(private readonly callback: ResizeObserverCallback) { graphMock.observers.push(callback) }
     observe(): void { this.callback([], this) }
     unobserve(): void {}
     disconnect(): void {}
@@ -57,6 +67,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe("NetworkPreview focus labels", () => {
@@ -107,5 +118,26 @@ describe("NetworkPreview focus labels", () => {
 
     rerender(<NetworkPreview {...callbacks} onEntity={vi.fn()} onRelationship={vi.fn()} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
     expect(cytoscape).toHaveBeenCalledTimes(initialCalls + 1)
+  })
+
+  it("resizes without fitting or laying out when a persistent canvas becomes visible", async () => {
+    render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} />)
+    await waitFor(() => expect(graphMock.instances).toHaveLength(1))
+    const instance = graphMock.instances[0] as {
+      layout: ReturnType<typeof vi.fn>
+      fit: ReturnType<typeof vi.fn>
+      resize: ReturnType<typeof vi.fn>
+    }
+    const layoutCalls = instance.layout.mock.calls.length
+    const fitCalls = instance.fit.mock.calls.length
+
+    graphMock.width = 0
+    act(() => graphMock.observers[0]?.([], {} as ResizeObserver))
+    graphMock.width = 640
+    act(() => graphMock.observers[0]?.([], {} as ResizeObserver))
+
+    expect(instance.resize).toHaveBeenCalledOnce()
+    expect(instance.layout).toHaveBeenCalledTimes(layoutCalls)
+    expect(instance.fit).toHaveBeenCalledTimes(fitCalls)
   })
 })

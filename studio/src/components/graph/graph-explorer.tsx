@@ -304,24 +304,35 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   )
 
   return (
-    <section className="size-full min-h-0" aria-label="Graph Explorer">
-      {desktop ? <ResizablePanelGroup orientation="horizontal">
-        <ResizablePanel minSize="480px">{graphCanvas}
+    <section className="flex size-full min-h-0 flex-col" aria-label="Graph Explorer">
+      <Tabs value={mobileView} onValueChange={setMobileView} className={desktop ? "hidden" : "shrink-0 p-2 pb-0"}>
+        <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="detail">Detail</TabsTrigger></TabsList>
+      </Tabs>
+      <div className="relative min-h-0 flex-1">
+        <ResizablePanelGroup orientation="horizontal" className={desktop ? "" : "relative"}>
+        <ResizablePanel
+          minSize="480px"
+          className={desktop ? "" : `!absolute !inset-0 !size-full ${mobileView === "graph" ? "!visible !pointer-events-auto !z-10" : "!invisible !pointer-events-none"}`}
+        >{graphCanvas}
         </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel panelRef={inspectorPanelRef} defaultSize="330px" minSize="300px" maxSize="420px" collapsedSize="44px" collapsible onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}>
+        <ResizableHandle withHandle className={desktop ? "" : "hidden"} />
+        <ResizablePanel
+          panelRef={inspectorPanelRef}
+          defaultSize="330px"
+          minSize="300px"
+          maxSize="420px"
+          collapsedSize="44px"
+          collapsible
+          className={desktop ? "" : `!absolute !inset-0 !size-full ${mobileView === "detail" ? "!visible !pointer-events-auto !z-10" : "!invisible !pointer-events-none"}`}
+          onResize={(size) => setInspectorCollapsed(size.inPixels <= 48)}
+        >
           <aside className="relative size-full min-h-0 border-l bg-card/20">
-            <div className={inspectorCollapsed ? "invisible size-full" : "size-full"}>{inspector}</div>
-            <Button variant="ghost" size="icon" className={`absolute top-2 z-20 size-8 ${inspectorCollapsed ? "left-1.5" : "right-2"}`} aria-label={inspectorCollapsed ? "Expand graph inspector" : "Collapse graph inspector"} aria-expanded={!inspectorCollapsed} onClick={() => inspectorCollapsed ? inspectorPanelRef.current?.expand() : inspectorPanelRef.current?.collapse()}>{inspectorCollapsed ? <ChevronLeft /> : <ChevronRight />}</Button>
+            <div className={desktop && inspectorCollapsed ? "invisible size-full" : "size-full"}>{inspector}</div>
+            {desktop ? <Button variant="ghost" size="icon" className={`absolute top-2 z-20 size-8 ${inspectorCollapsed ? "left-1.5" : "right-2"}`} aria-label={inspectorCollapsed ? "Expand graph inspector" : "Collapse graph inspector"} aria-expanded={!inspectorCollapsed} onClick={() => inspectorCollapsed ? inspectorPanelRef.current?.expand() : inspectorPanelRef.current?.collapse()}>{inspectorCollapsed ? <ChevronLeft /> : <ChevronRight />}</Button> : null}
           </aside>
         </ResizablePanel>
-      </ResizablePanelGroup> : (
-        <Tabs value={mobileView} onValueChange={setMobileView} className="flex size-full min-h-0 flex-col p-2">
-          <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="detail">Detail</TabsTrigger></TabsList>
-          <TabsContent forceMount value="graph" className={`min-h-0 flex-1 ${mobileView === "graph" ? "" : "hidden"}`}>{graphCanvas}</TabsContent>
-          <TabsContent forceMount value="detail" className={`min-h-0 flex-1 ${mobileView === "detail" ? "" : "hidden"}`}>{inspector}</TabsContent>
-        </Tabs>
-      )}
+        </ResizablePanelGroup>
+      </div>
     </section>
   )
 }

@@ -81,7 +81,6 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
     let disposed = false
     let initializing = false
     let instance: Core | null = null
-    let wasVisible = false
 
     const initialize = (): void => {
       if (disposed || initializing || instance !== null) return
@@ -140,12 +139,9 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
     const updateViewport = (): void => {
       const width = container.clientWidth
       const action = graphViewportAction(width, instance !== null || initializing)
-      const becameVisible = width > 0 && !wasVisible
-      wasVisible = width > 0
       if (action === "initialize") initialize()
       if (action === "resize" && instance !== null) {
         instance.resize()
-        if (becameVisible) focusCollection(instance, projection, mode)
       }
     }
     const observer = new ResizeObserver(updateViewport)

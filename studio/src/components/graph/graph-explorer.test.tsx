@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { useEffect } from "react"
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -29,8 +30,16 @@ vi.mock("@/api/client", () => ({
   listRelationships: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
 }))
 
+const networkLifecycle = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }))
+
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBackOverview, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBackOverview: () => void; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>,
+  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBackOverview, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBackOverview: () => void; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
+    useEffect(() => {
+      networkLifecycle.mounts += 1
+      return () => { networkLifecycle.unmounts += 1 }
+    }, [])
+    return <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
+  },
 }))
 
 const summary = { entity_count: 10, relationship_count: 20, community_count: 2, community_report_count: 2, community_levels: [0], entity_types: { PERSON: 1 }, untyped_entity_count: 0 }
@@ -51,7 +60,25 @@ function projection(id: string, seed = false): GraphProjection {
 
 const defaultExplorerProps = { runId: "run-a", onClearFocus: vi.fn() }
 
+function changeableMediaQuery(initialMatches: boolean): MediaQueryList & { setMatches: (value: boolean) => void } {
+  let listener: ((event: MediaQueryListEvent) => void) | undefined
+  const query = {
+    matches: initialMatches,
+    media: "(min-width: 1280px)",
+    onchange: null,
+    addEventListener: vi.fn((_type: string, callback: EventListenerOrEventListenerObject) => { if (typeof callback === "function") listener = callback as (event: MediaQueryListEvent) => void }),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+    setMatches(value: boolean): void { query.matches = value; listener?.({ matches: value } as MediaQueryListEvent) },
+  } as MediaQueryList & { matches: boolean; setMatches: (value: boolean) => void }
+  return query
+}
+
 beforeEach(() => {
+  networkLifecycle.mounts = 0
+  networkLifecycle.unmounts = 0
   defaultExplorerProps.onClearFocus.mockReset()
   vi.mocked(getGraphSummary).mockReset().mockResolvedValue(summary)
   vi.mocked(getGraphOverview).mockReset().mockResolvedValue(projection("overview"))
@@ -374,6 +401,53 @@ describe("GraphExplorer focus flow", () => {
     expect(screen.getByRole("tab", { name: "Detail" })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByText("FOCUSED")).toBeInTheDocument()
     expect(getGraphSubgraph).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps one NetworkPreview owner, requests, and Inspector selection across breakpoints and narrow tabs", async () => {
+    const media = changeableMediaQuery(true)
+    vi.stubGlobal("matchMedia", vi.fn(() => media))
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", rank: 1,
+      description: "Persistent Inspector detail", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Persistent Inspector detail")).toBeInTheDocument()
+
+    act(() => media.setMatches(false))
+    expect(screen.getByRole("tab", { name: "Detail" })).toHaveAttribute("aria-selected", "true")
+    await user.click(screen.getByRole("tab", { name: "Graph" }))
+    await user.click(screen.getByRole("tab", { name: "Detail" }))
+    act(() => media.setMatches(true))
+
+    expect(screen.getByText("Persistent Inspector detail")).toBeInTheDocument()
+    expect(networkLifecycle.mounts).toBe(1)
+    expect(networkLifecycle.unmounts).toBe(0)
+    expect(getGraphSummary).toHaveBeenCalledTimes(1)
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+    expect(getEntity).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the initial Query focus owner and request stable across breakpoints", async () => {
+    const media = changeableMediaQuery(true)
+    vi.stubGlobal("matchMedia", vi.fn(() => media))
+    vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
+    const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: [], revision: 1 }
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={intent} />)
+    expect(await screen.findByText("FOCUSED")).toBeInTheDocument()
+
+    act(() => media.setMatches(false))
+    act(() => media.setMatches(true))
+
+    expect(networkLifecycle.mounts).toBe(1)
+    expect(networkLifecycle.unmounts).toBe(0)
+    expect(getGraphSummary).toHaveBeenCalledTimes(1)
+    expect(getGraphSubgraph).toHaveBeenCalledTimes(1)
+    expect(getGraphOverview).not.toHaveBeenCalled()
+    expect(screen.getByText("query-focus")).toBeInTheDocument()
   })
 
   it("does not reload overview when the Run changes while already in overview", async () => {
