@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
-import { buildProjectionElements, graphViewportAction, permanentEntityLabelIds, projectionFocusIds } from "@/lib/graph"
+import { buildProjectionElements, graphNodeDisplayWidth, graphViewportAction, permanentEntityLabelIds, projectionFocusIds } from "@/lib/graph"
 
 const projection: GraphProjection = {
   entities: [
@@ -27,6 +27,12 @@ const projection: GraphProjection = {
 }
 
 describe("graph projection transformation", () => {
+  it("derives deterministic node widths and clamps long labels", () => {
+    expect(graphNodeDisplayWidth("A")).toBe(32)
+    expect(graphNodeDisplayWidth("Alice")).toBe(46)
+    expect(graphNodeDisplayWidth("A".repeat(100))).toBe(112)
+  })
+
   it("uses backend-resolved endpoint IDs without title lookup", () => {
     const elements = buildProjectionElements(projection)
     const edge = elements.find((element) => element.data.id === "relationship-seed")

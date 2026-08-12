@@ -6,6 +6,7 @@ import type { GraphProjection, GraphSummary } from "@/api/types"
 import type { GraphViewMode } from "@/components/graph/graph-explorer"
 import { GraphTooltip, type GraphTooltipContent } from "@/components/graph/graph-tooltip"
 import { Button } from "@/components/ui/button"
+import { readCytoscapeTheme } from "@/lib/cytoscape-theme"
 import { buildProjectionElements, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 interface NetworkPreviewProps {
@@ -57,16 +58,13 @@ function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, a
   layout.run()
 }
 
-function cssVariable(styles: CSSStyleDeclaration, name: string): string {
-  return styles.getPropertyValue(name).trim()
-}
-
 export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const { mode, onEntity, onRelationship, projection } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const cytoscapeRef = useRef<Core | null>(null)
   const onEntityRef = useRef(onEntity)
   const onRelationshipRef = useRef(onRelationship)
+  const [rendererError, setRendererError] = useState(false)
   const [tooltip, setTooltip] = useState<{ content: GraphTooltipContent; x: number; y: number; bounds: { width: number; height: number } } | null>(null)
   const elements = useMemo(() => buildProjectionElements(projection), [projection])
   const entities = useMemo(() => new Map(projection.entities.map((entity) => [entity.id, entity])), [projection.entities])
@@ -80,36 +78,44 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
     if (container === null) return undefined
     let disposed = false
     let initializing = false
+    let failed = false
     let instance: Core | null = null
 
+    const failInitialization = (error: unknown): void => {
+      initializing = false
+      failed = true
+      instance?.destroy()
+      instance = null
+      cytoscapeRef.current = null
+      console.error("Graph visualization failed to initialize", error)
+      if (!disposed) setRendererError(true)
+    }
+
     const initialize = (): void => {
-      if (disposed || initializing || instance !== null) return
+      if (disposed || failed || initializing || instance !== null) return
       initializing = true
+      setRendererError(false)
       void import("cytoscape").then(({ default: cytoscape }) => {
         if (disposed) return
-        const styles = getComputedStyle(document.documentElement)
-        const foreground = cssVariable(styles, "--foreground")
-        const background = cssVariable(styles, "--background")
-        const border = cssVariable(styles, "--border")
-        const seed = cssVariable(styles, "--graph-seed")
+        const theme = readCytoscapeTheme(getComputedStyle(document.documentElement))
         const cy = cytoscape({
         container,
         elements,
         layout: { name: "preset" },
         style: [
-          { selector: "node", style: { "background-color": cssVariable(styles, "--graph-default"), "border-color": background, "border-width": 2, label: "", shape: "roundrectangle", width: 32, height: 22 } },
-          { selector: 'node[entityType = "PERSON"]', style: { "background-color": cssVariable(styles, "--graph-person") } },
-          { selector: 'node[entityType = "ORGANIZATION"], node[entityType = "ORG"]', style: { "background-color": cssVariable(styles, "--graph-organization") } },
-          { selector: 'node[entityType = "GEO"]', style: { "background-color": cssVariable(styles, "--graph-geo") } },
-          { selector: 'node[entityType = "EVENT"]', style: { "background-color": cssVariable(styles, "--graph-event") } },
-          { selector: "node.permanent-label, node.hovered, node.seed, node.ui-selected", style: { label: "data(label)", color: foreground, "font-size": 10, "text-wrap": "ellipsis", "text-max-width": "112px", width: "label", padding: "8px", "text-background-color": background, "text-background-opacity": 0.88, "text-background-padding": "2px", "text-background-shape": "roundrectangle", "z-index": 10 } },
+          { selector: "node", style: { "background-color": theme.defaultNode, "border-color": theme.background, "border-width": 2, label: "", shape: "roundrectangle", width: 32, height: 22 } },
+          { selector: 'node[entityType = "PERSON"]', style: { "background-color": theme.person } },
+          { selector: 'node[entityType = "ORGANIZATION"], node[entityType = "ORG"]', style: { "background-color": theme.organization } },
+          { selector: 'node[entityType = "GEO"]', style: { "background-color": theme.geo } },
+          { selector: 'node[entityType = "EVENT"]', style: { "background-color": theme.event } },
+          { selector: "node.permanent-label, node.hovered, node.seed, node.ui-selected", style: { label: "data(label)", color: theme.foreground, "font-size": 10, "text-wrap": "ellipsis", "text-max-width": "112px", width: "data(displayWidth)", padding: "8px", "text-background-color": theme.background, "text-background-opacity": 0.88, "text-background-padding": "2px", "text-background-shape": "roundrectangle", "z-index": 10 } },
           { selector: "node.hovered", style: { "border-width": 3 } },
-          { selector: "node.seed", style: { "font-size": 11, padding: "10px", "border-color": seed, "border-width": 4 } },
-          { selector: "node.ui-selected", style: { "border-color": foreground, "border-style": "double", "border-width": 4 } },
-          { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": border, "target-arrow-color": border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
-          { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": seed, "target-arrow-color": seed, "arrow-scale": 0.9, "z-index": 8 } },
-          { selector: "edge.hovered, edge.ui-selected", style: { label: "data(sourceLabel) → data(targetLabel)", color: foreground, "font-size": 9, "text-background-color": background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "z-index": 12 } },
-          { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": foreground, "target-arrow-color": foreground } },
+          { selector: "node.seed", style: { "font-size": 11, padding: "10px", "border-color": theme.seed, "border-width": 4 } },
+          { selector: "node.ui-selected", style: { "border-color": theme.foreground, "border-style": "double", "border-width": 4 } },
+          { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": theme.border, "target-arrow-color": theme.border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
+          { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.9, "z-index": 8 } },
+          { selector: "edge.hovered, edge.ui-selected", style: { label: "data(sourceLabel) → data(targetLabel)", color: theme.foreground, "font-size": 9, "text-background-color": theme.background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "z-index": 12 } },
+          { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": theme.foreground, "target-arrow-color": theme.foreground } },
         ],
         minZoom: 0.2,
         maxZoom: 3,
@@ -133,7 +139,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         instance = cy
         cytoscapeRef.current = cy
         runLayout(cy, projection, mode, false)
-      }).catch(() => { initializing = false })
+      }).catch(failInitialization)
     }
 
     const updateViewport = (): void => {
@@ -204,6 +210,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
       </div>
       <div className="relative min-h-80 flex-1 overflow-hidden rounded-md border bg-background">
         <div ref={containerRef} className="absolute inset-0" aria-label="Knowledge graph network preview" />
+        {rendererError ? <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-background/95 p-6 text-center" role="alert"><p className="text-sm font-medium text-destructive">Graph visualization failed to initialize.</p><p className="mt-1 text-xs text-muted-foreground">Check the browser console for renderer diagnostics.</p></div> : null}
         {tooltip !== null ? <GraphTooltip {...tooltip} /> : null}
       </div>
     </div>

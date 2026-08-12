@@ -3,6 +3,12 @@ import type { ElementDefinition } from "cytoscape"
 import type { GraphProjection, GraphProjectionEntity } from "@/api/types"
 
 export const PERMANENT_GRAPH_LABEL_LIMIT = 24
+export const MIN_GRAPH_NODE_WIDTH = 32
+export const MAX_GRAPH_NODE_WIDTH = 112
+
+export function graphNodeDisplayWidth(label: string): number {
+  return Math.min(MAX_GRAPH_NODE_WIDTH, Math.max(MIN_GRAPH_NODE_WIDTH, 16 + Array.from(label).length * 6))
+}
 
 export function permanentEntityLabelIds(
   projection: GraphProjection,
@@ -30,7 +36,7 @@ export function buildProjectionElements(projection: GraphProjection): ElementDef
   const nodes: ElementDefinition[] = projection.entities.map((entity) => ({
     group: "nodes",
     classes: [seedEntityIds.has(entity.id) ? "seed" : "neighbor", labeledEntityIds.has(entity.id) ? "permanent-label" : ""].filter(Boolean).join(" "),
-    data: { id: entity.id, label: entity.title, entityType: (entity.entity_type ?? "OTHER").toUpperCase(), rank: entity.rank },
+    data: { id: entity.id, label: entity.title, displayWidth: graphNodeDisplayWidth(entity.title), entityType: (entity.entity_type ?? "OTHER").toUpperCase(), rank: entity.rank },
   }))
   const edges: ElementDefinition[] = projection.relationships.map((relationship) => ({
       group: "edges",

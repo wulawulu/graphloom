@@ -33,6 +33,15 @@
   --graph-event: oklch(0.78 0.14 75);
   --graph-default: oklch(0.63 0.035 260);
   --graph-seed: oklch(0.83 0.17 85);
+  --cy-background: #080a0e;
+  --cy-foreground: #ebeff5;
+  --cy-border: #282b33;
+  --cy-graph-person: #00bdce;
+  --cy-graph-organization: #bc90ee;
+  --cy-graph-geo: #5bbd74;
+  --cy-graph-event: #eba941;
+  --cy-graph-default: #7d8a9f;
+  --cy-graph-seed: #f9bd01;
 }
 
 @theme inline {
