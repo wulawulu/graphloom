@@ -431,6 +431,7 @@ impl From<&GraphEntityDetail> for GraphProjectionEntity {
             id: entity.id.clone(),
             title: entity.title.clone(),
             entity_type: entity.entity_type.clone(),
+            degree: entity.degree,
             rank: entity.rank,
         }
     }
@@ -446,7 +447,9 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
     fn entity(id: &str, title: &str, rank: i64) -> GraphEntityDetail {
-        GraphEntityDetail::new(id.to_owned(), title.to_owned()).with_rank(rank)
+        GraphEntityDetail::new(id.to_owned(), title.to_owned())
+            .with_degree(rank)
+            .with_rank(rank)
     }
 
     fn relationship(
@@ -526,7 +529,8 @@ mod tests {
     #[test]
     fn test_should_count_self_loop_endpoint_once_in_overview() -> TestResult {
         let snapshot = snapshot(
-            vec![entity("a", "Alice", 1)],
+            // GraphRAG's authoritative undirected degree counts a self-loop twice.
+            vec![entity("a", "Alice", 2)],
             vec![relationship("loop", "Alice", "Alice", 1, 1.0)],
         )?;
 
@@ -534,9 +538,40 @@ mod tests {
 
         assert_eq!(projection.entities.len(), 1);
         assert_eq!(projection.entities[0].id, "a");
+        assert_eq!(projection.entities[0].degree, Some(2));
         assert_eq!(projection.relationships.len(), 1);
         assert_eq!(projection.relationships[0].id, "loop");
         assert!(!projection.truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_preserve_full_graph_degree_in_bounded_projection() -> TestResult {
+        let snapshot = snapshot(
+            vec![
+                entity("a", "Alice", 4),
+                entity("b", "Bob", 1),
+                entity("c", "Carol", 1),
+                entity("d", "Dave", 1),
+                entity("e", "Eve", 1),
+            ],
+            vec![
+                relationship("a-b", "Alice", "Bob", 4, 1.0),
+                relationship("a-c", "Alice", "Carol", 3, 1.0),
+                relationship("a-d", "Alice", "Dave", 2, 1.0),
+                relationship("a-e", "Alice", "Eve", 1, 1.0),
+            ],
+        )?;
+
+        let projection = overview(&snapshot, 3, 2);
+        let alice = projection
+            .entities
+            .iter()
+            .find(|entity| entity.id == "a")
+            .ok_or("Alice must remain in the bounded projection")?;
+
+        assert_eq!(projection.relationships.len(), 2);
+        assert_eq!(alice.degree, Some(4));
         Ok(())
     }
 

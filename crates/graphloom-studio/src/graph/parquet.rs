@@ -165,6 +165,18 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(snapshot.entities.len(), 3);
+        assert!(
+            snapshot
+                .entities
+                .iter()
+                .any(|entity| entity.degree.is_some())
+        );
+        assert!(
+            snapshot
+                .entities
+                .iter()
+                .all(|entity| entity.degree == entity.rank)
+        );
         assert_eq!(snapshot.relationships.len(), 3);
         assert_eq!(snapshot.communities.len(), 2);
         assert_eq!(snapshot.community_reports.len(), 2);

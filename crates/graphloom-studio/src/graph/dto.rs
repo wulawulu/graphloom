@@ -57,6 +57,8 @@ pub struct GraphProjectionEntity {
     pub title: String,
     /// Optional semantic entity type.
     pub entity_type: Option<String>,
+    /// Optional full-graph degree from the entity artifact.
+    pub degree: Option<i64>,
     /// Optional degree-derived rank.
     pub rank: Option<i64>,
 }
@@ -93,6 +95,8 @@ pub struct GraphEntity {
     pub title: String,
     /// Optional entity type.
     pub entity_type: Option<String>,
+    /// Optional full-graph degree from the entity artifact.
+    pub degree: Option<i64>,
     /// Optional degree-derived rank.
     pub rank: Option<i64>,
     /// Query-visible community memberships.
@@ -113,6 +117,8 @@ pub struct GraphEntityDetail {
     pub entity_type: Option<String>,
     /// Optional entity description.
     pub description: Option<String>,
+    /// Optional full-graph degree from the entity artifact.
+    pub degree: Option<i64>,
     /// Optional degree-derived rank.
     pub rank: Option<i64>,
     /// Query-visible community memberships.
@@ -137,6 +143,7 @@ impl GraphEntityDetail {
             title,
             entity_type: None,
             description: None,
+            degree: None,
             rank: None,
             community_ids: Vec::new(),
             text_unit_ids: Vec::new(),
@@ -161,6 +168,13 @@ impl GraphEntityDetail {
     #[must_use]
     pub fn with_description(mut self, description: String) -> Self {
         self.description = Some(description);
+        self
+    }
+
+    /// Set the authoritative full-graph degree.
+    #[must_use]
+    pub const fn with_degree(mut self, degree: i64) -> Self {
+        self.degree = Some(degree);
         self
     }
 
@@ -422,6 +436,7 @@ impl From<&Entity> for GraphEntity {
             short_id: entity.short_id.clone(),
             title: entity.title.clone(),
             entity_type: entity.entity_type.clone(),
+            degree: entity.rank,
             rank: entity.rank,
             community_ids: entity.community_ids.clone(),
         }
@@ -436,6 +451,7 @@ impl From<&Entity> for GraphEntityDetail {
             title: entity.title.clone(),
             entity_type: entity.entity_type.clone(),
             description: entity.description.clone(),
+            degree: entity.rank,
             rank: entity.rank,
             community_ids: entity.community_ids.clone(),
             text_unit_ids: entity.text_unit_ids.clone(),
@@ -450,6 +466,7 @@ impl From<&GraphEntityDetail> for GraphEntity {
             short_id: entity.short_id.clone(),
             title: entity.title.clone(),
             entity_type: entity.entity_type.clone(),
+            degree: entity.degree,
             rank: entity.rank,
             community_ids: entity.community_ids.clone(),
         }
