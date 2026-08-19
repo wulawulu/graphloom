@@ -85,6 +85,8 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const previousFocusIntent = useRef(focusIntent)
   const previousRunId = useRef(runId)
   const previousInspectRevision = useRef<number | null>(null)
+  const inspectionRunId = useRef(runId)
+  const candidateInspectionActive = useRef(false)
   const inspectorPanelRef = usePanelRef()
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
@@ -244,9 +246,22 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     }
   }, [])
 
+  const resetCandidateInspection = useCallback((): void => {
+    previousInspectRevision.current = null
+    if (!candidateInspectionActive.current) return
+    candidateInspectionActive.current = false
+    detailRequest.current?.abort()
+    detailRequest.current = null
+    setDetail(null)
+    setDecision(null)
+    setDetailLoading(false)
+    setDetailError(false)
+  }, [])
+
   const openEntityDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    candidateInspectionActive.current = candidate !== null
     setDecision(candidate)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
@@ -259,6 +274,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const openRelationshipDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    candidateInspectionActive.current = candidate !== null
     setDecision(candidate)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
@@ -272,15 +288,26 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const openRelationship = useCallback((id: string) => openRelationshipDetail(id, null), [openRelationshipDetail])
 
   useEffect(() => {
-    if (inspectIntent === null || previousInspectRevision.current === inspectIntent.revision) return
+    const runChanged = inspectionRunId.current !== runId
+    inspectionRunId.current = runId
+    if (runChanged) {
+      resetCandidateInspection()
+      return
+    }
+    if (inspectIntent === null) {
+      resetCandidateInspection()
+      return
+    }
+    if (previousInspectRevision.current === inspectIntent.revision) return
     previousInspectRevision.current = inspectIntent.revision
     if (inspectIntent.candidate.recordType === "entity") openEntityDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
     if (inspectIntent.candidate.recordType === "relationship") openRelationshipDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
-  }, [inspectIntent, openEntityDetail, openRelationshipDetail])
+  }, [inspectIntent, openEntityDetail, openRelationshipDetail, resetCandidateInspection, runId])
 
   const openCommunity = useCallback((id: string) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    candidateInspectionActive.current = false
     setDecision(null)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
@@ -298,6 +325,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
   const closeDetail = (): void => {
+    candidateInspectionActive.current = false
     detailRequest.current?.abort()
     detailRequest.current = null
     setDetail(null)

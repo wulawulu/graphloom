@@ -30,13 +30,13 @@ vi.mock("@/components/workspace/qa-workspace", () => ({
     answer: ReactNode
     composer: ReactNode
     onFocusGraph: (envelope: ExplainabilityEnvelope) => void
-    onInspectCandidate: (candidate: { stableId: string; title: string; recordType: string; selected: boolean; finalContext: string }) => void
+    onInspectCandidate: (candidate: { stableId: string; title: string; recordType: string; selected: boolean; selectionStatus: string; finalContext: string }) => void
     onNewQuery: () => void
     onSelectRun: (runId: string) => void
     question: string | null
     runId: string | null
     envelopes: ExplainabilityEnvelope[]
-  }) => <div>{composer}{answer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button><button type="button" onClick={() => onInspectCandidate({ stableId: "entity-candidate", title: "Candidate", recordType: "entity", selected: true, finalContext: "included" })}>Inspect candidate test</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
+  }) => <div>{composer}{answer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button><button type="button" onClick={() => onInspectCandidate({ stableId: "entity-candidate", title: "Candidate", recordType: "entity", selected: true, selectionStatus: "selected", finalContext: "included" })}>Inspect candidate test</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
 }))
 
 vi.mock("@/components/query/query-composer", () => ({
@@ -181,5 +181,18 @@ describe("App graph focus ownership", () => {
     expect(screen.getByText("Candidate inspection entity-candidate revision 1")).toBeInTheDocument()
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.getByText("No citation emphasis")).toBeInTheDocument()
+  })
+
+  it("starts candidate inspection revisions fresh after switching Runs", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole("button", { name: "Select Run A" }))
+    await user.click(screen.getByRole("button", { name: "Inspect candidate test" }))
+    expect(screen.getByText("Candidate inspection entity-candidate revision 1")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Select Run B" }))
+    expect(screen.getByText("No candidate inspection")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Inspect candidate test" }))
+    expect(screen.getByText("Candidate inspection entity-candidate revision 1")).toBeInTheDocument()
   })
 })

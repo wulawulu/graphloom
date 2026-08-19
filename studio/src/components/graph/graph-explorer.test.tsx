@@ -12,7 +12,7 @@ import {
   getGraphSummary,
   getRelationship,
 } from "@/api/client"
-import type { GraphProjection, GraphSummary } from "@/api/types"
+import type { GraphEntityDetail, GraphProjection, GraphSummary } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent, type GraphInspectIntent } from "@/components/graph/graph-explorer"
 import { highlightFromEvent } from "@/lib/explainability"
 
@@ -98,7 +98,7 @@ describe("GraphExplorer focus flow", () => {
     })
     const inspectIntent: GraphInspectIntent = {
       revision: 1,
-      candidate: { stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", finalContext: "included" },
+      candidate: { stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", selectionStatus: "selected", finalContext: "included" },
     }
 
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} inspectIntent={inspectIntent} />)
@@ -120,7 +120,7 @@ describe("GraphExplorer focus flow", () => {
     })
     const inspectIntent: GraphInspectIntent = {
       revision: 1,
-      candidate: { stableId: "relationship-1", shortId: "23", title: "Alice knows Bob", recordType: "relationship", score: 0.75, selected: true, finalContext: "included" },
+      candidate: { stableId: "relationship-1", shortId: "23", title: "Alice knows Bob", recordType: "relationship", score: 0.75, selected: true, selectionStatus: "selected", finalContext: "included" },
     }
 
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} inspectIntent={inspectIntent} />)
@@ -129,6 +129,83 @@ describe("GraphExplorer focus flow", () => {
     expect(screen.getByText("OVERVIEW")).toBeInTheDocument()
     expect(screen.getByText("overview")).toBeInTheDocument()
     expect(getRelationship).toHaveBeenCalledWith("relationship-1", expect.any(AbortSignal))
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+  })
+
+  it("clears candidate-owned detail on Run switch and accepts a reused revision", async () => {
+    const detail = (id: string, title: string): GraphEntityDetail => ({
+      id, short_id: null, title, entity_type: "PERSON", degree: 1, rank: 1,
+      description: `${title} detail`, community_ids: [], text_unit_ids: [],
+    })
+    vi.mocked(getEntity)
+      .mockResolvedValueOnce(detail("entity-a", "Candidate A"))
+      .mockResolvedValueOnce(detail("entity-b", "Candidate B"))
+    const candidateA: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-a", title: "Candidate A", recordType: "entity", selected: true, selectionStatus: "selected", finalContext: "included" },
+    }
+    const candidateB: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-b", title: "Candidate B", recordType: "entity", selected: true, selectionStatus: "selected", finalContext: "included" },
+    }
+    const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={null} inspectIntent={candidateA} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Query decision" })).toBeInTheDocument()
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    await waitFor(() => expect(screen.queryByText("Candidate A detail")).not.toBeInTheDocument())
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} inspectIntent={candidateB} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    expect(await screen.findByText("Candidate B detail")).toBeInTheDocument()
+    expect(getEntity).toHaveBeenCalledTimes(2)
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+    expect(screen.getByText("overview")).toBeInTheDocument()
+  })
+
+  it("aborts and ignores a pending candidate detail when the Run changes", async () => {
+    let resolveCandidate: ((value: GraphEntityDetail) => void) | undefined
+    vi.mocked(getEntity).mockReturnValue(new Promise((resolve) => { resolveCandidate = resolve }))
+    const inspectIntent: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-a", title: "Candidate A", recordType: "entity", selected: true, selectionStatus: "selected", finalContext: "included" },
+    }
+    const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={null} inspectIntent={inspectIntent} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    await waitFor(() => expect(getEntity).toHaveBeenCalledOnce())
+    const signal = vi.mocked(getEntity).mock.calls[0]?.[1]
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    await waitFor(() => expect(signal?.aborted).toBe(true))
+    expect(screen.queryByText("Loading structured detail…")).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveCandidate?.({
+        id: "entity-a", short_id: null, title: "Stale candidate A", entity_type: "PERSON", degree: 1, rank: 1,
+        description: "Stale detail", community_ids: [], text_unit_ids: [],
+      })
+      await Promise.resolve()
+    })
+    expect(screen.queryByText("Stale detail")).not.toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+    expect(screen.getByText("overview")).toBeInTheDocument()
+  })
+
+  it("preserves ordinary graph inspection while clearing only Run-owned decisions", async () => {
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: null, title: "Graph selection", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Ordinary graph detail", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    await user.click(await screen.findByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Ordinary graph detail")).toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+
+    expect(screen.getByText("Ordinary graph detail")).toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
     expect(getGraphSubgraph).not.toHaveBeenCalled()
   })
 

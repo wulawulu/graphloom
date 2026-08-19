@@ -41,6 +41,40 @@ describe("semantic explainability timeline", () => {
     expect(model.steps.map((step) => step.kind)).toEqual(["entity-mapping"])
   })
 
+  it("keeps retrieved-only candidates pending instead of excluding them", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, { type: "candidates_retrieved", candidates: [{ id: "entity-1", record_type: "entity", selected: false }, { id: "entity-2", record_type: "entity", selected: false }] }),
+    ])
+    const mapping = model.steps.find((step) => step.kind === "entity-mapping")
+    if (mapping?.kind !== "entity-mapping") throw new Error("expected entity mapping")
+
+    expect(mapping.summary.candidates.map((candidate) => candidate.selectionStatus)).toEqual(["pending", "pending"])
+    expect(mapping.summary).toMatchObject({ retrievedCount: 2, selectedCount: 0, excludedCount: 0, pendingCount: 2 })
+  })
+
+  it("promotes a retrieved candidate to selected when filtering accepts it", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, { type: "candidates_retrieved", candidates: [{ id: "entity-1", record_type: "entity", selected: false }] }),
+      envelope(2, { type: "candidates_filtered", candidates: [{ id: "entity-1", record_type: "entity", selected: true, reason: "ann_result" }] }),
+    ])
+    const mapping = model.steps.find((step) => step.kind === "entity-mapping")
+    if (mapping?.kind !== "entity-mapping") throw new Error("expected entity mapping")
+
+    expect(mapping.summary.candidates[0]).toMatchObject({ selectionStatus: "selected", selected: true, reason: "ann_result" })
+  })
+
+  it("promotes a retrieved candidate to excluded when filtering rejects it", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, { type: "candidates_retrieved", candidates: [{ id: "entity-1", record_type: "entity", selected: false }] }),
+      envelope(2, { type: "candidates_filtered", candidates: [{ id: "entity-1", record_type: "entity", selected: false, reason: "explicitly_excluded" }] }),
+    ])
+    const mapping = model.steps.find((step) => step.kind === "entity-mapping")
+    if (mapping?.kind !== "entity-mapping") throw new Error("expected entity mapping")
+
+    expect(mapping.summary.candidates[0]).toMatchObject({ selectionStatus: "excluded", selected: false, reason: "explicitly_excluded" })
+    expect(mapping.summary).toMatchObject({ selectedCount: 0, excludedCount: 1, pendingCount: 0 })
+  })
+
   it.each([
     [[section(3, "entities", ["entity-included"])], "entity-included", "included"],
     [[section(3, "entities", ["entity-other"])], "entity-excluded", "excluded"],
@@ -53,8 +87,7 @@ describe("semantic explainability timeline", () => {
     const mapping = model.steps.find((step) => step.kind === "entity-mapping")
     if (mapping?.kind !== "entity-mapping") throw new Error("expected entity mapping")
 
-    expect(mapping.summary.candidates[0]?.selected).toBe(true)
-    expect(mapping.summary.candidates[0]?.finalContext).toBe(expected)
+    expect(mapping.summary.candidates[0]).toMatchObject({ selected: true, selectionStatus: "selected", finalContext: expected })
   })
 
   it("merges progressive candidate decisions deterministically and uses the latest section", () => {
@@ -69,7 +102,7 @@ describe("semantic explainability timeline", () => {
     if (mapping?.kind !== "entity-mapping") throw new Error("expected entity mapping")
 
     expect(mapping.summary.candidates).toHaveLength(1)
-    expect(mapping.summary.candidates[0]).toMatchObject({ stableId: "entity-1", title: "Alice final", selected: true, finalContext: "excluded" })
+    expect(mapping.summary.candidates[0]).toMatchObject({ stableId: "entity-1", title: "Alice final", selected: true, selectionStatus: "selected", finalContext: "excluded" })
   })
 
   it("derives relationship final-context membership independently", () => {

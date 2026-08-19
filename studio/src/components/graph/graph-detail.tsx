@@ -65,12 +65,18 @@ function DecisionDetail({ value }: { value: ExplainabilityRecordView }): React.R
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
         {value.score === undefined ? null : <DecisionMetric label="Retrieval score" value={value.score.toFixed(4)} />}
         {value.rank === undefined ? null : <DecisionMetric label="Retrieval rank" value={value.rank} />}
-        <DecisionMetric label="Selected" value={value.selected ? "Yes" : "No"} />
+        <DecisionMetric label="Selection" value={selectionLabel(value.selectionStatus)} />
         <DecisionMetric label="Final context" value={finalContext} />
         {value.reason === undefined ? null : <DecisionMetric label="Reason" value={value.reason.replaceAll("_", " ")} />}
       </dl>
     </section>
   )
+}
+
+function selectionLabel(status: ExplainabilityRecordView["selectionStatus"]): string {
+  if (status === "pending") return "Retrieved"
+  if (status === "selected") return "Selected"
+  return "Excluded"
 }
 
 function DecisionMetric({ label, value }: { label: string; value: string | number }): React.ReactElement {

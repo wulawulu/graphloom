@@ -49,7 +49,7 @@ function StepIcon({ kind }: { kind: SemanticStep["kind"] }): React.ReactElement 
 function StepSummary({ step }: { step: SemanticStep }): React.ReactElement {
   if (step.kind === "entity-mapping") {
     const summary = step.summary
-    return <p className="mt-1 text-xs text-muted-foreground">{summary.retrievedCount} retrieved · {summary.selectedCount} selected · {summary.rejectedCount} excluded</p>
+    return <p className="mt-1 text-xs text-muted-foreground">{summary.retrievedCount} retrieved · {summary.selectedCount} selected · {summary.excludedCount} excluded{summary.pendingCount === 0 ? "" : ` · ${summary.pendingCount} pending`}</p>
   }
   if (step.kind === "graph-expansion") {
     const total = Object.values(step.summary.selectedCounts).reduce((sum, count) => sum + count, 0)
@@ -118,13 +118,15 @@ function DecisionRecordRow({ record, onInspectCandidate }: { record: Explainabil
 }
 
 function DecisionIcon({ record }: { record: ExplainabilityRecordView }): React.ReactElement {
-  if (!record.selected) return <X className="size-3.5 shrink-0 text-muted-foreground" aria-label="Excluded" />
+  if (record.selectionStatus === "pending") return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label="Retrieved; selection pending" />
+  if (record.selectionStatus === "excluded") return <X className="size-3.5 shrink-0 text-muted-foreground" aria-label="Excluded" />
   if (record.finalContext === "included") return <Check className="size-3.5 shrink-0 text-success" aria-label="Included in final context" />
   return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label={record.finalContext === "excluded" ? "Not in final context" : "Final context unknown"} />
 }
 
 function decisionLabel(record: ExplainabilityRecordView): string {
-  if (!record.selected) return "Excluded"
+  if (record.selectionStatus === "pending") return "Retrieved"
+  if (record.selectionStatus === "excluded") return "Excluded"
   if (record.finalContext === "included") return "Included"
   if (record.finalContext === "excluded") return "Not in final context"
   return "Selected · context unknown"

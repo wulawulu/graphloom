@@ -2,6 +2,7 @@ import type { ExplainabilityCandidate, ExplainabilityContextSection, Explainabil
 
 export type SemanticStepKind = "entity-mapping" | "graph-expansion" | "context-assembly" | "answer-generation"
 export type FinalContextStatus = "included" | "excluded" | "unknown"
+export type SelectionStatus = "pending" | "selected" | "excluded"
 
 export interface ExplainabilityRecordView {
   stableId: string
@@ -15,6 +16,7 @@ export interface ExplainabilityRecordView {
   sourceId?: string
   relationshipId?: string
   expansionDepth?: number
+  selectionStatus: SelectionStatus
   finalContext: FinalContextStatus
 }
 
@@ -22,7 +24,8 @@ export interface EntityMappingSummary {
   candidates: ExplainabilityRecordView[]
   retrievedCount: number
   selectedCount: number
-  rejectedCount: number
+  excludedCount: number
+  pendingCount: number
   model?: string
   promptTokens?: number
   dimensions?: number
@@ -117,7 +120,7 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
 }
 
 function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: FinalContextIndex): SemanticStep {
-  const candidates = new Map<string, ExplainabilityCandidate>()
+  const candidates = new Map<string, CandidateAccumulator>()
   const retrieved = new Set<string>()
   let focusEnvelope: ExplainabilityEnvelope | null = null
   let model: string | undefined
@@ -129,10 +132,18 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
   for (const envelope of rawEvents) {
     const event = envelope.record.event
     if (event.type === "candidates_retrieved") {
-      for (const candidate of asCandidates(event.candidates)) retrieved.add(candidateKey(candidate))
+      const retrievedCandidates = asCandidates(event.candidates)
+      for (const candidate of retrievedCandidates) retrieved.add(candidateKey(candidate))
+      mergeCandidateDecisions(candidates, retrievedCandidates, "pending")
     }
-    const field = event.type === "candidates_retrieved" || event.type === "candidates_filtered" ? "candidates" : SELECTION_FIELDS[event.type]
-    if (field !== undefined) mergeCandidates(candidates, asCandidates(event[field]))
+    if (event.type === "candidates_filtered") {
+      const filtered = asCandidates(event.candidates)
+      mergeCandidateDecisions(candidates, filtered)
+    }
+    if (event.type === "entities_selected") {
+      const selected = asCandidates(event.entities)
+      mergeCandidateDecisions(candidates, selected)
+    }
     if (event.type === "entities_selected" && asCandidates(event.entities).some((candidate) => candidate.selected)) focusEnvelope = envelope
     if (event.type === "embedding_started") {
       model = stringValue(event.model_id) ?? model
@@ -146,8 +157,10 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
     }
   }
 
-  const views = [...candidates.values()].map((candidate) => candidateView(candidate, finalContext))
-  const selectedCount = views.filter((candidate) => candidate.selected).length
+  const views = [...candidates.values()].map(({ candidate, selectionStatus }) => candidateView(candidate, finalContext, selectionStatus))
+  const selectedCount = views.filter((candidate) => candidate.selectionStatus === "selected").length
+  const excludedCount = views.filter((candidate) => candidate.selectionStatus === "excluded").length
+  const pendingCount = views.filter((candidate) => candidate.selectionStatus === "pending").length
   const elapsedMs = embeddingStartedAt !== undefined && embeddingCompletedAt !== undefined && embeddingCompletedAt >= embeddingStartedAt
     ? embeddingCompletedAt - embeddingStartedAt
     : undefined
@@ -161,7 +174,8 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
       candidates: views,
       retrievedCount: retrieved.size > 0 ? retrieved.size : views.length,
       selectedCount,
-      rejectedCount: views.length - selectedCount,
+      excludedCount,
+      pendingCount,
       model,
       promptTokens,
       dimensions,
@@ -180,7 +194,7 @@ function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: 
     if (event.type === "relationships_selected" && asCandidates(event.relationships).some((candidate) => candidate.selected)) focusEnvelope = envelope
     else if (focusEnvelope === null && event.type === "graph_expansion_started") focusEnvelope = envelope
   }
-  const records = [...candidates.values()].map((candidate) => candidateView(candidate, finalContext))
+  const records = [...candidates.values()].map((candidate) => candidateView(candidate, finalContext, candidate.selected ? "selected" : "excluded"))
   const selectedCounts: Record<string, number> = {}
   for (const record of records) {
     if (!record.selected) continue
@@ -243,7 +257,7 @@ function buildFinalContextIndex(sections: readonly ExplainabilityContextSection[
   return { sectionIds, knownSections }
 }
 
-function candidateView(candidate: ExplainabilityCandidate, finalContext: FinalContextIndex): ExplainabilityRecordView {
+function candidateView(candidate: ExplainabilityCandidate, finalContext: FinalContextIndex, selectionStatus: SelectionStatus): ExplainabilityRecordView {
   const section = CONTEXT_SECTION_BY_RECORD_TYPE[candidate.record_type]
   const finalContextStatus: FinalContextStatus = section === undefined || !finalContext.knownSections.has(section)
     ? "unknown"
@@ -262,7 +276,32 @@ function candidateView(candidate: ExplainabilityCandidate, finalContext: FinalCo
     sourceId: candidate.source_id,
     relationshipId: candidate.relationship_id,
     expansionDepth: candidate.expansion_depth,
+    selectionStatus,
     finalContext: finalContextStatus,
+  }
+}
+
+interface CandidateAccumulator {
+  candidate: ExplainabilityCandidate
+  selectionStatus: SelectionStatus
+}
+
+function mergeCandidateDecisions(
+  target: Map<string, CandidateAccumulator>,
+  candidates: readonly ExplainabilityCandidate[],
+  status?: SelectionStatus,
+): void {
+  for (const candidate of candidates) {
+    const key = candidateKey(candidate)
+    const current = target.get(key)
+    const incomingStatus = status ?? (candidate.selected ? "selected" : "excluded")
+    const preserveDecision = incomingStatus === "pending" && current !== undefined && current.selectionStatus !== "pending"
+    target.set(key, {
+      candidate: preserveDecision
+        ? { ...current.candidate, ...candidate, selected: current.candidate.selected, reason: current.candidate.reason }
+        : { ...current?.candidate, ...candidate },
+      selectionStatus: preserveDecision ? current.selectionStatus : incomingStatus,
+    })
   }
 }
 

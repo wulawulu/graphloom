@@ -44,11 +44,11 @@ describe("GraphInspector", () => {
 
   it("combines graph detail with the originating query decision", () => {
     const entity: GraphEntityDetail = { id: "entity-1", short_id: "150", title: "Alice", entity_type: "PERSON", degree: 2, rank: 1, description: null, community_ids: [], text_unit_ids: [] }
-    render(<GraphInspector {...common} detail={{ kind: "entity", value: entity }} decision={{ stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", finalContext: "excluded" }} />)
+    render(<GraphInspector {...common} detail={{ kind: "entity", value: entity }} decision={{ stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", selectionStatus: "selected", finalContext: "excluded" }} />)
 
     expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("Retrieval score0.8870")
     expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("Retrieval rank2")
-    expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("SelectedYes")
+    expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("SelectionSelected")
     expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("Final contextNot included")
     expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("ann result")
   })

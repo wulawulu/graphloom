@@ -89,6 +89,23 @@ describe("Timeline", () => {
     expect(screen.getByText("Rejected entity").closest("div.flex.items-center")).toHaveTextContent("Excluded")
   })
 
+  it("updates live candidates from Retrieved to explicit selection decisions", () => {
+    const retrieved = envelope({ type: "candidates_retrieved", candidates: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: false }, { id: "entity-2", title: "Bob", record_type: "entity", selected: false }] }, 1)
+    const common = { runId: "run", streamStatus: "open" as const, onFocusGraph: vi.fn(), onInspectCandidate: vi.fn() }
+    const { rerender } = render(<Timeline {...common} envelopes={[retrieved]} />)
+
+    expect(screen.getByText("Alice").closest("div.flex.items-center")).toHaveTextContent("Retrieved")
+    expect(screen.getByText("Bob").closest("div.flex.items-center")).toHaveTextContent("Retrieved")
+    expect(screen.getByText("2 retrieved · 0 selected · 0 excluded · 2 pending")).toBeInTheDocument()
+
+    const filtered = envelope({ type: "candidates_filtered", candidates: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: true, reason: "ann_result" }, { id: "entity-2", title: "Bob", record_type: "entity", selected: false, reason: "explicitly_excluded" }] }, 2)
+    rerender(<Timeline {...common} envelopes={[retrieved, filtered]} />)
+
+    expect(screen.getByText("Alice").closest("div.flex.items-center")).toHaveTextContent("Selected · context unknown")
+    expect(screen.getByText("Bob").closest("div.flex.items-center")).toHaveTextContent("Excluded")
+    expect(screen.getByText("2 retrieved · 1 selected · 1 excluded")).toBeInTheDocument()
+  })
+
   it("preserves typed candidate details and bounded raw tables", async () => {
     const user = userEvent.setup()
     const candidates = Array.from({ length: 101 }, (_, index) => ({ id: `entity-${index + 1}`, title: `Candidate ${index + 1}`, record_type: "entity", selected: false }))
