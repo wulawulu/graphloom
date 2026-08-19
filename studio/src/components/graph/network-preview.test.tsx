@@ -99,7 +99,8 @@ const projection: GraphProjection = {
 const callbacks = {
   onEntity: vi.fn(),
   onRelationship: vi.fn(),
-  onBackOverview: vi.fn(),
+  onBack: vi.fn(),
+  backLabel: "Back to overview" as const,
   onReload: vi.fn(),
 }
 
@@ -253,6 +254,13 @@ describe("NetworkPreview focus labels", () => {
     expect(screen.queryByText("Query focus")).not.toBeInTheDocument()
     expect(screen.queryByText("Query seed")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument()
+  })
+
+  it("uses the supplied semantic origin label for explorer navigation", () => {
+    render(<NetworkPreview {...callbacks} backLabel="Back to query focus" projection={projection} summary={null} summaryError={false} mode="explorer-focus" loading={false} error={null} />)
+
+    expect(screen.getByRole("button", { name: "Back to query focus" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Back to overview" })).not.toBeInTheDocument()
   })
 
   it("shows and removes projection tooltips while clicks request Inspector detail", async () => {

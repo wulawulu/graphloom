@@ -33,12 +33,12 @@ vi.mock("@/api/client", () => ({
 const networkLifecycle = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }))
 
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBackOverview, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBackOverview: () => void; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
+  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBack, backLabel, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBack: () => void; backLabel: string; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
     useEffect(() => {
       networkLifecycle.mounts += 1
       return () => { networkLifecycle.unmounts += 1 }
     }, [])
-    return <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <button onClick={onBackOverview}>Back test</button> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
+    return <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <><span>{backLabel}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
   },
 }))
 
@@ -497,6 +497,97 @@ describe("GraphExplorer focus flow", () => {
     expect(await screen.findByText("OVERVIEW-NEW")).toBeInTheDocument()
     expect(defaultExplorerProps.onClearFocus).not.toHaveBeenCalled()
     expect(getGraphOverview).toHaveBeenCalledTimes(2)
+  })
+
+  it("restores Query focus after exploring an entity neighborhood", async () => {
+    const queryIntent: GraphFocusIntent = { entity_ids: ["query-seed"], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }
+    vi.mocked(getGraphSubgraph)
+      .mockResolvedValueOnce(projection("query-focus", true))
+      .mockResolvedValueOnce(projection("entity-focus", true))
+      .mockResolvedValueOnce(projection("query-restored", true))
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Query entity", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={queryIntent} />)
+    expect(await screen.findByText("QUERY-FOCUS")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    await user.click(await screen.findByRole("button", { name: "Focus neighborhood" }))
+    expect(await screen.findByText("ENTITY-FOCUS")).toBeInTheDocument()
+    expect(screen.getByText("Back to query focus")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Back test" }))
+
+    expect(await screen.findByText("QUERY-RESTORED")).toBeInTheDocument()
+    expect(screen.getByText("query-focus")).toBeInTheDocument()
+    expect(vi.mocked(getGraphSubgraph).mock.calls[2]?.[0]).toEqual({ entity_ids: ["query-seed"], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })
+    expect(defaultExplorerProps.onClearFocus).not.toHaveBeenCalled()
+  })
+
+  it("invalidates a Query navigation origin when the Run changes and aborts stale restoration", async () => {
+    let resolveRestore: ((value: GraphProjection) => void) | undefined
+    const restore = new Promise<GraphProjection>((resolve) => { resolveRestore = resolve })
+    const queryIntent: GraphFocusIntent = { entity_ids: ["query-seed"], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }
+    vi.mocked(getGraphSubgraph)
+      .mockResolvedValueOnce(projection("query-focus", true))
+      .mockResolvedValueOnce(projection("entity-focus", true))
+      .mockReturnValueOnce(restore)
+    vi.mocked(getGraphOverview).mockResolvedValue(projection("run-b-overview"))
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Query entity", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={queryIntent} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    expect(await screen.findByText("QUERY-FOCUS")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    await user.click(await screen.findByRole("button", { name: "Focus neighborhood" }))
+    expect(await screen.findByText("ENTITY-FOCUS")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Back test" }))
+    await waitFor(() => expect(getGraphSubgraph).toHaveBeenCalledTimes(3))
+    const restoreSignal = vi.mocked(getGraphSubgraph).mock.calls[2]?.[1]
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+
+    expect(await screen.findByText("RUN-B-OVERVIEW")).toBeInTheDocument()
+    expect(restoreSignal?.aborted).toBe(true)
+    resolveRestore?.(projection("stale-query", true))
+    await Promise.resolve()
+    expect(screen.queryByText("STALE-QUERY")).not.toBeInTheDocument()
+    expect(screen.queryByText("Back to query focus")).not.toBeInTheDocument()
+  })
+
+  it("aborts pending Query restoration when a New Query resets navigation", async () => {
+    let resolveRestore: ((value: GraphProjection) => void) | undefined
+    const restore = new Promise<GraphProjection>((resolve) => { resolveRestore = resolve })
+    const queryIntent: GraphFocusIntent = { entity_ids: ["query-seed"], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }
+    vi.mocked(getGraphSubgraph)
+      .mockResolvedValueOnce(projection("query-focus", true))
+      .mockResolvedValueOnce(projection("entity-focus", true))
+      .mockReturnValueOnce(restore)
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Query entity", community_ids: [], text_unit_ids: [],
+    })
+    const user = userEvent.setup()
+    const { rerender } = render(<GraphExplorer {...defaultExplorerProps} focusIntent={queryIntent} navigationResetRevision={0} />)
+    expect(await screen.findByText("QUERY-FOCUS")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open entity test" }))
+    await user.click(await screen.findByRole("button", { name: "Focus neighborhood" }))
+    expect(await screen.findByText("ENTITY-FOCUS")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Back test" }))
+    await waitFor(() => expect(getGraphSubgraph).toHaveBeenCalledTimes(3))
+    const restoreSignal = vi.mocked(getGraphSubgraph).mock.calls[2]?.[1]
+
+    rerender(<GraphExplorer {...defaultExplorerProps} focusIntent={queryIntent} navigationResetRevision={1} />)
+
+    expect(restoreSignal?.aborted).toBe(true)
+    resolveRestore?.(projection("stale-query", true))
+    await Promise.resolve()
+    expect(screen.queryByText("STALE-QUERY")).not.toBeInTheDocument()
+    expect(screen.getByText("ENTITY-FOCUS")).toBeInTheDocument()
+    expect(screen.queryByText("Back to query focus")).not.toBeInTheDocument()
   })
 
   it("keeps Inspector selection mounted while the right panel is collapsed", async () => {

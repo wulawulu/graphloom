@@ -1,8 +1,9 @@
 import { useState } from "react"
-import { Braces, Check, Circle, DatabaseZap, GitBranch, Sparkles, X } from "lucide-react"
+import { Braces, Check, Circle, Copy, DatabaseZap, GitBranch, Sparkles, X } from "lucide-react"
 
-import type { ExplainabilityEnvelope } from "@/api/types"
+import type { ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
 import { TimelineEvent } from "@/components/explainability/timeline-event"
+import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -77,7 +78,7 @@ function StepContent({ step, onInspectCandidate }: { step: SemanticStep; onInspe
     return <div className="mt-3 space-y-3">{counts.length === 0 ? <p className="text-xs text-muted-foreground">No expansion records were selected.</p> : <dl className="grid grid-cols-2 gap-2 text-xs">{counts.map(([type, count]) => <div key={type} className="flex justify-between rounded border bg-muted/20 px-2 py-1.5"><dt>{RECORD_LABELS[type] ?? type.replaceAll("_", " ")}</dt><dd className="font-mono">{count}</dd></div>)}</dl>}<DecisionRecordList records={step.summary.records} onInspectCandidate={onInspectCandidate} /></div>
   }
   if (step.kind === "context-assembly") {
-    return <div className="mt-3 space-y-2">{step.summary.sections.map((section) => <div key={`${section.section}:${section.name ?? ""}`} className="rounded border bg-muted/20 px-2 py-2 text-xs"><div className="flex items-center justify-between gap-3"><span className="font-medium capitalize">{section.name ?? section.section.replaceAll("_", " ")}</span><span>{section.selected_count} included</span></div><p className="mt-1 text-[11px] text-muted-foreground">{section.candidate_count} candidates · {section.tokens_used.toLocaleString()} / {section.token_budget.toLocaleString()} tokens{section.truncated ? " · truncated" : ""}</p></div>)}</div>
+    return <div className="mt-3 min-w-0 space-y-2">{step.summary.sections.map((section) => <ContextSectionRow key={`${section.section}:${section.name ?? ""}`} section={section} />)}<LlmContextPanel exactContext={step.summary.exactContext} /></div>
   }
   const summary = step.summary
   return <dl className="mt-3 grid grid-cols-2 gap-2 text-xs"><Metric label="Calls" value={summary.calls} /><Metric label="Input tokens" value={summary.inputTokens.toLocaleString()} /><Metric label="Output tokens" value={summary.outputTokens.toLocaleString()} /><Metric label="Latency" value={`${summary.elapsedMs.toLocaleString()} ms`} />{summary.model === undefined ? null : <Metric label="Model" value={summary.model} />}</dl>
@@ -105,15 +106,59 @@ function DecisionRecordRow({ record, onInspectCandidate }: { record: Explainabil
   const inspectable = (record.recordType === "entity" || record.recordType === "relationship") && record.stableId.length > 0
   const label = record.title ?? record.shortId ?? record.stableId
   return (
-    <div className="flex items-center gap-2 px-2 py-2 text-xs">
-      <DecisionIcon record={record} />
-      <div className="min-w-0 flex-1">
-        {inspectable ? <button type="button" className="max-w-full truncate text-left font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Inspect ${record.recordType} ${label}`} onClick={() => onInspectCandidate(record)}>{label}</button> : <span className="block truncate font-medium">{label}</span>}
-        <span className="block truncate font-mono text-[10px] text-muted-foreground">{record.shortId === undefined ? record.stableId : `${record.shortId} · ${record.stableId}`}</span>
+    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 gap-y-1 overflow-hidden px-2 py-2 text-xs">
+      <span className="row-span-2 pt-0.5"><DecisionIcon record={record} /></span>
+      <div className="min-w-0">
+        {inspectable ? <button type="button" className="block max-w-full truncate text-left font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={label} aria-label={`Inspect ${record.recordType} ${label}`} onClick={() => onInspectCandidate(record)}>{label}</button> : <span className="block truncate font-medium" title={label}>{label}</span>}
       </div>
-      {record.score === undefined ? null : <span className="font-mono text-[11px] text-muted-foreground">{record.score.toFixed(4)}</span>}
-      <Badge variant="outline">{decisionLabel(record)}</Badge>
+      <Badge variant="outline" className="max-w-36 shrink-0 truncate" title={decisionLabel(record)}>{decisionLabel(record)}</Badge>
+      <div className="col-span-2 col-start-2 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate font-mono" title={record.stableId}>{record.shortId === undefined ? compactStableId(record.stableId) : `${record.shortId} · ${compactStableId(record.stableId)}`}</span>
+        {record.score === undefined ? null : <span className="shrink-0 font-mono text-[11px]" aria-label={`Score ${record.score.toFixed(4)}`}>{record.score.toFixed(4)}</span>}
+      </div>
     </div>
+  )
+}
+
+function compactStableId(id: string): string {
+  if (id.length <= 20) return id
+  return `${id.slice(0, 8)}…${id.slice(-8)}`
+}
+
+function ContextSectionRow({ section }: { section: ExplainabilityContextSection }): React.ReactElement {
+  const emptySection = section.selected_count === 0 && section.tokens_used > 0
+  const tokenExplanation = emptySection ? "Tokens measure the literal final section text, including empty placeholders such as []." : undefined
+  return (
+    <div className="min-w-0 overflow-hidden rounded border bg-muted/20 px-2 py-2 text-xs">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+        <span className="truncate font-medium capitalize" title={section.name ?? section.section}>{section.name ?? section.section.replaceAll("_", " ")}</span>
+        <span className="shrink-0">{section.selected_count} / {section.candidate_count} included</span>
+      </div>
+      <p className="mt-1 min-w-0 break-words text-[11px] text-muted-foreground" title={tokenExplanation}>
+        {section.tokens_used.toLocaleString()} / {section.token_budget.toLocaleString()} tokens{emptySection ? " · empty section" : ""}{section.truncated ? " · truncated" : ""}
+      </p>
+    </div>
+  )
+}
+
+function LlmContextPanel({ exactContext }: { exactContext: string | null }): React.ReactElement {
+  const [view, setView] = useState<"exact" | "preview">("exact")
+  const [copied, setCopied] = useState(false)
+  const copy = (): void => {
+    if (exactContext === null || navigator.clipboard === undefined) return
+    void navigator.clipboard.writeText(exactContext).then(() => setCopied(true)).catch(() => setCopied(false))
+  }
+  return (
+    <Collapsible>
+      <CollapsibleTrigger asChild><Button variant="outline" size="sm" className="mt-1">View LLM Context</Button></CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 min-w-0 overflow-hidden rounded-md border bg-background/60 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div><p className="text-xs font-semibold">LLM Context</p><p className="text-[10px] text-muted-foreground">Exact input is the captured source of truth; Preview is presentation only.</p></div>
+          {exactContext === null ? null : <Button variant="ghost" size="sm" onClick={copy} aria-label="Copy exact LLM context"><Copy className="size-3.5" />{copied ? "Copied" : "Copy"}</Button>}
+        </div>
+        {exactContext === null ? <p className="mt-3 rounded border bg-muted/20 p-3 text-xs text-muted-foreground">LLM context content was not captured. Run with Content or Debug explainability mode to inspect the exact LLM context.</p> : <div className="mt-3 min-w-0"><div className="flex gap-1" role="tablist" aria-label="LLM context view"><Button role="tab" aria-selected={view === "exact"} variant={view === "exact" ? "secondary" : "ghost"} size="sm" onClick={() => setView("exact")}>Exact input</Button><Button role="tab" aria-selected={view === "preview"} variant={view === "preview" ? "secondary" : "ghost"} size="sm" onClick={() => setView("preview")}>Preview</Button></div>{view === "exact" ? <pre className="mt-2 max-h-80 max-w-full overflow-auto whitespace-pre font-mono text-[11px] leading-5" data-testid="exact-llm-context">{exactContext}</pre> : <SafeMarkdown className="markdown-answer mt-2 max-h-80 overflow-auto" >{exactContext}</SafeMarkdown>}</div>}
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 

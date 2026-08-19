@@ -133,6 +133,8 @@ export function listEntities(parameters: EntityListParameters, signal?: AbortSig
     community: parameters.community,
     limit: parameters.limit,
     after: parameters.after,
+    sort: parameters.sort,
+    order: parameters.order,
   })}`, { signal })
 }
 
@@ -146,6 +148,8 @@ export function listRelationships(parameters: RelationshipListParameters, signal
     target: parameters.target,
     limit: parameters.limit,
     after: parameters.after,
+    sort: parameters.sort,
+    order: parameters.order,
   })}`, { signal })
 }
 

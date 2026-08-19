@@ -85,6 +85,23 @@ async fn get_json(router: &Router, uri: &str) -> TestResult<(StatusCode, Value)>
     Ok((status, serde_json::from_slice(&bytes)?))
 }
 
+fn item_ids(value: &Value) -> TestResult<Vec<String>> {
+    value["items"]
+        .as_array()
+        .ok_or_else(|| "graph list items".into())
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item["id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "graph list item id".into())
+                })
+                .collect()
+        })
+}
+
 async fn post_json(router: &Router, uri: &str, body: Value) -> TestResult<(StatusCode, Value)> {
     let response = router
         .clone()
@@ -310,6 +327,89 @@ async fn test_should_paginate_entities_by_stable_id_and_apply_exact_filters() ->
 }
 
 #[tokio::test]
+async fn test_should_sort_entities_before_filter_pagination_with_nulls_last() -> TestResult {
+    let mut data = snapshot().await?;
+    for entity in &mut data.entities {
+        match entity.id.as_str() {
+            "entity-a" => {
+                entity.title = "Zebra".to_owned();
+                entity.degree = Some(3);
+                entity.rank = None;
+                entity.entity_type = Some("PERSON".to_owned());
+            }
+            "entity-b" => {
+                entity.title = "Alpha".to_owned();
+                entity.degree = Some(5);
+                entity.rank = Some(2);
+                entity.entity_type = Some("PERSON".to_owned());
+            }
+            "entity-c" => {
+                entity.title = "Alpha".to_owned();
+                entity.degree = Some(5);
+                entity.rank = Some(1);
+                entity.entity_type = Some("PERSON".to_owned());
+            }
+            "entity-d" => {
+                entity.title = "Omega".to_owned();
+                entity.degree = None;
+                entity.rank = Some(3);
+                entity.entity_type = Some("ORG".to_owned());
+            }
+            _ => {}
+        }
+    }
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(data),
+    }));
+
+    for (query, expected) in [
+        (
+            "sort=degree&order=desc",
+            vec!["entity-b", "entity-c", "entity-a", "entity-d"],
+        ),
+        (
+            "sort=degree&order=asc",
+            vec!["entity-a", "entity-b", "entity-c", "entity-d"],
+        ),
+        (
+            "sort=rank&order=desc",
+            vec!["entity-d", "entity-b", "entity-c", "entity-a"],
+        ),
+        (
+            "sort=rank&order=asc",
+            vec!["entity-c", "entity-b", "entity-d", "entity-a"],
+        ),
+        (
+            "sort=title&order=asc",
+            vec!["entity-b", "entity-c", "entity-d", "entity-a"],
+        ),
+        (
+            "sort=title&order=desc",
+            vec!["entity-a", "entity-d", "entity-b", "entity-c"],
+        ),
+    ] {
+        let (_, value) = get_json(&router, &format!("/api/graph/entities?{query}")).await?;
+        assert_eq!(item_ids(&value)?, expected, "{query}");
+    }
+
+    let (_, first) = get_json(
+        &router,
+        "/api/graph/entities?type=PERSON&sort=degree&order=desc&limit=2",
+    )
+    .await?;
+    assert_eq!(item_ids(&first)?, ["entity-b", "entity-c"]);
+    assert_eq!(first["next_cursor"], "entity-c");
+    let (_, second) = get_json(
+        &router,
+        "/api/graph/entities?type=PERSON&sort=degree&order=desc&limit=2&after=entity-c",
+    )
+    .await?;
+    assert_eq!(item_ids(&second)?, ["entity-a"]);
+    assert!(second["next_cursor"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_should_paginate_and_filter_relationships_and_communities() -> TestResult {
     let (_, router) = router(Arc::new(FakeGraphDataSource {
         snapshot: Some(snapshot().await?),
@@ -347,6 +447,98 @@ async fn test_should_paginate_and_filter_relationships_and_communities() -> Test
     assert_eq!(filtered["items"][0]["report"]["id"], "report-a");
     assert_eq!(filtered["items"][0]["report"]["summary"], "Summary 5");
     assert!(filtered.to_string().find("full_content").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_sort_relationships_before_pagination_with_stable_ties() -> TestResult {
+    let mut data = snapshot().await?;
+    for relationship in &mut data.relationships {
+        match relationship.id.as_str() {
+            "relationship-a" => {
+                relationship.source = "Beta".to_owned();
+                relationship.target = "Target Z".to_owned();
+                relationship.weight = Some(2.0);
+                relationship.rank = None;
+            }
+            "relationship-b" => {
+                relationship.source = "Alpha".to_owned();
+                relationship.target = "Target X".to_owned();
+                relationship.weight = Some(5.0);
+                relationship.rank = Some(2);
+            }
+            "relationship-c" => {
+                relationship.source = "Alpha".to_owned();
+                relationship.target = "Target Y".to_owned();
+                relationship.weight = None;
+                relationship.rank = Some(1);
+            }
+            _ => {}
+        }
+    }
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(data),
+    }));
+
+    for (query, expected) in [
+        (
+            "sort=weight&order=desc",
+            vec!["relationship-b", "relationship-a", "relationship-c"],
+        ),
+        (
+            "sort=weight&order=asc",
+            vec!["relationship-a", "relationship-b", "relationship-c"],
+        ),
+        (
+            "sort=rank&order=desc",
+            vec!["relationship-b", "relationship-c", "relationship-a"],
+        ),
+        (
+            "sort=rank&order=asc",
+            vec!["relationship-c", "relationship-b", "relationship-a"],
+        ),
+        (
+            "sort=source&order=asc",
+            vec!["relationship-b", "relationship-c", "relationship-a"],
+        ),
+        (
+            "sort=source&order=desc",
+            vec!["relationship-a", "relationship-b", "relationship-c"],
+        ),
+        (
+            "sort=target&order=asc",
+            vec!["relationship-b", "relationship-c", "relationship-a"],
+        ),
+        (
+            "sort=target&order=desc",
+            vec!["relationship-a", "relationship-c", "relationship-b"],
+        ),
+    ] {
+        let (_, value) = get_json(&router, &format!("/api/graph/relationships?{query}")).await?;
+        assert_eq!(item_ids(&value)?, expected, "{query}");
+    }
+
+    let (_, filtered) = get_json(
+        &router,
+        "/api/graph/relationships?source=Alpha&sort=target&order=desc",
+    )
+    .await?;
+    assert_eq!(item_ids(&filtered)?, ["relationship-c", "relationship-b"]);
+
+    let (_, first) = get_json(
+        &router,
+        "/api/graph/relationships?sort=weight&order=desc&limit=1",
+    )
+    .await?;
+    assert_eq!(item_ids(&first)?, ["relationship-b"]);
+    assert_eq!(first["next_cursor"], "relationship-b");
+    let (_, second) = get_json(
+        &router,
+        "/api/graph/relationships?sort=weight&order=desc&limit=2&after=relationship-b",
+    )
+    .await?;
+    assert_eq!(item_ids(&second)?, ["relationship-a", "relationship-c"]);
+    assert!(second["next_cursor"].is_null());
     Ok(())
 }
 
@@ -400,7 +592,11 @@ async fn test_should_return_safe_graph_errors() -> TestResult {
         "/api/graph/entities?limit=0",
         "/api/graph/entities?limit=201",
         "/api/graph/entities?unknown=value",
+        "/api/graph/entities?sort=unknown",
+        "/api/graph/entities?order=unknown",
         "/api/graph/relationships?unknown=value",
+        "/api/graph/relationships?sort=unknown",
+        "/api/graph/relationships?order=unknown",
         "/api/graph/communities?level=invalid",
         "/api/graph/communities?parent=invalid",
         "/api/graph/entities/%20",

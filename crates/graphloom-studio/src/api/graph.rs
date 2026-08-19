@@ -1,6 +1,6 @@
 //! Read-only Graph Explorer HTTP handlers.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{cmp::Ordering, collections::BTreeSet, sync::Arc};
 
 use axum::{
     Json,
@@ -66,6 +66,10 @@ pub(super) struct EntityListQuery {
     community: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
+    #[serde(default)]
+    sort: EntitySort,
+    #[serde(default)]
+    order: SortOrder,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +79,39 @@ pub(super) struct RelationshipListQuery {
     target: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
+    #[serde(default)]
+    sort: RelationshipSort,
+    #[serde(default)]
+    order: SortOrder,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EntitySort {
+    #[default]
+    Id,
+    Degree,
+    Rank,
+    Title,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RelationshipSort {
+    #[default]
+    Id,
+    Weight,
+    Rank,
+    Source,
+    Target,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,7 +221,7 @@ pub(super) async fn list_entities(
         })
         .map(GraphEntity::from)
         .collect::<Vec<_>>();
-    items.sort_by(|left, right| left.id.cmp(&right.id));
+    sort_entities(&mut items, query.sort, query.order);
     Json(paginate(items, query.after.as_deref(), limit, |item| {
         item.id.as_str()
     }))
@@ -243,7 +280,7 @@ pub(super) async fn list_relationships(
         })
         .map(GraphRelationship::from)
         .collect::<Vec<_>>();
-    items.sort_by(|left, right| left.id.cmp(&right.id));
+    sort_relationships(&mut items, query.sort, query.order);
     Json(paginate(items, query.after.as_deref(), limit, |item| {
         item.id.as_str()
     }))
@@ -471,9 +508,15 @@ fn paginate<T, F>(items: Vec<T>, after: Option<&str>, limit: usize, id: F) -> Gr
 where
     F: Fn(&T) -> &str,
 {
+    let start = after.map_or(0, |cursor| {
+        items
+            .iter()
+            .position(|item| id(item) == cursor)
+            .map_or(items.len(), |index| index.saturating_add(1))
+    });
     let mut page = items
         .into_iter()
-        .filter(|item| after.is_none_or(|cursor| id(item) > cursor))
+        .skip(start)
         .take(limit.saturating_add(1))
         .collect::<Vec<_>>();
     let has_more = page.len() > limit;
@@ -484,6 +527,56 @@ where
     GraphListResponse {
         items: page,
         next_cursor,
+    }
+}
+
+fn sort_entities(items: &mut [GraphEntity], sort: EntitySort, order: SortOrder) {
+    items.sort_by(|left, right| {
+        let primary = match sort {
+            EntitySort::Id => ordered(left.id.cmp(&right.id), order),
+            EntitySort::Degree => compare_optional(left.degree, right.degree, order),
+            EntitySort::Rank => compare_optional(left.rank, right.rank, order),
+            EntitySort::Title => ordered(left.title.cmp(&right.title), order),
+        };
+        primary.then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_relationships(items: &mut [GraphRelationship], sort: RelationshipSort, order: SortOrder) {
+    items.sort_by(|left, right| {
+        let primary = match sort {
+            RelationshipSort::Id => ordered(left.id.cmp(&right.id), order),
+            RelationshipSort::Weight => compare_optional_f64(left.weight, right.weight, order),
+            RelationshipSort::Rank => compare_optional(left.rank, right.rank, order),
+            RelationshipSort::Source => ordered(left.source.cmp(&right.source), order),
+            RelationshipSort::Target => ordered(left.target.cmp(&right.target), order),
+        };
+        primary.then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn compare_optional<T: Ord>(left: Option<T>, right: Option<T>, order: SortOrder) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => ordered(left.cmp(&right), order),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_optional_f64(left: Option<f64>, right: Option<f64>, order: SortOrder) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => ordered(left.total_cmp(&right), order),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+const fn ordered(value: Ordering, order: SortOrder) -> Ordering {
+    match order {
+        SortOrder::Asc => value,
+        SortOrder::Desc => value.reverse(),
     }
 }
 

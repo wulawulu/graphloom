@@ -21,7 +21,8 @@ interface NetworkPreviewProps {
   onClearEmphasis?: () => void
   onEntity: (id: string) => void
   onRelationship: (id: string) => void
-  onBackOverview: () => void
+  onBack: () => void
+  backLabel: "Back to overview" | "Back to query focus"
   onReload: () => void
 }
 
@@ -233,7 +234,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           {props.summary !== null ? <p className="text-muted-foreground">{props.summary.entity_count.toLocaleString()} entities · {props.summary.relationship_count.toLocaleString()} relationships · {props.summary.community_count.toLocaleString()} communities · {props.summary.community_report_count.toLocaleString()} reports</p> : null}
         </div>
         <div className="flex items-center gap-1">
-          {focused ? <Button variant="outline" size="sm" onClick={props.onBackOverview}>Back to overview</Button> : null}
+          {focused ? <Button variant="outline" size="sm" onClick={props.onBack}>{props.backLabel}</Button> : null}
           <Button variant="ghost" size="icon" title="Fit the current projection" aria-label="Fit graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode) }}><Focus /></Button>
           <Button variant="ghost" size="icon" title="Re-run layout without loading data" aria-label="Re-layout graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, true) }}><RefreshCcw /></Button>
           <Button variant="ghost" size="icon" title="Reload graph data from the backend" aria-label="Reload graph data" onClick={props.onReload}><RotateCw /></Button>

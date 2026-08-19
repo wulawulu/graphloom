@@ -43,6 +43,7 @@ export interface ContextAssemblySummary {
   sections: ContextSectionView[]
   totalTokenBudget?: number
   tokensUsed?: number
+  exactContext: string | null
 }
 
 export interface AnswerGenerationSummary {
@@ -206,13 +207,17 @@ function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: 
 function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: ExplainabilityContextSection[]): SemanticStep {
   let totalTokenBudget: number | undefined
   let tokensUsed: number | undefined
+  let exactContext: string | null = null
   for (const envelope of rawEvents) {
     const event = envelope.record.event
     if (event.type === "context_budget_allocated") totalTokenBudget = numberValue(event.total_token_budget) ?? totalTokenBudget
-    if (event.type === "context_completed") tokensUsed = numberValue(event.tokens_used) ?? tokensUsed
+    if (event.type === "context_completed") {
+      tokensUsed = numberValue(event.tokens_used) ?? tokensUsed
+      exactContext = stringValue(event.context) ?? null
+    }
   }
   if (tokensUsed === undefined && sections.length > 0) tokensUsed = sections.reduce((total, section) => total + section.tokens_used, 0)
-  return { id: "context-assembly", kind: "context-assembly", title: "Context Assembly", rawEvents, focusEnvelope: null, summary: { sections, totalTokenBudget, tokensUsed } }
+  return { id: "context-assembly", kind: "context-assembly", title: "Context Assembly", rawEvents, focusEnvelope: null, summary: { sections, totalTokenBudget, tokensUsed, exactContext } }
 }
 
 function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): SemanticStep {

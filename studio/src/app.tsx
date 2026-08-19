@@ -28,6 +28,7 @@ export function App(): React.ReactElement {
   const [activeSubmittedRunId, setActiveSubmittedRunId] = useState<string | null>(null)
   const [showCurrentQa, setShowCurrentQa] = useState(false)
   const [composerRevision, setComposerRevision] = useState(0)
+  const [graphNavigationRevision, setGraphNavigationRevision] = useState(0)
   const autoFocusedRunIds = useRef(new Set<string>())
   const history = useRunHistory()
   const selected = useRun(selectedRunId)
@@ -82,6 +83,7 @@ export function App(): React.ReactElement {
     setShowCurrentQa(false)
     setCitationEmphasis(null)
     setGraphInspection(null)
+    setGraphNavigationRevision((value) => value + 1)
     setComposerRevision((value) => value + 1)
     setMobileTab("query")
   }, [])
@@ -159,7 +161,7 @@ export function App(): React.ReactElement {
     <TooltipProvider delayDuration={250}>
       <StudioShell
         queryWorkspace={queryWorkspace}
-        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} navigationResetRevision={graphNavigationRevision} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
       />

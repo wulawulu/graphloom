@@ -222,6 +222,8 @@ export interface EntityListParameters {
   community?: string
   limit?: number
   after?: string
+  sort?: "id" | "degree" | "rank" | "title"
+  order?: GraphSortOrder
 }
 
 export interface RelationshipListParameters {
@@ -229,7 +231,11 @@ export interface RelationshipListParameters {
   target?: string
   limit?: number
   after?: string
+  sort?: "id" | "weight" | "rank" | "source" | "target"
+  order?: GraphSortOrder
 }
+
+export type GraphSortOrder = "asc" | "desc"
 
 export interface CommunityListParameters {
   level?: number

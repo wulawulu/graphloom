@@ -16,8 +16,8 @@ function envelope(sequence: number, event: ExplainabilityEventPayload, runId = "
 }
 
 vi.mock("@/components/graph/graph-explorer", () => ({
-  GraphExplorer: ({ emphasisIntent, focusIntent, inspectIntent, runId }: { emphasisIntent: { entityIds: string[]; relationshipIds: string[]; revision: number } | null; focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; inspectIntent: { candidate: { stableId: string }; revision: number } | null; runId: string | null }) => (
-    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span><span>{emphasisIntent === null ? "No citation emphasis" : `Citation emphasis ${emphasisIntent.entityIds.join(",")}/${emphasisIntent.relationshipIds.join(",")} revision ${emphasisIntent.revision}`}</span><span>{inspectIntent === null ? "No candidate inspection" : `Candidate inspection ${inspectIntent.candidate.stableId} revision ${inspectIntent.revision}`}</span></div>
+  GraphExplorer: ({ emphasisIntent, focusIntent, inspectIntent, navigationResetRevision, runId }: { emphasisIntent: { entityIds: string[]; relationshipIds: string[]; revision: number } | null; focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; inspectIntent: { candidate: { stableId: string }; revision: number } | null; navigationResetRevision: number; runId: string | null }) => (
+    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span><span>Navigation revision {navigationResetRevision}</span><span>{emphasisIntent === null ? "No citation emphasis" : `Citation emphasis ${emphasisIntent.entityIds.join(",")}/${emphasisIntent.relationshipIds.join(",")} revision ${emphasisIntent.revision}`}</span><span>{inspectIntent === null ? "No candidate inspection" : `Candidate inspection ${inspectIntent.candidate.stableId} revision ${inspectIntent.revision}`}</span></div>
   ),
 }))
 
@@ -105,11 +105,13 @@ describe("App graph focus ownership", () => {
     render(<App />)
     await user.click(screen.getByRole("button", { name: "Select Run A" }))
     await user.click(screen.getByRole("button", { name: "Show in graph" }))
+    const revisionBefore = screen.getByText(/Navigation revision/).textContent
 
     await user.click(screen.getByRole("button", { name: "New Query test" }))
     expect(screen.getByText("Workspace run none")).toBeInTheDocument()
     expect(screen.getByText("Graph run run-a")).toBeInTheDocument()
     expect(screen.getByText("Graph focus entity-a/ revision 1")).toBeInTheDocument()
+    expect(screen.getByText(/Navigation revision/).textContent).not.toBe(revisionBefore)
   })
 
   it("waits for successful terminal completion, then auto-focuses the combined evidence exactly once", async () => {

@@ -118,4 +118,28 @@ describe("semantic explainability timeline", () => {
       expect.objectContaining({ stableId: "relationship-out", finalContext: "excluded" }),
     ])
   })
+
+  it("uses the latest captured ContextCompleted input without rebuilding it from sections", () => {
+    const exact = "Reports\n[]\n\nEntities\n  id,title\n  1,Alice\n"
+    const model = buildSemanticTimeline([
+      section(1, "entities", ["entity-1"]),
+      envelope(2, { type: "context_completed", tokens_used: 17, context: exact }),
+    ])
+    const context = model.steps.find((step) => step.kind === "context-assembly")
+    if (context?.kind !== "context-assembly") throw new Error("expected context assembly")
+
+    expect(context.summary.exactContext).toBe(exact)
+    expect(context.summary.tokensUsed).toBe(17)
+  })
+
+  it("keeps metadata-only ContextCompleted content explicitly unavailable", () => {
+    const model = buildSemanticTimeline([
+      section(1, "entities", ["entity-1"]),
+      envelope(2, { type: "context_completed", tokens_used: 17 }),
+    ])
+    const context = model.steps.find((step) => step.kind === "context-assembly")
+    if (context?.kind !== "context-assembly") throw new Error("expected context assembly")
+
+    expect(context.summary.exactContext).toBeNull()
+  })
 })

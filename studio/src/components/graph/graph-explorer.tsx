@@ -36,12 +36,17 @@ interface GraphExplorerProps {
   emphasisIntent?: GraphEmphasisIntent | null
   onClearEmphasis?: () => void
   inspectIntent?: GraphInspectIntent | null
+  navigationResetRevision?: number
 }
 
 interface ProjectionRequest {
   controller: AbortController
   kind: GraphViewMode
 }
+
+type ExplorerOrigin =
+  | { kind: "overview"; runId: string | null }
+  | { kind: "query-focus"; runId: string | null; request: GraphSubgraphRequest }
 
 const noop = (): void => undefined
 
@@ -59,7 +64,7 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
   }
 }
 
-export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectIntent = null, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
+export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectIntent = null, navigationResetRevision = 0, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
   const desktop = useDesktopLayout()
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
@@ -75,6 +80,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
   const [decision, setDecision] = useState<ExplainabilityRecordView | null>(null)
+  const [explorerOrigin, setExplorerOrigin] = useState<ExplorerOrigin | null>(null)
   const projectionRef = useRef<GraphProjection | null>(null)
   const modeRef = useRef<GraphViewMode>("overview")
   const projectionRequest = useRef<ProjectionRequest | null>(null)
@@ -86,6 +92,8 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const previousRunId = useRef(runId)
   const previousInspectRevision = useRef<number | null>(null)
   const inspectionRunId = useRef(runId)
+  const queryFocusRequest = useRef<GraphSubgraphRequest | null>(null)
+  const previousNavigationResetRevision = useRef(navigationResetRevision)
   const candidateInspectionActive = useRef(false)
   const inspectorPanelRef = usePanelRef()
 
@@ -115,7 +123,10 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     setError(null)
     void getGraphOverview({}, controller.signal)
       .then((value) => {
-        if (projectionRequest.current === request && !controller.signal.aborted) commitProjection(value, "overview")
+        if (projectionRequest.current === request && !controller.signal.aborted) {
+          queryFocusRequest.current = null
+          commitProjection(value, "overview")
+        }
       })
       .catch((reason: unknown) => {
         if (projectionRequest.current !== request || isAbort(reason)) return
@@ -139,7 +150,10 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     setError(null)
     void getGraphSubgraph(subgraphRequest, controller.signal)
       .then((value) => {
-        if (projectionRequest.current === request && !controller.signal.aborted) commitProjection(value, nextMode)
+        if (projectionRequest.current === request && !controller.signal.aborted) {
+          if (nextMode === "query-focus") queryFocusRequest.current = subgraphRequest
+          commitProjection(value, nextMode)
+        }
       })
       .catch((reason: unknown) => {
         if (projectionRequest.current === request && !isAbort(reason)) setError("Could not load focused graph.")
@@ -195,6 +209,8 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     previousRunId.current = runId
 
     if (runChanged) {
+      setExplorerOrigin(null)
+      queryFocusRequest.current = null
       const hadFocusedProjection = modeRef.current !== "overview"
       const hadPendingFocus = projectionRequest.current?.kind === "query-focus" || projectionRequest.current?.kind === "explorer-focus"
       invalidateCommittedFocus()
@@ -219,10 +235,41 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     }
   }, [focusIntent, invalidateCommittedFocus, loadFocus, loadOverview, onClearFocus, runId])
 
-  const backToOverview = useCallback((): void => {
+  useEffect(() => {
+    if (previousNavigationResetRevision.current === navigationResetRevision) return
+    previousNavigationResetRevision.current = navigationResetRevision
+    setExplorerOrigin(null)
+    queryFocusRequest.current = null
+    const pending = projectionRequest.current
+    if (pending?.kind === "query-focus") {
+      pending.controller.abort()
+      projectionRequest.current = null
+      setLoading(false)
+      setError(null)
+    }
+  }, [navigationResetRevision])
+
+  const loadExplorerFocus = useCallback((request: GraphSubgraphRequest): void => {
+    if (modeRef.current !== "explorer-focus") {
+      const queryRequest = queryFocusRequest.current
+      setExplorerOrigin(queryRequest === null
+        ? { kind: "overview", runId }
+        : { kind: "query-focus", runId, request: queryRequest })
+    }
+    loadFocus(request, "explorer-focus")
+  }, [loadFocus, runId])
+
+  const backFromFocus = useCallback((): void => {
+    if (modeRef.current === "explorer-focus") {
+      const origin = explorerOrigin
+      setExplorerOrigin(null)
+      if (origin?.kind === "query-focus" && origin.runId === runId) loadFocus(origin.request, "query-focus")
+      else loadOverview()
+      return
+    }
     if (focusIntent !== null) onClearFocus()
     else loadOverview()
-  }, [focusIntent, loadOverview, onClearFocus])
+  }, [explorerOrigin, focusIntent, loadFocus, loadOverview, onClearFocus, runId])
 
   const reloadGraphData = useCallback((): void => {
     loadSummary()
@@ -343,13 +390,13 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
             {projection === null && loading ? <div className="space-y-3 p-4"><Skeleton className="h-12" /><Skeleton className="h-80" /></div> : null}
             {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
             {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
-            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={backToOverview} onReload={reloadGraphData} /> : null}
+            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBack={backFromFocus} backLabel={mode === "explorer-focus" && explorerOrigin?.kind === "query-focus" ? "Back to query focus" : "Back to overview"} onReload={reloadGraphData} /> : null}
     </div>
   )
   const inspector = (
     <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
       <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">Inspect</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Groups</TabsTrigger></TabsList>
-      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} /></TabsContent>
+      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadExplorerFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })} onFocusRelationship={(id) => loadExplorerFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 })} /></TabsContent>
       <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
       <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
       <TabsContent value="communities" className="min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>
