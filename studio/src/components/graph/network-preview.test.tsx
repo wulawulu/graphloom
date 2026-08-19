@@ -330,6 +330,43 @@ describe("NetworkPreview focus labels", () => {
     expect(graphMock.layoutCalls).toBe(layoutCalls)
   })
 
+  it("clears the previous emphasis when every new target is outside the projection", async () => {
+    const evidenceProjection: GraphProjection = {
+      ...projection,
+      entities: [projection.entities[0]!, { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 }],
+      relationships: [{ id: "relationship-1", source_entity_id: "entity-1", target_entity_id: "entity-2", source: "Alice", target: "Bob", weight: 1, rank: 1 }],
+    }
+    const view = render(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} />)
+    await waitFor(() => expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target"))
+    const instance = graphMock.instances[0] as { animate: ReturnType<typeof vi.fn> }
+    const layoutCalls = graphMock.layoutCalls
+    const animationCalls = instance.animate.mock.calls.length
+
+    view.rerender(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-missing"], relationshipIds: [], revision: 2 }} />)
+
+    expect(graphMock.elements.every((element) => [...element.classes].every((name) => !name.startsWith("citation-")))).toBe(true)
+    expect(instance.animate).toHaveBeenCalledTimes(animationCalls)
+    expect(graphMock.layoutCalls).toBe(layoutCalls)
+  })
+
+  it("emphasizes present targets when a citation is only partially in the projection", async () => {
+    const evidenceProjection: GraphProjection = {
+      ...projection,
+      entities: [projection.entities[0]!, { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 }],
+    }
+    const view = render(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={null} />)
+    await waitFor(() => expect(graphMock.instances).toHaveLength(1))
+    const instance = graphMock.instances[0] as { animate: ReturnType<typeof vi.fn> }
+    const layoutCalls = graphMock.layoutCalls
+
+    view.rerender(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1", "entity-missing"], relationshipIds: [], revision: 1 }} />)
+
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target")
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).toContain("citation-dimmed")
+    expect(instance.animate).toHaveBeenCalledOnce()
+    expect(graphMock.layoutCalls).toBe(layoutCalls)
+  })
+
   it("keeps connecting edges visible and clears emphasis from canvas or Escape", async () => {
     const onClearEmphasis = vi.fn()
     const evidenceProjection: GraphProjection = {

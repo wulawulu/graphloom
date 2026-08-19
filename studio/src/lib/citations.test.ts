@@ -7,6 +7,21 @@ function envelope(sequence: number, event: ExplainabilityEventPayload): Explaina
   return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event } }
 }
 
+function contextSection(sequence: number, section: "entities" | "relationships", selectedRecordIds: string[]): ExplainabilityEnvelope {
+  return envelope(sequence, {
+    type: "context_section_built",
+    section: {
+      section,
+      token_budget: 1_000,
+      tokens_used: 100,
+      candidate_count: selectedRecordIds.length,
+      selected_count: selectedRecordIds.length,
+      truncated: false,
+      selected_record_ids: selectedRecordIds,
+    },
+  })
+}
+
 describe("GraphRAG data citations", () => {
   it("parses a single Entities citation", () => {
     expect(parseDataCitation("[Data: Entities (150, 0, 119, 130)]")).toEqual({
@@ -32,19 +47,70 @@ describe("GraphRAG data citations", () => {
     expect(parseDataCitation("[ordinary link text]")).toBeNull()
   })
 
-  it("maps only selected unique short IDs to stable graph IDs", () => {
+  it("maps a selected entity only when it entered the final entity context", () => {
+    const index = buildCitationGraphIndex([
+      envelope(1, { type: "entities_selected", entities: [{ id: "entity-150", short_id: "150", record_type: "entity", selected: true }] }),
+      contextSection(2, "entities", ["entity-150"]),
+    ])
+
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150"], hasMore: false }, index)).toEqual({ entityIds: ["entity-150"], relationshipIds: [] })
+  })
+
+  it("does not map a selected entity removed by context token fitting", () => {
     const index = buildCitationGraphIndex([
       envelope(1, { type: "entities_selected", entities: [
-        { id: "entity-uuid", short_id: "150", record_type: "entity", selected: true },
-        { id: "entity-rejected", short_id: "151", record_type: "entity", selected: false },
+        { id: "entity-150", short_id: "150", record_type: "entity", selected: true },
+        { id: "entity-151", short_id: "151", record_type: "entity", selected: true },
+      ] }),
+      contextSection(2, "entities", ["entity-150"]),
+    ])
+
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150"], hasMore: false }, index)).not.toBeNull()
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["151"], hasMore: false }, index)).toBeNull()
+  })
+
+  it("limits relationships to final relationship context membership", () => {
+    const index = buildCitationGraphIndex([
+      envelope(1, { type: "relationships_selected", relationships: [
+        { id: "relationship-23", short_id: "23", record_type: "relationship", selected: true },
+        { id: "relationship-24", short_id: "24", record_type: "relationship", selected: true },
+      ] }),
+      contextSection(2, "relationships", ["relationship-23"]),
+    ])
+
+    expect(resolveCitationGroup({ dataset: "Relationships", recordIds: ["23"], hasMore: false }, index)).toEqual({ entityIds: [], relationshipIds: ["relationship-23"] })
+    expect(resolveCitationGroup({ dataset: "Relationships", recordIds: ["24"], hasMore: false }, index)).toBeNull()
+  })
+
+  it("rejects unselected and conflicting identity mappings", () => {
+    const index = buildCitationGraphIndex([
+      envelope(1, { type: "entities_selected", entities: [
+        { id: "entity-unselected", short_id: "151", record_type: "entity", selected: false },
         { id: "entity-conflict-a", short_id: "152", record_type: "entity", selected: true },
       ] }),
       envelope(2, { type: "entities_selected", entities: [{ id: "entity-conflict-b", short_id: "152", record_type: "entity", selected: true }] }),
-      envelope(3, { type: "relationships_selected", relationships: [{ id: "relationship-uuid", short_id: "23", record_type: "relationship", selected: true }] }),
+      contextSection(3, "entities", ["entity-unselected", "entity-conflict-a", "entity-conflict-b"]),
     ])
 
-    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150", "151", "152", "unknown"], hasMore: false }, index)).toEqual({ entityIds: ["entity-uuid"], relationshipIds: [] })
-    expect(resolveCitationGroup({ dataset: "Relationships", recordIds: ["23"], hasMore: false }, index)).toEqual({ entityIds: [], relationshipIds: ["relationship-uuid"] })
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["151"], hasMore: false }, index)).toBeNull()
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["152"], hasMore: false }, index)).toBeNull()
+  })
+
+  it("is independent of context and selection event order", () => {
+    const index = buildCitationGraphIndex([
+      contextSection(1, "entities", ["entity-150"]),
+      envelope(2, { type: "entities_selected", entities: [{ id: "entity-150", short_id: "150", record_type: "entity", selected: true }] }),
+    ])
+
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150"], hasMore: false }, index)).toEqual({ entityIds: ["entity-150"], relationshipIds: [] })
+  })
+
+  it("does not infer final context membership when its event is absent", () => {
+    const index = buildCitationGraphIndex([
+      envelope(1, { type: "entities_selected", entities: [{ id: "entity-150", short_id: "150", record_type: "entity", selected: true }] }),
+    ])
+
+    expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150"], hasMore: false }, index)).toBeNull()
     expect(resolveCitationGroup({ dataset: "Reports", recordIds: ["1"], hasMore: false }, index)).toBeNull()
   })
 })

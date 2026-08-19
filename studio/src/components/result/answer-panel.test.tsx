@@ -2,6 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { AnswerPanel } from "@/components/result/answer-panel"
 
 afterEach(cleanup)
@@ -45,6 +46,8 @@ describe("AnswerPanel", () => {
       envelopes={[
         { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "entities_selected", entities: [{ id: "entity-150", short_id: "150", record_type: "entity", selected: true }, { id: "entity-0", short_id: "0", record_type: "entity", selected: true }] } } },
         { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "relationships_selected", relationships: [{ id: "relationship-23", short_id: "23", record_type: "relationship", selected: true }] } } },
+        { schema_version: 1, sequence: 3, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "context_section_built", section: { section: "entities", token_budget: 1_000, tokens_used: 100, candidate_count: 2, selected_count: 2, truncated: false, selected_record_ids: ["entity-150", "entity-0"] } } } },
+        { schema_version: 1, sequence: 4, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "context_section_built", section: { section: "relationships", token_budget: 1_000, tokens_used: 100, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["relationship-23"] } } } },
       ]}
       onCitationEmphasis={onCitationEmphasis}
     />)
@@ -60,5 +63,21 @@ describe("AnswerPanel", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "`[Data: Entities (150)]`\n\n```text\n[Data: Relationships (23)]\n```\n\n[Data: Entities 150]", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.queryByRole("button", { name: /Emphasize/ })).not.toBeInTheDocument()
     expect(screen.getAllByText(/Data:/)).toHaveLength(3)
+  })
+
+  it("does not expose malformed model-authored citation schemes as links", () => {
+    render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "[malformed](graphloom-citation:not-valid-json) [opaque](graphloom-citation:model-supplied)", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
+
+    expect(screen.getByText("malformed").closest("a")).toBeNull()
+    expect(screen.getByText("opaque").closest("a")).toBeNull()
+    expect(document.querySelector('a[href^="graphloom-citation:"]')).toBeNull()
+  })
+
+  it("does not trust a valid model-authored citation URL without a citation renderer", () => {
+    const payload = encodeURIComponent(JSON.stringify({ dataset: "Entities", recordIds: ["150"], hasMore: false }))
+    render(<SafeMarkdown>{`[forged](graphloom-citation:${payload})`}</SafeMarkdown>)
+
+    expect(screen.getByText("forged").closest("a")).toBeNull()
+    expect(document.querySelector('a[href^="graphloom-citation:"]')).toBeNull()
   })
 })

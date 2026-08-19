@@ -52,10 +52,8 @@ function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, a
 const CITATION_CLASSES = "citation-target citation-dimmed citation-connecting"
 
 function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: GraphEmphasisIntent | null): void {
-  if (emphasis === null) {
-    cy.elements().removeClass(CITATION_CLASSES)
-    return
-  }
+  cy.elements().removeClass(CITATION_CLASSES)
+  if (emphasis === null) return
 
   const entityIds = new Set(emphasis.entityIds)
   const connectingIds = projection.relationships
@@ -67,7 +65,6 @@ function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: 
 
   const connecting = connectingIds.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
   const emphasizedEdges = emphasis.relationshipIds.reduce((collection, id) => collection.union(cy.getElementById(id)), connecting)
-  cy.elements().removeClass(CITATION_CLASSES)
   cy.nodes().addClass("citation-dimmed")
   cy.edges().addClass("citation-dimmed")
   targets.addClass("citation-target").removeClass("citation-dimmed")

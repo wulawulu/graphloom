@@ -14,14 +14,14 @@ export function SafeMarkdown({ children, className = "markdown-answer", renderCi
     <div className={className}>
       <ReactMarkdown
         remarkPlugins={renderCitation === undefined ? [remarkGfm] : [remarkGfm, remarkDataCitations]}
-        urlTransform={(url) => url.startsWith(CITATION_URL_PREFIX) ? url : defaultUrlTransform(url)}
+        urlTransform={(url) => renderCitation !== undefined && citationGroupFromUrl(url) !== null ? url : defaultUrlTransform(url)}
         components={{
           img: ({ alt }) => <span>[Remote image omitted{alt === undefined ? "" : `: ${alt}`}]</span>,
           a: ({ children: linkChildren, href }) => {
             const citation = href === undefined ? null : citationGroupFromUrl(href)
-            return citation !== null && renderCitation !== undefined
-              ? renderCitation(citation)
-              : <a href={href} target="_blank" rel="noreferrer noopener">{linkChildren}</a>
+            if (citation !== null && renderCitation !== undefined) return renderCitation(citation)
+            if (href === undefined || href.length === 0 || href.startsWith(CITATION_URL_PREFIX)) return <span>{linkChildren}</span>
+            return <a href={href} target="_blank" rel="noreferrer noopener">{linkChildren}</a>
           },
         }}
       >

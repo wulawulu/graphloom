@@ -56,16 +56,35 @@ function isGroupSeparator(value: string): boolean {
 }
 
 export function buildCitationGraphIndex(envelopes: readonly ExplainabilityEnvelope[]): CitationGraphIndex {
-  const entities = new Map<string, string | null>()
-  const relationships = new Map<string, string | null>()
+  const entityIdentities = new Map<string, string | null>()
+  const relationshipIdentities = new Map<string, string | null>()
+  const finalEntityIds = new Set<string>()
+  const finalRelationshipIds = new Set<string>()
 
   for (const envelope of envelopes) {
     const event = envelope.record.event
-    if (event.type === "entities_selected") addCandidates(entities, event.entities)
-    if (event.type === "relationships_selected") addCandidates(relationships, event.relationships)
+    if (event.type === "entities_selected") addCandidates(entityIdentities, event.entities)
+    if (event.type === "relationships_selected") addCandidates(relationshipIdentities, event.relationships)
+    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds)
   }
 
-  return { entities: uniqueMappings(entities), relationships: uniqueMappings(relationships) }
+  return {
+    entities: uniqueMappings(entityIdentities, finalEntityIds),
+    relationships: uniqueMappings(relationshipIdentities, finalRelationshipIds),
+  }
+}
+
+function addContextMembership(value: unknown, entityIds: Set<string>, relationshipIds: Set<string>): void {
+  if (typeof value !== "object" || value === null) return
+  const section = value as { section?: unknown; selected_record_ids?: unknown }
+  if (!Array.isArray(section.selected_record_ids) || !section.selected_record_ids.every((id) => typeof id === "string")) return
+  const target = section.section === "entities"
+    ? entityIds
+    : section.section === "relationships"
+      ? relationshipIds
+      : null
+  if (target === null) return
+  section.selected_record_ids.forEach((id) => target.add(id))
 }
 
 function addCandidates(target: Map<string, string | null>, value: unknown): void {
@@ -86,8 +105,8 @@ function isSelectedCandidate(value: unknown): value is ExplainabilityCandidate &
     && (candidate.short_id === undefined || typeof candidate.short_id === "string")
 }
 
-function uniqueMappings(values: Map<string, string | null>): Map<string, string> {
-  return new Map([...values].flatMap(([shortId, stableId]) => stableId === null ? [] : [[shortId, stableId]]))
+function uniqueMappings(values: Map<string, string | null>, finalContextIds: ReadonlySet<string>): Map<string, string> {
+  return new Map([...values].flatMap(([shortId, stableId]) => stableId === null || !finalContextIds.has(stableId) ? [] : [[shortId, stableId]]))
 }
 
 export function resolveCitationGroup(group: CitationGroup, index: CitationGraphIndex): GraphEmphasis | null {
@@ -167,7 +186,15 @@ export function citationGroupFromUrl(url: string): CitationGroup | null {
     const value: unknown = JSON.parse(decodeURIComponent(url.slice(CITATION_URL_PREFIX.length)))
     if (typeof value !== "object" || value === null) return null
     const group = value as Partial<CitationGroup>
-    if (typeof group.dataset !== "string" || !Array.isArray(group.recordIds) || !group.recordIds.every((id) => typeof id === "string") || typeof group.hasMore !== "boolean") return null
+    if (
+      typeof group.dataset !== "string"
+      || group.dataset.length === 0
+      || group.dataset.trim() !== group.dataset
+      || !Array.isArray(group.recordIds)
+      || group.recordIds.length === 0
+      || !group.recordIds.every((id) => typeof id === "string" && id.length > 0 && id.trim() === id)
+      || typeof group.hasMore !== "boolean"
+    ) return null
     return { dataset: group.dataset, recordIds: group.recordIds, hasMore: group.hasMore }
   } catch {
     return null
