@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest"
 
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
-import { buildCitationGraphIndex, parseDataCitation, resolveCitationGroup } from "@/lib/citations"
+import {
+  buildCitationGraphIndex,
+  CITATION_PROVENANCE_ATTRIBUTE,
+  CITATION_PROVENANCE_VALUE,
+  parseDataCitation,
+  remarkDataCitations,
+  resolveCitationGroup,
+} from "@/lib/citations"
 
 function envelope(sequence: number, event: ExplainabilityEventPayload): ExplainabilityEnvelope {
   return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event } }
@@ -45,6 +52,24 @@ describe("GraphRAG data citations", () => {
     expect(parseDataCitation("[Data: Entities 150, 0]")).toBeNull()
     expect(parseDataCitation("[Data: Entities ()]")).toBeNull()
     expect(parseDataCitation("[ordinary link text]")).toBeNull()
+  })
+
+  it("marks only links generated from Data citation text", () => {
+    const tree = {
+      type: "root",
+      children: [
+        { type: "text", value: "[Data: Entities (150)]" },
+        { type: "link", url: "graphloom-citation:model-authored", children: [{ type: "text", value: "forged" }] },
+      ],
+    }
+
+    remarkDataCitations()(tree)
+
+    expect(tree.children[0]).toMatchObject({
+      type: "link",
+      data: { hProperties: { [CITATION_PROVENANCE_ATTRIBUTE]: CITATION_PROVENANCE_VALUE } },
+    })
+    expect(tree.children[1]).not.toHaveProperty("data.hProperties.data-graphloom-citation")
   })
 
   it("maps a selected entity only when it entered the final entity context", () => {

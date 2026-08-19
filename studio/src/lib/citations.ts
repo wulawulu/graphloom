@@ -24,6 +24,8 @@ export interface GraphEmphasis {
 export type GraphEmphasisIntent = GraphEmphasis & { revision: number }
 
 export const CITATION_URL_PREFIX = "graphloom-citation:"
+export const CITATION_PROVENANCE_ATTRIBUTE = "data-graphloom-citation"
+export const CITATION_PROVENANCE_VALUE = "generated"
 
 const DATA_CITATION_PATTERN = /\[Data:\s*[^\]\r\n]*\]/g
 const GROUP_PATTERN = /([^()[\],;\r\n]+?)\s*\(([^()]*)\)/g
@@ -133,6 +135,7 @@ interface MarkdownNode {
   value?: string
   url?: string
   children?: MarkdownNode[]
+  data?: { hProperties?: Record<string, string> }
 }
 
 export function remarkDataCitations(): (tree: MarkdownNode) => void {
@@ -170,6 +173,7 @@ function citationTextNodes(value: string): MarkdownNode[] {
         nodes.push({
           type: "link",
           url: `${CITATION_URL_PREFIX}${encodeURIComponent(JSON.stringify(group))}`,
+          data: { hProperties: { [CITATION_PROVENANCE_ATTRIBUTE]: CITATION_PROVENANCE_VALUE } },
           children: [{ type: "text", value: `${group.dataset} · ${group.recordIds.length}${group.hasMore ? "+" : ""}` }],
         })
       })
