@@ -14,7 +14,7 @@ import {
 } from "@/api/client"
 import type { GraphEntityDetail, GraphProjection, GraphSummary } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent, type GraphInspectIntent } from "@/components/graph/graph-explorer"
-import { highlightFromEvent } from "@/lib/explainability"
+import { highlightFromEvent, type GraphHighlight } from "@/lib/explainability"
 
 vi.mock("@/api/client", () => ({
   ApiError: class extends Error { status = 500 },
@@ -33,12 +33,12 @@ vi.mock("@/api/client", () => ({
 const networkLifecycle = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }))
 
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, summary, summaryError, mode, error, onBack, backLabel, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; error: string | null; onBack: () => void; backLabel: string; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
+  NetworkPreview: ({ projection, summary, summaryError, mode, focusCore, focusKind, error, onBack, backLabel, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; focusCore: GraphHighlight | null; focusKind: string; error: string | null; onBack: () => void; backLabel: string; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
     useEffect(() => {
       networkLifecycle.mounts += 1
       return () => { networkLifecycle.unmounts += 1 }
     }, [])
-    return <div><span>{mode}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <><span>{backLabel}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
+    return <div><span>{mode}</span><span>Core {focusCore === null ? "none" : `${focusCore.entityIds.join(",")}/${focusCore.relationshipIds.join(",")}`}</span><span>Focus kind {focusKind}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <><span>{backLabel}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
   },
 }))
 
@@ -225,13 +225,15 @@ describe("GraphExplorer focus flow", () => {
 
   it("posts entity and relationship seeds with bounded depth-one defaults", async () => {
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
-    const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }
+    const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160, revision: 1, focusKind: "final-context" }
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={intent} />)
 
     await waitFor(() => expect(getGraphSubgraph).toHaveBeenCalledTimes(1))
     expect(vi.mocked(getGraphSubgraph).mock.calls[0]?.[0]).toEqual({ entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160 })
     expect(await screen.findByText("FOCUSED")).toBeInTheDocument()
     expect(screen.getByText("query-focus")).toBeInTheDocument()
+    expect(screen.getByText("Core entity-1/relationship-1")).toBeInTheDocument()
+    expect(screen.getByText("Focus kind final-context")).toBeInTheDocument()
   })
 
   it("posts only selected candidate IDs and excludes rejected records", async () => {

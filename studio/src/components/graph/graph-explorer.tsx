@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDesktopLayout } from "@/components/layout/use-desktop-layout"
 import type { GraphEmphasisIntent } from "@/lib/citations"
+import type { GraphHighlight } from "@/lib/explainability"
 import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 import { GraphInspector, type GraphDetail } from "./graph-detail"
@@ -26,7 +27,8 @@ import { CommunityList, EntityList, RelationshipList } from "./graph-lists"
 import { NetworkPreview } from "./network-preview"
 
 export type GraphViewMode = "overview" | "query-focus" | "explorer-focus"
-export type GraphFocusIntent = GraphSubgraphRequest & { revision: number }
+export type GraphFocusKind = "final-context" | "focus-target"
+export type GraphFocusIntent = GraphSubgraphRequest & { revision: number; focusKind?: GraphFocusKind }
 export type GraphInspectIntent = { candidate: ExplainabilityRecordView; revision: number }
 
 interface GraphExplorerProps {
@@ -46,7 +48,12 @@ interface ProjectionRequest {
 
 type ExplorerOrigin =
   | { kind: "overview"; runId: string | null }
-  | { kind: "query-focus"; runId: string | null; request: GraphSubgraphRequest }
+  | { kind: "query-focus"; runId: string | null; request: GraphSubgraphRequest; focusKind: GraphFocusKind }
+
+interface CommittedQueryFocus {
+  request: GraphSubgraphRequest
+  focusKind: GraphFocusKind
+}
 
 const noop = (): void => undefined
 
@@ -81,6 +88,8 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const [detailError, setDetailError] = useState(false)
   const [decision, setDecision] = useState<ExplainabilityRecordView | null>(null)
   const [explorerOrigin, setExplorerOrigin] = useState<ExplorerOrigin | null>(null)
+  const [focusCore, setFocusCore] = useState<GraphHighlight | null>(null)
+  const [focusKind, setFocusKind] = useState<GraphFocusKind>("focus-target")
   const projectionRef = useRef<GraphProjection | null>(null)
   const modeRef = useRef<GraphViewMode>("overview")
   const projectionRequest = useRef<ProjectionRequest | null>(null)
@@ -92,17 +101,19 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const previousRunId = useRef(runId)
   const previousInspectRevision = useRef<number | null>(null)
   const inspectionRunId = useRef(runId)
-  const queryFocusRequest = useRef<GraphSubgraphRequest | null>(null)
+  const queryFocusRequest = useRef<CommittedQueryFocus | null>(null)
   const previousNavigationResetRevision = useRef(navigationResetRevision)
   const candidateInspectionActive = useRef(false)
   const inspectorPanelRef = usePanelRef()
 
-  const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
+  const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode, core: GraphHighlight | null, nextFocusKind: GraphFocusKind): void => {
     onClearEmphasis()
     projectionRef.current = value
     modeRef.current = nextMode
     setProjection(value)
     setMode(nextMode)
+    setFocusCore(core)
+    setFocusKind(nextFocusKind)
     setUnavailable(false)
   }, [onClearEmphasis])
 
@@ -112,6 +123,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     projectionRef.current = null
     setMode("overview")
     setProjection(null)
+    setFocusCore(null)
   }, [])
 
   const loadOverview = useCallback((): void => {
@@ -125,7 +137,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
       .then((value) => {
         if (projectionRequest.current === request && !controller.signal.aborted) {
           queryFocusRequest.current = null
-          commitProjection(value, "overview")
+          commitProjection(value, "overview", null, "focus-target")
         }
       })
       .catch((reason: unknown) => {
@@ -141,7 +153,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
       })
   }, [commitProjection])
 
-  const loadFocus = useCallback((subgraphRequest: GraphSubgraphRequest, nextMode: Exclude<GraphViewMode, "overview">): void => {
+  const loadFocus = useCallback((subgraphRequest: GraphSubgraphRequest, nextMode: Exclude<GraphViewMode, "overview">, nextFocusKind: GraphFocusKind = "focus-target"): void => {
     projectionRequest.current?.controller.abort()
     const controller = new AbortController()
     const request: ProjectionRequest = { controller, kind: nextMode }
@@ -151,8 +163,11 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     void getGraphSubgraph(subgraphRequest, controller.signal)
       .then((value) => {
         if (projectionRequest.current === request && !controller.signal.aborted) {
-          if (nextMode === "query-focus") queryFocusRequest.current = subgraphRequest
-          commitProjection(value, nextMode)
+          if (nextMode === "query-focus") queryFocusRequest.current = { request: subgraphRequest, focusKind: nextFocusKind }
+          commitProjection(value, nextMode, {
+            entityIds: [...subgraphRequest.entity_ids],
+            relationshipIds: [...subgraphRequest.relationship_ids],
+          }, nextFocusKind)
         }
       })
       .catch((reason: unknown) => {
@@ -199,7 +214,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     if (!lifecycleInitialized.current) {
       lifecycleInitialized.current = true
       if (focusIntent !== null) {
-        loadFocus(subgraphRequest(focusIntent), "query-focus")
+        loadFocus(subgraphRequest(focusIntent), "query-focus", focusIntent.focusKind ?? "focus-target")
       }
       return
     }
@@ -216,7 +231,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
       invalidateCommittedFocus()
       if (focusIntent !== null && focusIntent.revision !== previousIntent?.revision) {
         previousFocusIntent.current = focusIntent
-        loadFocus(subgraphRequest(focusIntent), "query-focus")
+        loadFocus(subgraphRequest(focusIntent), "query-focus", focusIntent.focusKind ?? "focus-target")
       } else if (focusIntent !== null) {
         previousFocusIntent.current = null
         onClearFocus()
@@ -230,7 +245,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
       if (focusIntent === null) {
         if (previousIntent !== null) loadOverview()
       } else {
-        loadFocus(subgraphRequest(focusIntent), "query-focus")
+        loadFocus(subgraphRequest(focusIntent), "query-focus", focusIntent.focusKind ?? "focus-target")
       }
     }
   }, [focusIntent, invalidateCommittedFocus, loadFocus, loadOverview, onClearFocus, runId])
@@ -251,10 +266,10 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
 
   const loadExplorerFocus = useCallback((request: GraphSubgraphRequest): void => {
     if (modeRef.current !== "explorer-focus") {
-      const queryRequest = queryFocusRequest.current
-      setExplorerOrigin(queryRequest === null
+      const queryFocus = queryFocusRequest.current
+      setExplorerOrigin(queryFocus === null
         ? { kind: "overview", runId }
-        : { kind: "query-focus", runId, request: queryRequest })
+        : { kind: "query-focus", runId, request: queryFocus.request, focusKind: queryFocus.focusKind })
     }
     loadFocus(request, "explorer-focus")
   }, [loadFocus, runId])
@@ -263,7 +278,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     if (modeRef.current === "explorer-focus") {
       const origin = explorerOrigin
       setExplorerOrigin(null)
-      if (origin?.kind === "query-focus" && origin.runId === runId) loadFocus(origin.request, "query-focus")
+      if (origin?.kind === "query-focus" && origin.runId === runId) loadFocus(origin.request, "query-focus", origin.focusKind)
       else loadOverview()
       return
     }
@@ -390,7 +405,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
             {projection === null && loading ? <div className="space-y-3 p-4"><Skeleton className="h-12" /><Skeleton className="h-80" /></div> : null}
             {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
             {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
-            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBack={backFromFocus} backLabel={mode === "explorer-focus" && explorerOrigin?.kind === "query-focus" ? "Back to query focus" : "Back to overview"} onReload={reloadGraphData} /> : null}
+            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} focusCore={focusCore} focusKind={focusKind} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBack={backFromFocus} backLabel={mode === "explorer-focus" && explorerOrigin?.kind === "query-focus" ? "Back to query focus" : "Back to overview"} onReload={reloadGraphData} /> : null}
     </div>
   )
   const inspector = (

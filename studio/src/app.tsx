@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 
-import type { ExplainabilityEnvelope, GraphSubgraphRequest, StartQueryResponse } from "@/api/types"
+import type { ExplainabilityEnvelope, StartQueryResponse } from "@/api/types"
 import { StudioShell } from "@/components/layout/studio-shell"
 import { QueryComposer } from "@/components/query/query-composer"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -12,7 +12,7 @@ import { useRunHistory } from "@/hooks/use-run-history"
 import { QaWorkspace } from "@/components/workspace/qa-workspace"
 import { deriveFinalGraphFocus, highlightFromEvent } from "@/lib/explainability"
 import type { GraphEmphasis, GraphEmphasisIntent } from "@/lib/citations"
-import type { GraphInspectIntent } from "@/components/graph/graph-explorer"
+import type { GraphFocusIntent, GraphInspectIntent } from "@/components/graph/graph-explorer"
 import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 const GraphExplorer = lazy(() => import("@/components/graph/graph-explorer").then((module) => ({ default: module.GraphExplorer })))
@@ -20,7 +20,7 @@ const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((
 
 export function App(): React.ReactElement {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [graphFocus, setGraphFocus] = useState<(GraphSubgraphRequest & { revision: number }) | null>(null)
+  const [graphFocus, setGraphFocus] = useState<GraphFocusIntent | null>(null)
   const [citationEmphasis, setCitationEmphasis] = useState<GraphEmphasisIntent | null>(null)
   const [graphInspection, setGraphInspection] = useState<GraphInspectIntent | null>(null)
   const [mobileTab, setMobileTab] = useState("query")
@@ -81,6 +81,7 @@ export function App(): React.ReactElement {
     setActiveSubmittedRunId(null)
     setSubmittedQuestion(null)
     setShowCurrentQa(false)
+    setGraphFocus(null)
     setCitationEmphasis(null)
     setGraphInspection(null)
     setGraphNavigationRevision((value) => value + 1)
@@ -97,6 +98,7 @@ export function App(): React.ReactElement {
       depth: 1,
       max_entities: 80,
       max_relationships: 160,
+      focusKind: "focus-target",
       revision: (current?.revision ?? 0) + 1,
     }))
     setMobileTab("graph")
@@ -108,15 +110,16 @@ export function App(): React.ReactElement {
     const runEnvelopes = stream.envelopes.filter((envelope) => envelope.record.run_id === runId)
     if (!runEnvelopes.some((envelope) => envelope.record.event.type === "run_completed")) return
     if (autoFocusedRunIds.current.has(runId)) return
-    autoFocusedRunIds.current.add(runId)
     const highlight = deriveFinalGraphFocus(runEnvelopes)
     if (highlight === null) return
+    autoFocusedRunIds.current.add(runId)
     setGraphFocus((current) => ({
       entity_ids: highlight.entityIds,
       relationship_ids: highlight.relationshipIds,
       depth: 1,
       max_entities: 80,
       max_relationships: 160,
+      focusKind: "final-context",
       revision: (current?.revision ?? 0) + 1,
     }))
     setMobileTab("graph")

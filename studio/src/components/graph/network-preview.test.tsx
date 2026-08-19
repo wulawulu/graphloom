@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { GraphProjection } from "@/api/types"
@@ -237,22 +237,24 @@ describe("NetworkPreview focus labels", () => {
     )
   })
 
-  it("labels Timeline focus as Query focus with a Query seed", () => {
-    render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="query-focus" loading={false} error={null} />)
+  it("labels automatic focus as final context", () => {
+    render(<NetworkPreview {...callbacks} projection={projection} focusCore={{ entityIds: ["entity-1"], relationshipIds: [] }} focusKind="final-context" summary={null} summaryError={false} mode="query-focus" loading={false} error={null} />)
 
     expect(screen.getByText("Query focus")).toBeInTheDocument()
-    expect(screen.getByText("Query seed")).toBeInTheDocument()
+    expect(screen.getByText("Final context")).toBeInTheDocument()
+    expect(screen.getByText(/1 final context records/)).toBeInTheDocument()
+    expect(screen.getByText("Context neighbor")).toBeInTheDocument()
     expect(screen.queryByText("Focused subgraph")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument()
   })
 
-  it("labels manual focus as a Focused subgraph with a generic Seed", () => {
-    render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="explorer-focus" loading={false} error={null} />)
+  it("labels manual focus as a focused subgraph with a focus target", () => {
+    render(<NetworkPreview {...callbacks} projection={projection} focusCore={{ entityIds: ["entity-1"], relationshipIds: [] }} summary={null} summaryError={false} mode="explorer-focus" loading={false} error={null} />)
 
     expect(screen.getByText("Focused subgraph")).toBeInTheDocument()
-    expect(screen.getByText("Seed")).toBeInTheDocument()
+    expect(screen.getByText("Focus target")).toBeInTheDocument()
     expect(screen.queryByText("Query focus")).not.toBeInTheDocument()
-    expect(screen.queryByText("Query seed")).not.toBeInTheDocument()
+    expect(screen.queryByText("Final context")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument()
   })
 
@@ -261,6 +263,75 @@ describe("NetworkPreview focus labels", () => {
 
     expect(screen.getByRole("button", { name: "Back to query focus" })).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Back to overview" })).not.toBeInTheDocument()
+  })
+
+  it("layers final-context nodes and relationships above structural neighbors", async () => {
+    const focusedProjection: GraphProjection = {
+      ...projection,
+      entities: [
+        projection.entities[0]!,
+        { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 },
+        { id: "entity-3", title: "Carol", entity_type: "PERSON", degree: 2, rank: 2 },
+      ],
+      relationships: [
+        { id: "relationship-context", source_entity_id: "entity-1", target_entity_id: "entity-3", source: "Alice", target: "Carol", weight: 1, rank: 1 },
+        { id: "relationship-core", source_entity_id: "entity-1", target_entity_id: "entity-2", source: "Alice", target: "Bob", weight: 1, rank: 1 },
+        { id: "relationship-boundary", source_entity_id: "entity-1", target_entity_id: "entity-3", source: "Alice", target: "Carol", weight: 1, rank: 1 },
+        { id: "relationship-neighbor", source_entity_id: "entity-3", target_entity_id: "entity-3", source: "Carol", target: "Carol", weight: 1, rank: 1 },
+      ],
+    }
+    render(<NetworkPreview {...callbacks} projection={focusedProjection} focusCore={{ entityIds: ["entity-1", "entity-2"], relationshipIds: ["relationship-context"] }} summary={null} summaryError={false} mode="query-focus" loading={false} error={null} />)
+    await waitFor(() => expect(graphMock.elements).toHaveLength(7))
+
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("focus-core")
+    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("focus-neighbor")
+    expect(graphMock.elements.find((element) => element.id() === "relationship-context")?.classes).toContain("focus-relationship")
+    expect(graphMock.elements.find((element) => element.id() === "relationship-core")?.classes).toContain("focus-connection")
+    expect(graphMock.elements.find((element) => element.id() === "relationship-boundary")?.classes).toContain("focus-boundary")
+    expect(graphMock.elements.find((element) => element.id() === "relationship-neighbor")?.classes).toContain("focus-neighbor-edge")
+  })
+
+  it("switches Focus and Full as visual-only modes while retaining citation evidence", async () => {
+    const focusedProjection: GraphProjection = {
+      ...projection,
+      entities: [projection.entities[0]!, { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 }],
+    }
+    render(<NetworkPreview {...callbacks} projection={focusedProjection} focusCore={{ entityIds: ["entity-1"], relationshipIds: [] }} summary={null} summaryError={false} mode="query-focus" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} />)
+    await waitFor(() => expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target"))
+    const instanceCount = graphMock.instances.length
+    const layoutCalls = graphMock.layoutCalls
+
+    fireEvent.click(screen.getByRole("button", { name: "Full" }))
+
+    expect(graphMock.instances).toHaveLength(instanceCount)
+    expect(graphMock.layoutCalls).toBe(layoutCalls)
+    await waitFor(() => expect(graphMock.elements.every((element) => element.classes.has("focus-full"))).toBe(true))
+    expect(graphMock.elements.every((element) => !element.classes.has("focus-core") && !element.classes.has("focus-neighbor"))).toBe(true)
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target")
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus" }))
+    await waitFor(() => expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("focus-core"))
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).toContain("focus-neighbor")
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target")
+    expect(callbacks.onReload).not.toHaveBeenCalled()
+  })
+
+  it("keeps non-cited final-context records above dimmed neighbors", async () => {
+    const focusedProjection: GraphProjection = {
+      ...projection,
+      entities: [
+        projection.entities[0]!,
+        { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 },
+        { id: "entity-3", title: "Carol", entity_type: "PERSON", degree: 2, rank: 2 },
+      ],
+    }
+    render(<NetworkPreview {...callbacks} projection={focusedProjection} focusCore={{ entityIds: ["entity-1", "entity-2"], relationshipIds: [] }} summary={null} summaryError={false} mode="query-focus" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} />)
+    await waitFor(() => expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target"))
+
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).toContain("citation-secondary")
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).not.toContain("citation-dimmed")
+    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("citation-dimmed")
+    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("focus-neighbor")
   })
 
   it("shows and removes projection tooltips while clicks request Inspector detail", async () => {

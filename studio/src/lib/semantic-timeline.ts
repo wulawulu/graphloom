@@ -1,4 +1,5 @@
 import type { ExplainabilityCandidate, ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
+import { latestContextSections } from "@/lib/context-evidence"
 
 export type SemanticStepKind = "entity-mapping" | "graph-expansion" | "context-assembly" | "answer-generation"
 export type FinalContextStatus = "included" | "excluded" | "unknown"
@@ -95,7 +96,7 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
     answerGeneration: [] as ExplainabilityEnvelope[],
     diagnostics: [] as ExplainabilityEnvelope[],
   }
-  const latestSections = new Map<string, ExplainabilityContextSection>()
+  const contextSections = latestContextSections(ordered)
 
   for (const envelope of ordered) {
     const event = envelope.record.event
@@ -105,17 +106,13 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
     else if (ANSWER_GENERATION_EVENTS.has(event.type)) grouped.answerGeneration.push(envelope)
     else grouped.diagnostics.push(envelope)
 
-    if (event.type === "context_section_built") {
-      const section = asContextSection(event.section)
-      if (section !== null) latestSections.set(`${section.section}:${section.name ?? ""}`, section)
-    }
   }
 
-  const finalContext = buildFinalContextIndex([...latestSections.values()])
+  const finalContext = buildFinalContextIndex(contextSections)
   const steps: SemanticStep[] = []
   if (grouped.entityMapping.length > 0) steps.push(buildEntityMapping(grouped.entityMapping, finalContext))
   if (grouped.graphExpansion.length > 0) steps.push(buildGraphExpansion(grouped.graphExpansion, finalContext))
-  if (grouped.contextAssembly.length > 0) steps.push(buildContextAssembly(grouped.contextAssembly, [...latestSections.values()]))
+  if (grouped.contextAssembly.length > 0) steps.push(buildContextAssembly(grouped.contextAssembly, contextSections))
   if (grouped.answerGeneration.length > 0) steps.push(buildAnswerGeneration(grouped.answerGeneration))
   return { steps, diagnosticEvents: grouped.diagnostics }
 }
@@ -328,22 +325,6 @@ function asCandidates(value: unknown): ExplainabilityCandidate[] {
     const value = candidate as Partial<ExplainabilityCandidate>
     return typeof value.id === "string" && value.id.length > 0 && typeof value.record_type === "string" && typeof value.selected === "boolean"
   })
-}
-
-function asContextSection(value: unknown): ExplainabilityContextSection | null {
-  if (typeof value !== "object" || value === null) return null
-  const section = value as Partial<ExplainabilityContextSection>
-  if (
-    typeof section.section !== "string"
-    || typeof section.token_budget !== "number"
-    || typeof section.tokens_used !== "number"
-    || typeof section.candidate_count !== "number"
-    || typeof section.selected_count !== "number"
-    || typeof section.truncated !== "boolean"
-    || !Array.isArray(section.selected_record_ids)
-    || !section.selected_record_ids.every((id) => typeof id === "string")
-  ) return null
-  return section as ExplainabilityContextSection
 }
 
 function numberValue(value: unknown): number | undefined {

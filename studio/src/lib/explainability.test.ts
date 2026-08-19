@@ -7,25 +7,38 @@ const frame = (sequence: number): ExplainabilityEnvelope => ({ schema_version: 1
 const eventFrame = (sequence: number, event: ExplainabilityEnvelope["record"]["event"]): ExplainabilityEnvelope => ({ schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event } })
 
 describe("Explainability presentation helpers", () => {
-  it("derives a first-seen final graph focus from selected records and expansion seeds", () => {
+  it("derives automatic graph focus only from records in the final context", () => {
     const envelopes = [
       eventFrame(4, { type: "relationships_selected", relationships: [{ id: "r-2", selected: true }, { id: "r-rejected", selected: false }, { id: "r-1", selected: true }] }),
       eventFrame(2, { type: "graph_expansion_started", seed_entity_ids: ["e-2", "e-1"] }),
       eventFrame(3, { type: "entities_selected", entities: [{ id: "e-1", selected: true }, { id: "e-rejected", selected: false }] }),
       eventFrame(5, { type: "relationships_selected", relationships: [{ id: "r-1", selected: true }] }),
+      eventFrame(7, { type: "context_section_built", section: { section: "relationships", name: "Relationships", token_budget: 20, tokens_used: 5, candidate_count: 2, selected_count: 1, truncated: true, selected_record_ids: ["r-1"] } }),
+      eventFrame(6, { type: "context_section_built", section: { section: "entities", name: "Entities", token_budget: 20, tokens_used: 5, candidate_count: 3, selected_count: 1, truncated: true, selected_record_ids: ["e-1"] } }),
     ]
 
     expect(deriveFinalGraphFocus(envelopes)).toEqual({
-      entityIds: ["e-2", "e-1"],
-      relationshipIds: ["r-2", "r-1"],
+      entityIds: ["e-1"],
+      relationshipIds: ["r-1"],
     })
   })
 
-  it("returns no final focus when a Run has no selected graph evidence", () => {
+  it("returns no final focus without final-context graph evidence", () => {
     expect(deriveFinalGraphFocus([
       eventFrame(1, { type: "entities_selected", entities: [{ id: "e-rejected", selected: false }] }),
       eventFrame(2, { type: "run_completed" }),
     ])).toBeNull()
+  })
+
+  it("uses the latest version of a progressively rebuilt context section", () => {
+    const section = (selected_record_ids: string[]) => ({
+      section: "entities", name: "Entities", token_budget: 20, tokens_used: 5,
+      candidate_count: 2, selected_count: selected_record_ids.length, truncated: true, selected_record_ids,
+    })
+    expect(deriveFinalGraphFocus([
+      eventFrame(3, { type: "context_section_built", section: section(["entity-final"]) }),
+      eventFrame(1, { type: "context_section_built", section: section(["entity-early"]) }),
+    ])).toEqual({ entityIds: ["entity-final"], relationshipIds: [] })
   })
 
   it("orders and deduplicates frames", () => {

@@ -3,18 +3,24 @@ import type { Core } from "cytoscape"
 import { Focus, LoaderCircle, RefreshCcw, RotateCw } from "lucide-react"
 
 import type { GraphProjection, GraphSummary } from "@/api/types"
-import type { GraphViewMode } from "@/components/graph/graph-explorer"
+import type { GraphFocusKind, GraphViewMode } from "@/components/graph/graph-explorer"
 import { GraphTooltip, type GraphTooltipContent } from "@/components/graph/graph-tooltip"
 import { Button } from "@/components/ui/button"
 import { readCytoscapeTheme } from "@/lib/cytoscape-theme"
 import type { GraphEmphasisIntent } from "@/lib/citations"
+import type { GraphHighlight } from "@/lib/explainability"
 import { buildProjectionElements, GRAPH_LAYOUT_OPTIONS, graphViewportAction, projectionFocusIds } from "@/lib/graph"
+import { deriveGraphFocusHierarchy } from "@/lib/graph-focus"
+
+type GraphVisualMode = "focus" | "full"
 
 interface NetworkPreviewProps {
   projection: GraphProjection
   summary: GraphSummary | null
   summaryError: boolean
   mode: GraphViewMode
+  focusCore?: GraphHighlight | null
+  focusKind?: GraphFocusKind
   loading: boolean
   error: string | null
   emphasisIntent?: GraphEmphasisIntent | null
@@ -26,9 +32,11 @@ interface NetworkPreviewProps {
   onReload: () => void
 }
 
-function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewMode): void {
-  const focused = mode !== "overview"
-  const ids = new Set(projectionFocusIds(projection, focused))
+function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewMode, visualMode: GraphVisualMode, focusCore: GraphHighlight | null): void {
+  const focused = mode !== "overview" && visualMode === "focus"
+  const ids = new Set(focused && focusCore !== null
+    ? [...focusCore.entityIds, ...focusCore.relationshipIds]
+    : projectionFocusIds(projection, focused))
   const targets = cy.elements().filter((element) => ids.has(element.id()))
   if (targets.length === 0) return
   if (focused) {
@@ -43,16 +51,51 @@ function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewM
   }
 }
 
-function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, animate: boolean): void {
+function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, visualMode: GraphVisualMode, focusCore: GraphHighlight | null, animate: boolean): void {
   const options = { ...GRAPH_LAYOUT_OPTIONS, animate } as unknown as Parameters<Core["layout"]>[0]
   const layout = cy.layout(options)
-  layout.one("layoutstop", () => focusCollection(cy, projection, mode))
+  layout.one("layoutstop", () => focusCollection(cy, projection, mode, visualMode, focusCore))
   layout.run()
 }
 
-const CITATION_CLASSES = "citation-target citation-dimmed citation-connecting"
+const FOCUS_CLASSES = "focus-core focus-neighbor focus-relationship focus-connection focus-boundary focus-neighbor-edge focus-full"
+const CITATION_CLASSES = "citation-target citation-secondary citation-dimmed citation-connecting"
 
-function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: GraphEmphasisIntent | null): void {
+function collectionForIds(cy: Core, ids: readonly string[]) {
+  return ids.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
+}
+
+function applyFocusHierarchy(
+  cy: Core,
+  projection: GraphProjection,
+  mode: GraphViewMode,
+  visualMode: GraphVisualMode,
+  focusCore: GraphHighlight | null,
+): void {
+  cy.elements().removeClass(FOCUS_CLASSES)
+  if (mode === "overview" || focusCore === null) return
+  if (visualMode === "full") {
+    cy.elements().addClass("focus-full")
+    return
+  }
+
+  const hierarchy = deriveGraphFocusHierarchy(projection, focusCore)
+  collectionForIds(cy, hierarchy.coreEntityIds).addClass("focus-core")
+  collectionForIds(cy, hierarchy.neighborEntityIds).addClass("focus-neighbor")
+  collectionForIds(cy, hierarchy.coreRelationshipIds).addClass("focus-relationship")
+  collectionForIds(cy, hierarchy.coreConnectionIds).addClass("focus-connection")
+  collectionForIds(cy, hierarchy.boundaryRelationshipIds).addClass("focus-boundary")
+  collectionForIds(cy, hierarchy.neighborRelationshipIds).addClass("focus-neighbor-edge")
+}
+
+function applyCitationEmphasis(
+  cy: Core,
+  projection: GraphProjection,
+  emphasis: GraphEmphasisIntent | null,
+  focusCore: GraphHighlight | null,
+  focusActive: boolean,
+  animate: boolean,
+): void {
   cy.elements().removeClass(CITATION_CLASSES)
   if (emphasis === null) return
 
@@ -61,15 +104,24 @@ function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: 
     .filter((relationship) => entityIds.has(relationship.source_entity_id) && entityIds.has(relationship.target_entity_id))
     .map((relationship) => relationship.id)
   const targetIds = [...emphasis.entityIds, ...emphasis.relationshipIds]
-  const targets = targetIds.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
+  const targets = collectionForIds(cy, targetIds)
   if (targets.length === 0) return
 
-  const connecting = connectingIds.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
-  const emphasizedEdges = emphasis.relationshipIds.reduce((collection, id) => collection.union(cy.getElementById(id)), connecting)
+  const connecting = collectionForIds(cy, connectingIds)
+  const emphasizedEdges = collectionForIds(cy, emphasis.relationshipIds).union(connecting)
   cy.nodes().addClass("citation-dimmed")
   cy.edges().addClass("citation-dimmed")
-  targets.addClass("citation-target").removeClass("citation-dimmed")
-  emphasizedEdges.addClass("citation-connecting").removeClass("citation-dimmed")
+  if (focusActive && focusCore !== null) {
+    const hierarchy = deriveGraphFocusHierarchy(projection, focusCore)
+    collectionForIds(cy, [
+      ...hierarchy.coreEntityIds,
+      ...hierarchy.coreRelationshipIds,
+      ...hierarchy.coreConnectionIds,
+    ]).addClass("citation-secondary").removeClass("citation-dimmed")
+  }
+  targets.addClass("citation-target").removeClass("citation-dimmed citation-secondary")
+  emphasizedEdges.addClass("citation-connecting").removeClass("citation-dimmed citation-secondary")
+  if (!animate) return
   const animation = {
     fit: { ["el" + "es"]: targets, padding: 72 },
     duration: 350,
@@ -79,13 +131,18 @@ function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: 
 
 export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const { mode, onEntity, onRelationship, projection } = props
+  const emphasisIntent = props.emphasisIntent ?? null
+  const focusCore = props.focusCore ?? null
   const containerRef = useRef<HTMLDivElement>(null)
   const cytoscapeRef = useRef<Core | null>(null)
   const onEntityRef = useRef(onEntity)
   const onRelationshipRef = useRef(onRelationship)
-  const emphasisRef = useRef(props.emphasisIntent ?? null)
+  const emphasisRef = useRef(emphasisIntent)
+  const focusCoreRef = useRef(focusCore)
+  const visualModeRef = useRef<GraphVisualMode>(mode === "overview" ? "full" : "focus")
   const onClearEmphasisRef = useRef(props.onClearEmphasis ?? (() => undefined))
   const [rendererError, setRendererError] = useState(false)
+  const [visualMode, setVisualMode] = useState<GraphVisualMode>(mode === "overview" ? "full" : "focus")
   const [tooltip, setTooltip] = useState<{ content: GraphTooltipContent; x: number; y: number; bounds: { width: number; height: number } } | null>(null)
   const elements = useMemo(() => buildProjectionElements(projection), [projection])
   const entities = useMemo(() => new Map(projection.entities.map((entity) => [entity.id, entity])), [projection.entities])
@@ -93,13 +150,28 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
 
   useEffect(() => { onEntityRef.current = onEntity }, [onEntity])
   useEffect(() => { onRelationshipRef.current = onRelationship }, [onRelationship])
-  useEffect(() => { emphasisRef.current = props.emphasisIntent ?? null }, [props.emphasisIntent])
+  useEffect(() => { emphasisRef.current = emphasisIntent }, [emphasisIntent])
+  useEffect(() => { focusCoreRef.current = focusCore }, [focusCore])
+  useEffect(() => { visualModeRef.current = visualMode }, [visualMode])
   useEffect(() => { onClearEmphasisRef.current = props.onClearEmphasis ?? (() => undefined) }, [props.onClearEmphasis])
 
   useEffect(() => {
     const cy = cytoscapeRef.current
-    if (cy !== null) applyCitationEmphasis(cy, projection, props.emphasisIntent ?? null)
-  }, [projection, props.emphasisIntent])
+    if (cy !== null) applyCitationEmphasis(cy, projection, emphasisRef.current, focusCoreRef.current, mode !== "overview" && visualModeRef.current === "focus", true)
+  }, [mode, projection, emphasisIntent])
+
+  useEffect(() => {
+    const nextMode = mode === "overview" ? "full" : "focus"
+    visualModeRef.current = nextMode
+    setVisualMode(nextMode)
+  }, [mode, projection])
+
+  useEffect(() => {
+    const cy = cytoscapeRef.current
+    if (cy === null) return
+    applyFocusHierarchy(cy, projection, mode, visualMode, focusCore)
+    applyCitationEmphasis(cy, projection, emphasisRef.current, focusCore, mode !== "overview" && visualMode === "focus", false)
+  }, [focusCore, mode, projection, visualMode])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -146,13 +218,25 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           { selector: 'node[entityType = "EVENT"]', style: { "background-color": theme.event } },
           { selector: "node.hovered", style: { "border-width": 3 } },
           { selector: "node.seed", style: { "font-size": 11, "border-color": theme.seed, "border-width": 4 } },
-          { selector: "node.ui-selected", style: { "border-color": theme.foreground, "border-style": "double", "border-width": 4 } },
           { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": theme.border, "target-arrow-color": theme.border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
           { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.9, "z-index": 8 } },
+          { selector: "node.focus-core", style: { opacity: 1, "text-opacity": 1, "font-size": 11, "border-color": theme.seed, "border-width": 4, "z-index": 20 } },
+          { selector: "node.focus-neighbor", style: { opacity: 0.26, "text-opacity": 0, "border-color": theme.background, "border-width": 2, "z-index": 4 } },
+          { selector: "edge.focus-relationship", style: { width: 4, opacity: 1, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.95, "z-index": 18 } },
+          { selector: "edge.focus-connection", style: { width: 2.4, opacity: 0.58, "line-color": theme.foreground, "target-arrow-color": theme.foreground, "arrow-scale": 0.72, "z-index": 12 } },
+          { selector: "edge.focus-boundary", style: { width: 1, opacity: 0.12, "line-color": theme.border, "target-arrow-color": theme.border, "arrow-scale": 0.5, "z-index": 3 } },
+          { selector: "edge.focus-neighbor-edge", style: { width: 0.8, opacity: 0.055, "line-color": theme.border, "target-arrow-color": theme.border, "arrow-scale": 0.42, "z-index": 2 } },
+          { selector: "node.seed.focus-full", style: { "font-size": 9, "border-color": theme.background, "border-width": 2 } },
+          { selector: "edge.seed-relationship.focus-full", style: { width: 1.2, opacity: 0.48, "line-color": theme.border, "target-arrow-color": theme.border, "arrow-scale": 0.58 } },
+          { selector: "node.ui-selected", style: { opacity: 1, "text-opacity": 1, "border-color": theme.foreground, "border-style": "double", "border-width": 4, "z-index": 22 } },
           { selector: "edge.hovered, edge.ui-selected", style: { label: "data(sourceLabel) → data(targetLabel)", color: theme.foreground, "font-size": 9, "text-background-color": theme.background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "z-index": 12 } },
           { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": theme.foreground, "target-arrow-color": theme.foreground } },
+          { selector: "node.focus-neighbor.hovered, node.focus-neighbor.ui-selected", style: { opacity: 1, "text-opacity": 1, "z-index": 22 } },
+          { selector: "edge.focus-boundary.hovered, edge.focus-neighbor-edge.hovered, edge.focus-boundary.ui-selected, edge.focus-neighbor-edge.ui-selected", style: { opacity: 1, "z-index": 22 } },
           { selector: "node.citation-dimmed", style: { opacity: 0.32 } },
           { selector: "edge.citation-dimmed", style: { opacity: 0.18 } },
+          { selector: "node.citation-secondary", style: { opacity: 0.58, "text-opacity": 1 } },
+          { selector: "edge.citation-secondary", style: { opacity: 0.38 } },
           { selector: "node.citation-target", style: { opacity: 1, "border-color": theme.foreground, "border-width": 5, "overlay-color": theme.seed, "overlay-opacity": 0.16, "overlay-padding": 8, "overlay-shape": "ellipse", "z-index": 30 } },
           { selector: "edge.citation-target, edge.citation-connecting", style: { width: 4, opacity: 1, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.95, "z-index": 24 } },
         ],
@@ -180,8 +264,9 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         cy.on("tap", (event) => { if (event.target === cy && emphasisRef.current !== null) onClearEmphasisRef.current() })
         instance = cy
         cytoscapeRef.current = cy
-        runLayout(cy, projection, mode, false)
-        applyCitationEmphasis(cy, projection, emphasisRef.current)
+        applyFocusHierarchy(cy, projection, mode, visualModeRef.current, focusCoreRef.current)
+        runLayout(cy, projection, mode, visualModeRef.current, focusCoreRef.current, false)
+        applyCitationEmphasis(cy, projection, emphasisRef.current, focusCoreRef.current, mode !== "overview" && visualModeRef.current === "focus", false)
       }).catch(failInitialization)
     }
 
@@ -208,15 +293,16 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const missingCount = projection.missing_entity_ids.length
     + projection.missing_relationship_ids.length
     + projection.unresolved_relationship_ids.length
-  const seedCount = projection.seed_entity_ids.length + projection.seed_relationship_ids.length
+  const coreCount = (props.focusCore?.entityIds.length ?? 0) + (props.focusCore?.relationshipIds.length ?? 0)
   const missingIds = [
     ...projection.missing_entity_ids,
     ...projection.missing_relationship_ids,
     ...projection.unresolved_relationship_ids,
   ]
   const focused = mode !== "overview"
+  const finalContextFocus = mode === "query-focus" && props.focusKind === "final-context"
   const title = mode === "query-focus" ? "Query focus" : mode === "explorer-focus" ? "Focused subgraph" : "Overview"
-  const seedLabel = mode === "query-focus" ? "Query seed" : "Seed"
+  const coreLabel = finalContextFocus ? "Final context" : "Focus target"
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -227,16 +313,22 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
             {props.loading ? <LoaderCircle className="size-3.5 animate-spin text-primary" aria-label="Loading graph data" /> : null}
           </div>
           <p className="text-muted-foreground">
-            {focused ? `${seedCount} seeds · ` : ""}{projection.entities.length} nodes · {projection.relationships.length} edges
+            {focused ? `${coreCount} ${finalContextFocus ? "final context" : "focus"} records · ` : ""}{projection.entities.length} nodes · {projection.relationships.length} edges
             {mode === "overview" && projection.unresolved_relationship_count > 0 ? ` · ${projection.unresolved_relationship_count} unresolved relationships in source graph` : ""}
             {projection.truncated ? " · bounded view" : ""}
           </p>
           {props.summary !== null ? <p className="text-muted-foreground">{props.summary.entity_count.toLocaleString()} entities · {props.summary.relationship_count.toLocaleString()} relationships · {props.summary.community_count.toLocaleString()} communities · {props.summary.community_report_count.toLocaleString()} reports</p> : null}
         </div>
         <div className="flex items-center gap-1">
+          {focused ? (
+            <div className="flex rounded-md border p-0.5" role="group" aria-label="Graph visibility">
+              <Button variant={visualMode === "focus" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "focus"} onClick={() => setVisualMode("focus")}>Focus</Button>
+              <Button variant={visualMode === "full" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "full"} onClick={() => setVisualMode("full")}>Full</Button>
+            </div>
+          ) : null}
           {focused ? <Button variant="outline" size="sm" onClick={props.onBack}>{props.backLabel}</Button> : null}
-          <Button variant="ghost" size="icon" title="Fit the current projection" aria-label="Fit graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode) }}><Focus /></Button>
-          <Button variant="ghost" size="icon" title="Re-run layout without loading data" aria-label="Re-layout graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, true) }}><RefreshCcw /></Button>
+          <Button variant="ghost" size="icon" title="Fit the current projection" aria-label="Fit graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode, visualMode, focusCore) }}><Focus /></Button>
+          <Button variant="ghost" size="icon" title="Re-run layout without loading data" aria-label="Re-layout graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, visualMode, focusCore, true) }}><RefreshCcw /></Button>
           <Button variant="ghost" size="icon" title="Reload graph data from the backend" aria-label="Reload graph data" onClick={props.onReload}><RotateCw /></Button>
         </div>
       </div>
@@ -250,7 +342,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
       ) : null}
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground" aria-label="Graph legend">
         <Legend color="var(--graph-person)" label="PERSON" /><Legend color="var(--graph-organization)" label="ORGANIZATION" /><Legend color="var(--graph-geo)" label="GEO" /><Legend color="var(--graph-event)" label="EVENT" /><Legend color="var(--graph-default)" label="Other" />
-        <span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{seedLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)]" />Neighbor</span>
+        {focused ? <><span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{coreLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)] opacity-30" />Context neighbor</span></> : null}
       </div>
       <div className="relative min-h-80 flex-1 overflow-hidden rounded-md border bg-background">
         <div className="absolute inset-0">

@@ -99,7 +99,7 @@ describe("App graph focus ownership", () => {
     expect(screen.getByText("Question Fresh question")).toBeInTheDocument()
   })
 
-  it("prepares a New Query without clearing the current graph", async () => {
+  it("prepares a New Query without retaining the previous Query focus intent", async () => {
     const user = userEvent.setup()
     lifecycle.envelopes = [envelope(1, { type: "entities_selected", entities: [{ id: "entity-a", selected: true }] }, "run-a")]
     render(<App />)
@@ -110,11 +110,11 @@ describe("App graph focus ownership", () => {
     await user.click(screen.getByRole("button", { name: "New Query test" }))
     expect(screen.getByText("Workspace run none")).toBeInTheDocument()
     expect(screen.getByText("Graph run run-a")).toBeInTheDocument()
-    expect(screen.getByText("Graph focus entity-a/ revision 1")).toBeInTheDocument()
+    expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.getByText(/Navigation revision/).textContent).not.toBe(revisionBefore)
   })
 
-  it("waits for successful terminal completion, then auto-focuses the combined evidence exactly once", async () => {
+  it("waits for successful terminal completion, then auto-focuses final-context graph evidence exactly once", async () => {
     const user = userEvent.setup()
     const view = render(<App />)
     await user.click(screen.getByRole("button", { name: "Accept new Query" }))
@@ -123,18 +123,20 @@ describe("App graph focus ownership", () => {
       envelope(1, { type: "entities_selected", entities: [{ id: "entity-a", selected: true }, { id: "entity-rejected", selected: false }] }),
       envelope(2, { type: "graph_expansion_started", seed_entity_ids: ["entity-seed", "entity-a"] }),
       envelope(3, { type: "relationships_selected", relationships: [{ id: "relationship-a", selected: true }, { id: "relationship-rejected", selected: false }] }),
+      envelope(4, { type: "context_section_built", section: { section: "entities", name: "Entities", token_budget: 20, tokens_used: 5, candidate_count: 2, selected_count: 1, truncated: true, selected_record_ids: ["entity-a"] } }),
+      envelope(5, { type: "context_section_built", section: { section: "relationships", name: "Relationships", token_budget: 20, tokens_used: 5, candidate_count: 2, selected_count: 1, truncated: true, selected_record_ids: ["relationship-a"] } }),
     ]
     view.rerender(<App />)
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
 
     lifecycle.status = "completed"
-    lifecycle.envelopes = [...lifecycle.envelopes, envelope(4, { type: "run_completed" })]
+    lifecycle.envelopes = [...lifecycle.envelopes, envelope(6, { type: "run_completed" })]
     view.rerender(<App />)
-    expect(await screen.findByText("Graph focus entity-a,entity-seed/relationship-a revision 1")).toBeInTheDocument()
+    expect(await screen.findByText("Graph focus entity-a/relationship-a revision 1")).toBeInTheDocument()
 
-    lifecycle.envelopes = [...lifecycle.envelopes, envelope(4, { type: "run_completed" })]
+    lifecycle.envelopes = [...lifecycle.envelopes, envelope(6, { type: "run_completed" })]
     view.rerender(<App />)
-    expect(screen.getByText("Graph focus entity-a,entity-seed/relationship-a revision 1")).toBeInTheDocument()
+    expect(screen.getByText("Graph focus entity-a/relationship-a revision 1")).toBeInTheDocument()
     expect(screen.queryByText(/revision 2/)).not.toBeInTheDocument()
   })
 

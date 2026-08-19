@@ -1,4 +1,5 @@
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
+import { latestContextSections } from "@/lib/context-evidence"
 
 export type TimelineCategory = "Lifecycle" | "Retrieval" | "Graph" | "Context" | "LLM" | "Warning"
 
@@ -69,20 +70,18 @@ export interface GraphHighlight {
 }
 
 export function deriveFinalGraphFocus(envelopes: readonly ExplainabilityEnvelope[]): GraphHighlight | null {
-  const entityIds: string[] = []
-  const relationshipIds: string[] = []
-  const seenEntities = new Set<string>()
-  const seenRelationships = new Set<string>()
-  const ordered = [...envelopes].sort((left, right) => left.sequence - right.sequence)
+  const focus: GraphHighlight = { entityIds: [], relationshipIds: [] }
+  const seen = { entities: new Set<string>(), relationships: new Set<string>() }
 
-  for (const envelope of ordered) {
-    const highlight = highlightFromEvent(envelope.record.event)
-    if (highlight === null) continue
-    appendFirstSeen(entityIds, seenEntities, highlight.entityIds)
-    appendFirstSeen(relationshipIds, seenRelationships, highlight.relationshipIds)
+  for (const section of latestContextSections(envelopes)) {
+    if (section.section === "entities") {
+      appendFirstSeen(focus.entityIds, seen.entities, section.selected_record_ids)
+    } else if (section.section === "relationships") {
+      appendFirstSeen(focus.relationshipIds, seen.relationships, section.selected_record_ids)
+    }
   }
 
-  return nonEmptyHighlight({ entityIds, relationshipIds })
+  return nonEmptyHighlight(focus)
 }
 
 function appendFirstSeen(target: string[], seen: Set<string>, values: readonly string[]): void {
