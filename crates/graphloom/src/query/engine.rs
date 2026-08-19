@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
 use super::{
-    BasicQueryRuntime, DriftQueryRuntime, GlobalQueryRuntime, LocalQueryInstrumentation,
-    LocalQueryRuntime, QueryCallbackChain, QueryCallbacks, QueryEventStream, QueryOptions,
+    BasicQueryRuntime, DriftQueryRuntime, GlobalQueryRuntime, LocalQueryRuntime,
+    QueryCallbackChain, QueryCallbacks, QueryEventStream, QueryInstrumentation, QueryOptions,
     QueryResult, QueryRuntimeFactory, Result, SearchMethod,
     basic::{basic_search, basic_search_streaming},
     drift::{drift_search, drift_search_streaming},
@@ -127,14 +127,14 @@ impl QueryEngine {
     /// Returns a typed Query error for invalid request options, missing snapshot resources, or
     /// model/provider failures.
     pub async fn query(&self, options: QueryOptions) -> crate::Result<QueryResult> {
-        let instrumentation = LocalQueryInstrumentation::start(&options, false).await;
+        let instrumentation = QueryInstrumentation::start(&options, false).await;
         self.query_with_session(options, instrumentation).await
     }
 
     pub(crate) async fn query_with_session(
         &self,
         options: QueryOptions,
-        instrumentation: Option<LocalQueryInstrumentation>,
+        instrumentation: Option<QueryInstrumentation>,
     ) -> crate::Result<QueryResult> {
         let result = self.query_inner(&options, instrumentation.clone()).await;
         if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
@@ -146,7 +146,7 @@ impl QueryEngine {
     async fn query_inner(
         &self,
         options: &QueryOptions,
-        instrumentation: Option<LocalQueryInstrumentation>,
+        instrumentation: Option<QueryInstrumentation>,
     ) -> crate::Result<QueryResult> {
         match options.method {
             SearchMethod::Basic => {
@@ -169,7 +169,13 @@ impl QueryEngine {
             SearchMethod::Global => {
                 self.validate_project_root(options).await?;
                 let runtime = self.global_runtime(options).await?;
-                Ok(global_search(runtime, &options.query, &options.response_type).await?)
+                Ok(global_search(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
+                )
+                .await?)
             }
             SearchMethod::Drift => {
                 self.validate_project_root(options).await?;
@@ -186,7 +192,7 @@ impl QueryEngine {
     /// Returns a typed Query error when resource preparation or the provider stream handshake
     /// fails.
     pub async fn query_stream(&self, options: QueryOptions) -> crate::Result<QueryEventStream> {
-        let instrumentation = LocalQueryInstrumentation::start(&options, true).await;
+        let instrumentation = QueryInstrumentation::start(&options, true).await;
         self.query_stream_with_session(options, instrumentation)
             .await
     }
@@ -194,7 +200,7 @@ impl QueryEngine {
     pub(crate) async fn query_stream_with_session(
         &self,
         options: QueryOptions,
-        instrumentation: Option<LocalQueryInstrumentation>,
+        instrumentation: Option<QueryInstrumentation>,
     ) -> crate::Result<QueryEventStream> {
         let result = self
             .query_stream_inner(&options, instrumentation.clone())
@@ -208,7 +214,7 @@ impl QueryEngine {
     async fn query_stream_inner(
         &self,
         options: &QueryOptions,
-        instrumentation: Option<LocalQueryInstrumentation>,
+        instrumentation: Option<QueryInstrumentation>,
     ) -> crate::Result<QueryEventStream> {
         match options.method {
             SearchMethod::Basic => {
@@ -231,10 +237,13 @@ impl QueryEngine {
             SearchMethod::Global => {
                 self.validate_project_root(options).await?;
                 let runtime = self.global_runtime(options).await?;
-                Ok(
-                    global_search_streaming(runtime, &options.query, &options.response_type)
-                        .await?,
+                Ok(global_search_streaming(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
                 )
+                .await?)
             }
             SearchMethod::Drift => {
                 self.validate_project_root(options).await?;

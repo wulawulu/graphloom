@@ -8,7 +8,9 @@ use serde::{
     ser::Error as _,
 };
 
-use super::{ContextSectionBudget, ExplainabilityCandidate};
+use super::{
+    ContextSectionBudget, ExplainabilityCandidate, GlobalMapPointDecision, GlobalMapPointEvidence,
+};
 
 /// Maximum bytes for record IDs, model IDs, codes, titles, and other short metadata.
 pub(crate) const MAX_METADATA_STRING_BYTES: usize = 256;
@@ -22,6 +24,8 @@ pub(crate) const MAX_CANDIDATES: usize = 10_000;
 pub(crate) const MAX_RECORD_IDS: usize = 10_000;
 /// Maximum logical context-section budgets in one event.
 pub(crate) const MAX_CONTEXT_SECTIONS: usize = 32;
+/// Maximum Global map points or Reduce decisions in one event.
+pub(crate) const MAX_GLOBAL_MAP_POINTS: usize = 10_000;
 
 fn validate_string(value: &str, max_bytes: usize, label: &str) -> Result<(), String> {
     if value.len() > max_bytes {
@@ -336,6 +340,66 @@ pub(crate) mod context_sections {
         D: Deserializer<'de>,
     {
         deserialize_vec::<D, ContextSectionBudget, MAX_CONTEXT_SECTIONS>(deserializer)
+    }
+}
+
+pub(crate) mod global_map_points {
+    use serde::{Deserializer, Serializer};
+
+    use super::{GlobalMapPointEvidence, MAX_GLOBAL_MAP_POINTS, deserialize_vec, serialize_slice};
+
+    pub(crate) fn serialize<S>(
+        value: &[GlobalMapPointEvidence],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(
+            value,
+            serializer,
+            MAX_GLOBAL_MAP_POINTS,
+            "Global map point array",
+        )
+    }
+
+    pub(crate) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<GlobalMapPointEvidence>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, GlobalMapPointEvidence, MAX_GLOBAL_MAP_POINTS>(deserializer)
+    }
+}
+
+pub(crate) mod global_map_point_decisions {
+    use serde::{Deserializer, Serializer};
+
+    use super::{GlobalMapPointDecision, MAX_GLOBAL_MAP_POINTS, deserialize_vec, serialize_slice};
+
+    pub(crate) fn serialize<S>(
+        value: &[GlobalMapPointDecision],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(
+            value,
+            serializer,
+            MAX_GLOBAL_MAP_POINTS,
+            "Global map point decision array",
+        )
+    }
+
+    pub(crate) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<GlobalMapPointDecision>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, GlobalMapPointDecision, MAX_GLOBAL_MAP_POINTS>(deserializer)
     }
 }
 

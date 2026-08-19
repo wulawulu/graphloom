@@ -15,15 +15,60 @@ use graphloom::{
         ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
         ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
         ExplainabilityScore, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
-        ExplainabilitySinkOperation, ExplainabilitySpanId, JsonlExplainabilityOptions,
-        JsonlExplainabilityRecorder, NoopExplainabilitySink, QueryStarted, RelationshipsSelected,
-        RunStarted, SelectionReason, TextUnitsSelected,
+        ExplainabilitySinkOperation, ExplainabilitySpanId, GlobalMapBatchBuilt,
+        GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
+        GlobalMapPointsProduced, GlobalReduceContextBuilt, GlobalReduceSkipReason,
+        GlobalReduceSkipped, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
+        NoopExplainabilitySink, QueryStarted, RelationshipsSelected, RunStarted, SelectionReason,
+        TextUnitsSelected,
     },
     query::{QueryExplainabilityOptions, QueryOptions, SearchMethod},
 };
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+#[test]
+fn test_should_expose_additive_static_global_event_contract() -> TestResult {
+    let mut batch = GlobalMapBatchBuilt::new(
+        1,
+        vec!["report-a".to_owned(), "report-b".to_owned()],
+        42,
+        100,
+    );
+    batch.context = Some("exact map context".to_owned());
+    let events = [
+        ExplainabilityEvent::GlobalMapBatchBuilt(batch),
+        ExplainabilityEvent::GlobalMapPointsProduced(GlobalMapPointsProduced::try_new(
+            1,
+            vec![{
+                let mut point = GlobalMapPointEvidence::new(1, 0, i64::MAX);
+                point.answer = Some("exact answer".to_owned());
+                point
+            }],
+        )?),
+        ExplainabilityEvent::GlobalReduceContextBuilt(GlobalReduceContextBuilt::try_new(
+            10,
+            0,
+            true,
+            vec![GlobalMapPointDecision::new(
+                1,
+                0,
+                i64::MAX,
+                false,
+                GlobalMapPointDecisionReason::TokenBudget,
+            )],
+        )?),
+        ExplainabilityEvent::GlobalReduceSkipped(GlobalReduceSkipped::new(
+            GlobalReduceSkipReason::NoPositivePoints,
+        )),
+    ];
+    for event in events {
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 enum ObservedCall {

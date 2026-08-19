@@ -176,11 +176,11 @@ pub struct QueryArgs {
         help = "Print the response in a streaming manner."
     )]
     pub no_streaming: bool,
-    /// Write Local Query Explainability envelopes as JSONL.
+    /// Write supported Query Explainability envelopes as JSONL.
     #[arg(
         long = "explain-output",
         value_name = "EXPLAIN_OUTPUT",
-        help = "Write Local Query Explainability envelopes as JSONL."
+        help = "Write Local or static Global Query Explainability envelopes as JSONL."
     )]
     pub explain_output: Option<PathBuf>,
     /// Explainability content policy; valid only with `--explain-output` and defaults to metadata.
@@ -189,7 +189,7 @@ pub struct QueryArgs {
         value_name = "EXPLAIN_CONTENT",
         value_enum,
         requires = "explain_output",
-        help = "Explainability content policy for Local Query JSONL [possible values: metadata, \
+        help = "Explainability content policy for Query JSONL [possible values: metadata, \
                 content, debug]."
     )]
     pub explain_content: Option<ExplainabilityContentArg>,
@@ -265,9 +265,11 @@ where
 }
 
 fn validate_query_explainability(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
-    if args.explain_output.is_some() && !matches!(args.method, SearchMethod::Local) {
+    if args.explain_output.is_some()
+        && !matches!(args.method, SearchMethod::Local | SearchMethod::Global)
+    {
         return Err(query_path_error(
-            "--explain-output currently supports only --method local".to_owned(),
+            "--explain-output currently supports --method local and static global".to_owned(),
         ));
     }
     Ok(())

@@ -10,9 +10,9 @@ use tracing::Instrument;
 use super::super::{
     ConversationHistory, LocalQueryRuntime, QueryContext, QueryContextText, QueryError, QueryEvent,
     QueryEventStream, QueryResult, Result, SearchMethod,
-    explainability::QueryExplainabilitySession,
+    explainability::LocalQueryExplainability as QueryExplainabilitySession,
     observability::{
-        LlmSpanLatch, LocalQueryInstrumentation, QueryTraceSession, query_error_kind,
+        LlmSpanLatch, QueryInstrumentation, QueryTraceSession, query_error_kind,
         record_stage_error, record_u64, usize_to_u64,
     },
     result::count_completion_input,
@@ -34,7 +34,7 @@ pub(crate) async fn local_search(
     query: &str,
     response_type: &str,
     conversation_history: Option<&ConversationHistory>,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryResult> {
     let mut events = local_search_streaming(
         runtime,
@@ -66,7 +66,7 @@ pub(crate) async fn local_search_streaming(
     query: &str,
     response_type: &str,
     conversation_history: Option<&ConversationHistory>,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryEventStream> {
     match prepare_local_stream(
         runtime,
@@ -92,12 +92,12 @@ async fn prepare_local_stream(
     query: &str,
     response_type: &str,
     conversation_history: Option<&ConversationHistory>,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryEventStream> {
     let started = Instant::now();
     let explainability = instrumentation
         .as_ref()
-        .and_then(|item| item.explainability());
+        .and_then(|item| item.local_explainability());
     let trace = instrumentation.as_ref().and_then(|item| item.trace());
     let built = runtime
         .local_context
@@ -309,7 +309,7 @@ fn local_context_text(context: &QueryContext) -> Result<&str> {
 struct LocalCompletionState {
     events: QueryEventStream,
     llm: LlmSpanLatch,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
     llm_started: Instant,
     completion_model_id: String,
     context_tokens: Option<u64>,
@@ -317,7 +317,7 @@ struct LocalCompletionState {
 
 fn instrument_local_completion_stream(
     events: QueryEventStream,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
     llm: LlmSpanLatch,
     llm_started: Instant,
     completion_model_id: String,
@@ -351,7 +351,7 @@ async fn next_local_completion_event(
             state.llm.finish_ok(&result);
             if let Some(instrumentation) = &state.instrumentation {
                 instrumentation.finish_trace_success(&result, state.context_tokens);
-                if let Some(session) = instrumentation.explainability() {
+                if let Some(session) = instrumentation.local_explainability() {
                     emit_llm_completed(
                         session,
                         &state.completion_model_id,
@@ -383,7 +383,7 @@ async fn next_local_completion_event(
 }
 
 async fn emit_llm_completed(
-    session: &super::super::explainability::QueryExplainabilitySession,
+    session: &super::super::explainability::LocalQueryExplainability,
     completion_model_id: &str,
     llm_started: Instant,
     result: &QueryResult,

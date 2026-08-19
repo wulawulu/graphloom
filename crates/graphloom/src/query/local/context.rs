@@ -16,7 +16,7 @@ use super::super::{
     QueryContextRecords, QueryContextText, QueryDataIndex, QueryError, QueryUsageCategory,
     Relationship, Result, SearchMethod, TextUnit,
     context::ContextTable,
-    explainability::QueryExplainabilitySession,
+    explainability::LocalQueryExplainability as QueryExplainabilitySession,
     observability::{
         QueryTraceSession, query_error_kind, record_stage_error, record_u64, usize_to_u64,
     },

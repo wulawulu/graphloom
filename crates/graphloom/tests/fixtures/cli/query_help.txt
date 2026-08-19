@@ -52,10 +52,10 @@ Options:
           Print the response in a streaming manner.
 
       --explain-output <EXPLAIN_OUTPUT>
-          Write Local Query Explainability envelopes as JSONL.
+          Write Local or static Global Query Explainability envelopes as JSONL.
 
       --explain-content <EXPLAIN_CONTENT>
-          Explainability content policy for Local Query JSONL [possible values: metadata, content, debug].
+          Explainability content policy for Query JSONL [possible values: metadata, content, debug].
 
           Possible values:
           - metadata: Persist metadata and identifiers without user or model content

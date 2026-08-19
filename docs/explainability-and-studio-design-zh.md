@@ -1720,13 +1720,35 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 不在 Drop 中执行异步工作、不 spawn 隐藏任务，Run 暂时保持未完成，等待后续 Store/Studio
 阶段通过超时或 abandoned 状态处理。
 
-当前只有 Local Query 接入运行时 Explainability。Basic、Global 和 DRIFT 即使收到请求配置
-也不会产生 Local 事件。JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run
-sequence allocator、Live Hub、host-side Explainability SSE、Studio Local Query API、Query Result、
-Run metadata、Run history API、Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 OpenTelemetry
-仍属于后续阶段。
-Basic、Global 与 DRIFT 尚未接入完整 Explainability 生命周期，因此 Studio 当前对这些 method
-返回 422，不伪造事件或创建无法完成的 Run。
+Core runtime 当前完整接入 Local Query 与 static Global Query Explainability。Dynamic Global、
+Basic 和 DRIFT 即使收到请求配置也保持安全 no-op，不会创建缺失关键 evidence 的半截 Run。
+Local tracing topology 保持不变；static Global 仅接入 Explainability，不扩展 OpenTelemetry。
+JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence allocator、Live Hub、
+host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
+Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
+Semantic Timeline 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
+Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 static Global Explainability 的支持。
+
+Static Global 的 request-scoped topology 与真实 fan-out/fan-in 如下；每个 batch span 都有独立
+ID，`batch_index` 是语义身份，持久化 sequence 只表示实际 emission 顺序：
+
+```text
+Query root
+├── Global context
+│   └── GlobalContextBuilt
+├── Map
+│   ├── batch 0: BatchBuilt → LLM Started → LLM Completed → PointsProduced
+│   ├── batch 1: BatchBuilt → LLM Started → LLM Completed → PointsProduced
+│   └── ...（并行，完成顺序不保证等于 batch_index）
+└── Reduce
+    ├── ReduceContextBuilt（含每个 point 的真实 selection decision）
+    ├── ReduceSkipped(NoPositivePoints)，或
+    └── LLM Started → streamed completion → LLM Completed
+```
+
+CommunityReport stable ID 在真实 batch-local sort 后、CSV render 前后同一构造路径中作为
+sidecar 捕获，不从 CSV 或 short ID 反推。Reduce decision 也在真实 `score > 0`、stable score
+sort 与 first-over-budget `break` 循环中捕获；Explainability 不重新执行 selection。
 
 前端可据此处理：
 

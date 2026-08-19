@@ -54,6 +54,95 @@ pub enum SelectionReason {
     MissingRecord,
 }
 
+/// Decision applied to one parsed Global map point during Reduce context fitting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GlobalMapPointDecisionReason {
+    /// The positive point was selected for the Reduce context.
+    Selected,
+    /// The point was excluded because its score was zero or negative.
+    NonPositiveScore,
+    /// The positive point was not included after the first token-budget stop.
+    TokenBudget,
+}
+
+/// Parsed evidence produced by one Global map analyst.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GlobalMapPointEvidence {
+    /// Stable zero-based map batch index.
+    pub batch_index: u32,
+    /// Zero-based point order returned by `parse_map_points` for this batch.
+    pub point_index: u32,
+    /// Parsed GraphRAG importance score.
+    pub score: i64,
+    /// Exact parsed point description when content disclosure is enabled.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_content_string"
+    )]
+    pub answer: Option<String>,
+}
+
+impl GlobalMapPointEvidence {
+    /// Create metadata-only parsed point evidence.
+    #[must_use]
+    pub const fn new(batch_index: u32, point_index: u32, score: i64) -> Self {
+        Self {
+            batch_index,
+            point_index,
+            score,
+            answer: None,
+        }
+    }
+}
+
+/// Reduce-selection decision for one parsed Global map point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GlobalMapPointDecision {
+    /// Stable zero-based map batch index.
+    pub batch_index: u32,
+    /// Zero-based point order returned by `parse_map_points` for this batch.
+    pub point_index: u32,
+    /// Parsed GraphRAG importance score.
+    pub score: i64,
+    /// Whether the point entered the exact Reduce context.
+    pub selected: bool,
+    /// Proven selection or exclusion reason.
+    pub reason: GlobalMapPointDecisionReason,
+    /// Exact parsed point description when content disclosure is enabled.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_content_string"
+    )]
+    pub answer: Option<String>,
+}
+
+impl GlobalMapPointDecision {
+    /// Create metadata-only Reduce decision evidence.
+    #[must_use]
+    pub const fn new(
+        batch_index: u32,
+        point_index: u32,
+        score: i64,
+        selected: bool,
+        reason: GlobalMapPointDecisionReason,
+    ) -> Self {
+        Self {
+            batch_index,
+            point_index,
+            score,
+            selected,
+            reason,
+            answer: None,
+        }
+    }
+}
+
 /// Logical section of a constructed query context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -364,7 +453,9 @@ mod tests {
     use super::{
         ContextSectionKind, ExplainabilityCandidate, ExplainabilityContextSection,
         ExplainabilityQueryMethod, ExplainabilityRecordType, ExplainabilityRun,
-        ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore, SelectionReason,
+        ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore,
+        GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
+        SelectionReason,
     };
     use crate::{explainability::ExplainabilityRunId, query::SearchMethod};
 
@@ -381,6 +472,14 @@ mod tests {
                 "community_report",
             ),
             (ExplainabilityRecordType::Covariate, "covariate"),
+        ])?;
+        assert_serialized_names(&[
+            (GlobalMapPointDecisionReason::Selected, "selected"),
+            (
+                GlobalMapPointDecisionReason::NonPositiveScore,
+                "non_positive_score",
+            ),
+            (GlobalMapPointDecisionReason::TokenBudget, "token_budget"),
         ])?;
         assert_serialized_names(&[
             (SelectionReason::AnnResult, "ann_result"),
@@ -437,6 +536,42 @@ mod tests {
         assert!(serde_json::from_value::<ExplainabilityRunKind>(json!("unknown")).is_err());
         assert!(serde_json::from_value::<ExplainabilityRunStatus>(json!("unknown")).is_err());
         assert!(serde_json::from_value::<ExplainabilityQueryMethod>(json!("unknown")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_round_trip_global_point_identity_scores_and_optional_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let evidence = GlobalMapPointEvidence {
+            batch_index: u32::MAX,
+            point_index: u32::MAX,
+            score: i64::MIN,
+            answer: Some("exact point".to_owned()),
+        };
+        let decision = GlobalMapPointDecision {
+            batch_index: 2,
+            point_index: 3,
+            score: i64::MAX,
+            selected: false,
+            reason: GlobalMapPointDecisionReason::TokenBudget,
+            answer: None,
+        };
+        assert_eq!(
+            serde_json::from_value::<GlobalMapPointEvidence>(serde_json::to_value(&evidence)?)?,
+            evidence
+        );
+        assert_eq!(
+            serde_json::from_value::<GlobalMapPointDecision>(serde_json::to_value(&decision)?)?,
+            decision
+        );
+        assert!(
+            serde_json::from_value::<GlobalMapPointEvidence>(json!({
+                "batch_index": u64::from(u32::MAX) + 1,
+                "point_index": 0,
+                "score": 1,
+            }))
+            .is_err()
+        );
         Ok(())
     }
 

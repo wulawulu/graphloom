@@ -1,4 +1,4 @@
-//! Request-scoped Local Search Explainability orchestration.
+//! Request-scoped Query Explainability lifecycle and method-specific span topology.
 
 use std::{
     sync::{
@@ -30,13 +30,15 @@ use crate::{
 
 const DELIVERY_ERROR_KIND: &str = "explainability_delivery";
 const DELIVERY_ERROR_MESSAGE: &str = "One or more explainability records could not be delivered.";
-const QUERY_ERROR_MESSAGE: &str = "Local query execution failed.";
+const LOCAL_QUERY_ERROR_MESSAGE: &str = "Local query execution failed.";
+const GLOBAL_QUERY_ERROR_MESSAGE: &str = "Global query execution failed.";
 
 /// Request-scoped configuration for Query Explainability.
 ///
 /// The caller owns the run identity and sink. This allows a host such as Studio to create a run,
 /// establish subscriptions, and then execute the Query with the same identity. In the current
-/// phase only Local Search emits Explainability events; other Query methods ignore this option.
+/// runtime supports Local Search and static Global Search. Dynamic Global, Basic, and DRIFT
+/// queries ignore this option without error until their complete evidence contracts are available.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct QueryExplainabilityOptions {
@@ -89,7 +91,7 @@ impl QueryExplainabilityOptions {
 }
 
 #[derive(Debug)]
-pub(crate) struct QueryExplainabilitySpans {
+pub(crate) struct LocalExplainabilitySpans {
     root: ExplainabilitySpanId,
     mapping: ExplainabilitySpanId,
     embedding: ExplainabilitySpanId,
@@ -99,10 +101,10 @@ pub(crate) struct QueryExplainabilitySpans {
     llm: ExplainabilitySpanId,
 }
 
-impl QueryExplainabilitySpans {
-    fn generate() -> Self {
+impl LocalExplainabilitySpans {
+    fn generate(root: ExplainabilitySpanId) -> Self {
         Self {
-            root: ExplainabilitySpanId::generate(),
+            root,
             mapping: ExplainabilitySpanId::generate(),
             embedding: ExplainabilitySpanId::generate(),
             retrieval: ExplainabilitySpanId::generate(),
@@ -141,45 +143,78 @@ impl QueryExplainabilitySpans {
     }
 }
 
-/// One Local Query's event identity, delivery state, and terminal lifecycle.
+#[derive(Debug)]
+pub(crate) struct GlobalExplainabilitySpans {
+    context: ExplainabilitySpanId,
+    map: ExplainabilitySpanId,
+    reduce: ExplainabilitySpanId,
+}
+
+impl GlobalExplainabilitySpans {
+    fn generate() -> Self {
+        Self {
+            context: ExplainabilitySpanId::generate(),
+            map: ExplainabilitySpanId::generate(),
+            reduce: ExplainabilitySpanId::generate(),
+        }
+    }
+
+    pub(crate) const fn context(&self) -> &ExplainabilitySpanId {
+        &self.context
+    }
+
+    pub(crate) const fn map(&self) -> &ExplainabilitySpanId {
+        &self.map
+    }
+
+    pub(crate) const fn reduce(&self) -> &ExplainabilitySpanId {
+        &self.reduce
+    }
+}
+
+/// One Query's method-neutral event identity, delivery state, and terminal lifecycle.
 #[derive(Debug)]
 pub(crate) struct QueryExplainabilitySession {
     run_id: ExplainabilityRunId,
     content_mode: ExplainabilityContentMode,
     sink: Arc<dyn ExplainabilitySink>,
-    spans: QueryExplainabilitySpans,
+    method: ExplainabilityQueryMethod,
+    root_span: ExplainabilitySpanId,
     started: Instant,
     delivery_failure_count: AtomicUsize,
     terminal_started: AtomicBool,
 }
 
 impl QueryExplainabilitySession {
-    pub(crate) fn new(options: &QueryExplainabilityOptions) -> Self {
+    fn new(options: &QueryExplainabilityOptions, method: SearchMethod) -> Self {
         Self {
             run_id: options.run_id.clone(),
             content_mode: options.content_mode,
             sink: Arc::clone(&options.sink),
-            spans: QueryExplainabilitySpans::generate(),
+            method: method.into(),
+            root_span: ExplainabilitySpanId::generate(),
             started: Instant::now(),
             delivery_failure_count: AtomicUsize::new(0),
             terminal_started: AtomicBool::new(false),
         }
     }
 
-    pub(crate) async fn start_local(options: &QueryOptions) -> Option<Arc<Self>> {
-        if options.method != SearchMethod::Local {
+    pub(crate) async fn start(options: &QueryOptions) -> Option<Arc<Self>> {
+        let supported = options.method == SearchMethod::Local
+            || (options.method == SearchMethod::Global && !options.dynamic_community_selection);
+        if !supported {
             return None;
         }
         let session = options
             .explainability
             .as_ref()
-            .map(|options| Arc::new(Self::new(options)))?;
-        session.start(&options.query).await;
+            .map(|explainability| Arc::new(Self::new(explainability, options.method)))?;
+        session.emit_start(&options.query).await;
         Some(session)
     }
 
-    pub(crate) const fn spans(&self) -> &QueryExplainabilitySpans {
-        &self.spans
+    pub(crate) const fn root_span(&self) -> &ExplainabilitySpanId {
+        &self.root_span
     }
 
     pub(crate) fn content(&self, value: &str) -> Option<String> {
@@ -188,9 +223,13 @@ impl QueryExplainabilitySession {
             .then(|| value.to_owned())
     }
 
-    pub(crate) async fn start(&self, query: &str) {
+    pub(crate) const fn includes_content(&self) -> bool {
+        self.content_mode.includes_content()
+    }
+
+    async fn emit_start(&self, query: &str) {
         self.emit(
-            self.spans.root(),
+            self.root_span(),
             None,
             ExplainabilityEvent::RunStarted(RunStarted::new(
                 ExplainabilityRunKind::Query,
@@ -198,10 +237,10 @@ impl QueryExplainabilitySession {
             )),
         )
         .await;
-        let mut started = QueryStarted::new(ExplainabilityQueryMethod::Local);
+        let mut started = QueryStarted::new(self.method);
         started.query = self.content(query);
         self.emit(
-            self.spans.root(),
+            self.root_span(),
             None,
             ExplainabilityEvent::QueryStarted(started),
         )
@@ -227,10 +266,10 @@ impl QueryExplainabilitySession {
                 name: event_name::QUERY_EXPLAINABILITY_DELIVERY_FAILED,
                 {
                     "graphloom.run.id" = %self.run_id,
-                    "graphloom.query.method" = "local",
+                    "graphloom.query.method" = %self.method_name(),
                     "graphloom.error.kind" = error_kind::EXPLAINABILITY_DELIVERY,
                 },
-                "Explainability sink rejected a Local Query record"
+                "Explainability sink rejected a Query record"
             );
         }
     }
@@ -249,9 +288,10 @@ impl QueryExplainabilitySession {
                 name: event_name::QUERY_EXPLAINABILITY_CONTRACT_FAILED,
                 {
                     "graphloom.run.id" = %self.run_id,
+                    "graphloom.query.method" = %self.method_name(),
                     "graphloom.error.kind" = error_kind::EVENT_CONTRACT,
                 },
-                "Explainability event failed Local Query contract validation"
+                "Explainability event failed Query contract validation"
             );
         }
     }
@@ -262,14 +302,23 @@ impl QueryExplainabilitySession {
             name: event_name::QUERY_EXPLAINABILITY_SIDECAR_INCOMPLETE,
             {
                 "graphloom.run.id" = %self.run_id,
+                "graphloom.query.method" = %self.method_name(),
                 "graphloom.error.kind" = failure_kind,
             },
-            "Local Query Explainability sidecar data is incomplete"
+            "Query Explainability sidecar data is incomplete"
         );
     }
 
     pub(crate) fn usize_to_u64(&self, value: usize) -> Option<u64> {
         let converted = convert_usize_to_u64(value);
+        if converted.is_none() {
+            self.mark_sidecar_failure("numeric_conversion");
+        }
+        converted
+    }
+
+    pub(crate) fn usize_to_u32(&self, value: usize) -> Option<u32> {
+        let converted = u32::try_from(value).ok();
         if converted.is_none() {
             self.mark_sidecar_failure("numeric_conversion");
         }
@@ -295,26 +344,26 @@ impl QueryExplainabilitySession {
             Some(delivery_failed_event())
         };
         if let Some(event) = event {
-            self.emit(self.spans.root(), None, event).await;
+            self.emit(self.root_span(), None, event).await;
         } else {
-            self.emit(self.spans.root(), None, delivery_failed_event())
+            self.emit(self.root_span(), None, delivery_failed_event())
                 .await;
         }
         self.finish_run().await;
     }
 
     pub(crate) async fn finish_query_error(&self, error: &QueryError) {
-        self.finish_failure(query_error_kind(error), QUERY_ERROR_MESSAGE)
+        self.finish_failure(query_error_kind(error), self.query_error_message())
             .await;
     }
 
     pub(crate) async fn finish_graphloom_error(&self, error: &GraphLoomError) {
-        self.finish_failure(graphloom_error_kind(error), QUERY_ERROR_MESSAGE)
+        self.finish_failure(graphloom_error_kind(error), self.query_error_message())
             .await;
     }
 
     pub(crate) async fn finish_stream_ended(&self) {
-        self.finish_failure("query_completion", QUERY_ERROR_MESSAGE)
+        self.finish_failure("query_completion", self.query_error_message())
             .await;
     }
 
@@ -323,7 +372,7 @@ impl QueryExplainabilitySession {
             return;
         }
         self.emit(
-            self.spans.root(),
+            self.root_span(),
             None,
             ExplainabilityEvent::RunFailed(RunFailed::new(
                 error_kind.to_owned(),
@@ -346,11 +395,107 @@ impl QueryExplainabilitySession {
                 name: event_name::QUERY_EXPLAINABILITY_FINISH_FAILED,
                 {
                     "graphloom.run.id" = %self.run_id,
+                    "graphloom.query.method" = %self.method_name(),
                     "graphloom.error.kind" = error_kind::EXPLAINABILITY_FINISH,
                 },
-                "Explainability sink failed to finalize a Local Query run"
+                "Explainability sink failed to finalize a Query run"
             );
         }
+    }
+
+    const fn method_name(&self) -> &'static str {
+        match self.method {
+            ExplainabilityQueryMethod::Basic => "basic",
+            ExplainabilityQueryMethod::Local => "local",
+            ExplainabilityQueryMethod::Global => "global",
+            ExplainabilityQueryMethod::Drift => "drift",
+        }
+    }
+
+    const fn query_error_message(&self) -> &'static str {
+        match self.method {
+            ExplainabilityQueryMethod::Global => GLOBAL_QUERY_ERROR_MESSAGE,
+            ExplainabilityQueryMethod::Basic
+            | ExplainabilityQueryMethod::Local
+            | ExplainabilityQueryMethod::Drift => LOCAL_QUERY_ERROR_MESSAGE,
+        }
+    }
+}
+
+/// Local Search stage spans paired with the shared Query lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalQueryExplainability {
+    session: Arc<QueryExplainabilitySession>,
+    spans: Arc<LocalExplainabilitySpans>,
+}
+
+impl LocalQueryExplainability {
+    #[cfg(test)]
+    pub(crate) fn new(options: &QueryExplainabilityOptions) -> Self {
+        Self::from_session(Arc::new(QueryExplainabilitySession::new(
+            options,
+            SearchMethod::Local,
+        )))
+    }
+
+    pub(crate) fn from_session(session: Arc<QueryExplainabilitySession>) -> Self {
+        let root = session.root_span().clone();
+        Self {
+            session,
+            spans: Arc::new(LocalExplainabilitySpans::generate(root)),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &LocalExplainabilitySpans {
+        self.spans.as_ref()
+    }
+
+    pub(crate) fn session(&self) -> &QueryExplainabilitySession {
+        self.session.as_ref()
+    }
+}
+
+impl std::ops::Deref for LocalQueryExplainability {
+    type Target = QueryExplainabilitySession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session()
+    }
+}
+
+/// Static Global Search stage spans paired with the shared Query lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) struct GlobalQueryExplainability {
+    session: Arc<QueryExplainabilitySession>,
+    spans: Arc<GlobalExplainabilitySpans>,
+}
+
+impl GlobalQueryExplainability {
+    pub(crate) fn from_session(session: Arc<QueryExplainabilitySession>) -> Self {
+        Self {
+            session,
+            spans: Arc::new(GlobalExplainabilitySpans::generate()),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &GlobalExplainabilitySpans {
+        self.spans.as_ref()
+    }
+
+    pub(crate) fn session(&self) -> &QueryExplainabilitySession {
+        self.session.as_ref()
+    }
+
+    pub(crate) fn batch_span(&self) -> ExplainabilitySpanId {
+        ExplainabilitySpanId::generate()
+    }
+}
+
+impl std::ops::Deref for GlobalQueryExplainability {
+    type Target = QueryExplainabilitySession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session()
     }
 }
 

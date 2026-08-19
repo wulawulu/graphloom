@@ -20,7 +20,9 @@ use tracing::{Instrument, Span};
 
 use super::{
     QueryError, QueryOptions, QueryResult, Result, SearchMethod,
-    explainability::QueryExplainabilitySession,
+    explainability::{
+        GlobalQueryExplainability, LocalQueryExplainability, QueryExplainabilitySession,
+    },
 };
 use crate::{
     GraphLoomError,
@@ -297,28 +299,55 @@ impl Drop for QueryTraceSession {
     }
 }
 
-/// Request-scoped lifecycle handles for Local Query observability channels.
+/// Request-scoped lifecycle handles for Query observability channels.
 ///
 /// This combines two independent channels: the `tracing` trace session and the
 /// optional Explainability session. It only co-locates their lifetimes; it
 /// never merges their data models or derives one channel from the other.
 #[derive(Debug, Clone)]
-pub(crate) struct LocalQueryInstrumentation {
+pub(crate) struct QueryInstrumentation {
     trace: Option<Arc<QueryTraceSession>>,
-    explainability: Option<Arc<QueryExplainabilitySession>>,
+    explainability: Option<QueryMethodExplainability>,
 }
 
-impl LocalQueryInstrumentation {
-    /// Start both channels for one Local Query request.
-    ///
-    /// Returns `None` for non-Local methods or when both channels are disabled.
-    /// Neither channel is cached on the runtime.
-    pub(crate) async fn start(options: &QueryOptions, streaming: bool) -> Option<Self> {
-        if options.method != SearchMethod::Local {
-            return None;
+#[derive(Debug, Clone)]
+enum QueryMethodExplainability {
+    Local(LocalQueryExplainability),
+    Global(GlobalQueryExplainability),
+}
+
+impl QueryMethodExplainability {
+    fn session(&self) -> &QueryExplainabilitySession {
+        match self {
+            Self::Local(handle) => handle.session(),
+            Self::Global(handle) => handle.session(),
         }
-        let explainability = QueryExplainabilitySession::start_local(options).await;
-        let trace = QueryTraceSession::start(options, streaming);
+    }
+}
+
+impl QueryInstrumentation {
+    /// Start supported observability channels for one Query request.
+    ///
+    /// Local Search may start tracing and Explainability. Static Global Search may start
+    /// Explainability only. Dynamic Global, Basic, and DRIFT currently start neither channel.
+    /// No request-scoped channel is cached on the runtime.
+    pub(crate) async fn start(options: &QueryOptions, streaming: bool) -> Option<Self> {
+        let explainability = match options.method {
+            SearchMethod::Local => QueryExplainabilitySession::start(options)
+                .await
+                .map(LocalQueryExplainability::from_session)
+                .map(QueryMethodExplainability::Local),
+            SearchMethod::Global if !options.dynamic_community_selection => {
+                QueryExplainabilitySession::start(options)
+                    .await
+                    .map(GlobalQueryExplainability::from_session)
+                    .map(QueryMethodExplainability::Global)
+            }
+            SearchMethod::Basic | SearchMethod::Drift | SearchMethod::Global => None,
+        };
+        let trace = (options.method == SearchMethod::Local)
+            .then(|| QueryTraceSession::start(options, streaming))
+            .flatten();
         if trace.is_none() && explainability.is_none() {
             return None;
         }
@@ -334,8 +363,19 @@ impl LocalQueryInstrumentation {
     }
 
     /// Borrow the Explainability session, when enabled.
-    pub(crate) fn explainability(&self) -> Option<&QueryExplainabilitySession> {
-        self.explainability.as_deref()
+    pub(crate) fn local_explainability(&self) -> Option<&LocalQueryExplainability> {
+        match self.explainability.as_ref() {
+            Some(QueryMethodExplainability::Local(handle)) => Some(handle),
+            Some(QueryMethodExplainability::Global(_)) | None => None,
+        }
+    }
+
+    /// Borrow static Global Explainability, when enabled.
+    pub(crate) fn global_explainability(&self) -> Option<&GlobalQueryExplainability> {
+        match self.explainability.as_ref() {
+            Some(QueryMethodExplainability::Global(handle)) => Some(handle),
+            Some(QueryMethodExplainability::Local(_)) | None => None,
+        }
     }
 
     /// Close the root tracing span with a successful Query result.
@@ -350,8 +390,8 @@ impl LocalQueryInstrumentation {
 
     /// Finalize the Explainability run after both tracing spans are closed.
     pub(crate) async fn finish_explainability_success(&self) {
-        if let Some(session) = &self.explainability {
-            session.finish_success().await;
+        if let Some(explainability) = &self.explainability {
+            explainability.session().finish_success().await;
         }
     }
 
@@ -360,8 +400,8 @@ impl LocalQueryInstrumentation {
         if let Some(trace) = &self.trace {
             trace.finish_query_error(error);
         }
-        if let Some(session) = &self.explainability {
-            session.finish_query_error(error).await;
+        if let Some(explainability) = &self.explainability {
+            explainability.session().finish_query_error(error).await;
         }
     }
 
@@ -370,8 +410,8 @@ impl LocalQueryInstrumentation {
         if let Some(trace) = &self.trace {
             trace.finish_graphloom_error(error);
         }
-        if let Some(session) = &self.explainability {
-            session.finish_graphloom_error(error).await;
+        if let Some(explainability) = &self.explainability {
+            explainability.session().finish_graphloom_error(error).await;
         }
     }
 
@@ -380,8 +420,8 @@ impl LocalQueryInstrumentation {
         if let Some(trace) = &self.trace {
             trace.finish_query_completion();
         }
-        if let Some(session) = &self.explainability {
-            session.finish_stream_ended().await;
+        if let Some(explainability) = &self.explainability {
+            explainability.session().finish_stream_ended().await;
         }
     }
 }

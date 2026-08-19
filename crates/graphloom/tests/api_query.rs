@@ -31,9 +31,11 @@ use graphloom::{
         query_stream,
     },
     explainability::{
-        ContextSectionKind, ExplainabilityContentMode, ExplainabilityEvent, ExplainabilityRecord,
-        ExplainabilityRecordType, ExplainabilityRunId, ExplainabilitySink, ExplainabilitySinkChain,
-        ExplainabilitySinkError, NoopExplainabilitySink, SelectionReason,
+        ContextSectionKind, ExplainabilityContentMode, ExplainabilityEvent,
+        ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
+        ExplainabilityRunId, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
+        GlobalMapPointDecisionReason, GlobalReduceSkipReason, NoopExplainabilitySink,
+        SelectionReason,
     },
     query::{
         MapSearchResult, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
@@ -403,7 +405,7 @@ async fn mount_global_no_data_stub() -> MockServer {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "{\"points\":[{\"description\":\"Irrelevant\",\"score\":0}]}",
+                    "content": "not valid map JSON",
                     "refusal": null
                 },
                 "finish_reason": "stop"
@@ -425,6 +427,101 @@ async fn mount_global_map_failure_stub() -> MockServer {
             ResponseTemplate::new(401)
                 .set_body_json(json!({"error": {"message": "invalid API key"}})),
         )
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_global_reduce_failure_stub(midstream: bool) -> MockServer {
+    use wiremock::matchers::body_partial_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": false})))
+        .respond_with(completion_response(
+            r#"{"points":[{"description":"Mapped fact","score":8}]}"#,
+        ))
+        .mount(&server)
+        .await;
+    let reduce = Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"stream": true})));
+    if midstream {
+        reduce
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        r#"data: {"id":"reduce-1","model":"chat-test","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}"#,
+                        "\n\n",
+                        "data: {invalid-json}\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+    } else {
+        reduce
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(json!({"error": {"message": "reduce unavailable"}})),
+            )
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+fn global_explainability_responder(request: &Request) -> ResponseTemplate {
+    let body = request.body_json::<Value>().expect("Global request JSON");
+    let system_prompt = body["messages"][0]["content"]
+        .as_str()
+        .expect("Global system prompt");
+    if body["stream"] == false {
+        let (content, delay_ms) = if system_prompt.contains("Full report 3") {
+            (
+                r#"{"points":[{"description":"POINT_ANSWER_SECRET REDUCE_CONTEXT_SECRET highest","score":9},{"description":"MAP_RESPONSE_SECRET zero","score":0}]}"#,
+                40,
+            )
+        } else {
+            (
+                r#"{"points":[{"description":"second selected","score":8},{"description":"budget excluded","score":7}]}"#,
+                5,
+            )
+        };
+        return ResponseTemplate::new(200)
+            .set_delay(std::time::Duration::from_millis(delay_ms))
+            .set_body_json(json!({
+                "id": "map-explainability",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "chat-test",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                        "refusal": null
+                    },
+                    "finish_reason": "stop"
+                }]
+            }));
+    }
+    let response = "FINAL_RESPONSE_SECRET";
+    let stream = format!(
+        "data: {{\"id\":\"reduce\",\"model\":\"chat-test\",\"choices\":[{{\"index\":0,\"delta\":\
+         {{\"content\":\"{response}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+    );
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(stream)
+}
+
+async fn mount_global_explainability_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(global_explainability_responder)
         .mount(&server)
         .await;
     server
@@ -724,8 +821,8 @@ async fn write_dynamic_global_tables(root: &Path) -> Vec<std::path::PathBuf> {
             Series::new(
                 "full_content".into(),
                 [
-                    "Full report 0",
-                    "Full report 1",
+                    "Full report 0 MAP_CONTEXT_SECRET",
+                    "Full report 1 MAP_CONTEXT_SECRET",
                     "Full report 2",
                     "Full report 3",
                 ],
@@ -1874,6 +1971,11 @@ async fn test_should_instrument_local_query_without_changing_business_behavior()
             .iter()
             .all(|record| record.run_id.as_str() == "run-metadata")
     );
+    assert!(metadata_records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.method == ExplainabilityQueryMethod::Local
+    )));
     assert_content_fields(&metadata_records, false);
     let content_records = content.records();
     let debug_records = debug.records();
@@ -2959,20 +3061,26 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
         .to_string();
 
     let mut method_options = global_options(project.path(), "What are the themes?");
-    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
+    let global_explainability = Arc::new(RecordingExplainabilitySink::default());
     method_options.explainability = Some(QueryExplainabilityOptions::new(
         "ignored-global".parse().expect("Global run id"),
         ExplainabilityContentMode::Debug,
-        ignored_explainability.clone(),
+        global_explainability.clone(),
     ));
     method_options.method = SearchMethod::Local;
     let result = global_search(config.clone(), method_options)
         .await
         .expect("method-specific Global Query");
-    assert!(ignored_explainability.records().is_empty());
-    assert_eq!(
-        ignored_explainability.finish_calls.load(Ordering::SeqCst),
-        0
+    assert_eq!(global_explainability.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        global_explainability
+            .records()
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                ExplainabilityEvent::QueryStarted(event)
+                    if event.method == ExplainabilityQueryMethod::Global
+            ))
     );
     let method_request_bodies = recorded_request_bodies(&server).await;
     let unified_result = query(
@@ -3105,6 +3213,235 @@ async fn test_should_run_fixed_global_api_and_stream_without_vector_io_or_mutati
 }
 
 #[tokio::test]
+async fn test_should_explain_static_global_map_reduce_without_changing_business_result() {
+    let server = mount_global_explainability_stub().await;
+    let project = TempDir::new().expect("project");
+    write_dynamic_global_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.concurrent_requests = 2;
+    config.global_search.max_context_tokens = 60;
+    config.global_search.data_max_tokens = 32;
+    config.global_search.map_prompt = Some("MAP_PROMPT_SECRET\n{{ context_data }}".to_owned());
+    config.global_search.reduce_prompt = Some("REDUCE_PROMPT_SECRET\n{{ report_data }}".to_owned());
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+
+    let baseline = query(
+        config.clone(),
+        global_options(project.path(), "USER_QUERY_SECRET"),
+    )
+    .await
+    .expect("baseline Global Query");
+    let baseline_requests = recorded_request_bodies(&server).await;
+    assert_eq!(baseline.usage.categories["map"].llm_calls, 2);
+
+    let metadata_sink = Arc::new(RecordingExplainabilitySink::default());
+    let metadata = query(
+        config.clone(),
+        global_options(project.path(), "USER_QUERY_SECRET").with_explainability(
+            QueryExplainabilityOptions::new(
+                "global-metadata".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                metadata_sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("metadata Global Query");
+    assert_query_results_equal(&baseline, &metadata);
+
+    let content_sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut content_events = query_stream(
+        config,
+        global_options(project.path(), "USER_QUERY_SECRET").with_explainability(
+            QueryExplainabilityOptions::new(
+                "global-content".parse().expect("run id"),
+                ExplainabilityContentMode::Content,
+                content_sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("content Global Query stream");
+    let mut content = None;
+    while let Some(event) = content_events.next().await {
+        if let QueryEvent::Completed(result) = event.expect("content Global stream event") {
+            content = Some(result);
+        }
+    }
+    let content = content.expect("content Global completed result");
+    assert_query_results_equal(&baseline, &content);
+
+    let requests = recorded_request_bodies(&server).await;
+    let request_count = baseline_requests.len();
+    assert_eq!(request_count, 3);
+    assert_eq!(requests.len(), request_count * 3);
+    let sorted_requests = |values: &[Value]| {
+        let mut values = values.iter().map(Value::to_string).collect::<Vec<_>>();
+        values.sort();
+        values
+    };
+    assert_eq!(
+        sorted_requests(&requests[request_count..request_count * 2]),
+        sorted_requests(&baseline_requests)
+    );
+    assert_eq!(
+        sorted_requests(&requests[request_count * 2..]),
+        sorted_requests(&baseline_requests)
+    );
+
+    let metadata_records = metadata_sink.records();
+    let content_records = content_sink.records();
+    assert_eq!(metadata_sink.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(content_sink.finish_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        metadata_records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert!(matches!(
+        content_records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert!(content_records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.method == ExplainabilityQueryMethod::Global
+                && event.query.as_deref() == Some("USER_QUERY_SECRET")
+    )));
+
+    let batches = content_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            ExplainabilityEvent::GlobalMapBatchBuilt(event) => Some((record, event)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches.len(), 2);
+    for (record, batch) in &batches {
+        assert_eq!(
+            record.parent_span_id.as_ref().map(|id| id.as_str()),
+            content_records.iter().find_map(|candidate| matches!(
+                candidate.event,
+                ExplainabilityEvent::GlobalMapStarted(_)
+            )
+            .then(|| candidate.span_id.as_str()))
+        );
+        assert!(batch.report_ids.iter().all(|id| id.starts_with("report-")));
+        assert_eq!(
+            usize::try_from(batch.report_count).expect("report count"),
+            batch.report_ids.len()
+        );
+        let context = batch.context.as_deref().expect("Map content context");
+        assert!(baseline_requests.iter().any(|request| {
+            request["stream"] == false
+                && request["messages"][0]["content"]
+                    == Value::String(format!("MAP_PROMPT_SECRET\n{context}"))
+        }));
+        let same_span = content_records
+            .iter()
+            .filter(|candidate| candidate.span_id == record.span_id)
+            .map(|candidate| explainability_event_name(&candidate.event))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            same_span,
+            [
+                "global_map_batch_built",
+                "llm_request_started",
+                "llm_request_completed",
+                "global_map_points_produced",
+            ]
+        );
+    }
+    assert_ne!(batches[0].0.span_id, batches[1].0.span_id);
+
+    let points = content_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            ExplainabilityEvent::GlobalMapPointsProduced(event) => Some(event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(points.len(), 2);
+    assert!(points.iter().flat_map(|event| &event.points).any(|point| {
+        point.score == 9
+            && point
+                .answer
+                .as_deref()
+                .is_some_and(|answer| answer.contains("POINT_ANSWER_SECRET"))
+    }));
+
+    let reduce = content_records
+        .iter()
+        .find_map(|record| match &record.event {
+            ExplainabilityEvent::GlobalReduceContextBuilt(event) => Some((record, event)),
+            _ => None,
+        })
+        .expect("Reduce context event");
+    assert_eq!(reduce.1.candidate_point_count, 4);
+    assert_eq!(reduce.1.positive_point_count, 3);
+    assert!(reduce.1.selected_point_count < reduce.1.positive_point_count);
+    assert!(reduce.1.truncated);
+    assert!(reduce.1.points.iter().any(|point| {
+        point.score == 0
+            && !point.selected
+            && point.reason == GlobalMapPointDecisionReason::NonPositiveScore
+    }));
+    assert!(reduce.1.points.iter().any(|point| {
+        point.score == 7
+            && !point.selected
+            && point.reason == GlobalMapPointDecisionReason::TokenBudget
+    }));
+    let reduce_context = reduce.1.context.as_deref().expect("Reduce content context");
+    let QueryContextText::Composite(context_text) = &content.context.text else {
+        panic!("Global composite context");
+    };
+    let QueryContextText::Text(result_reduce_context) = &context_text["reduce"] else {
+        panic!("Global Reduce context");
+    };
+    assert_eq!(reduce_context, result_reduce_context);
+    assert!(baseline_requests.iter().any(|request| {
+        request["stream"] == true
+            && request["messages"][0]["content"]
+                == Value::String(format!("REDUCE_PROMPT_SECRET\n{reduce_context}"))
+    }));
+    assert!(content_records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::LlmRequestCompleted(event)
+            if record.span_id == reduce.0.span_id
+                && event.response.as_deref() == Some("FINAL_RESPONSE_SECRET")
+    )));
+
+    let metadata_json = serde_json::to_string(&metadata_records).expect("metadata JSON");
+    for secret in [
+        "USER_QUERY_SECRET",
+        "MAP_CONTEXT_SECRET",
+        "MAP_PROMPT_SECRET",
+        "MAP_RESPONSE_SECRET",
+        "POINT_ANSWER_SECRET",
+        "REDUCE_CONTEXT_SECRET",
+        "REDUCE_PROMPT_SECRET",
+        "FINAL_RESPONSE_SECRET",
+    ] {
+        assert!(!metadata_json.contains(secret), "metadata leaked {secret}");
+    }
+    let content_json = serde_json::to_string(&content_records).expect("content JSON");
+    for secret in [
+        "USER_QUERY_SECRET",
+        "MAP_CONTEXT_SECRET",
+        "MAP_PROMPT_SECRET",
+        "MAP_RESPONSE_SECRET",
+        "POINT_ANSWER_SECRET",
+        "REDUCE_CONTEXT_SECRET",
+        "REDUCE_PROMPT_SECRET",
+        "FINAL_RESPONSE_SECRET",
+    ] {
+        assert!(content_json.contains(secret), "content omitted {secret}");
+    }
+}
+
+#[tokio::test]
 async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
     let server = mount_global_no_data_stub().await;
     let project = TempDir::new().expect("project");
@@ -3115,8 +3452,14 @@ async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
         model_config(&server, "chat-test"),
     );
     let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let explainability = Arc::new(RecordingExplainabilitySink::default());
     let mut options = global_options(project.path(), "Unknown?");
     options.callbacks.push(callbacks.clone());
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        "global-no-data".parse().expect("run id"),
+        ExplainabilityContentMode::Content,
+        explainability.clone(),
+    ));
 
     let mut events = query_stream(config, options)
         .await
@@ -3149,6 +3492,48 @@ async fn test_should_stream_global_no_data_without_reduce_call_or_callbacks() {
             .len(),
         1
     );
+    let records = explainability.records();
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::GlobalMapPointsProduced(event)
+            if event.points.len() == 1
+                && event.points.first().is_some_and(|point| {
+                    point.score == 0 && point.answer.as_deref() == Some("")
+                })
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::GlobalReduceContextBuilt(event)
+            if event.positive_point_count == 0 && event.selected_point_count == 0
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::GlobalReduceSkipped(event)
+            if event.reason == GlobalReduceSkipReason::NoPositivePoints
+    )));
+    let reduce_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.event,
+                ExplainabilityEvent::GlobalReduceContextBuilt(_)
+            )
+            .then(|| record.span_id.clone())
+        })
+        .expect("Reduce span");
+    assert!(!records.iter().any(|record| {
+        record.span_id == reduce_span
+            && matches!(
+                record.event,
+                ExplainabilityEvent::LlmRequestStarted(_)
+                    | ExplainabilityEvent::LlmRequestCompleted(_)
+            )
+    }));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert_eq!(explainability.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3190,6 +3575,149 @@ async fn test_should_isolate_static_and_dynamic_global_snapshots_in_both_query_o
     let static_second = run_global_snapshot(&dynamic_first_engine, project.path(), false).await;
     assert_global_snapshot_eq(&dynamic_first, &fresh_dynamic);
     assert_global_snapshot_eq(&static_second, &fresh_static);
+}
+
+#[tokio::test]
+async fn test_should_leave_dynamic_global_explainability_as_safe_noop() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_dynamic_global_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.global_search.max_context_tokens = 10_000;
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut options = global_options(project.path(), "Dynamic question?");
+    options.dynamic_community_selection = true;
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        "dynamic-global-deferred".parse().expect("run id"),
+        ExplainabilityContentMode::Debug,
+        sink.clone(),
+    ));
+
+    let result = query(config, options)
+        .await
+        .expect("Dynamic Global Query remains functional");
+
+    assert!(!result.response.is_empty());
+    assert!(sink.records().is_empty());
+    assert_eq!(sink.emit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_should_keep_global_business_result_when_explainability_sink_fails() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let baseline = query(config.clone(), global_options(project.path(), "Question?"))
+        .await
+        .expect("baseline Global Query");
+    let sink = Arc::new(RecordingExplainabilitySink::failing());
+    let explained = query(
+        config,
+        global_options(project.path(), "Question?").with_explainability(
+            QueryExplainabilityOptions::new(
+                "global-sink-failure".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("Global Query survives Explainability delivery failure");
+
+    assert_query_results_equal(&baseline, &explained);
+    assert!(matches!(
+        sink.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_isolate_concurrent_global_explainability_runs() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let engine = QueryEngine::load(config, project.path())
+        .await
+        .expect("Global Query engine");
+    let sink_a = Arc::new(RecordingExplainabilitySink::failing());
+    let sink_b = Arc::new(RecordingExplainabilitySink::default());
+    let options_a = global_options(project.path(), "Global Run A").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-run-a".parse().expect("run id"),
+            ExplainabilityContentMode::Content,
+            sink_a.clone(),
+        ),
+    );
+    let options_b = global_options(project.path(), "Global Run B").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-run-b".parse().expect("run id"),
+            ExplainabilityContentMode::Content,
+            sink_b.clone(),
+        ),
+    );
+
+    let (result_a, result_b) = tokio::join!(engine.query(options_a), engine.query(options_b));
+    assert!(result_a.is_ok());
+    assert!(result_b.is_ok());
+    let records_a = sink_a.records();
+    let records_b = sink_b.records();
+    assert!(
+        records_a
+            .iter()
+            .all(|record| record.run_id.as_str() == "global-run-a")
+    );
+    assert!(
+        records_b
+            .iter()
+            .all(|record| record.run_id.as_str() == "global-run-b")
+    );
+    assert!(records_a.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.query.as_deref() == Some("Global Run A")
+    )));
+    assert!(records_b.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.query.as_deref() == Some("Global Run B")
+    )));
+    let spans_a = records_a
+        .iter()
+        .map(|record| record.span_id.as_str())
+        .collect::<HashSet<_>>();
+    assert!(
+        records_b
+            .iter()
+            .all(|record| !spans_a.contains(record.span_id.as_str()))
+    );
+    assert!(matches!(
+        records_a.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert!(matches!(
+        records_b.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert_eq!(sink_a.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink_b.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3408,8 +3936,14 @@ async fn test_should_not_emit_map_end_callback_after_provider_failure() {
         model_config(&server, "chat-test"),
     );
     let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let explainability = Arc::new(RecordingExplainabilitySink::default());
     let mut options = global_options(project.path(), "Question?");
     options.callbacks.push(callbacks.clone());
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        "global-map-failure".parse().expect("run id"),
+        ExplainabilityContentMode::Metadata,
+        explainability.clone(),
+    ));
 
     let error = match query_stream(config, options).await {
         Ok(_) => panic!("map provider failure must fail Query construction"),
@@ -3430,6 +3964,181 @@ async fn test_should_not_emit_map_end_callback_after_provider_failure() {
         *callbacks.events.lock().expect("map failure callbacks"),
         ["map_start:1"]
     );
+    let records = explainability.records();
+    let failed_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_))
+                .then(|| record.span_id.clone())
+        })
+        .expect("failed Map request span");
+    assert!(!records.iter().any(|record| {
+        record.span_id == failed_span
+            && matches!(record.event, ExplainabilityEvent::LlmRequestCompleted(_))
+    }));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "query_completion"
+    ));
+    assert_eq!(explainability.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_global_reduce_handshake_failure_without_fake_completion() {
+    let server = mount_global_reduce_failure_stub(false).await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let options = global_options(project.path(), "Question?").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-reduce-handshake".parse().expect("run id"),
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    );
+
+    let error = match query_stream(config, options).await {
+        Ok(_) => panic!("Reduce handshake failure must fail stream construction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                source.as_ref(),
+                QueryError::QueryCompletion {
+                    operation: "start Global Search reduce stream",
+                    ..
+                }
+            )
+    ));
+    assert_failed_reduce_explainability(&sink);
+}
+
+#[tokio::test]
+async fn test_should_finalize_global_reduce_prompt_construction_failure() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.global_search.reduce_prompt = Some("{{ missing_variable }}".to_owned());
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let options = global_options(project.path(), "Question?").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-reduce-prompt".parse().expect("run id"),
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    );
+
+    let error = match query_stream(config, options).await {
+        Ok(_) => panic!("Reduce prompt failure must fail stream construction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                source.as_ref(),
+                QueryError::QueryPrompt {
+                    operation: "render Global Search reduce prompt",
+                    ..
+                }
+            )
+    ));
+    let records = sink.records();
+    let reduce_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.event,
+                ExplainabilityEvent::GlobalReduceContextBuilt(_)
+            )
+            .then(|| record.span_id.clone())
+        })
+        .expect("Reduce context span");
+    assert!(!records.iter().any(|record| {
+        record.span_id == reduce_span
+            && matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_))
+    }));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_prompt"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_global_reduce_stream_consumption_failure() {
+    let server = mount_global_reduce_failure_stub(true).await;
+    let project = TempDir::new().expect("project");
+    write_local_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let options = global_options(project.path(), "Question?").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-reduce-stream".parse().expect("run id"),
+            ExplainabilityContentMode::Content,
+            sink.clone(),
+        ),
+    );
+    let mut events = query_stream(config, options)
+        .await
+        .expect("Reduce stream handshake");
+    let mut saw_error = false;
+    while let Some(event) = events.next().await {
+        if event.is_err() {
+            saw_error = true;
+            break;
+        }
+    }
+
+    assert!(saw_error);
+    assert_failed_reduce_explainability(&sink);
+}
+
+fn assert_failed_reduce_explainability(sink: &RecordingExplainabilitySink) {
+    let records = sink.records();
+    let reduce_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.event,
+                ExplainabilityEvent::GlobalReduceContextBuilt(_)
+            )
+            .then(|| record.span_id.clone())
+        })
+        .expect("Reduce span");
+    assert!(records.iter().any(|record| {
+        record.span_id == reduce_span
+            && matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_))
+    }));
+    assert!(!records.iter().any(|record| {
+        record.span_id == reduce_span
+            && matches!(record.event, ExplainabilityEvent::LlmRequestCompleted(_))
+    }));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "query_completion"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3519,6 +4228,31 @@ async fn test_should_return_typed_errors_for_missing_resources() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn test_should_finalize_global_context_build_failure() {
+    let project = TempDir::new().expect("project");
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let options = global_options(project.path(), "Question?").with_explainability(
+        QueryExplainabilityOptions::new(
+            "global-context-failure".parse().expect("run id"),
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ),
+    );
+
+    let result = query(GraphRagConfig::default(), options).await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        sink.records()
+            .iter()
+            .map(|record| explainability_event_name(&record.event))
+            .collect::<Vec<_>>(),
+        ["run_started", "query_started", "run_failed"]
+    );
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -120,7 +120,7 @@ async fn run_query_work(args: &QueryArgs, project: crate::project::LoadedProject
                 "graphloom.run.id" = %explainability.run_id(),
                 "graphloom.explainability.enabled" = true,
             },
-            "Local Query Explainability JSONL enabled"
+            "Query Explainability JSONL enabled"
         );
         options.explainability = Some(explainability);
     }

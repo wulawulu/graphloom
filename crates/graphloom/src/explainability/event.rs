@@ -1,12 +1,60 @@
 //! Versioned explainability event vocabulary and named payloads.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{Error as _, SerializeStruct},
+};
 
 use super::{
     ContextSectionKind, ExplainabilityCandidate, ExplainabilityContentMode,
     ExplainabilityContextSection, ExplainabilityContractError, ExplainabilityQueryMethod,
-    ExplainabilityRecordType, ExplainabilityRunKind,
+    ExplainabilityRecordType, ExplainabilityRunKind, GlobalMapPointDecision,
+    GlobalMapPointDecisionReason, GlobalMapPointEvidence,
 };
+
+struct ValidatedRecordIds<'a>(&'a [String]);
+
+impl Serialize for ValidatedRecordIds<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        super::validation::record_ids::serialize(self.0, serializer)
+    }
+}
+
+struct ValidatedGlobalMapPoints<'a>(&'a [GlobalMapPointEvidence]);
+
+impl Serialize for ValidatedGlobalMapPoints<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        super::validation::global_map_points::serialize(self.0, serializer)
+    }
+}
+
+struct ValidatedGlobalMapPointDecisions<'a>(&'a [GlobalMapPointDecision]);
+
+impl Serialize for ValidatedGlobalMapPointDecisions<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        super::validation::global_map_point_decisions::serialize(self.0, serializer)
+    }
+}
+
+struct ValidatedOptionalContent<'a>(&'a Option<String>);
+
+impl Serialize for ValidatedOptionalContent<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        super::validation::optional_content_string::serialize(self.0, serializer)
+    }
+}
 
 /// A run entered execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +527,421 @@ pub struct ContextCompleted {
     pub context: Option<String>,
 }
 
+/// Static Global community context completed construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GlobalContextBuilt {
+    /// Number of real context batches produced.
+    pub batch_count: u32,
+    /// Number of stable CommunityReport IDs across the batches.
+    pub report_count: u32,
+}
+
+impl GlobalContextBuilt {
+    /// Create a Global context summary.
+    #[must_use]
+    pub const fn new(batch_count: u32, report_count: u32) -> Self {
+        Self {
+            batch_count,
+            report_count,
+        }
+    }
+}
+
+/// Static Global map fan-out began for the constructed batches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GlobalMapStarted {
+    /// Number of map analyst calls scheduled by the real orchestration.
+    pub batch_count: u32,
+}
+
+impl GlobalMapStarted {
+    /// Create a map-stage start summary.
+    #[must_use]
+    pub const fn new(batch_count: u32) -> Self {
+        Self { batch_count }
+    }
+}
+
+/// One actual static Global context batch completed construction for a map analyst.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "GlobalMapBatchBuiltWire")]
+#[non_exhaustive]
+pub struct GlobalMapBatchBuilt {
+    /// Stable zero-based semantic batch identity.
+    pub batch_index: u32,
+    /// Number of CommunityReports in this batch.
+    pub report_count: u32,
+    /// Stable CommunityReport IDs in the exact batch-local order.
+    #[serde(default, with = "super::validation::record_ids")]
+    pub report_ids: Vec<String>,
+    /// Tokens in the exact map `context_data` string.
+    pub tokens_used: u64,
+    /// Configured per-batch token budget.
+    pub token_budget: u64,
+    /// Exact map `context_data` when content disclosure is enabled.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_content_string"
+    )]
+    pub context: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlobalMapBatchBuiltWire {
+    batch_index: u32,
+    report_count: u32,
+    #[serde(default, with = "super::validation::record_ids")]
+    report_ids: Vec<String>,
+    tokens_used: u64,
+    token_budget: u64,
+    #[serde(default, with = "super::validation::optional_content_string")]
+    context: Option<String>,
+}
+
+impl TryFrom<GlobalMapBatchBuiltWire> for GlobalMapBatchBuilt {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: GlobalMapBatchBuiltWire) -> Result<Self, Self::Error> {
+        if usize::try_from(wire.report_count).ok() != Some(wire.report_ids.len()) {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Global map batch report",
+            });
+        }
+        Ok(Self {
+            batch_index: wire.batch_index,
+            report_count: wire.report_count,
+            report_ids: wire.report_ids,
+            tokens_used: wire.tokens_used,
+            token_budget: wire.token_budget,
+            context: wire.context,
+        })
+    }
+}
+
+impl Serialize for GlobalMapBatchBuilt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        let field_count = 5 + usize::from(self.context.is_some());
+        let mut state = serializer.serialize_struct("GlobalMapBatchBuilt", field_count)?;
+        state.serialize_field("batch_index", &self.batch_index)?;
+        state.serialize_field("report_count", &self.report_count)?;
+        state.serialize_field("report_ids", &ValidatedRecordIds(&self.report_ids))?;
+        state.serialize_field("tokens_used", &self.tokens_used)?;
+        state.serialize_field("token_budget", &self.token_budget)?;
+        if self.context.is_some() {
+            state.serialize_field("context", &ValidatedOptionalContent(&self.context))?;
+        }
+        state.end()
+    }
+}
+
+impl GlobalMapBatchBuilt {
+    /// Create metadata-only Global map batch evidence.
+    #[must_use]
+    pub fn new(
+        batch_index: u32,
+        report_ids: Vec<String>,
+        tokens_used: u64,
+        token_budget: u64,
+    ) -> Self {
+        let report_count = u32::try_from(report_ids.len()).unwrap_or(u32::MAX);
+        Self {
+            batch_index,
+            report_count,
+            report_ids,
+            tokens_used,
+            token_budget,
+            context: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        if usize::try_from(self.report_count).ok() != Some(self.report_ids.len()) {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Global map batch report",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Parsed points produced by one static Global map analyst.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "GlobalMapPointsProducedWire")]
+#[non_exhaustive]
+pub struct GlobalMapPointsProduced {
+    /// Stable zero-based semantic batch identity.
+    pub batch_index: u32,
+    /// Parsed points in their actual post-parse order.
+    #[serde(default, with = "super::validation::global_map_points")]
+    pub points: Vec<GlobalMapPointEvidence>,
+}
+
+#[derive(Deserialize)]
+struct GlobalMapPointsProducedWire {
+    batch_index: u32,
+    #[serde(default, with = "super::validation::global_map_points")]
+    points: Vec<GlobalMapPointEvidence>,
+}
+
+impl TryFrom<GlobalMapPointsProducedWire> for GlobalMapPointsProduced {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: GlobalMapPointsProducedWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            batch_index: wire.batch_index,
+            points: wire.points,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for GlobalMapPointsProduced {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        let mut state = serializer.serialize_struct("GlobalMapPointsProduced", 2)?;
+        state.serialize_field("batch_index", &self.batch_index)?;
+        state.serialize_field("points", &ValidatedGlobalMapPoints(&self.points))?;
+        state.end()
+    }
+}
+
+impl GlobalMapPointsProduced {
+    /// Create parsed map-point evidence.
+    pub fn try_new(
+        batch_index: u32,
+        points: Vec<GlobalMapPointEvidence>,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let event = Self {
+            batch_index,
+            points,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        if let Some((point_index, _)) = self
+            .points
+            .iter()
+            .enumerate()
+            .find(|(_, point)| point.batch_index != self.batch_index)
+        {
+            return Err(ExplainabilityContractError::GlobalMapPointBatchMismatch { point_index });
+        }
+        if let Some((point_index, _)) =
+            self.points.iter().enumerate().find(|(point_index, point)| {
+                u32::try_from(*point_index).ok() != Some(point.point_index)
+            })
+        {
+            return Err(ExplainabilityContractError::GlobalMapPointOrderMismatch { point_index });
+        }
+        Ok(())
+    }
+}
+
+/// Reduce fitting completed against the real parsed map points.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "GlobalReduceContextBuiltWire")]
+#[non_exhaustive]
+pub struct GlobalReduceContextBuilt {
+    /// Total parsed point count, including non-positive points.
+    pub candidate_point_count: u64,
+    /// Number of points whose score is greater than zero.
+    pub positive_point_count: u64,
+    /// Number of positive points included in the Reduce context.
+    pub selected_point_count: u64,
+    /// Configured Reduce data token budget.
+    pub token_budget: u64,
+    /// Tokens consumed by selected point blocks.
+    pub tokens_used: u64,
+    /// Whether the first over-budget point stopped selection.
+    pub truncated: bool,
+    /// Decisions for every parsed point.
+    #[serde(default, with = "super::validation::global_map_point_decisions")]
+    pub points: Vec<GlobalMapPointDecision>,
+    /// Exact `report_data` supplied to the Reduce prompt when content disclosure is enabled.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_content_string"
+    )]
+    pub context: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlobalReduceContextBuiltWire {
+    candidate_point_count: u64,
+    positive_point_count: u64,
+    selected_point_count: u64,
+    token_budget: u64,
+    tokens_used: u64,
+    truncated: bool,
+    #[serde(default, with = "super::validation::global_map_point_decisions")]
+    points: Vec<GlobalMapPointDecision>,
+    #[serde(default, with = "super::validation::optional_content_string")]
+    context: Option<String>,
+}
+
+impl TryFrom<GlobalReduceContextBuiltWire> for GlobalReduceContextBuilt {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: GlobalReduceContextBuiltWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            candidate_point_count: wire.candidate_point_count,
+            positive_point_count: wire.positive_point_count,
+            selected_point_count: wire.selected_point_count,
+            token_budget: wire.token_budget,
+            tokens_used: wire.tokens_used,
+            truncated: wire.truncated,
+            points: wire.points,
+            context: wire.context,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for GlobalReduceContextBuilt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        let field_count = 7 + usize::from(self.context.is_some());
+        let mut state = serializer.serialize_struct("GlobalReduceContextBuilt", field_count)?;
+        state.serialize_field("candidate_point_count", &self.candidate_point_count)?;
+        state.serialize_field("positive_point_count", &self.positive_point_count)?;
+        state.serialize_field("selected_point_count", &self.selected_point_count)?;
+        state.serialize_field("token_budget", &self.token_budget)?;
+        state.serialize_field("tokens_used", &self.tokens_used)?;
+        state.serialize_field("truncated", &self.truncated)?;
+        state.serialize_field("points", &ValidatedGlobalMapPointDecisions(&self.points))?;
+        if self.context.is_some() {
+            state.serialize_field("context", &ValidatedOptionalContent(&self.context))?;
+        }
+        state.end()
+    }
+}
+
+impl GlobalReduceContextBuilt {
+    /// Create validated metadata-only Reduce fitting evidence.
+    pub fn try_new(
+        token_budget: u64,
+        tokens_used: u64,
+        truncated: bool,
+        points: Vec<GlobalMapPointDecision>,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let candidate_point_count = u64::try_from(points.len()).unwrap_or(u64::MAX);
+        let positive_point_count =
+            u64::try_from(points.iter().filter(|point| point.score > 0).count())
+                .unwrap_or(u64::MAX);
+        let selected_point_count =
+            u64::try_from(points.iter().filter(|point| point.selected).count()).unwrap_or(u64::MAX);
+        let event = Self {
+            candidate_point_count,
+            positive_point_count,
+            selected_point_count,
+            token_budget,
+            tokens_used,
+            truncated,
+            points,
+            context: None,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        let candidate_count = u64::try_from(self.points.len()).unwrap_or(u64::MAX);
+        let positive_count =
+            u64::try_from(self.points.iter().filter(|point| point.score > 0).count())
+                .unwrap_or(u64::MAX);
+        let selected_count =
+            u64::try_from(self.points.iter().filter(|point| point.selected).count())
+                .unwrap_or(u64::MAX);
+        if self.candidate_point_count != candidate_count {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Global Reduce candidate point",
+            });
+        }
+        if self.positive_point_count != positive_count {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Global Reduce positive point",
+            });
+        }
+        if self.selected_point_count != selected_count {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Global Reduce selected point",
+            });
+        }
+        if self.tokens_used > self.token_budget {
+            return Err(ExplainabilityContractError::GlobalReduceTokensExceedBudget);
+        }
+        for (point_index, point) in self.points.iter().enumerate() {
+            let valid = match point.reason {
+                GlobalMapPointDecisionReason::Selected => point.selected && point.score > 0,
+                GlobalMapPointDecisionReason::NonPositiveScore => {
+                    !point.selected && point.score <= 0
+                }
+                GlobalMapPointDecisionReason::TokenBudget => !point.selected && point.score > 0,
+            };
+            if !valid {
+                return Err(ExplainabilityContractError::InvalidGlobalReduceDecision {
+                    point_index,
+                    reason: "score, selected flag, and decision reason disagree",
+                });
+            }
+        }
+        let has_budget_exclusion = self
+            .points
+            .iter()
+            .any(|point| point.reason == GlobalMapPointDecisionReason::TokenBudget);
+        if self.truncated != has_budget_exclusion {
+            return Err(ExplainabilityContractError::InvalidGlobalReduceDecision {
+                point_index: 0,
+                reason: "truncated flag disagrees with token-budget decisions",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Reason the static Global Reduce LLM was not called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GlobalReduceSkipReason {
+    /// No parsed map point had a score greater than zero.
+    NoPositivePoints,
+}
+
+/// Static Global Reduce was explicitly skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GlobalReduceSkipped {
+    /// Proven reason no Reduce LLM request was made.
+    pub reason: GlobalReduceSkipReason,
+}
+
+impl GlobalReduceSkipped {
+    /// Create a Reduce-skip event.
+    #[must_use]
+    pub const fn new(reason: GlobalReduceSkipReason) -> Self {
+        Self { reason }
+    }
+}
+
 impl ContextCompleted {
     /// Create metadata-only completed-context payload.
     #[must_use]
@@ -499,7 +962,7 @@ pub struct LlmRequestStarted {
     pub model_id: String,
     /// Counted request input tokens.
     pub prompt_tokens: u64,
-    /// Rendered Local system prompt when the content mode permits it.
+    /// Rendered system prompt when the content mode permits it.
     ///
     /// This is not the provider's complete request object and never includes headers or secrets.
     #[serde(
@@ -630,6 +1093,18 @@ pub enum ExplainabilityEvent {
     ContextSectionBuilt(ContextSectionBuilt),
     /// The complete context was built.
     ContextCompleted(ContextCompleted),
+    /// Static Global community context completed.
+    GlobalContextBuilt(GlobalContextBuilt),
+    /// Static Global map fan-out began.
+    GlobalMapStarted(GlobalMapStarted),
+    /// One actual static Global map batch was built.
+    GlobalMapBatchBuilt(GlobalMapBatchBuilt),
+    /// One map analyst's response was parsed into points.
+    GlobalMapPointsProduced(GlobalMapPointsProduced),
+    /// Static Global Reduce context fitting completed.
+    GlobalReduceContextBuilt(GlobalReduceContextBuilt),
+    /// Static Global Reduce was skipped.
+    GlobalReduceSkipped(GlobalReduceSkipped),
     /// Completion-model request started.
     LlmRequestStarted(LlmRequestStarted),
     /// Completion-model request completed.
@@ -646,6 +1121,8 @@ mod tests {
         CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextBudgetAllocated,
         ContextCompleted, ContextSectionBuilt, CovariatesSelected, EmbeddingCompleted,
         EmbeddingStarted, EntitiesSelected, ExplainabilityEvent, ExplainabilityWarning,
+        GlobalContextBuilt, GlobalMapBatchBuilt, GlobalMapPointsProduced, GlobalMapStarted,
+        GlobalReduceContextBuilt, GlobalReduceSkipReason, GlobalReduceSkipped,
         GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted, MappingQueryBuilt,
         QueryStarted, RelationshipsSelected, RunCompleted, RunFailed, RunStarted,
         TextUnitsSelected,
@@ -653,6 +1130,7 @@ mod tests {
     use crate::explainability::{
         ContextSectionKind, ExplainabilityContentMode, ExplainabilityContextSection,
         ExplainabilityQueryMethod, ExplainabilityRecordType, ExplainabilityRunKind,
+        GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
     };
 
     #[test]
@@ -676,6 +1154,95 @@ mod tests {
         let unknown = json!({"type": "future_event", "optional_field": true});
         let error = serde_json::from_value::<ExplainabilityEvent>(unknown);
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn test_should_validate_global_batch_ids_and_allow_empty_point_lists()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let empty = ExplainabilityEvent::GlobalMapPointsProduced(GlobalMapPointsProduced::try_new(
+            7,
+            Vec::new(),
+        )?);
+        assert_eq!(
+            serde_json::from_value::<ExplainabilityEvent>(serde_json::to_value(&empty)?)?,
+            empty
+        );
+
+        let invalid = json!({
+            "type": "global_map_batch_built",
+            "batch_index": 0,
+            "report_count": 1,
+            "report_ids": ["x".repeat(257)],
+            "tokens_used": 1,
+            "token_budget": 2,
+        });
+        assert!(serde_json::from_value::<ExplainabilityEvent>(invalid).is_err());
+        let mismatched_count = json!({
+            "type": "global_map_batch_built",
+            "batch_index": 0,
+            "report_count": 2,
+            "report_ids": ["report-1"],
+            "tokens_used": 1,
+            "token_budget": 2,
+        });
+        assert!(serde_json::from_value::<ExplainabilityEvent>(mismatched_count).is_err());
+        let mismatched_batch = json!({
+            "type": "global_map_points_produced",
+            "batch_index": 0,
+            "points": [{
+                "batch_index": 1,
+                "point_index": 0,
+                "score": 1,
+            }],
+        });
+        assert!(serde_json::from_value::<ExplainabilityEvent>(mismatched_batch).is_err());
+        let mismatched_point_order = json!({
+            "type": "global_map_points_produced",
+            "batch_index": 0,
+            "points": [{
+                "batch_index": 0,
+                "point_index": 1,
+                "score": 1,
+            }],
+        });
+        assert!(serde_json::from_value::<ExplainabilityEvent>(mismatched_point_order).is_err());
+
+        let invalid_write = ExplainabilityEvent::GlobalMapBatchBuilt(GlobalMapBatchBuilt {
+            batch_index: 0,
+            report_count: 2,
+            report_ids: vec!["report-1".to_owned()],
+            tokens_used: 1,
+            token_budget: 2,
+            context: None,
+        });
+        assert!(serde_json::to_value(invalid_write).is_err());
+        assert!(
+            GlobalMapPointsProduced::try_new(0, vec![GlobalMapPointEvidence::new(1, 0, 1)],)
+                .is_err()
+        );
+        assert!(
+            GlobalMapPointsProduced::try_new(0, vec![GlobalMapPointEvidence::new(0, 1, 1)],)
+                .is_err()
+        );
+        let invalid_reduce =
+            ExplainabilityEvent::GlobalReduceContextBuilt(GlobalReduceContextBuilt {
+                candidate_point_count: 1,
+                positive_point_count: 1,
+                selected_point_count: 1,
+                token_budget: 2,
+                tokens_used: 1,
+                truncated: false,
+                points: vec![GlobalMapPointDecision::new(
+                    0,
+                    0,
+                    1,
+                    false,
+                    GlobalMapPointDecisionReason::TokenBudget,
+                )],
+                context: None,
+            });
+        assert!(serde_json::to_value(invalid_reduce).is_err());
+        Ok(())
     }
 
     #[test]
@@ -782,6 +1349,61 @@ mod tests {
             (
                 ExplainabilityEvent::ContextCompleted(ContextCompleted::new(900)),
                 "context_completed",
+            ),
+            (
+                ExplainabilityEvent::GlobalContextBuilt(GlobalContextBuilt::new(2, 3)),
+                "global_context_built",
+            ),
+            (
+                ExplainabilityEvent::GlobalMapStarted(GlobalMapStarted::new(2)),
+                "global_map_started",
+            ),
+            (
+                ExplainabilityEvent::GlobalMapBatchBuilt(GlobalMapBatchBuilt::new(
+                    0,
+                    vec!["report-1".to_owned()],
+                    100,
+                    1_000,
+                )),
+                "global_map_batch_built",
+            ),
+            (
+                ExplainabilityEvent::GlobalMapPointsProduced(GlobalMapPointsProduced::try_new(
+                    0,
+                    vec![GlobalMapPointEvidence {
+                        batch_index: 0,
+                        point_index: 0,
+                        score: i64::MIN,
+                        answer: None,
+                    }],
+                )?),
+                "global_map_points_produced",
+            ),
+            (
+                ExplainabilityEvent::GlobalReduceContextBuilt(GlobalReduceContextBuilt {
+                    candidate_point_count: 1,
+                    positive_point_count: 1,
+                    selected_point_count: 1,
+                    token_budget: 1_000,
+                    tokens_used: 100,
+                    truncated: false,
+                    points: vec![GlobalMapPointDecision {
+                        batch_index: 0,
+                        point_index: 0,
+                        score: i64::MAX,
+                        selected: true,
+                        reason: GlobalMapPointDecisionReason::Selected,
+                        answer: None,
+                    }],
+                    context: None,
+                }),
+                "global_reduce_context_built",
+            ),
+            (
+                ExplainabilityEvent::GlobalReduceSkipped(GlobalReduceSkipped::new(
+                    GlobalReduceSkipReason::NoPositivePoints,
+                )),
+                "global_reduce_skipped",
             ),
             (
                 ExplainabilityEvent::LlmRequestStarted(LlmRequestStarted::new(

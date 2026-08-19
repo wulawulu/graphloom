@@ -4,7 +4,7 @@ use crate::{
     GraphRagConfig, Result,
     project::LoadedProject,
     query::{
-        LocalQueryInstrumentation, QueryEngine, QueryEventStream, QueryOptions, QueryResult,
+        QueryEngine, QueryEventStream, QueryInstrumentation, QueryOptions, QueryResult,
         SearchMethod,
         basic::{basic_search as run_basic, basic_search_streaming as run_basic_streaming},
         drift::{drift_search as run_drift, drift_search_streaming as run_drift_streaming},
@@ -147,7 +147,7 @@ async fn execute_query(
     method: SearchMethod,
 ) -> Result<QueryResult> {
     options.method = method;
-    let instrumentation = LocalQueryInstrumentation::start(&options, false).await;
+    let instrumentation = QueryInstrumentation::start(&options, false).await;
     let engine = match QueryEngine::load(config, &options.project_root).await {
         Ok(engine) => engine,
         Err(error) => {
@@ -166,7 +166,7 @@ async fn execute_query_stream(
     method: SearchMethod,
 ) -> Result<QueryEventStream> {
     options.method = method;
-    let instrumentation = LocalQueryInstrumentation::start(&options, true).await;
+    let instrumentation = QueryInstrumentation::start(&options, true).await;
     let engine = match QueryEngine::load(config, &options.project_root).await {
         Ok(engine) => engine,
         Err(error) => {
@@ -185,7 +185,7 @@ pub(crate) async fn query_loaded(
     project: LoadedProject,
     options: QueryOptions,
 ) -> Result<QueryResult> {
-    let instrumentation = LocalQueryInstrumentation::start(&options, false).await;
+    let instrumentation = QueryInstrumentation::start(&options, false).await;
     let result = query_loaded_with_session(&project, &options, instrumentation.clone()).await;
     if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
         instrumentation.finish_graphloom_error(error).await;
@@ -196,7 +196,7 @@ pub(crate) async fn query_loaded(
 async fn query_loaded_with_session(
     project: &LoadedProject,
     options: &QueryOptions,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryResult> {
     match options.method {
         SearchMethod::Basic => {
@@ -221,7 +221,13 @@ async fn query_loaded_with_session(
         }
         SearchMethod::Global => {
             let runtime = crate::query::QueryRuntimeFactory::build_global(project, options).await?;
-            Ok(run_global(runtime, &options.query, &options.response_type).await?)
+            Ok(run_global(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
         SearchMethod::Drift => {
             let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;
@@ -234,7 +240,7 @@ pub(crate) async fn query_loaded_stream(
     project: LoadedProject,
     options: QueryOptions,
 ) -> Result<QueryEventStream> {
-    let instrumentation = LocalQueryInstrumentation::start(&options, true).await;
+    let instrumentation = QueryInstrumentation::start(&options, true).await;
     let result =
         query_loaded_stream_with_session(&project, &options, instrumentation.clone()).await;
     if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
@@ -246,7 +252,7 @@ pub(crate) async fn query_loaded_stream(
 async fn query_loaded_stream_with_session(
     project: &LoadedProject,
     options: &QueryOptions,
-    instrumentation: Option<LocalQueryInstrumentation>,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryEventStream> {
     match options.method {
         SearchMethod::Basic => {
@@ -271,7 +277,13 @@ async fn query_loaded_stream_with_session(
         }
         SearchMethod::Global => {
             let runtime = crate::query::QueryRuntimeFactory::build_global(project, options).await?;
-            Ok(run_global_streaming(runtime, &options.query, &options.response_type).await?)
+            Ok(run_global_streaming(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
         SearchMethod::Drift => {
             let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;

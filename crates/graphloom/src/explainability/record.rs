@@ -42,6 +42,35 @@ pub enum ExplainabilityContractError {
         /// Zero-based position of the mismatched candidate.
         candidate_index: usize,
     },
+    /// A declared collection count did not match the bounded collection length.
+    #[error("{collection} count does not match the collection length")]
+    CollectionCountMismatch {
+        /// Stable collection name without request content.
+        collection: &'static str,
+    },
+    /// A Global map point declared a different batch identity than its event.
+    #[error("Global map point at index {point_index} has a mismatched batch index")]
+    GlobalMapPointBatchMismatch {
+        /// Zero-based point position in the event.
+        point_index: usize,
+    },
+    /// A Global map point's declared index differed from its position in the event.
+    #[error("Global map point at index {point_index} has a mismatched point index")]
+    GlobalMapPointOrderMismatch {
+        /// Zero-based position of the point in the event.
+        point_index: usize,
+    },
+    /// A Global Reduce point decision contradicted its score, selected flag, or reason.
+    #[error("Global Reduce point decision at index {point_index} is inconsistent: {reason}")]
+    InvalidGlobalReduceDecision {
+        /// Zero-based point position in the event.
+        point_index: usize,
+        /// Stable validation failure description without point content.
+        reason: &'static str,
+    },
+    /// Global Reduce token usage exceeded its declared budget.
+    #[error("Global Reduce token usage exceeds its token budget")]
+    GlobalReduceTokensExceedBudget,
     /// A persisted envelope used a schema version this reader does not support.
     #[error("unsupported explainability schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion {

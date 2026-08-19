@@ -40,7 +40,7 @@ pub use indexer_adapters::{
     read_indexer_relationships, read_indexer_report_embeddings, read_indexer_reports,
     read_indexer_text_units,
 };
-pub(crate) use observability::LocalQueryInstrumentation;
+pub(crate) use observability::QueryInstrumentation;
 pub use requirements::{QueryEmbedding, QueryPrompt, QueryRequirements, QueryTable};
 pub use result::{
     QueryContext, QueryContextRecords, QueryContextText, QueryEvent, QueryEventStream, QueryResult,
@@ -150,8 +150,8 @@ pub struct QueryOptions {
     pub conversation_history: Option<ConversationHistory>,
     /// Optional request-scoped Explainability configuration.
     ///
-    /// The first runtime-instrumentation phase emits events only for Local Search. Basic, Global,
-    /// and DRIFT queries ignore this option without error.
+    /// Current runtime support covers Local Search and static Global Search. Dynamic Global,
+    /// Basic, and DRIFT queries ignore this option without error.
     pub explainability: Option<QueryExplainabilityOptions>,
 }
 
@@ -173,7 +173,7 @@ impl QueryOptions {
         }
     }
 
-    /// Enable request-scoped Local Search Explainability.
+    /// Enable request-scoped Explainability for a currently supported Query method.
     #[must_use]
     pub fn with_explainability(mut self, explainability: QueryExplainabilityOptions) -> Self {
         self.explainability = Some(explainability);

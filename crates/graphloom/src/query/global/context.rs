@@ -26,6 +26,7 @@ const CONTEXT_NAME: &str = "Reports";
 pub(crate) struct GlobalContextResult {
     pub(crate) batches: Vec<String>,
     pub(crate) records: Vec<DataFrame>,
+    pub(crate) batch_report_ids: Vec<Vec<String>>,
     pub(crate) usage: QueryUsageCategory,
     pub(crate) dynamic_ratings: Vec<DynamicRating>,
 }
@@ -70,11 +71,20 @@ impl GlobalContextBuilder {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn build_fixed(&self) -> Result<GlobalContextResult> {
-        self.build_selected(
+        self.build_fixed_explainable(false)
+    }
+
+    pub(crate) fn build_fixed_explainable(
+        &self,
+        capture_report_ids: bool,
+    ) -> Result<GlobalContextResult> {
+        self.build_selected_with_evidence(
             self.reports.clone(),
             QueryUsageCategory::default(),
             Vec::new(),
+            capture_report_ids,
         )
     }
 
@@ -83,6 +93,16 @@ impl GlobalContextBuilder {
         reports: Vec<CommunityReport>,
         usage: QueryUsageCategory,
         dynamic_ratings: Vec<DynamicRating>,
+    ) -> Result<GlobalContextResult> {
+        self.build_selected_with_evidence(reports, usage, dynamic_ratings, false)
+    }
+
+    fn build_selected_with_evidence(
+        &self,
+        reports: Vec<CommunityReport>,
+        usage: QueryUsageCategory,
+        dynamic_ratings: Vec<DynamicRating>,
+        capture_report_ids: bool,
     ) -> Result<GlobalContextResult> {
         let weights = self.community_weights();
         let max_weight = reports
@@ -110,7 +130,7 @@ impl GlobalContextBuilder {
             })
             .collect::<Vec<_>>();
         PythonRandom::new(86).shuffle(&mut selected);
-        self.batch(selected, usage, dynamic_ratings)
+        self.batch(selected, usage, dynamic_ratings, capture_report_ids)
     }
 
     pub(crate) const fn config(&self) -> &GlobalSearchConfig {
@@ -143,11 +163,13 @@ impl GlobalContextBuilder {
         reports: Vec<WeightedReport>,
         usage: QueryUsageCategory,
         dynamic_ratings: Vec<DynamicRating>,
+        capture_report_ids: bool,
     ) -> Result<GlobalContextResult> {
         if reports.is_empty() {
             return Ok(GlobalContextResult {
                 batches: Vec::new(),
                 records: Vec::new(),
+                batch_report_ids: Vec::new(),
                 usage,
                 dynamic_ratings,
             });
@@ -164,6 +186,7 @@ impl GlobalContextBuilder {
         let mut current_tokens = initial_tokens;
         let mut batches = Vec::new();
         let mut records = Vec::new();
+        let mut batch_report_ids = Vec::new();
 
         for report in reports {
             let row = report_row(&report);
@@ -174,16 +197,29 @@ impl GlobalContextBuilder {
             )?;
             let row_tokens = self.count(&row_text, "count Global community row tokens")?;
             if current_tokens.saturating_add(row_tokens) > self.config.max_context_tokens {
-                cut_batch(&mut current, &mut batches, &mut records)?;
+                cut_batch(
+                    &mut current,
+                    &mut batches,
+                    &mut records,
+                    &mut batch_report_ids,
+                    capture_report_ids,
+                )?;
                 current_tokens = initial_tokens;
             }
             current.push(report);
             current_tokens = current_tokens.saturating_add(row_tokens);
         }
-        cut_batch(&mut current, &mut batches, &mut records)?;
+        cut_batch(
+            &mut current,
+            &mut batches,
+            &mut records,
+            &mut batch_report_ids,
+            capture_report_ids,
+        )?;
         Ok(GlobalContextResult {
             batches,
             records,
+            batch_report_ids,
             usage,
             dynamic_ratings,
         })
@@ -204,6 +240,8 @@ fn cut_batch(
     current: &mut Vec<WeightedReport>,
     batches: &mut Vec<String>,
     records: &mut Vec<DataFrame>,
+    batch_report_ids: &mut Vec<Vec<String>>,
+    capture_report_ids: bool,
 ) -> Result<()> {
     if current.is_empty() {
         return Ok(());
@@ -227,6 +265,14 @@ fn cut_batch(
     );
     batches.push(table.render_csv(SearchMethod::Global, "render Global community batch")?);
     records.push(report_dataframe(current)?);
+    if capture_report_ids {
+        batch_report_ids.push(
+            current
+                .iter()
+                .map(|value| value.report.id.clone())
+                .collect(),
+        );
+    }
     current.clear();
     Ok(())
 }
@@ -543,7 +589,7 @@ mod tests {
             .map(|id| entity(&[&id.to_string()], &["unit"]))
             .collect();
         let result = builder(config, entities, reports)
-            .build_fixed()
+            .build_fixed_explainable(true)
             .expect("batches");
         let golden: Vec<String> = serde_json::from_str(include_str!(
             "../../../../../tests/compat/fixtures/query/global_batches.json"
@@ -565,6 +611,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![vec!["3", "1"], vec!["2", "0"]]);
+        assert_eq!(
+            result.batch_report_ids,
+            vec![
+                vec!["report-3".to_owned(), "report-1".to_owned()],
+                vec!["report-2".to_owned(), "report-0".to_owned()],
+            ]
+        );
     }
 
     #[test]
