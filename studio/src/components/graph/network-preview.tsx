@@ -7,6 +7,7 @@ import type { GraphViewMode } from "@/components/graph/graph-explorer"
 import { GraphTooltip, type GraphTooltipContent } from "@/components/graph/graph-tooltip"
 import { Button } from "@/components/ui/button"
 import { readCytoscapeTheme } from "@/lib/cytoscape-theme"
+import type { GraphEmphasisIntent } from "@/lib/citations"
 import { buildProjectionElements, GRAPH_LAYOUT_OPTIONS, graphViewportAction, projectionFocusIds } from "@/lib/graph"
 
 interface NetworkPreviewProps {
@@ -16,6 +17,8 @@ interface NetworkPreviewProps {
   mode: GraphViewMode
   loading: boolean
   error: string | null
+  emphasisIntent?: GraphEmphasisIntent | null
+  onClearEmphasis?: () => void
   onEntity: (id: string) => void
   onRelationship: (id: string) => void
   onBackOverview: () => void
@@ -46,12 +49,44 @@ function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, a
   layout.run()
 }
 
+const CITATION_CLASSES = "citation-target citation-dimmed citation-connecting"
+
+function applyCitationEmphasis(cy: Core, projection: GraphProjection, emphasis: GraphEmphasisIntent | null): void {
+  if (emphasis === null) {
+    cy.elements().removeClass(CITATION_CLASSES)
+    return
+  }
+
+  const entityIds = new Set(emphasis.entityIds)
+  const connectingIds = projection.relationships
+    .filter((relationship) => entityIds.has(relationship.source_entity_id) && entityIds.has(relationship.target_entity_id))
+    .map((relationship) => relationship.id)
+  const targetIds = [...emphasis.entityIds, ...emphasis.relationshipIds]
+  const targets = targetIds.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
+  if (targets.length === 0) return
+
+  const connecting = connectingIds.reduce((collection, id) => collection.union(cy.getElementById(id)), cy.collection())
+  const emphasizedEdges = emphasis.relationshipIds.reduce((collection, id) => collection.union(cy.getElementById(id)), connecting)
+  cy.elements().removeClass(CITATION_CLASSES)
+  cy.nodes().addClass("citation-dimmed")
+  cy.edges().addClass("citation-dimmed")
+  targets.addClass("citation-target").removeClass("citation-dimmed")
+  emphasizedEdges.addClass("citation-connecting").removeClass("citation-dimmed")
+  const animation = {
+    fit: { ["el" + "es"]: targets, padding: 72 },
+    duration: 350,
+  } as unknown as Parameters<Core["animate"]>[0]
+  cy.animate(animation)
+}
+
 export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   const { mode, onEntity, onRelationship, projection } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const cytoscapeRef = useRef<Core | null>(null)
   const onEntityRef = useRef(onEntity)
   const onRelationshipRef = useRef(onRelationship)
+  const emphasisRef = useRef(props.emphasisIntent ?? null)
+  const onClearEmphasisRef = useRef(props.onClearEmphasis ?? (() => undefined))
   const [rendererError, setRendererError] = useState(false)
   const [tooltip, setTooltip] = useState<{ content: GraphTooltipContent; x: number; y: number; bounds: { width: number; height: number } } | null>(null)
   const elements = useMemo(() => buildProjectionElements(projection), [projection])
@@ -60,6 +95,21 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
 
   useEffect(() => { onEntityRef.current = onEntity }, [onEntity])
   useEffect(() => { onRelationshipRef.current = onRelationship }, [onRelationship])
+  useEffect(() => { emphasisRef.current = props.emphasisIntent ?? null }, [props.emphasisIntent])
+  useEffect(() => { onClearEmphasisRef.current = props.onClearEmphasis ?? (() => undefined) }, [props.onClearEmphasis])
+
+  useEffect(() => {
+    const cy = cytoscapeRef.current
+    if (cy !== null) applyCitationEmphasis(cy, projection, props.emphasisIntent ?? null)
+  }, [projection, props.emphasisIntent])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && emphasisRef.current !== null) onClearEmphasisRef.current()
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [])
 
   useEffect(() => {
     const container = containerRef.current
@@ -91,7 +141,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         elements,
         layout: { name: "preset" },
         style: [
-          { selector: "node", style: { "background-color": theme.defaultNode, "border-color": theme.background, "border-width": 2, label: "data(label)", color: theme.foreground, "font-size": 10, shape: "roundrectangle", width: "data(displayWidth)", height: "data(displayHeight)", "text-wrap": "ellipsis", "text-max-width": "data(textMaxWidth)", "text-halign": "center", "text-valign": "center", "text-justification": "center", "z-index": 10 } },
+          { selector: "node", style: { "background-color": theme.defaultNode, "border-color": theme.background, "border-width": 2, label: "data(label)", color: theme.foreground, "font-size": 9, shape: "ellipse", width: "data(displayWidth)", height: "data(displayHeight)", "text-wrap": "ellipsis", "text-max-width": "data(textMaxWidth)", "text-halign": "center", "text-valign": "center", "text-justification": "center", "z-index": 10 } },
           { selector: 'node[entityType = "PERSON"]', style: { "background-color": theme.person } },
           { selector: 'node[entityType = "ORGANIZATION"], node[entityType = "ORG"]', style: { "background-color": theme.organization } },
           { selector: 'node[entityType = "GEO"]', style: { "background-color": theme.geo } },
@@ -103,6 +153,10 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.9, "z-index": 8 } },
           { selector: "edge.hovered, edge.ui-selected", style: { label: "data(sourceLabel) → data(targetLabel)", color: theme.foreground, "font-size": 9, "text-background-color": theme.background, "text-background-opacity": 0.92, "text-background-padding": "3px", "text-background-shape": "roundrectangle", "z-index": 12 } },
           { selector: "edge.ui-selected", style: { width: 3, opacity: 1, "line-color": theme.foreground, "target-arrow-color": theme.foreground } },
+          { selector: "node.citation-dimmed", style: { opacity: 0.32 } },
+          { selector: "edge.citation-dimmed", style: { opacity: 0.18 } },
+          { selector: "node.citation-target", style: { opacity: 1, "border-color": theme.foreground, "border-width": 5, "overlay-color": theme.seed, "overlay-opacity": 0.16, "overlay-padding": 8, "overlay-shape": "ellipse", "z-index": 30 } },
+          { selector: "edge.citation-target, edge.citation-connecting", style: { width: 4, opacity: 1, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.95, "z-index": 24 } },
         ],
         minZoom: 0.2,
         maxZoom: 3,
@@ -125,9 +179,11 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         cy.on("unselect", "node, edge", (event) => event.target.removeClass("ui-selected"))
         cy.on("tap", "node", (event) => onEntityRef.current(event.target.id()))
         cy.on("tap", "edge", (event) => onRelationshipRef.current(event.target.id()))
+        cy.on("tap", (event) => { if (event.target === cy && emphasisRef.current !== null) onClearEmphasisRef.current() })
         instance = cy
         cytoscapeRef.current = cy
         runLayout(cy, projection, mode, false)
+        applyCitationEmphasis(cy, projection, emphasisRef.current)
       }).catch(failInitialization)
     }
 

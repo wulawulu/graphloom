@@ -18,6 +18,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup, usePanelRef } fro
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDesktopLayout } from "@/components/layout/use-desktop-layout"
+import type { GraphEmphasisIntent } from "@/lib/citations"
 
 import { GraphInspector, type GraphDetail } from "./graph-detail"
 import { CommunityList, EntityList, RelationshipList } from "./graph-lists"
@@ -30,12 +31,16 @@ interface GraphExplorerProps {
   runId: string | null
   focusIntent: GraphFocusIntent | null
   onClearFocus: () => void
+  emphasisIntent?: GraphEmphasisIntent | null
+  onClearEmphasis?: () => void
 }
 
 interface ProjectionRequest {
   controller: AbortController
   kind: GraphViewMode
 }
+
+const noop = (): void => undefined
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
@@ -51,7 +56,7 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
   }
 }
 
-export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
+export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
   const desktop = useDesktopLayout()
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
@@ -78,12 +83,13 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
   const inspectorPanelRef = usePanelRef()
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
+    onClearEmphasis()
     projectionRef.current = value
     modeRef.current = nextMode
     setProjection(value)
     setMode(nextMode)
     setUnavailable(false)
-  }, [])
+  }, [onClearEmphasis])
 
   const invalidateCommittedFocus = useCallback((): void => {
     if (modeRef.current === "overview") return
@@ -290,7 +296,7 @@ export function GraphExplorer({ focusIntent, onClearFocus, runId }: GraphExplore
             {projection === null && loading ? <div className="space-y-3 p-4"><Skeleton className="h-12" /><Skeleton className="h-80" /></div> : null}
             {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
             {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
-            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={backToOverview} onReload={reloadGraphData} /> : null}
+            {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBackOverview={backToOverview} onReload={reloadGraphData} /> : null}
     </div>
   )
   const inspector = (

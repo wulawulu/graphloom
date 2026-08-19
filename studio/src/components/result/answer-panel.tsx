@@ -1,13 +1,33 @@
+import { useMemo } from "react"
 import { AlertCircle, Clock3, MessageSquareText, Sparkles } from "lucide-react"
-import type { QueryResultState } from "@/api/types"
+
+import type { ExplainabilityEnvelope, QueryResultState } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { buildCitationGraphIndex, resolveCitationGroup, type CitationGroup, type GraphEmphasis } from "@/lib/citations"
 
-interface AnswerPanelProps { runId: string | null; result: QueryResultState; loading: boolean }
+interface AnswerPanelProps {
+  runId: string | null
+  result: QueryResultState
+  loading: boolean
+  envelopes?: ExplainabilityEnvelope[]
+  onCitationEmphasis?: (emphasis: GraphEmphasis) => void
+}
 
-export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React.ReactElement {
+export function AnswerPanel({ runId, result, loading, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
+  const citationIndex = useMemo(() => buildCitationGraphIndex(envelopes), [envelopes])
+  const renderCitation = (group: CitationGroup): React.ReactNode => {
+    const emphasis = resolveCitationGroup(group, citationIndex)
+    const title = `${group.dataset}\n${group.recordIds.join("\n")}${group.hasMore ? "\n+more" : ""}`
+    const label = `${group.dataset} · ${group.recordIds.length}${group.hasMore ? "+" : ""}`
+    if (emphasis === null || onCitationEmphasis === undefined) {
+      return <span className="mx-0.5 inline-flex items-center rounded-full border bg-muted/50 px-2 py-0.5 align-baseline text-[11px] font-medium text-muted-foreground" title={title}>{label}</span>
+    }
+    return <button type="button" className="mx-0.5 inline-flex items-center rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 align-baseline text-[11px] font-medium text-primary transition-colors hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={title} aria-label={`Emphasize ${group.recordIds.length} ${group.dataset} in graph`} onClick={() => onCitationEmphasis(emphasis)}>{label}</button>
+  }
+
   return (
     <section aria-label="Final answer">
         <div className="px-3 pb-3">
@@ -19,7 +39,7 @@ export function AnswerPanel({ runId, result, loading }: AnswerPanelProps): React
           {!loading && result.state === "missing" ? <AnswerState title="Result unavailable" detail="The Query Run does not exist in this Store namespace." /> : null}
           {!loading && result.state === "ready" ? (
             <div className="grid gap-4">
-              <article className="min-w-0"><SafeMarkdown>{result.result.response}</SafeMarkdown></article>
+              <article className="min-w-0"><SafeMarkdown renderCitation={renderCitation}>{result.result.response}</SafeMarkdown></article>
               <aside className="space-y-3">
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="outline"><Clock3 /> {result.result.elapsed_ms} ms</Badge>

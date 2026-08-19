@@ -18,8 +18,16 @@ const rendererTheme = {
 }
 
 interface CytoscapeTestEvent {
-  target: { id: () => string; addClass: (value: string) => void; removeClass: (value: string) => void }
+  target: unknown
   renderedPosition?: { x: number; y: number }
+}
+
+interface TestElement {
+  id: () => string
+  group: "nodes" | "edges"
+  classes: Set<string>
+  addClass: (value: string) => TestElement
+  removeClass: (value: string) => TestElement
 }
 
 const graphMock = vi.hoisted(() => ({
@@ -30,14 +38,41 @@ const graphMock = vi.hoisted(() => ({
   fitCalls: 0,
   width: 640,
   height: 480,
+  elements: [] as TestElement[],
 }))
 
 vi.mock("cytoscape", () => ({
-  default: vi.fn(() => {
+  default: vi.fn((options: { elements?: Array<{ group?: "nodes" | "edges"; data: { id: string }; classes?: string }> }) => {
     let onLayoutStop: (() => void) | undefined
+    const createElement = (definition: { group?: "nodes" | "edges"; data: { id: string }; classes?: string }): TestElement => {
+      const element: TestElement = {
+        id: () => definition.data.id,
+        group: definition.group ?? "nodes",
+        classes: new Set((definition.classes ?? "").split(" ").filter(Boolean)),
+        addClass(value) { value.split(" ").filter(Boolean).forEach((name) => element.classes.add(name)); return element },
+        removeClass(value) { value.split(" ").filter(Boolean).forEach((name) => element.classes.delete(name)); return element },
+      }
+      return element
+    }
+    graphMock.elements = (options.elements ?? []).map(createElement)
+    const collection = (items: TestElement[]) => ({
+      length: items.length,
+      union: (other: { items: TestElement[] }) => collection([...new Set([...items, ...other.items])]),
+      addClass: (value: string) => { items.forEach((item) => item.addClass(value)); return collection(items) },
+      removeClass: (value: string) => { items.forEach((item) => item.removeClass(value)); return collection(items) },
+      filter: (predicate: (element: TestElement) => boolean) => collection(items.filter(predicate)),
+      items,
+    })
     const instance = {
-      on: vi.fn((event: string, selector: string, handler: (value: CytoscapeTestEvent) => void) => graphMock.handlers.set(`${event}:${selector}`, handler)),
-      elements: vi.fn(() => ({ filter: vi.fn(() => ({ length: 1 })) })),
+      on: vi.fn((event: string, selectorOrHandler: string | ((value: CytoscapeTestEvent) => void), handler?: (value: CytoscapeTestEvent) => void) => {
+        if (typeof selectorOrHandler === "string" && handler !== undefined) graphMock.handlers.set(`${event}:${selectorOrHandler}`, handler)
+        else if (typeof selectorOrHandler === "function") graphMock.handlers.set(`${event}:core`, selectorOrHandler)
+      }),
+      collection: vi.fn(() => collection([])),
+      elements: vi.fn(() => collection(graphMock.elements)),
+      nodes: vi.fn(() => collection(graphMock.elements.filter((element) => element.group === "nodes"))),
+      edges: vi.fn(() => collection(graphMock.elements.filter((element) => element.group === "edges"))),
+      getElementById: vi.fn((id: string) => collection(graphMock.elements.filter((element) => element.id() === id))),
       layout: vi.fn(() => {
         graphMock.layoutCalls += 1
         return { one: vi.fn((_event: string, handler: () => void) => { onLayoutStop = handler }), run: vi.fn(() => onLayoutStop?.()) }
@@ -76,6 +111,7 @@ beforeEach(() => {
   graphMock.fitCalls = 0
   graphMock.width = 640
   graphMock.height = 480
+  graphMock.elements = []
   for (const [name, value] of Object.entries(rendererTheme)) {
     document.documentElement.style.setProperty(name, value)
   }
@@ -157,6 +193,11 @@ describe("NetworkPreview focus labels", () => {
     expect(serializedStyles).toContain('"text-halign":"center"')
     expect(serializedStyles).toContain('"text-valign":"center"')
     expect(serializedStyles).toContain('"label":"data(label)"')
+    expect(serializedStyles).toContain('"shape":"ellipse"')
+    expect(serializedStyles).toContain('"overlay-shape":"ellipse"')
+    expect(serializedStyles).toContain("node.seed")
+    expect(serializedStyles).toContain("node.ui-selected")
+    expect(serializedStyles).toContain('node[entityType = \\"PERSON\\"]')
     expect(options?.userZoomingEnabled).toBe(true)
     expect(options?.userPanningEnabled).toBe(true)
   })
@@ -264,5 +305,52 @@ describe("NetworkPreview focus labels", () => {
     expect(instance.resize).toHaveBeenCalledOnce()
     expect(instance.layout).toHaveBeenCalledTimes(layoutCalls)
     expect(instance.fit).toHaveBeenCalledTimes(fitCalls)
+  })
+
+  it("applies and replaces citation emphasis without running layout", async () => {
+    const evidenceProjection: GraphProjection = {
+      ...projection,
+      entities: [
+        projection.entities[0]!,
+        { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 },
+      ],
+      relationships: [{ id: "relationship-1", source_entity_id: "entity-1", target_entity_id: "entity-2", source: "Alice", target: "Bob", weight: 1, rank: 1 }],
+    }
+    const view = render(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={null} />)
+    await waitFor(() => expect(graphMock.instances).toHaveLength(1))
+    const layoutCalls = graphMock.layoutCalls
+
+    view.rerender(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} />)
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("citation-target")
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).toContain("citation-dimmed")
+
+    view.rerender(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: [], relationshipIds: ["relationship-1"], revision: 2 }} />)
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).not.toContain("citation-target")
+    expect(graphMock.elements.find((element) => element.id() === "relationship-1")?.classes).toContain("citation-target")
+    expect(graphMock.layoutCalls).toBe(layoutCalls)
+  })
+
+  it("keeps connecting edges visible and clears emphasis from canvas or Escape", async () => {
+    const onClearEmphasis = vi.fn()
+    const evidenceProjection: GraphProjection = {
+      ...projection,
+      entities: [projection.entities[0]!, { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 }],
+      relationships: [{ id: "relationship-1", source_entity_id: "entity-1", target_entity_id: "entity-2", source: "Alice", target: "Bob", weight: 1, rank: 1 }],
+    }
+    render(<NetworkPreview {...callbacks} projection={evidenceProjection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1", "entity-2"], relationshipIds: [], revision: 1 }} onClearEmphasis={onClearEmphasis} />)
+    await waitFor(() => expect(graphMock.handlers.has("tap:core")).toBe(true))
+    expect(graphMock.elements.find((element) => element.id() === "relationship-1")?.classes).toContain("citation-connecting")
+    const instance = graphMock.instances[0]
+    act(() => graphMock.handlers.get("tap:core")?.({ target: instance }))
+    expect(onClearEmphasis).toHaveBeenCalledOnce()
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))
+    expect(onClearEmphasis).toHaveBeenCalledTimes(2)
+  })
+
+  it("restores all citation classes when emphasis clears", async () => {
+    const view = render(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} />)
+    await waitFor(() => expect(graphMock.elements[0]?.classes).toContain("citation-target"))
+    view.rerender(<NetworkPreview {...callbacks} projection={projection} summary={null} summaryError={false} mode="overview" loading={false} error={null} emphasisIntent={null} />)
+    expect([...graphMock.elements[0]!.classes].some((name) => name.startsWith("citation-"))).toBe(false)
   })
 })

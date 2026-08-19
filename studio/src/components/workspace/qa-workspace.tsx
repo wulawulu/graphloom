@@ -62,18 +62,18 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
             </section>
             <section aria-label="GraphLoom answer">
               <p className="mb-2 text-[11px] font-semibold tracking-wide text-primary uppercase">GraphLoom</p>
-              {props.answer}
-              <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mt-4 border-t pt-2">
+              <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
                 <CollapsibleTrigger asChild>
                   <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label="Toggle analysis process">
                     <span className="text-xs font-medium">{analysisSummary(props.envelopes.length, props.runStatus, props.streamStatus)}</span>
                     <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
                   </Button>
                 </CollapsibleTrigger>
-                <CollapsibleContent className="pt-3">
+                <CollapsibleContent className="pb-2 pt-3">
                   <Timeline embedded runId={props.runId} envelopes={props.envelopes} streamStatus={props.streamStatus} onFocusGraph={props.onFocusGraph} />
                 </CollapsibleContent>
               </Collapsible>
+              {props.answer}
             </section>
           </div>
         )}

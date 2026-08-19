@@ -91,6 +91,20 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe("GraphExplorer focus flow", () => {
+  it("does not load a subgraph for citation emphasis and clears it only when a projection commits", async () => {
+    const onClearEmphasis = vi.fn()
+    const { rerender } = render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} onClearEmphasis={onClearEmphasis} />)
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    expect(onClearEmphasis).toHaveBeenCalledOnce()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+
+    rerender(<GraphExplorer {...defaultExplorerProps} focusIntent={null} emphasisIntent={{ entityIds: [], relationshipIds: ["relationship-1"], revision: 2 }} onClearEmphasis={onClearEmphasis} />)
+    await Promise.resolve()
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+    expect(onClearEmphasis).toHaveBeenCalledOnce()
+  })
+
   it("posts entity and relationship seeds with bounded depth-one defaults", async () => {
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
     const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160, revision: 1 }

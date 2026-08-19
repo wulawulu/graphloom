@@ -2,10 +2,10 @@ import type { CoseLayoutOptions, ElementDefinition } from "cytoscape"
 
 import type { GraphProjection, GraphProjectionEntity } from "@/api/types"
 
-export const MIN_GRAPH_NODE_WIDTH = 56
-export const MAX_GRAPH_NODE_WIDTH = 136
-export const MIN_GRAPH_NODE_HEIGHT = 28
-export const MAX_GRAPH_NODE_HEIGHT = 54
+export const MIN_GRAPH_NODE_WIDTH = 58
+export const MAX_GRAPH_NODE_WIDTH = 100
+export const MIN_GRAPH_NODE_HEIGHT = MIN_GRAPH_NODE_WIDTH
+export const MAX_GRAPH_NODE_HEIGHT = MAX_GRAPH_NODE_WIDTH
 
 export const GRAPH_LAYOUT_OPTIONS = {
   // Cytoscape's compound spring embedder layout name is assembled to keep spellcheck signal clean.
@@ -27,16 +27,16 @@ export interface GraphNodeDimensions {
 
 function graphDegreeSizeBonus(degree: number | null): number {
   if (degree === null || !Number.isFinite(degree) || degree <= 0) return 0
-  const normalized = Math.min(1, Math.log2(degree + 1) / 6)
+  const normalized = Math.min(1, Math.log2(degree + 1) / 8)
   return Math.round((MAX_GRAPH_NODE_HEIGHT - MIN_GRAPH_NODE_HEIGHT) * normalized)
 }
 
 export function graphNodeDimensions(entity: Pick<GraphProjectionEntity, "degree" | "title">): GraphNodeDimensions {
   const degreeBonus = graphDegreeSizeBonus(entity.degree)
-  const labelWidth = 16 + Array.from(entity.title).length * 6
+  const diameter = MIN_GRAPH_NODE_HEIGHT + degreeBonus
   return {
-    width: Math.min(MAX_GRAPH_NODE_WIDTH, Math.max(MIN_GRAPH_NODE_WIDTH, labelWidth + Math.round(degreeBonus * 0.55))),
-    height: MIN_GRAPH_NODE_HEIGHT + degreeBonus,
+    width: diameter,
+    height: diameter,
   }
 }
 
@@ -53,7 +53,7 @@ export function buildProjectionElements(projection: GraphProjection): ElementDef
         label: entity.title,
         displayWidth: dimensions.width,
         displayHeight: dimensions.height,
-        textMaxWidth: `${dimensions.width - 16}px`,
+        textMaxWidth: `${dimensions.width - 14}px`,
         entityType: (entity.entity_type ?? "OTHER").toUpperCase(),
         degree: entity.degree,
         rank: entity.rank,

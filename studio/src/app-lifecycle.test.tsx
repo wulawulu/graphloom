@@ -16,8 +16,8 @@ function envelope(sequence: number, event: ExplainabilityEventPayload, runId = "
 }
 
 vi.mock("@/components/graph/graph-explorer", () => ({
-  GraphExplorer: ({ focusIntent, runId }: { focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; runId: string | null }) => (
-    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span></div>
+  GraphExplorer: ({ emphasisIntent, focusIntent, runId }: { emphasisIntent: { entityIds: string[]; relationshipIds: string[]; revision: number } | null; focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; runId: string | null }) => (
+    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span><span>{emphasisIntent === null ? "No citation emphasis" : `Citation emphasis ${emphasisIntent.entityIds.join(",")}/${emphasisIntent.relationshipIds.join(",")} revision ${emphasisIntent.revision}`}</span></div>
   ),
 }))
 
@@ -26,7 +26,8 @@ vi.mock("@/components/layout/studio-shell", () => ({
 }))
 
 vi.mock("@/components/workspace/qa-workspace", () => ({
-  QaWorkspace: ({ composer, onFocusGraph, onNewQuery, onSelectRun, question, runId, envelopes }: {
+  QaWorkspace: ({ answer, composer, onFocusGraph, onNewQuery, onSelectRun, question, runId, envelopes }: {
+    answer: ReactNode
     composer: ReactNode
     onFocusGraph: (envelope: ExplainabilityEnvelope) => void
     onNewQuery: () => void
@@ -34,7 +35,7 @@ vi.mock("@/components/workspace/qa-workspace", () => ({
     question: string | null
     runId: string | null
     envelopes: ExplainabilityEnvelope[]
-  }) => <div>{composer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
+  }) => <div>{composer}{answer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
 }))
 
 vi.mock("@/components/query/query-composer", () => ({
@@ -43,7 +44,9 @@ vi.mock("@/components/query/query-composer", () => ({
   ),
 }))
 
-vi.mock("@/components/result/answer-panel", () => ({ AnswerPanel: () => null }))
+vi.mock("@/components/result/answer-panel", () => ({
+  AnswerPanel: ({ onCitationEmphasis }: { onCitationEmphasis: (value: { entityIds: string[]; relationshipIds: string[] }) => void }) => <button type="button" onClick={() => onCitationEmphasis({ entityIds: ["entity-citation"], relationshipIds: [] })}>Citation test</button>,
+}))
 
 vi.mock("@/hooks/use-explainability-stream", () => ({
   useExplainabilityStream: () => ({ envelopes: lifecycle.envelopes, status: lifecycle.status === "running" ? "open" : "closed" }),
@@ -152,5 +155,19 @@ describe("App graph focus ownership", () => {
     lifecycle.envelopes = [envelope(1, { type: "entities_selected", entities: [{ id: "entity-a", selected: true }] }), envelope(2, { type: "run_completed" })]
     await user.click(screen.getByRole("button", { name: "Select Run A" }))
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
+  })
+
+  it("keeps citation emphasis independent from graph focus and clears it on Run switch", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole("button", { name: "Select Run A" }))
+    await user.click(screen.getByRole("button", { name: "Citation test" }))
+
+    expect(screen.getByText("Graph overview")).toBeInTheDocument()
+    expect(screen.getByText("Citation emphasis entity-citation/ revision 1")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Select Run B" }))
+    expect(screen.getByText("Graph overview")).toBeInTheDocument()
+    expect(screen.getByText("No citation emphasis")).toBeInTheDocument()
   })
 })

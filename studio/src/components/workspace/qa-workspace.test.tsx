@@ -48,6 +48,9 @@ describe("QaWorkspace", () => {
     expect(screen.queryByText("Entities selected")).not.toBeInTheDocument()
     expect(screen.getByText("Bottom composer")).toBeInTheDocument()
     expect(screen.queryByRole("region", { name: "Query run history" })).not.toBeInTheDocument()
+    const analysis = screen.getByText("Analysis process · 2 steps · completed")
+    const answer = screen.getByText("Authoritative answer")
+    expect(analysis.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
   })
 
   it("keeps terminal Run status authoritative while persisted events replay", () => {

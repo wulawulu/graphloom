@@ -44,17 +44,20 @@ describe("graph projection transformation", () => {
     expect(dimensions(10).height).toBeGreaterThan(dimensions(1).height)
     expect(dimensions(100).height).toBeGreaterThan(dimensions(10).height)
     expect(dimensions(Number.MAX_SAFE_INTEGER).height).toBe(MAX_GRAPH_NODE_HEIGHT)
-    expect(dimensions(Number.MAX_SAFE_INTEGER).width).toBeLessThanOrEqual(MAX_GRAPH_NODE_WIDTH)
+    expect(dimensions(Number.MAX_SAFE_INTEGER).width).toBe(MAX_GRAPH_NODE_WIDTH)
+    for (const degree of [null, 0, 1, 10, 100, Number.MAX_SAFE_INTEGER]) {
+      expect(dimensions(degree).width).toBe(dimensions(degree).height)
+    }
   })
 
-  it("uses code-point-aware bounded dimensions for Unicode labels", () => {
+  it("keeps circular dimensions independent of label length", () => {
     const short = graphNodeDimensions({ title: "甲", degree: 0 })
     const medium = graphNodeDimensions({ title: "西门庆与潘金莲", degree: 0 })
     const long = graphNodeDimensions({ title: "非常长的中文实体名称".repeat(20), degree: 100 })
 
-    expect(medium.width).toBeGreaterThan(short.width)
-    expect(long.width).toBe(MAX_GRAPH_NODE_WIDTH)
-    expect(long.height).toBe(MAX_GRAPH_NODE_HEIGHT)
+    expect(medium).toEqual(short)
+    expect(long.width).toBe(long.height)
+    expect(long.width).toBeGreaterThan(short.width)
   })
 
   it("uses backend-resolved endpoint IDs without title lookup", () => {
@@ -80,6 +83,7 @@ describe("graph projection transformation", () => {
       expect(node?.data.label).toBe(entity.title)
       expect(node?.data.displayWidth).toEqual(expect.any(Number))
       expect(node?.data.displayHeight).toEqual(expect.any(Number))
+      expect(node?.data.displayWidth).toBe(node?.data.displayHeight)
       expect(node?.classes).not.toContain("permanent-label")
     }
   })

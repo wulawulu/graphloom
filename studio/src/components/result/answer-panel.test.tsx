@@ -1,7 +1,10 @@
-import { render, screen } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { cleanup, render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AnswerPanel } from "@/components/result/answer-panel"
+
+afterEach(cleanup)
 
 describe("AnswerPanel", () => {
   it.each([
@@ -24,5 +27,38 @@ describe("AnswerPanel", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "![tracker](https://example.invalid/track.png)", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.queryByRole("img", { name: "tracker" })).not.toBeInTheDocument()
     expect(screen.getByText("[Remote image omitted: tracker]")).toBeInTheDocument()
+  })
+
+  it("keeps ordinary external Markdown links isolated from citation rendering", () => {
+    render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "Read [documentation](https://example.com).", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
+    expect(screen.getByRole("link", { name: "documentation" })).toHaveAttribute("target", "_blank")
+    expect(screen.getByRole("link", { name: "documentation" })).toHaveAttribute("rel", "noreferrer noopener")
+  })
+
+  it("renders graph citations as safe chips and resolves selected stable IDs", async () => {
+    const user = userEvent.setup()
+    const onCitationEmphasis = vi.fn()
+    render(<AnswerPanel
+      runId="run"
+      loading={false}
+      result={{ state: "ready", result: { run_id: "run", response: "Evidence [Data: Entities (150, 0); Relationships (23); Reports (1)]", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }}
+      envelopes={[
+        { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "entities_selected", entities: [{ id: "entity-150", short_id: "150", record_type: "entity", selected: true }, { id: "entity-0", short_id: "0", record_type: "entity", selected: true }] } } },
+        { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "relationships_selected", relationships: [{ id: "relationship-23", short_id: "23", record_type: "relationship", selected: true }] } } },
+      ]}
+      onCitationEmphasis={onCitationEmphasis}
+    />)
+
+    await user.click(screen.getByRole("button", { name: "Emphasize 2 Entities in graph" }))
+    expect(onCitationEmphasis).toHaveBeenLastCalledWith({ entityIds: ["entity-150", "entity-0"], relationshipIds: [] })
+    await user.click(screen.getByRole("button", { name: "Emphasize 1 Relationships in graph" }))
+    expect(onCitationEmphasis).toHaveBeenLastCalledWith({ entityIds: [], relationshipIds: ["relationship-23"] })
+    expect(screen.getByText("Reports · 1").closest("button")).toBeNull()
+  })
+
+  it("leaves citations inside code untouched and malformed citations readable", () => {
+    render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "`[Data: Entities (150)]`\n\n```text\n[Data: Relationships (23)]\n```\n\n[Data: Entities 150]", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
+    expect(screen.queryByRole("button", { name: /Emphasize/ })).not.toBeInTheDocument()
+    expect(screen.getAllByText(/Data:/)).toHaveLength(3)
   })
 })
