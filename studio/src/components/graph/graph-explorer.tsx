@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDesktopLayout } from "@/components/layout/use-desktop-layout"
 import type { GraphEmphasisIntent } from "@/lib/citations"
+import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 import { GraphInspector, type GraphDetail } from "./graph-detail"
 import { CommunityList, EntityList, RelationshipList } from "./graph-lists"
@@ -26,6 +27,7 @@ import { NetworkPreview } from "./network-preview"
 
 export type GraphViewMode = "overview" | "query-focus" | "explorer-focus"
 export type GraphFocusIntent = GraphSubgraphRequest & { revision: number }
+export type GraphInspectIntent = { candidate: ExplainabilityRecordView; revision: number }
 
 interface GraphExplorerProps {
   runId: string | null
@@ -33,6 +35,7 @@ interface GraphExplorerProps {
   onClearFocus: () => void
   emphasisIntent?: GraphEmphasisIntent | null
   onClearEmphasis?: () => void
+  inspectIntent?: GraphInspectIntent | null
 }
 
 interface ProjectionRequest {
@@ -56,7 +59,7 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
   }
 }
 
-export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
+export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectIntent = null, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
   const desktop = useDesktopLayout()
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
@@ -71,6 +74,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
   const [detail, setDetail] = useState<GraphDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
+  const [decision, setDecision] = useState<ExplainabilityRecordView | null>(null)
   const projectionRef = useRef<GraphProjection | null>(null)
   const modeRef = useRef<GraphViewMode>("overview")
   const projectionRequest = useRef<ProjectionRequest | null>(null)
@@ -80,6 +84,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
   const lifecycleInitialized = useRef(false)
   const previousFocusIntent = useRef(focusIntent)
   const previousRunId = useRef(runId)
+  const previousInspectRevision = useRef<number | null>(null)
   const inspectorPanelRef = usePanelRef()
 
   const commitProjection = useCallback((value: GraphProjection, nextMode: GraphViewMode): void => {
@@ -239,9 +244,10 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
     }
   }, [])
 
-  const openEntity = useCallback((id: string) => {
+  const openEntityDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    setDecision(candidate)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getEntity(id, controller.signal)
@@ -250,9 +256,10 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
       .finally(() => finishDetailRequest(controller))
   }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
-  const openRelationship = useCallback((id: string) => {
+  const openRelationshipDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    setDecision(candidate)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void getRelationship(id, controller.signal)
@@ -261,9 +268,20 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
       .finally(() => finishDetailRequest(controller))
   }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
 
+  const openEntity = useCallback((id: string) => openEntityDetail(id, null), [openEntityDetail])
+  const openRelationship = useCallback((id: string) => openRelationshipDetail(id, null), [openRelationshipDetail])
+
+  useEffect(() => {
+    if (inspectIntent === null || previousInspectRevision.current === inspectIntent.revision) return
+    previousInspectRevision.current = inspectIntent.revision
+    if (inspectIntent.candidate.recordType === "entity") openEntityDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
+    if (inspectIntent.candidate.recordType === "relationship") openRelationshipDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
+  }, [inspectIntent, openEntityDetail, openRelationshipDetail])
+
   const openCommunity = useCallback((id: string) => {
     setInspectorTab("inspect")
     setMobileView("detail")
+    setDecision(null)
     if (desktop) inspectorPanelRef.current?.expand()
     const controller = beginDetailRequest()
     void Promise.all([
@@ -285,6 +303,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
     setDetail(null)
     setDetailLoading(false)
     setDetailError(false)
+    setDecision(null)
   }
 
   const graphCanvas = (
@@ -302,7 +321,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, onClearEmpha
   const inspector = (
     <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
       <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">Inspect</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Groups</TabsTrigger></TabsList>
-      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} /></TabsContent>
+      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} onFocusRelationship={(id) => loadFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 }, "explorer-focus")} /></TabsContent>
       <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
       <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
       <TabsContent value="communities" className="min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>

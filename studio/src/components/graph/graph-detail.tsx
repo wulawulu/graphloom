@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 export type GraphDetail =
   | { kind: "entity"; value: GraphEntityDetail }
@@ -15,6 +16,7 @@ export type GraphDetail =
 
 interface GraphInspectorProps {
   detail: GraphDetail | null
+  decision?: ExplainabilityRecordView | null
   loading: boolean
   error: boolean
   onClear: () => void
@@ -43,11 +45,36 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
           {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} /> : null}
           {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} /> : null}
           {detail?.kind === "community" ? <CommunityDetail value={detail.value} report={detail.report} /> : null}
+          {detail !== null && props.decision !== undefined && props.decision !== null ? <DecisionDetail value={props.decision} /> : null}
           {detail !== null ? <RawData value={detail} /> : null}
         </div>
       </ScrollArea>
     </section>
   )
+}
+
+function DecisionDetail({ value }: { value: ExplainabilityRecordView }): React.ReactElement {
+  const finalContext = value.finalContext === "included"
+    ? "Included"
+    : value.finalContext === "excluded"
+      ? "Not included"
+      : "Unknown"
+  return (
+    <section className="mb-5 space-y-2 rounded-md border bg-primary/5 p-3" aria-label="Query decision">
+      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Query decision</h3>
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+        {value.score === undefined ? null : <DecisionMetric label="Retrieval score" value={value.score.toFixed(4)} />}
+        {value.rank === undefined ? null : <DecisionMetric label="Retrieval rank" value={value.rank} />}
+        <DecisionMetric label="Selected" value={value.selected ? "Yes" : "No"} />
+        <DecisionMetric label="Final context" value={finalContext} />
+        {value.reason === undefined ? null : <DecisionMetric label="Reason" value={value.reason.replaceAll("_", " ")} />}
+      </dl>
+    </section>
+  )
+}
+
+function DecisionMetric({ label, value }: { label: string; value: string | number }): React.ReactElement {
+  return <div><dt className="text-muted-foreground">{label}</dt><dd className="mt-0.5 font-medium capitalize">{value}</dd></div>
 }
 
 function RawData({ value }: { value: GraphDetail }): React.ReactElement {

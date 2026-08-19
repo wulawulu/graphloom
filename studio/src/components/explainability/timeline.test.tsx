@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -7,91 +7,128 @@ import { Timeline } from "@/components/explainability/timeline"
 
 afterEach(cleanup)
 
-function envelope(event: ExplainabilityEventPayload): ExplainabilityEnvelope {
-  return { schema_version: 1, sequence: 4, record: { run_id: "run", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event } }
+function envelope(event: ExplainabilityEventPayload, sequence = 4): ExplainabilityEnvelope {
+  return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event } }
 }
 
-function renderEvent(event: ExplainabilityEventPayload): ReturnType<typeof render> {
-  return render(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} envelopes={[envelope(event)]} />)
+function renderTimeline(events: ExplainabilityEventPayload[], onInspectCandidate = vi.fn(), onFocusGraph = vi.fn()): ReturnType<typeof render> {
+  return render(<Timeline runId="run" streamStatus="open" onFocusGraph={onFocusGraph} onInspectCandidate={onInspectCandidate} envelopes={events.map((event, index) => envelope(event, index + 1))} />)
 }
 
-async function openDetails(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.click(screen.getByRole("button", { name: "Details" }))
+async function openTechnicalDetails(user: ReturnType<typeof userEvent.setup>, stepName: string): Promise<void> {
+  const step = screen.getByRole("article", { name: stepName })
+  await user.click(within(step).getByRole("button", { name: /Technical details/ }))
 }
 
 describe("Timeline", () => {
-  it("renders the empty state and a forward-compatible unknown event", async () => {
+  it("renders the empty state and keeps forward-compatible events in diagnostics", async () => {
     const user = userEvent.setup()
-    const { rerender } = render(<Timeline runId={null} envelopes={[]} streamStatus="idle" onFocusGraph={vi.fn()} />)
+    const { rerender } = render(<Timeline runId={null} envelopes={[]} streamStatus="idle" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
     expect(screen.getByText("No Run selected")).toBeInTheDocument()
-    rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} envelopes={[envelope({ type: "future_graphloom_event", foo: "bar" })]} />)
+    rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} envelopes={[envelope({ type: "future_graphloom_event", foo: "bar" })]} />)
+    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
     expect(screen.getByText("future graphloom event")).toBeInTheDocument()
     expect(screen.getByText("#4")).toBeInTheDocument()
-    await openDetails(user)
+    await user.click(screen.getByRole("button", { name: "Details" }))
     expect(screen.getByText("Event details")).toBeInTheDocument()
     expect(screen.getByText("Developer data")).toBeInTheDocument()
   })
 
-  it("renders candidate events as a selected-aware table instead of a JSON primary view", async () => {
+  it("presents four semantic decisions and moves lifecycle events behind disclosures", async () => {
     const user = userEvent.setup()
-    renderEvent({ type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", score: 0.91, rank: 1, selected: true, reason: "ann_result" }, { id: "entity-2", title: "Bob", record_type: "entity", selected: false, reason: "token_budget" }] })
-    await openDetails(user)
+    renderTimeline([
+      { type: "run_started" },
+      { type: "query_started" },
+      { type: "embedding_started", model_id: "bge-m3" },
+      { type: "embedding_completed", model_id: "bge-m3", prompt_tokens: 5, dimensions: 1024 },
+      { type: "candidates_retrieved", record_type: "entity", candidates: [] },
+      { type: "relationships_selected", relationships: [] },
+      { type: "context_section_built", section: { section: "entities", token_budget: 400, tokens_used: 20, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["entity-1"] } },
+      { type: "llm_request_started", model_id: "model-x", prompt_tokens: 20 },
+      { type: "llm_request_completed", model_id: "model-x", input_tokens: 20, output_tokens: 4, elapsed_ms: 10 },
+      { type: "run_completed" },
+    ])
 
-    expect(screen.getByRole("columnheader", { name: "Rank" })).toBeInTheDocument()
-    expect(screen.getByText("Selected 1 / Candidates 2")).toBeInTheDocument()
-    expect(screen.getByText("Alice").closest("tr")).toHaveAttribute("data-selected", "true")
-    expect(screen.getByText("Bob").closest("tr")).toHaveAttribute("data-selected", "false")
-    expect(screen.getByRole("button", { name: "Focus all in graph" })).toBeInTheDocument()
-    expect(screen.getByText("Developer data")).toBeInTheDocument()
-    expect(screen.getByText("Raw JSON")).toBeInTheDocument()
+    expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter((label) => label !== null)).toEqual(["Entity Mapping", "Graph Expansion", "Context Assembly", "Answer Generation"])
+    expect(screen.queryByText("Embedding started")).not.toBeInTheDocument()
+    expect(screen.queryByText("Embedding completed")).not.toBeInTheDocument()
+    await openTechnicalDetails(user, "Entity Mapping")
+    expect(screen.getByText("Embedding started")).toBeInTheDocument()
+    expect(screen.getByText("Embedding completed")).toBeInTheDocument()
+    expect(screen.getByText("Run started")).not.toBeVisible()
+    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
+    expect(screen.getByText("Run started")).toBeInTheDocument()
+    expect(screen.getByText("Run completed")).toBeInTheDocument()
   })
 
-  it("reveals candidates in bounded batches of 100", async () => {
+  it("inspects stable graph candidates and leaves unsupported records read-only", async () => {
+    const user = userEvent.setup()
+    const onInspectCandidate = vi.fn()
+    renderTimeline([
+      { type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", score: 0.91, rank: 1, selected: true }] },
+      { type: "relationships_selected", relationships: [{ id: "relationship-1", title: "Alice knows Bob", record_type: "relationship", selected: true }] },
+      { type: "community_reports_selected", community_reports: [{ id: "report-1", title: "Report one", record_type: "community_report", selected: true }] },
+    ], onInspectCandidate)
+
+    await user.click(screen.getByRole("button", { name: "Inspect entity Alice" }))
+    expect(onInspectCandidate).toHaveBeenCalledWith(expect.objectContaining({ stableId: "entity-1", recordType: "entity" }))
+    await user.click(screen.getByRole("button", { name: "Inspect relationship Alice knows Bob" }))
+    expect(onInspectCandidate).toHaveBeenCalledWith(expect.objectContaining({ stableId: "relationship-1", recordType: "relationship" }))
+    expect(screen.getByText("Report one")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Inspect community_report/ })).not.toBeInTheDocument()
+  })
+
+  it("shows selected and final-context decisions as distinct states", () => {
+    renderTimeline([
+      { type: "entities_selected", entities: [{ id: "entity-in", title: "Included entity", record_type: "entity", selected: true }, { id: "entity-out", title: "Truncated entity", record_type: "entity", selected: true }, { id: "entity-rejected", title: "Rejected entity", record_type: "entity", selected: false }] },
+      { type: "context_section_built", section: { section: "entities", token_budget: 400, tokens_used: 20, candidate_count: 3, selected_count: 1, truncated: true, selected_record_ids: ["entity-in"] } },
+    ])
+
+    expect(screen.getByText("Included entity").closest("div.flex.items-center")).toHaveTextContent("Included")
+    expect(screen.getByText("Truncated entity").closest("div.flex.items-center")).toHaveTextContent("Not in final context")
+    expect(screen.getByText("Rejected entity").closest("div.flex.items-center")).toHaveTextContent("Excluded")
+  })
+
+  it("preserves typed candidate details and bounded raw tables", async () => {
     const user = userEvent.setup()
     const candidates = Array.from({ length: 101 }, (_, index) => ({ id: `entity-${index + 1}`, title: `Candidate ${index + 1}`, record_type: "entity", selected: false }))
-    renderEvent({ type: "candidates_retrieved", record_type: "entity", candidates })
-    await openDetails(user)
-    expect(screen.getByText("Showing 100 of 101")).toBeInTheDocument()
+    renderTimeline([{ type: "candidates_retrieved", record_type: "entity", candidates }])
     expect(screen.queryByText("Candidate 101")).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Show 100 more" }))
+    await user.click(screen.getByRole("button", { name: "Show all 101 records" }))
     expect(screen.getByText("Candidate 101")).toBeInTheDocument()
+    await openTechnicalDetails(user, "Entity Mapping")
+    await user.click(screen.getByRole("button", { name: "Details" }))
+    expect(screen.getByText("Showing 100 of 101")).toBeInTheDocument()
+    expect(screen.getByText("Developer data")).toBeInTheDocument()
   })
 
-  it("renders context budgets and metadata-hidden context safely", async () => {
+  it("preserves context and LLM technical details", async () => {
     const user = userEvent.setup()
-    const { unmount } = renderEvent({ type: "context_budget_allocated", total_token_budget: 1000, sections: [{ section: "entities", token_budget: 400 }, { section: "sources", token_budget: 0 }] })
-    await openDetails(user)
+    renderTimeline([
+      { type: "context_budget_allocated", total_token_budget: 1000, sections: [{ section: "entities", token_budget: 400 }] },
+      { type: "context_completed", tokens_used: 700 },
+      { type: "llm_request_completed", model_id: "model-x", input_tokens: 700, output_tokens: 40, elapsed_ms: 25, response: "Explainability response" },
+    ])
+    await openTechnicalDetails(user, "Context Assembly")
+    const contextDetails = screen.getAllByRole("button", { name: "Details" })
+    await user.click(contextDetails[0]!)
     expect(screen.getByText("Total token budget")).toBeInTheDocument()
-    expect(screen.getByText("entities")).toBeInTheDocument()
-    unmount()
-
-    renderEvent({ type: "context_completed", tokens_used: 700 })
-    await openDetails(user)
+    await user.click(contextDetails[1]!)
     expect(screen.getByText("Content hidden by explainability mode.")).toBeInTheDocument()
-  })
-
-  it("renders typed LLM usage and disclosed response", async () => {
-    const user = userEvent.setup()
-    renderEvent({ type: "llm_request_completed", model_id: "model-x", input_tokens: 700, output_tokens: 40, elapsed_ms: 25, response: "Explainability response" })
-    await openDetails(user)
-    expect(screen.getByText("model-x")).toBeInTheDocument()
-    expect(screen.getByText("700")).toBeInTheDocument()
-    expect(screen.getByText("40")).toBeInTheDocument()
-    expect(screen.getByText("Response")).toBeInTheDocument()
+    await openTechnicalDetails(user, "Answer Generation")
+    await user.click(screen.getAllByRole("button", { name: "Details" })[2]!)
     expect(screen.getByText("Explainability response")).toBeInTheDocument()
   })
 
-  it("renders graph expansion seeds and a focused action", async () => {
+  it("keeps Focus in graph explicit and excludes rejected-only mappings", async () => {
     const user = userEvent.setup()
-    renderEvent({ type: "graph_expansion_started", seed_entity_ids: ["entity-a", "entity-b"] })
-    await openDetails(user)
-    expect(screen.getByText("entity-a")).toBeInTheDocument()
-    expect(screen.getByText("entity-b")).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Focus expansion in graph" })).toBeInTheDocument()
-  })
+    const onFocusGraph = vi.fn()
+    const selected = { type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: true }] }
+    const { rerender } = renderTimeline([selected], vi.fn(), onFocusGraph)
+    await user.click(screen.getByRole("button", { name: "Focus in graph" }))
+    expect(onFocusGraph).toHaveBeenCalledWith(expect.objectContaining({ record: expect.objectContaining({ event: selected }) }))
 
-  it("does not offer Focus for empty or all-rejected selection events", () => {
-    renderEvent({ type: "entities_selected", entities: [{ id: "entity-rejected", title: "Rejected", record_type: "entity", selected: false }] })
+    rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={onFocusGraph} onInspectCandidate={vi.fn()} envelopes={[envelope({ type: "entities_selected", entities: [{ id: "entity-rejected", title: "Rejected", record_type: "entity", selected: false }] })]} />)
     expect(screen.queryByRole("button", { name: "Focus in graph" })).not.toBeInTheDocument()
   })
 })

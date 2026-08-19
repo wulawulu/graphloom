@@ -30,6 +30,7 @@ function props() {
     historyError: null,
     historyHasMore: true,
     onFocusGraph: vi.fn(),
+    onInspectCandidate: vi.fn(),
     onNewQuery: vi.fn(),
     onSelectRun: vi.fn(),
     onRefreshHistory: vi.fn(),
@@ -44,11 +45,11 @@ describe("QaWorkspace", () => {
     const workspace = screen.getByRole("region", { name: "Graph QA workspace" })
     expect(within(workspace).getByText("How is Alice connected?")).toBeInTheDocument()
     expect(within(workspace).getByText("Authoritative answer")).toBeInTheDocument()
-    expect(screen.getByText("Analysis process · 2 steps · completed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis process · 1 decision · completed")).toBeInTheDocument()
     expect(screen.queryByText("Entities selected")).not.toBeInTheDocument()
     expect(screen.getByText("Bottom composer")).toBeInTheDocument()
     expect(screen.queryByRole("region", { name: "Query run history" })).not.toBeInTheDocument()
-    const analysis = screen.getByText("Analysis process · 2 steps · completed")
+    const analysis = screen.getByText("Analysis process · 1 decision · completed")
     const answer = screen.getByText("Authoritative answer")
     expect(analysis.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
   })
@@ -56,23 +57,27 @@ describe("QaWorkspace", () => {
   it("keeps terminal Run status authoritative while persisted events replay", () => {
     const values = props()
     const { rerender } = render(<QaWorkspace {...values} streamStatus="open" />)
-    expect(screen.getByText("Analysis process · 2 steps · completed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis process · 1 decision · completed")).toBeInTheDocument()
 
     rerender(<QaWorkspace {...values} runStatus="failed" streamStatus="connecting" />)
-    expect(screen.getByText("Analysis process · 2 steps · failed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis process · 1 decision · failed")).toBeInTheDocument()
   })
 
-  it("expands ordered events with typed Details and keeps manual graph focus", async () => {
+  it("expands semantic decisions, inspects candidates, and keeps graph focus explicit", async () => {
     const user = userEvent.setup()
     const values = props()
     render(<QaWorkspace {...values} />)
 
     await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
-    const labels = screen.getAllByText(/Query started|Entities selected/)
-    expect(labels.map((element) => element.textContent)).toEqual(["Query started", "Entities selected"])
-    await user.click(screen.getAllByRole("button", { name: "Details" })[1]!)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+    expect(screen.getByText("Query started")).not.toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Inspect entity Alice" }))
+    expect(values.onInspectCandidate).toHaveBeenCalledWith(expect.objectContaining({ stableId: "entity-1" }))
+    expect(values.onFocusGraph).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: /Technical details/ }))
+    await user.click(within(screen.getByRole("article", { name: "Entity Mapping" })).getByRole("button", { name: "Details" }))
     expect(screen.getByText("Selected 1 / Candidates 1")).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Focus in graph" }))
+    await user.click(within(screen.getByRole("article", { name: "Entity Mapping" })).getAllByRole("button", { name: "Focus in graph" })[0]!)
     expect(values.onFocusGraph).toHaveBeenCalledWith(events[1])
   })
 
@@ -82,9 +87,9 @@ describe("QaWorkspace", () => {
     const { rerender } = render(<QaWorkspace {...values} envelopes={[events[0]!]} />)
 
     rerender(<QaWorkspace {...values} envelopes={events} />)
-    expect(screen.queryByText("Entities selected")).not.toBeInTheDocument()
+    expect(screen.queryByText("Entity Mapping")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
-    expect(screen.getByText("Entities selected")).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
   })
 
   it("opens History on demand, preserves metadata privacy, and selects through the existing callback", async () => {

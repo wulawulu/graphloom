@@ -12,6 +12,8 @@ import { useRunHistory } from "@/hooks/use-run-history"
 import { QaWorkspace } from "@/components/workspace/qa-workspace"
 import { deriveFinalGraphFocus, highlightFromEvent } from "@/lib/explainability"
 import type { GraphEmphasis, GraphEmphasisIntent } from "@/lib/citations"
+import type { GraphInspectIntent } from "@/components/graph/graph-explorer"
+import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 const GraphExplorer = lazy(() => import("@/components/graph/graph-explorer").then((module) => ({ default: module.GraphExplorer })))
 const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((module) => ({ default: module.AnswerPanel })))
@@ -20,6 +22,7 @@ export function App(): React.ReactElement {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [graphFocus, setGraphFocus] = useState<(GraphSubgraphRequest & { revision: number }) | null>(null)
   const [citationEmphasis, setCitationEmphasis] = useState<GraphEmphasisIntent | null>(null)
+  const [graphInspection, setGraphInspection] = useState<GraphInspectIntent | null>(null)
   const [mobileTab, setMobileTab] = useState("query")
   const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null)
   const [activeSubmittedRunId, setActiveSubmittedRunId] = useState<string | null>(null)
@@ -44,6 +47,7 @@ export function App(): React.ReactElement {
     setSelectedRunId(runId)
     setGraphFocus(null)
     setCitationEmphasis(null)
+    setGraphInspection(null)
   }, [])
 
   const clearGraphFocus = useCallback(() => setGraphFocus(null), [])
@@ -54,6 +58,12 @@ export function App(): React.ReactElement {
     setMobileTab("graph")
   }, [])
 
+  const onInspectCandidate = useCallback((candidate: ExplainabilityRecordView) => {
+    if ((candidate.recordType !== "entity" && candidate.recordType !== "relationship") || candidate.stableId.length === 0) return
+    setGraphInspection((current) => ({ candidate, revision: (current?.revision ?? 0) + 1 }))
+    setMobileTab("graph")
+  }, [])
+
   const onAccepted = useCallback((response: StartQueryResponse, query: string) => {
     setActiveSubmittedRunId(response.run_id)
     setSubmittedQuestion(query)
@@ -61,6 +71,7 @@ export function App(): React.ReactElement {
     setSelectedRunId(response.run_id)
     setGraphFocus(null)
     setCitationEmphasis(null)
+    setGraphInspection(null)
     setMobileTab("query")
     refreshHistory()
   }, [refreshHistory])
@@ -70,6 +81,7 @@ export function App(): React.ReactElement {
     setSubmittedQuestion(null)
     setShowCurrentQa(false)
     setCitationEmphasis(null)
+    setGraphInspection(null)
     setComposerRevision((value) => value + 1)
     setMobileTab("query")
   }, [])
@@ -135,6 +147,7 @@ export function App(): React.ReactElement {
       historyError={history.error}
       historyHasMore={history.cursor !== null}
       onFocusGraph={onFocusGraph}
+      onInspectCandidate={onInspectCandidate}
       onNewQuery={onNewQuery}
       onSelectRun={selectRun}
       onRefreshHistory={history.refresh}
@@ -146,7 +159,7 @@ export function App(): React.ReactElement {
     <TooltipProvider delayDuration={250}>
       <StudioShell
         queryWorkspace={queryWorkspace}
-        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
       />

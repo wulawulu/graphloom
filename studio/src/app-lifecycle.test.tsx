@@ -16,8 +16,8 @@ function envelope(sequence: number, event: ExplainabilityEventPayload, runId = "
 }
 
 vi.mock("@/components/graph/graph-explorer", () => ({
-  GraphExplorer: ({ emphasisIntent, focusIntent, runId }: { emphasisIntent: { entityIds: string[]; relationshipIds: string[]; revision: number } | null; focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; runId: string | null }) => (
-    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span><span>{emphasisIntent === null ? "No citation emphasis" : `Citation emphasis ${emphasisIntent.entityIds.join(",")}/${emphasisIntent.relationshipIds.join(",")} revision ${emphasisIntent.revision}`}</span></div>
+  GraphExplorer: ({ emphasisIntent, focusIntent, inspectIntent, runId }: { emphasisIntent: { entityIds: string[]; relationshipIds: string[]; revision: number } | null; focusIntent: { entity_ids: string[]; relationship_ids: string[]; revision: number } | null; inspectIntent: { candidate: { stableId: string }; revision: number } | null; runId: string | null }) => (
+    <div>{focusIntent === null ? "Graph overview" : `Graph focus ${focusIntent.entity_ids.join(",")}/${focusIntent.relationship_ids.join(",")} revision ${focusIntent.revision}`}<span>Graph run {runId ?? "none"}</span><span>{emphasisIntent === null ? "No citation emphasis" : `Citation emphasis ${emphasisIntent.entityIds.join(",")}/${emphasisIntent.relationshipIds.join(",")} revision ${emphasisIntent.revision}`}</span><span>{inspectIntent === null ? "No candidate inspection" : `Candidate inspection ${inspectIntent.candidate.stableId} revision ${inspectIntent.revision}`}</span></div>
   ),
 }))
 
@@ -26,16 +26,17 @@ vi.mock("@/components/layout/studio-shell", () => ({
 }))
 
 vi.mock("@/components/workspace/qa-workspace", () => ({
-  QaWorkspace: ({ answer, composer, onFocusGraph, onNewQuery, onSelectRun, question, runId, envelopes }: {
+  QaWorkspace: ({ answer, composer, onFocusGraph, onInspectCandidate, onNewQuery, onSelectRun, question, runId, envelopes }: {
     answer: ReactNode
     composer: ReactNode
     onFocusGraph: (envelope: ExplainabilityEnvelope) => void
+    onInspectCandidate: (candidate: { stableId: string; title: string; recordType: string; selected: boolean; finalContext: string }) => void
     onNewQuery: () => void
     onSelectRun: (runId: string) => void
     question: string | null
     runId: string | null
     envelopes: ExplainabilityEnvelope[]
-  }) => <div>{composer}{answer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
+  }) => <div>{composer}{answer}<span>Workspace run {runId ?? "none"}</span><span>Question {question ?? "none"}</span><button type="button" onClick={onNewQuery}>New Query test</button><button type="button" onClick={() => onSelectRun("run-a")}>Select Run A</button><button type="button" onClick={() => onSelectRun("run-b")}>Select Run B</button><button type="button" onClick={() => onInspectCandidate({ stableId: "entity-candidate", title: "Candidate", recordType: "entity", selected: true, finalContext: "included" })}>Inspect candidate test</button>{envelopes[0] === undefined ? null : <button type="button" onClick={() => onFocusGraph(envelopes[0]!)}>Show in graph</button>}</div>,
 }))
 
 vi.mock("@/components/query/query-composer", () => ({
@@ -167,6 +168,17 @@ describe("App graph focus ownership", () => {
     expect(screen.getByText("Citation emphasis entity-citation/ revision 1")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: "Select Run B" }))
+    expect(screen.getByText("Graph overview")).toBeInTheDocument()
+    expect(screen.getByText("No citation emphasis")).toBeInTheDocument()
+  })
+
+  it("keeps candidate inspection independent from graph focus and citation emphasis", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole("button", { name: "Select Run A" }))
+    await user.click(screen.getByRole("button", { name: "Inspect candidate test" }))
+
+    expect(screen.getByText("Candidate inspection entity-candidate revision 1")).toBeInTheDocument()
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.getByText("No citation emphasis")).toBeInTheDocument()
   })

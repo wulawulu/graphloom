@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { ChevronDown, History, MessageSquareText, Plus } from "lucide-react"
 
 import type { ExplainabilityEnvelope, ExplainabilityRun } from "@/api/types"
@@ -10,6 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import type { StreamStatus } from "@/hooks/use-explainability-stream"
+import { buildSemanticTimeline, type ExplainabilityRecordView } from "@/lib/semantic-timeline"
 
 interface QaWorkspaceProps {
   runId: string | null
@@ -24,6 +25,7 @@ interface QaWorkspaceProps {
   historyError: string | null
   historyHasMore: boolean
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
+  onInspectCandidate: (candidate: ExplainabilityRecordView) => void
   onNewQuery: () => void
   onSelectRun: (runId: string) => void
   onRefreshHistory: () => void
@@ -33,6 +35,7 @@ interface QaWorkspaceProps {
 export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const decisionCount = useMemo(() => buildSemanticTimeline(props.envelopes).steps.length, [props.envelopes])
 
   useEffect(() => setAnalysisOpen(false), [props.runId])
 
@@ -65,12 +68,12 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
               <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
                 <CollapsibleTrigger asChild>
                   <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label="Toggle analysis process">
-                    <span className="text-xs font-medium">{analysisSummary(props.envelopes.length, props.runStatus, props.streamStatus)}</span>
+                    <span className="text-xs font-medium">{analysisSummary(decisionCount, props.runStatus, props.streamStatus)}</span>
                     <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
                   </Button>
                 </CollapsibleTrigger>
                 <CollapsibleContent className="pb-2 pt-3">
-                  <Timeline embedded runId={props.runId} envelopes={props.envelopes} streamStatus={props.streamStatus} onFocusGraph={props.onFocusGraph} />
+                  <Timeline embedded runId={props.runId} envelopes={props.envelopes} streamStatus={props.streamStatus} onFocusGraph={props.onFocusGraph} onInspectCandidate={props.onInspectCandidate} />
                 </CollapsibleContent>
               </Collapsible>
               {props.answer}
@@ -100,11 +103,12 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   )
 }
 
-function analysisSummary(eventCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
-  if (runStatus === "completed") return `Analysis process · ${eventCount} steps · completed`
-  if (runStatus === "failed" || runStatus === "cancelled") return `Analysis process · ${eventCount} steps · ${runStatus}`
+function analysisSummary(decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
+  const count = `${decisionCount} ${decisionCount === 1 ? "decision" : "decisions"}`
+  if (runStatus === "completed") return `Analysis process · ${count} · completed`
+  if (runStatus === "failed" || runStatus === "cancelled") return `Analysis process · ${count} · ${runStatus}`
   if (runStatus === "running" || runStatus === "pending" || streamStatus === "open" || streamStatus === "connecting" || streamStatus === "reconnecting") {
-    return `Analysis process · ${eventCount} steps · running`
+    return `Analysis process · ${count} · running`
   }
-  return `Analysis process · ${eventCount} steps`
+  return `Analysis process · ${count}`
 }

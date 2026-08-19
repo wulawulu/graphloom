@@ -13,7 +13,7 @@ import {
   getRelationship,
 } from "@/api/client"
 import type { GraphProjection, GraphSummary } from "@/api/types"
-import { GraphExplorer, type GraphFocusIntent } from "@/components/graph/graph-explorer"
+import { GraphExplorer, type GraphFocusIntent, type GraphInspectIntent } from "@/components/graph/graph-explorer"
 import { highlightFromEvent } from "@/lib/explainability"
 
 vi.mock("@/api/client", () => ({
@@ -91,6 +91,47 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe("GraphExplorer focus flow", () => {
+  it("opens candidate detail without changing the projection or requesting a subgraph", async () => {
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: "150", title: "Alice", entity_type: "PERSON", degree: 2, rank: 1,
+      description: "Candidate detail", community_ids: [], text_unit_ids: [],
+    })
+    const inspectIntent: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", finalContext: "included" },
+    }
+
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} inspectIntent={inspectIntent} />)
+
+    expect(await screen.findByText("OVERVIEW")).toBeInTheDocument()
+    expect(await screen.findByText("Candidate detail")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("Final contextIncluded")
+    expect(screen.getByText("overview")).toBeInTheDocument()
+    expect(getEntity).toHaveBeenCalledWith("entity-1", expect.any(AbortSignal))
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+    expect(getGraphOverview).toHaveBeenCalledTimes(1)
+    expect(networkLifecycle.mounts).toBe(1)
+  })
+
+  it("opens relationship candidates with the same inspect-only semantics", async () => {
+    vi.mocked(getRelationship).mockResolvedValue({
+      id: "relationship-1", short_id: "23", source: "Alice", target: "Bob", weight: 0.8, rank: 2,
+      description: "Candidate relationship", text_unit_ids: [],
+    })
+    const inspectIntent: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "relationship-1", shortId: "23", title: "Alice knows Bob", recordType: "relationship", score: 0.75, selected: true, finalContext: "included" },
+    }
+
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} inspectIntent={inspectIntent} />)
+
+    expect(await screen.findByText("Candidate relationship")).toBeInTheDocument()
+    expect(screen.getByText("OVERVIEW")).toBeInTheDocument()
+    expect(screen.getByText("overview")).toBeInTheDocument()
+    expect(getRelationship).toHaveBeenCalledWith("relationship-1", expect.any(AbortSignal))
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+  })
+
   it("does not load a subgraph for citation emphasis and clears it only when a projection commits", async () => {
     const onClearEmphasis = vi.fn()
     const { rerender } = render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} emphasisIntent={{ entityIds: ["entity-1"], relationshipIds: [], revision: 1 }} onClearEmphasis={onClearEmphasis} />)
