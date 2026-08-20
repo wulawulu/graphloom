@@ -543,7 +543,10 @@ impl ContextSectionBuilt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ContextCompleted {
-    /// Tokens consumed by the completed context.
+    /// Tokens consumed under the method's real context-accounting algorithm.
+    ///
+    /// For Basic Search this is the budget-loop count rather than a second tokenization of the
+    /// rendered Sources CSV. The optional `context` remains the exact rendered input.
     pub tokens_used: u64,
     /// Full context when the content mode permits it.
     #[serde(

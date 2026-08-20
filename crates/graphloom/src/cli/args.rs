@@ -266,10 +266,13 @@ where
 
 fn validate_query_explainability(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
     if args.explain_output.is_some()
-        && !matches!(args.method, SearchMethod::Local | SearchMethod::Global)
+        && !matches!(
+            args.method,
+            SearchMethod::Local | SearchMethod::Global | SearchMethod::Basic
+        )
     {
         return Err(query_path_error(
-            "--explain-output currently supports --method local and static global".to_owned(),
+            "--explain-output currently supports --method local, global, and basic".to_owned(),
         ));
     }
     Ok(())
@@ -833,6 +836,55 @@ mod tests {
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_should_accept_explainability_for_basic_and_reject_drift() {
+        let fixture = TempDir::new().expect("query fixture");
+        let output = fixture.path().join("basic-explainability.jsonl");
+        let root = fixture.path().as_os_str();
+        let output = output.as_os_str();
+        let parsed = try_parse_cli_from_with_probe(
+            [
+                std::ffi::OsStr::new("graphloom"),
+                std::ffi::OsStr::new("query"),
+                std::ffi::OsStr::new("--root"),
+                root,
+                std::ffi::OsStr::new("--method"),
+                std::ffi::OsStr::new("basic"),
+                std::ffi::OsStr::new("--explain-output"),
+                output,
+                std::ffi::OsStr::new("question"),
+            ],
+            |_| Ok(()),
+        )
+        .expect("Basic Explainability must be accepted");
+        let Command::Query(args) = parsed.command else {
+            panic!("expected query command");
+        };
+        assert_eq!(args.explain_output.as_deref(), Some(output.as_ref()));
+
+        let error = try_parse_cli_from_with_probe(
+            [
+                std::ffi::OsStr::new("graphloom"),
+                std::ffi::OsStr::new("query"),
+                std::ffi::OsStr::new("--root"),
+                root,
+                std::ffi::OsStr::new("--method"),
+                std::ffi::OsStr::new("drift"),
+                std::ffi::OsStr::new("--explain-output"),
+                output,
+                std::ffi::OsStr::new("question"),
+            ],
+            |_| Ok(()),
+        )
+        .expect_err("DRIFT Explainability must remain deferred");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(
+            error
+                .to_string()
+                .contains("--explain-output currently supports --method local, global, and basic")
+        );
     }
 
     #[test]

@@ -430,22 +430,15 @@ impl BasicContextBuilder {
                     ExplainabilityEvent::ContextSectionBuilt(ContextSectionBuilt::new(section)),
                 )
                 .await;
-        }
-        match self.tokenizer.count(context_text) {
-            Ok(tokens) => {
-                if let Some(tokens) = session.usize_to_u64(tokens) {
-                    let mut event = ContextCompleted::new(tokens);
-                    event.context = session.content(context_text);
-                    session
-                        .emit(
-                            session.spans().context(),
-                            Some(session.root_span()),
-                            ExplainabilityEvent::ContextCompleted(event),
-                        )
-                        .await;
-                }
-            }
-            Err(_) => session.mark_sidecar_failure("context_token_count"),
+            let mut event = ContextCompleted::new(tokens_used);
+            event.context = session.content(context_text);
+            session
+                .emit(
+                    session.spans().context(),
+                    Some(session.root_span()),
+                    ExplainabilityEvent::ContextCompleted(event),
+                )
+                .await;
         }
     }
 }
@@ -939,6 +932,7 @@ mod tests {
             &record.event,
             ExplainabilityEvent::ContextCompleted(event)
                 if event.context.as_deref() == Some("id|text\n0|A\n")
+                    && event.tokens_used == section.tokens_used
         )));
     }
 }

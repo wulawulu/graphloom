@@ -148,4 +148,77 @@ describe("Basic semantic timeline", () => {
     expect(contextStep(model).summary.candidates.map((value) => value.id)).toEqual(["A"])
     expect(model.diagnosticEvents.map((event) => event.sequence)).toContain(4)
   })
+
+  it("bounds canonical facts between QueryStarted and the first root terminal", () => {
+    const model = buildSemanticTimeline([
+      envelope(0, "pre-llm", { type: "llm_request_started", model_id: "pre", prompt_tokens: 1, prompt: "PRE" }, "root"),
+      ...fullBasicRun(),
+      envelope(12, "late-context", { type: "context_budget_allocated", total_token_budget: 999, sections: [{ section: "sources", token_budget: 999 }] }, "root"),
+      envelope(13, "late-context", { type: "context_section_built", section: { section: "sources", token_budget: 999, tokens_used: 1, candidate_count: 0, selected_count: 0, truncated: false, selected_record_ids: [] } }, "root"),
+      envelope(14, "late-context", { type: "context_completed", tokens_used: 1, context: "WRONG CONTEXT" }, "root"),
+      envelope(15, "late-llm", { type: "llm_request_started", model_id: "wrong", prompt_tokens: 1, prompt: "WRONG PROMPT" }, "root"),
+      envelope(16, "late-llm", { type: "llm_request_completed", model_id: "wrong", input_tokens: 1, output_tokens: 1, elapsed_ms: 1, response: "WRONG RESPONSE" }, "root"),
+    ])
+    expect(contextStep(model).summary.exactContext).toBe("id|text\nA|exact\n")
+    expect(answerStep(model).summary.rawResponse).toBe("RAW RESPONSE")
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([0, 12, 13, 14, 15, 16]))
+  })
+
+  it("rejects filtered decisions inconsistent with the canonical context section", () => {
+    const events = fullBasicRun()
+    events.splice(7, 0, envelope(7.5, "retrieval", {
+      type: "candidates_filtered",
+      record_type: "text_unit",
+      candidates: [candidate("WRONG", 1, true)],
+    }, "root"))
+    const model = buildSemanticTimeline(events)
+    expect(contextStep(model).summary.candidates.map((value) => value.id)).toEqual(["A", "B", "C"])
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toContain(7.5)
+  })
+
+  it("leaves malformed Basic payloads in Diagnostics without throwing", () => {
+    const malformed = { type: "context_section_built" } as unknown as ExplainabilityEventPayload
+    const badCandidates = {
+      type: "candidates_retrieved",
+      record_type: "text_unit",
+      candidates: [{ id: "A", record_type: "text_unit", selected: false, score: "not-a-number" }],
+    } as unknown as ExplainabilityEventPayload
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "basic" }),
+      envelope(2, "context", malformed, "root"),
+      envelope(3, "retrieval", badCandidates, "root"),
+    ])
+    expect(model.steps).toHaveLength(3)
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([2, 3]))
+  })
+
+  it("does not let duplicate budget or incoherent section hide a completed context", () => {
+    const events = fullBasicRun().filter((event) => event.sequence < 8)
+    events.push(
+      envelope(7.1, "context", { type: "context_budget_allocated", total_token_budget: 999, sections: [{ section: "sources", token_budget: 999 }] }, "root"),
+      envelope(7.2, "context", { type: "context_section_built", section: { section: "sources", token_budget: 999, tokens_used: 1, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["WRONG"] } }, "root"),
+      envelope(8, "context", { type: "context_completed", tokens_used: 12, context: "id|text\nA|exact\n" }, "root"),
+    )
+    const model = buildSemanticTimeline(events)
+    expect(contextStep(model).summary.status).toBe("completed")
+    expect(contextStep(model).summary.selectedRecordIds).toEqual(["A"])
+    expect(contextStep(model).summary.exactContext).toBe("id|text\nA|exact\n")
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([7.1, 7.2]))
+  })
+
+  it("completes context assembly when a non-empty query has zero ANN matches", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "basic", query: "no matches" }),
+      envelope(2, "embedding", { type: "embedding_started", model_id: "embed", input: "no matches" }, "root"),
+      envelope(3, "embedding", { type: "embedding_completed", model_id: "embed", prompt_tokens: 2, dimensions: 2 }, "root"),
+      envelope(4, "retrieval", { type: "candidates_retrieved", record_type: "text_unit", candidates: [] }, "root"),
+      envelope(5, "context", { type: "context_budget_allocated", total_token_budget: 20, sections: [{ section: "sources", token_budget: 20 }] }, "root"),
+      envelope(6, "retrieval", { type: "candidates_filtered", record_type: "text_unit", candidates: [] }, "root"),
+      envelope(7, "context", { type: "context_section_built", section: { section: "sources", token_budget: 20, tokens_used: 8, candidate_count: 0, selected_count: 0, truncated: false, selected_record_ids: [] } }, "root"),
+      envelope(8, "context", { type: "context_completed", tokens_used: 8, context: "id|text\n" }, "root"),
+    ])
+    expect(retrievalStep(model).summary.status).toBe("retrieved")
+    expect(contextStep(model).summary.status).toBe("completed")
+    expect(contextStep(model).summary.exactContext).toBe("id|text\n")
+  })
 })

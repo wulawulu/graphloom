@@ -70,7 +70,7 @@ function StepContent({ step }: { step: BasicSemanticStep }): React.ReactNode {
         {summary.status === "waiting" ? null : <p className="text-[11px] text-muted-foreground">Basic preserves source-table order after ANN matching; token fitting stops at the first over-budget row.</p>}
         {summary.status === "completed" ? <dl className="grid grid-cols-2 gap-2 text-xs"><Metric label="Candidates" value={summary.candidateCount ?? summary.candidates.length} /><Metric label="Included" value={summary.selectedCount ?? 0} />{summary.tokenBudgetExcludedCount === undefined ? null : <Metric label="Token-budget excluded" value={summary.tokenBudgetExcludedCount} />}{summary.budgetedTokensUsed === undefined ? null : <Metric label="Budgeted tokens" value={`${summary.budgetedTokensUsed.toLocaleString()}${summary.tokenBudget === undefined ? "" : ` / ${summary.tokenBudget.toLocaleString()}`}`} />}</dl> : null}
         <CandidateList candidates={summary.candidates} mode="decision" />
-        <CapturedContentViewer buttonLabel="View Basic Context" title="Basic Context" content={summary.exactContext} unavailableMessage="Basic context content was not captured. Run with Content or Debug to inspect exact input." testId="exact-basic-context" exactTabLabel="Exact input" copyLabel="Copy exact Basic context" />
+        {summary.status === "completed" ? <CapturedContentViewer buttonLabel="View Basic Context" title="Basic Context" content={summary.exactContext} unavailableMessage="Basic context content was not captured. Run with Content or Debug to inspect exact input." testId="exact-basic-context" exactTabLabel="Exact input" copyLabel="Copy exact Basic context" /> : null}
       </div>
     )
   }
@@ -78,7 +78,7 @@ function StepContent({ step }: { step: BasicSemanticStep }): React.ReactNode {
   return (
     <div className="mt-3 min-w-0 space-y-3">
       <dl className="grid grid-cols-2 gap-2 text-xs"><Metric label="Calls" value={summary.calls} /><Metric label="Status" value={summary.status === "generated" ? "Answer generated" : summary.status === "generating" ? "Generating" : "Waiting"} />{summary.model === undefined ? null : <Metric label="Model" value={summary.model} />}{summary.inputTokens === undefined ? null : <Metric label="Input tokens" value={summary.inputTokens.toLocaleString()} />}{summary.outputTokens === undefined ? null : <Metric label="Output tokens" value={summary.outputTokens.toLocaleString()} />}{summary.elapsedMs === undefined ? null : <Metric label="Latency" value={`${summary.elapsedMs.toLocaleString()} ms`} />}</dl>
-      <div className="flex min-w-0 flex-wrap gap-2"><CapturedContentViewer buttonLabel="View Basic Prompt" title="Basic Prompt" content={summary.exactPrompt} unavailableMessage="Basic prompt content was not captured. Run with Content or Debug to inspect the exact rendered prompt." testId="exact-basic-prompt" /><CapturedContentViewer buttonLabel="View Raw Basic Response" title="Raw Basic Response" content={summary.rawResponse} unavailableMessage="Raw Basic response content was not captured. Run with Content or Debug to inspect the provider response." testId="raw-basic-response" preview={false} /></div>
+      {summary.status === "waiting" ? null : <div className="flex min-w-0 flex-wrap gap-2"><CapturedContentViewer buttonLabel="View Basic Prompt" title="Basic Prompt" content={summary.exactPrompt} unavailableMessage="Basic prompt content was not captured. Run with Content or Debug to inspect the exact rendered prompt." testId="exact-basic-prompt" />{summary.status === "generated" ? <CapturedContentViewer buttonLabel="View Raw Basic Response" title="Raw Basic Response" content={summary.rawResponse} unavailableMessage="Raw Basic response content was not captured. Run with Content or Debug to inspect the provider response." testId="raw-basic-response" preview={false} /> : <span className="self-center text-xs text-muted-foreground">Waiting for provider response</span>}</div>}
     </div>
   )
 }
@@ -90,7 +90,7 @@ function CandidateList({ candidates, mode }: { candidates: ExplainabilityCandida
   return (
     <div className="min-w-0 space-y-2">
       <div className="divide-y overflow-hidden rounded border bg-background/50">{visible.map((candidate, index) => <CandidateRow key={`${candidate.id}:${candidate.rank ?? index}`} candidate={candidate} mode={mode} />)}</div>
-      {candidates.length > INITIAL_CANDIDATES ? <Button variant="ghost" size="sm" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show fewer text units" : `Show all ${candidates.length} text units`}</Button> : null}
+      {candidates.length > INITIAL_CANDIDATES ? <Button variant="ghost" size="sm" aria-expanded={showAll} aria-label={showAll ? "Show fewer Basic text units" : `Show all ${candidates.length} Basic text units`} onClick={() => setShowAll((value) => !value)}>{showAll ? "Show fewer text units" : `Show all ${candidates.length} text units`}</Button> : null}
     </div>
   )
 }

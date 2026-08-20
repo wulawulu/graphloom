@@ -269,7 +269,10 @@ async fn emit_llm_completed(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use graphloom_llm::{
@@ -285,12 +288,41 @@ mod tests {
     use super::*;
     use crate::{
         BasicSearchConfig,
+        explainability::{
+            ExplainabilityContentMode, ExplainabilityRecord, ExplainabilityRunId,
+            ExplainabilitySink, ExplainabilitySinkError,
+        },
         prompts::{PromptKind, PromptRepository},
         query::{
-            BasicQueryRuntime, QueryCallbacks, QueryContext, QueryContextText, TextUnit,
-            basic::BasicContextBuilder,
+            BasicQueryRuntime, QueryCallbacks, QueryContext, QueryContextText,
+            QueryExplainabilityOptions, QueryOptions, TextUnit, basic::BasicContextBuilder,
         },
     };
+
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        records: Mutex<Vec<Arc<ExplainabilityRecord>>>,
+        finish_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExplainabilitySink for RecordingSink {
+        async fn emit(
+            &self,
+            record: Arc<ExplainabilityRecord>,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            self.records.lock().expect("records").push(record);
+            Ok(())
+        }
+
+        async fn finish_run(
+            &self,
+            _run_id: &ExplainabilityRunId,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            self.finish_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     #[derive(Debug, Default)]
     struct ByteTokenizer;
@@ -557,5 +589,47 @@ mod tests {
         );
         assert_eq!(result.usage.categories["response"].llm_calls, 1);
         assert_eq!(result.usage.output_tokens, "first answer".len());
+    }
+
+    #[tokio::test]
+    async fn test_should_finalize_when_basic_event_stream_ends_without_completed() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let options = QueryOptions::new(
+            tempdir.path().to_path_buf(),
+            "question".to_owned(),
+            SearchMethod::Basic,
+        )
+        .with_explainability(QueryExplainabilityOptions::new(
+            "basic-ended".parse().expect("run id"),
+            ExplainabilityContentMode::Metadata,
+            sink.clone(),
+        ));
+        let instrumentation = QueryInstrumentation::start(&options, true)
+            .await
+            .expect("Basic instrumentation");
+        let empty: QueryEventStream = Box::pin(futures_util::stream::empty());
+        let mut events = instrument_basic_completion_stream(
+            empty,
+            Some(instrumentation),
+            Instant::now(),
+            "completion".to_owned(),
+        );
+
+        assert!(events.next().await.is_none());
+        let records = sink.records.lock().expect("records");
+        assert!(matches!(
+            records.last().map(|record| &record.event),
+            Some(ExplainabilityEvent::RunFailed(event))
+                if event.error_kind == "query_completion"
+        ));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event, ExplainabilityEvent::RunFailed(_)))
+                .count(),
+            1
+        );
+        assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
     }
 }

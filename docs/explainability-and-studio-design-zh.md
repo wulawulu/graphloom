@@ -1234,12 +1234,9 @@ pub enum ExplainabilityEvent {
 }
 ```
 
-后续扩展：
+当前 Query runtime 已接入 Local、Static Global、Dynamic Global 与 Basic；后续扩展：
 
-* Basic Query；
-  -Global Query；
-  -Dynamic Global Query；
-  -DRIFT；
+* DRIFT；
   -Index；
   -Update；
   -Prompt Tune。
@@ -1728,7 +1725,7 @@ JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence 
 host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
 Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
 Semantic Timeline 已实现；Turso 与 DuckDB 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
-Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 Global Explainability 的支持。
+Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 Global 与 Basic Explainability 的支持。
 
 Global 的 request-scoped topology 与真实 selection/fan-out/fan-in 如下；Static Global 不发出
 optional selection span 下的任何事件。每个 rating repeat 与 Map batch 都有独立 ID，持久化
@@ -1803,9 +1800,10 @@ Basic 的 request-scoped Explainability topology 是 `root → embedding / retri
 `CandidatesRetrieved` 严格保留 ANN provider order；`CandidatesFiltered` 严格保留业务随后遍历
 TextUnit table 的 effective order。两者不能合并或按 score 重排。Context fitting 继续使用真实
 first-over-budget `break`：首个超预算 row 与其后的 effective candidates 都标记为 token-budget
-stop 后未进入 Context，前端不重跑 token fitting。`ContextSectionBuilt.tokens_used` 是真实 selection
-loop 使用的 budget-accounted tokens；`ContextCompleted.tokens_used` 是 exact rendered Sources
-context 的 token count，exact context 字符串直接来自真正传给 Basic prompt 的 `context_data`。
+stop 后未进入 Context，前端不重跑 token fitting。`ContextSectionBuilt.tokens_used` 与
+`ContextCompleted.tokens_used` 都复用真实 selection loop 的 budget-accounted tokens，不为
+Explainability 重新 tokenize rendered CSV；exact context 字符串直接来自真正传给 Basic prompt 的
+`context_data`。
 Empty query 通过 `BasicRetrievalSkipped(empty_query)` 明确表示 embedding 与 ANN 未发生。
 
 前端可据此处理：
@@ -2313,7 +2311,7 @@ graphloom-studio host-side service library
 Studio React Frontend MVP
     → Query + Result + Explainability Timeline + Run History + Graph Explorer implemented
 
-Studio Basic/Global/DRIFT Explainability Query
+Studio Basic/Global/DRIFT Query composer
     → not implemented
 ```
 
@@ -3223,7 +3221,8 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 ## 29.2 Query Chat
 
 * 输入问题；
-  -Local Query（Basic/Global/DRIFT 尚未开放完整 Explainability 生命周期）；
+  -Studio composer 当前提交 Local Query；Core/CLI 已具备 Local、Static/Dynamic Global 与 Basic
+  Explainability，DRIFT deferred；
   -Metadata/Content/Debug Explainability 模式；
   -异步接受 Run；
   -通过独立 Query Result API 展示最终回答；
@@ -3411,15 +3410,13 @@ HTTP request 重新读取 snapshot，当前未增加 cache。
 
 ## Phase 9：后续扩展
 
-1. Basic Query；
-   2.Global Query；
-   3.Dynamic Global；
-   4.DRIFT；
-   5.Index Timeline；
-   6.Update Timeline；
-   7.Turso Store；
-   8.DuckDB Analytics；
-   9.compatible/optimized 对比。
+1. Basic/Global/DRIFT Query composer；
+   2.DRIFT Semantic Timeline；
+   3.Index Timeline；
+   4.Update Timeline；
+   5.Turso Store；
+   6.DuckDB Analytics；
+   7.compatible/optimized 对比。
 
 ### Future：Provenance Graph（V3 Phase 2，尚未实现）
 

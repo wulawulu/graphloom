@@ -345,6 +345,47 @@ async fn mount_local_handshake_failure_stub() -> MockServer {
     server
 }
 
+async fn mount_basic_embedding_failure_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"message": "embedding provider unavailable"}
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_basic_midstream_failure_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
+            "model": "embed-test",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    let stream = concat!(
+        "data: {\"id\":\"chunk-1\",\"model\":\"chat-test\",\"choices\":[{\"index\":0,\"delta\":{\"\
+         content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        "data: not-json\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(stream),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
 async fn mount_global_query_stub() -> MockServer {
     use wiremock::matchers::body_partial_json;
 
@@ -2842,6 +2883,186 @@ async fn test_should_finalize_basic_handshake_failure_without_fake_completion() 
         Some(ExplainabilityEvent::RunFailed(event))
             if event.error_kind == "query_completion"
     ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_basic_embedding_failure_at_the_real_stage() {
+    let server = mount_basic_embedding_failure_stub().await;
+    let fixture = fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = query(
+        fixture.config,
+        basic_options(fixture.project.path(), "Basic embedding failure").with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-embedding-error".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(GraphLoomError::Query(source))
+            if matches!(source.as_ref(), QueryError::QueryEmbedding { method: SearchMethod::Basic, .. })
+    ));
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::EmbeddingStarted(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::EmbeddingCompleted(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::CandidatesRetrieved(_)))
+    );
+    assert!(
+        matches!(records.last().map(|record| &record.event), Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_embedding")
+    );
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_basic_vector_failure_without_fake_candidates() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let engine = QueryEngine::load(fixture.config, fixture.project.path())
+        .await
+        .expect("Basic Query engine");
+    engine
+        .query(basic_options(fixture.project.path(), ""))
+        .await
+        .expect("warm Basic runtime without vector retrieval");
+    let index = fixture
+        .project
+        .path()
+        .join("output/lancedb/text_unit_text.lance");
+    let hidden_index = fixture
+        .project
+        .path()
+        .join("output/lancedb/text_unit_text.lance.hidden");
+    tokio::fs::rename(&index, &hidden_index)
+        .await
+        .expect("hide Basic vector index after warming runtime");
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = engine
+        .query(
+            basic_options(fixture.project.path(), "Basic vector failure").with_explainability(
+                QueryExplainabilityOptions::new(
+                    "basic-vector-error".parse().expect("run id"),
+                    ExplainabilityContentMode::Metadata,
+                    sink.clone(),
+                ),
+            ),
+        )
+        .await;
+    assert!(result.is_err());
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::EmbeddingCompleted(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::CandidatesRetrieved(_)))
+    );
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(_))
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_basic_prompt_failure_after_context_evidence() {
+    let server = mount_query_stub().await;
+    let mut fixture = fixture(&server).await;
+    fixture.config.basic_search.prompt =
+        Some("{{ context_data | graphloom_missing }}\n".to_owned());
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = query(
+        fixture.config,
+        basic_options(fixture.project.path(), "Basic prompt failure").with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-prompt-error".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(GraphLoomError::Query(source))
+            if matches!(source.as_ref(), QueryError::QueryPrompt { method: SearchMethod::Basic, .. })
+    ));
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::ContextCompleted(_)))
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::LlmRequestStarted(_) | ExplainabilityEvent::LlmRequestCompleted(_)
+    )));
+    assert!(
+        matches!(records.last().map(|record| &record.event), Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_prompt")
+    );
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_basic_stream_consumption_failure_without_fake_completion() {
+    let server = mount_basic_midstream_failure_stub().await;
+    let fixture = fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut events = query_stream(
+        fixture.config,
+        basic_options(fixture.project.path(), "Basic stream failure").with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-stream-error".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("provider handshake");
+    let mut observed_error = false;
+    while let Some(event) = events.next().await {
+        if event.is_err() {
+            observed_error = true;
+            break;
+        }
+    }
+    assert!(
+        observed_error,
+        "malformed provider event must fail consumption"
+    );
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestCompleted(_)))
+    );
+    assert!(
+        matches!(records.last().map(|record| &record.event), Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_completion")
+    );
     assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 

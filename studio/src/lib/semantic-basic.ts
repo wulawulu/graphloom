@@ -8,6 +8,7 @@ import type {
   EmbeddingCompletedEvent,
   EmbeddingStartedEvent,
   ExplainabilityCandidate,
+  ExplainabilityContextSection,
   ExplainabilityEnvelope,
   ExplainabilityEventPayload,
   LlmRequestCompletedEvent,
@@ -36,7 +37,6 @@ export interface BasicContextSummary {
   tokenBudgetExcludedCount?: number
   tokenBudget?: number
   budgetedTokensUsed?: number
-  exactRenderedTokensUsed?: number
   truncated?: boolean
   selectedRecordIds: string[]
   exactContext: string | null
@@ -82,10 +82,16 @@ export function isBasicSemanticStep(step: { kind: string }): step is BasicSemant
 
 export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnvelope[]): BasicSemanticTimelineModel {
   const ordered = [...envelopes].sort(bySequence)
-  const rootSpan = ordered.find((envelope) => envelope.record.parent_span_id === undefined
+  const root = ordered.find((envelope) => envelope.record.parent_span_id === undefined
     && envelope.record.event.type === "query_started"
-    && envelope.record.event.method === "basic")?.record.span_id
-  if (rootSpan === undefined) return { steps: [], diagnosticEvents: ordered }
+    && envelope.record.event.method === "basic")
+  if (root === undefined) return { steps: [], diagnosticEvents: ordered }
+  const rootSpan = root.record.span_id
+  const terminal = ordered.find((envelope) => envelope.sequence > root.sequence
+    && envelope.record.span_id === rootSpan
+    && envelope.record.parent_span_id === undefined
+    && (envelope.record.event.type === "run_completed" || envelope.record.event.type === "run_failed"))
+  const terminalCutoff = terminal?.sequence ?? Number.MAX_SAFE_INTEGER
 
   const embeddingStarted: TypedEnvelope<EmbeddingStartedEvent>[] = []
   const embeddingCompleted: TypedEnvelope<EmbeddingCompletedEvent>[] = []
@@ -99,7 +105,9 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
   const llmCompleted: TypedEnvelope<LlmRequestCompletedEvent>[] = []
 
   for (const envelope of ordered) {
-    if (envelope.record.parent_span_id !== rootSpan) continue
+    if (envelope.sequence <= root.sequence
+      || envelope.sequence >= terminalCutoff
+      || envelope.record.parent_span_id !== rootSpan) continue
     const event = envelope.record.event
     if (isEmbeddingStarted(event)) embeddingStarted.push(typed(envelope, event))
     else if (isEmbeddingCompleted(event)) embeddingCompleted.push(typed(envelope, event))
@@ -114,7 +122,7 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
   }
 
   const claimed = new Set<number>()
-  const contextLifecycle = selectContextLifecycle(budgets, sections, contexts)
+  const contextLifecycle = selectContextLifecycle(budgets, sections, contexts, filtered, skipped)
   contextLifecycle.rawEvents.forEach((event) => claimed.add(event.sequence))
   const contextCutoff = contextLifecycle.completed?.sequence ?? Number.MAX_SAFE_INTEGER
   const retrievalLifecycle = selectRetrievalLifecycle(
@@ -122,7 +130,7 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
     filtered,
     skipped,
     contextCutoff,
-    contextLifecycle.section?.record.event.section.candidate_count,
+    contextLifecycle.section?.record.event.section,
   )
   retrievalLifecycle.rawEvents.forEach((event) => claimed.add(event.sequence))
   const retrievalStart = retrievalLifecycle.rawEvents[0]?.sequence
@@ -183,7 +191,6 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
       : decisions.filter((candidate) => !candidate.selected && candidate.reason === "token_budget").length,
     tokenBudget: sourceSection?.token_budget ?? contextLifecycle.budget?.record.event.total_token_budget,
     budgetedTokensUsed: sourceSection?.tokens_used,
-    exactRenderedTokensUsed: contextLifecycle.completed?.record.event.tokens_used,
     truncated: sourceSection?.truncated,
     selectedRecordIds: sourceSection?.selected_record_ids ?? [],
     exactContext: contextLifecycle.completed?.record.event.context ?? null,
@@ -221,22 +228,43 @@ function selectContextLifecycle(
   budgets: readonly TypedEnvelope<ContextBudgetAllocatedEvent>[],
   sections: readonly TypedEnvelope<ContextSectionBuiltEvent>[],
   contexts: readonly TypedEnvelope<ContextCompletedEvent>[],
+  filtered: readonly TypedEnvelope<CandidatesFilteredEvent>[],
+  skipped: readonly TypedEnvelope<BasicRetrievalSkippedEvent>[],
 ): ContextLifecycle {
   for (const completed of [...contexts].reverse()) {
     const span = completed.record.span_id
-    const budget = last(budgets.filter((event) => event.record.span_id === span && event.sequence <= completed.sequence))
-    const section = last(sections.filter((event) => event.record.span_id === span && event.sequence <= completed.sequence))
-    if (budget !== undefined && section !== undefined) {
-      return { budget, section, completed, rawEvents: [budget, section, completed].sort(bySequence) }
+    const candidateSections = sections.filter((event) => event.record.span_id === span
+      && event.sequence <= completed.sequence
+      && hasCoherentRetrieval(event, filtered, skipped))
+    for (const section of [...candidateSections].reverse()) {
+      const budget = last(budgets.filter((event) => event.record.span_id === span
+        && event.sequence <= section.sequence))
+      if (budget !== undefined) {
+        return { budget, section, completed, rawEvents: [budget, section, completed].sort(bySequence) }
+      }
     }
   }
-  const progressive = [...budgets, ...sections].sort(bySequence)
-  const latest = progressive.at(-1)
-  if (latest === undefined) return { rawEvents: [] }
-  const span = latest.record.span_id
-  const budget = last(budgets.filter((event) => event.record.span_id === span && event.sequence <= latest.sequence))
-  const section = last(sections.filter((event) => event.record.span_id === span && event.sequence <= latest.sequence))
-  return { budget, section, rawEvents: [budget, section].filter(defined).sort(bySequence) }
+  for (const section of [...sections].reverse()) {
+    if (!hasCoherentRetrieval(section, filtered, skipped)) continue
+    const budget = last(budgets.filter((event) => event.record.span_id === section.record.span_id
+      && event.sequence <= section.sequence))
+    if (budget !== undefined) return { budget, section, rawEvents: [budget, section] }
+  }
+  const budget = last(budgets)
+  return budget === undefined ? { rawEvents: [] } : { budget, rawEvents: [budget] }
+}
+
+function hasCoherentRetrieval(
+  section: TypedEnvelope<ContextSectionBuiltEvent>,
+  filtered: readonly TypedEnvelope<CandidatesFilteredEvent>[],
+  skipped: readonly TypedEnvelope<BasicRetrievalSkippedEvent>[],
+): boolean {
+  const evidence = section.record.event.section
+  const hasFilteredEvidence = filtered.some((event) => event.sequence <= section.sequence
+    && matchesContextSection(event.record.event.candidates, evidence))
+  return hasFilteredEvidence
+    || (evidence.candidate_count === 0
+      && skipped.some((event) => event.sequence <= section.sequence))
 }
 
 function selectRetrievalLifecycle(
@@ -244,11 +272,12 @@ function selectRetrievalLifecycle(
   filtered: readonly TypedEnvelope<CandidatesFilteredEvent>[],
   skipped: readonly TypedEnvelope<BasicRetrievalSkippedEvent>[],
   cutoff: number,
-  expectedCandidateCount: number | undefined,
+  expectedSection: ExplainabilityContextSection | undefined,
 ): { rawEvents: ExplainabilityEnvelope[]; retrieved?: TypedEnvelope<CandidatesRetrievedEvent>; filtered?: TypedEnvelope<CandidatesFilteredEvent>; skipped?: TypedEnvelope<BasicRetrievalSkippedEvent> } {
   const branches: Array<{ end: number; retrieved?: TypedEnvelope<CandidatesRetrievedEvent>; filtered?: TypedEnvelope<CandidatesFilteredEvent>; skipped?: TypedEnvelope<BasicRetrievalSkippedEvent> }> = []
   for (const decision of filtered) {
     if (decision.sequence > cutoff) continue
+    if (expectedSection !== undefined && !matchesContextSection(decision.record.event.candidates, expectedSection)) continue
     const source = last(retrieved.filter((event) => event.record.span_id === decision.record.span_id && event.sequence <= decision.sequence))
     if (source !== undefined) branches.push({ end: decision.sequence, retrieved: source, filtered: decision })
   }
@@ -256,7 +285,7 @@ function selectRetrievalLifecycle(
   for (const skip of skipped) if (skip.sequence <= cutoff) branches.push({ end: skip.sequence, skipped: skip })
   const filteredBranches = branches.filter((branch) => branch.filtered !== undefined)
   const skipBranches = branches.filter((branch) => branch.skipped !== undefined)
-  const branch = expectedCandidateCount === 0 && skipBranches.length > 0
+  const branch = expectedSection?.candidate_count === 0 && skipBranches.length > 0
     ? skipBranches.sort((left, right) => left.end - right.end).at(-1)
     : filteredBranches.length > 0
       ? filteredBranches.sort((left, right) => left.end - right.end).at(-1)
@@ -268,6 +297,17 @@ function selectRetrievalLifecycle(
       .filter(defined)
       .sort(bySequence),
   }
+}
+
+function matchesContextSection(
+  candidates: readonly ExplainabilityCandidate[],
+  section: ExplainabilityContextSection,
+): boolean {
+  const selectedIds = candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id)
+  return candidates.length === section.candidate_count
+    && selectedIds.length === section.selected_count
+    && selectedIds.length === section.selected_record_ids.length
+    && selectedIds.every((id, index) => id === section.selected_record_ids[index])
 }
 
 function selectPairLifecycle<S extends ExplainabilityEventPayload, C extends ExplainabilityEventPayload>(
@@ -310,13 +350,109 @@ function typed<T extends ExplainabilityEventPayload>(envelope: ExplainabilityEnv
   return { ...envelope, record: { ...envelope.record, event } }
 }
 
-function isEmbeddingStarted(event: ExplainabilityEventPayload): event is EmbeddingStartedEvent { return event.type === "embedding_started" }
-function isEmbeddingCompleted(event: ExplainabilityEventPayload): event is EmbeddingCompletedEvent { return event.type === "embedding_completed" }
-function isCandidatesRetrieved(event: ExplainabilityEventPayload): event is CandidatesRetrievedEvent { return event.type === "candidates_retrieved" }
-function isCandidatesFiltered(event: ExplainabilityEventPayload): event is CandidatesFilteredEvent { return event.type === "candidates_filtered" }
+function isEmbeddingStarted(event: ExplainabilityEventPayload): event is EmbeddingStartedEvent {
+  return event.type === "embedding_started"
+    && isString(event.model_id)
+    && isOptionalString(event.input)
+}
+
+function isEmbeddingCompleted(event: ExplainabilityEventPayload): event is EmbeddingCompletedEvent {
+  return event.type === "embedding_completed"
+    && isString(event.model_id)
+    && isNonNegativeInteger(event.prompt_tokens)
+    && isNonNegativeInteger(event.dimensions)
+}
+
+function isCandidatesRetrieved(event: ExplainabilityEventPayload): event is CandidatesRetrievedEvent {
+  return event.type === "candidates_retrieved"
+    && isString(event.record_type)
+    && isCandidateArray(event.candidates)
+}
+
+function isCandidatesFiltered(event: ExplainabilityEventPayload): event is CandidatesFilteredEvent {
+  return event.type === "candidates_filtered"
+    && isString(event.record_type)
+    && isCandidateArray(event.candidates)
+}
 function isBasicRetrievalSkipped(event: ExplainabilityEventPayload): event is BasicRetrievalSkippedEvent { return event.type === "basic_retrieval_skipped" && event.reason === "empty_query" }
-function isContextBudgetAllocated(event: ExplainabilityEventPayload): event is ContextBudgetAllocatedEvent { return event.type === "context_budget_allocated" }
-function isContextSectionBuilt(event: ExplainabilityEventPayload): event is ContextSectionBuiltEvent { return event.type === "context_section_built" }
-function isContextCompleted(event: ExplainabilityEventPayload): event is ContextCompletedEvent { return event.type === "context_completed" }
-function isLlmRequestStarted(event: ExplainabilityEventPayload): event is LlmRequestStartedEvent { return event.type === "llm_request_started" }
-function isLlmRequestCompleted(event: ExplainabilityEventPayload): event is LlmRequestCompletedEvent { return event.type === "llm_request_completed" }
+function isContextBudgetAllocated(event: ExplainabilityEventPayload): event is ContextBudgetAllocatedEvent {
+  return event.type === "context_budget_allocated"
+    && isNonNegativeInteger(event.total_token_budget)
+    && Array.isArray(event.sections)
+    && event.sections.every((section) => isObject(section)
+      && isString(section.section)
+      && isNonNegativeInteger(section.token_budget))
+}
+
+function isContextSectionBuilt(event: ExplainabilityEventPayload): event is ContextSectionBuiltEvent {
+  return event.type === "context_section_built" && isContextSection(event.section)
+}
+
+function isContextCompleted(event: ExplainabilityEventPayload): event is ContextCompletedEvent {
+  return event.type === "context_completed"
+    && isNonNegativeInteger(event.tokens_used)
+    && isOptionalString(event.context)
+}
+
+function isLlmRequestStarted(event: ExplainabilityEventPayload): event is LlmRequestStartedEvent {
+  return event.type === "llm_request_started"
+    && isString(event.model_id)
+    && isNonNegativeInteger(event.prompt_tokens)
+    && isOptionalString(event.prompt)
+}
+
+function isLlmRequestCompleted(event: ExplainabilityEventPayload): event is LlmRequestCompletedEvent {
+  return event.type === "llm_request_completed"
+    && isString(event.model_id)
+    && isNonNegativeInteger(event.input_tokens)
+    && isNonNegativeInteger(event.output_tokens)
+    && isNonNegativeInteger(event.elapsed_ms)
+    && isOptionalString(event.response)
+}
+
+function isCandidateArray(value: unknown): value is ExplainabilityCandidate[] {
+  return Array.isArray(value) && value.every((candidate) => isObject(candidate)
+    && isString(candidate.id)
+    && isString(candidate.record_type)
+    && typeof candidate.selected === "boolean"
+    && isOptionalString(candidate.short_id)
+    && (candidate.score === undefined || isFiniteNumber(candidate.score))
+    && (candidate.rank === undefined || isPositiveInteger(candidate.rank))
+    && isOptionalString(candidate.reason))
+}
+
+function isContextSection(value: unknown): value is ExplainabilityContextSection {
+  return isObject(value)
+    && isString(value.section)
+    && isNonNegativeInteger(value.token_budget)
+    && isNonNegativeInteger(value.tokens_used)
+    && isNonNegativeInteger(value.candidate_count)
+    && isNonNegativeInteger(value.selected_count)
+    && typeof value.truncated === "boolean"
+    && Array.isArray(value.selected_record_ids)
+    && value.selected_record_ids.every(isString)
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string"
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || isString(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && typeof value === "number" && value >= 0
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value > 0
+}
