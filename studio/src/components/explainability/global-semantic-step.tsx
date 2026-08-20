@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, Circle, Files, Filter, Sparkles, Split, X } from "lucide-react"
+import { Check, Circle, Files, Filter, GitBranch, Sparkles, Split, X } from "lucide-react"
 
 import type { ExplainabilityEnvelope } from "@/api/types"
 import { CapturedContentViewer } from "@/components/explainability/captured-content-viewer"
@@ -8,6 +8,10 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import type {
+  DynamicCommunityDecisionView,
+  DynamicCommunitySelectionSummary,
+  DynamicRatingAttemptView,
+  DynamicTraversalWaveView,
   GlobalMapBatchView,
   GlobalMapPointView,
   GlobalReduceDecisionView,
@@ -21,6 +25,8 @@ interface GlobalSemanticStepCardProps {
 
 const INITIAL_BATCHES = 6
 const INITIAL_POINTS = 20
+const INITIAL_COMMUNITIES = 20
+const INITIAL_WAVES = 5
 
 export function GlobalSemanticStepCard({ step, onFocusGraph }: GlobalSemanticStepCardProps): React.ReactElement {
   return (
@@ -37,6 +43,7 @@ export function GlobalSemanticStepCard({ step, onFocusGraph }: GlobalSemanticSte
 
 function GlobalStepIcon({ kind }: { kind: GlobalSemanticStep["kind"] }): React.ReactElement {
   const className = "size-4"
+  if (kind === "community-selection") return <GitBranch className={className} />
   if (kind === "community-context") return <Files className={className} />
   if (kind === "map-analysis") return <Split className={className} />
   if (kind === "evidence-reduction") return <Filter className={className} />
@@ -44,6 +51,12 @@ function GlobalStepIcon({ kind }: { kind: GlobalSemanticStep["kind"] }): React.R
 }
 
 function GlobalStepSummary({ step }: { step: GlobalSemanticStep }): React.ReactElement {
+  if (step.kind === "community-selection") {
+    const summary = step.summary
+    if (summary.completed) return <p className="mt-1 text-xs text-muted-foreground">{summary.visitedCount ?? 0} communities rated · {summary.selectedCount ?? 0} selected{summary.threshold === undefined ? "" : ` · threshold ${summary.threshold}`}{summary.numRepeats === undefined ? "" : ` · ${summary.numRepeats} ${summary.numRepeats === 1 ? "repeat" : "repeats"}`}</p>
+    if (summary.activeWave !== undefined) return <p className="mt-1 text-xs text-muted-foreground">Rating wave {summary.activeWave + 1} · {summary.attemptsCompleted} / {summary.attemptsStarted} attempts completed</p>
+    return <p className="mt-1 text-xs text-muted-foreground">Selecting communities</p>
+  }
   if (step.kind === "community-context") {
     const summary = step.summary
     if (!summary.built) return <p className="mt-1 text-xs text-muted-foreground">Waiting for community context</p>
@@ -65,16 +78,56 @@ function GlobalStepSummary({ step }: { step: GlobalSemanticStep }): React.ReactE
     return <p className="mt-1 text-xs text-muted-foreground">{summary.candidatePointCount ?? 0} candidates · {summary.positivePointCount ?? 0} positive · {summary.selectedPointCount ?? 0} included{tokens}{summary.truncated ? " · truncated" : ""}</p>
   }
   const summary = step.summary
-  if (summary.noDataAnswer) return <p className="mt-1 text-xs text-muted-foreground">No-data answer returned · Reduce LLM not invoked</p>
+  if (summary.noDataAnswerReturned) return <p className="mt-1 text-xs text-muted-foreground">No-data answer returned · Reduce LLM not invoked</p>
+  if (summary.noDataPathSelected) return <p className="mt-1 text-xs text-muted-foreground">No-data path selected · Reduce LLM skipped</p>
   if (summary.generated) return <p className="mt-1 text-xs text-muted-foreground">Answer generated · {summary.inputTokens?.toLocaleString() ?? 0} input · {summary.outputTokens?.toLocaleString() ?? 0} output</p>
   return <p className="mt-1 text-xs text-muted-foreground">{summary.calls === 0 ? "Waiting for Reduce LLM" : "Reduce LLM running"}</p>
 }
 
 function GlobalStepContent({ step }: { step: GlobalSemanticStep }): React.ReactNode {
+  if (step.kind === "community-selection") return <CommunitySelectionContent summary={step.summary} />
   if (step.kind === "community-context") return <CommunityContextContent batches={step.summary.batches} />
   if (step.kind === "map-analysis") return <MapAnalysisContent batches={step.summary.batches} />
   if (step.kind === "evidence-reduction") return <EvidenceReductionContent summary={step.summary} />
   return <AnswerGenerationContent summary={step.summary} />
+}
+
+function CommunitySelectionContent({ summary }: { summary: DynamicCommunitySelectionSummary }): React.ReactElement {
+  const [showAllCommunities, setShowAllCommunities] = useState(false)
+  const [showAllWaves, setShowAllWaves] = useState(false)
+  const visibleCommunities = showAllCommunities ? summary.decisions : summary.decisions.slice(0, INITIAL_COMMUNITIES)
+  const visibleWaves = showAllWaves ? summary.waves : summary.waves.slice(0, INITIAL_WAVES)
+  return (
+    <div className="mt-3 min-w-0 space-y-4">
+      <dl className="grid grid-cols-2 gap-2 text-xs">
+        {summary.initialCommunityCount === undefined ? null : <Metric label="Initial communities" value={summary.initialCommunityCount} />}
+        {summary.threshold === undefined ? null : <Metric label="Threshold" value={summary.threshold} />}
+        {summary.numRepeats === undefined ? null : <Metric label="Repeats" value={summary.numRepeats} />}
+        {summary.maxLevel === undefined ? null : <Metric label="Fallback max level" value={summary.maxLevel} />}
+        {summary.visitedCount === undefined ? null : <Metric label="Communities rated" value={summary.visitedCount} />}
+        {summary.thresholdPassedCount === undefined ? null : <Metric label="Passed threshold" value={summary.thresholdPassedCount} />}
+        {summary.selectedCount === undefined ? null : <Metric label="Selected" value={summary.selectedCount} />}
+        <Metric label="Rating attempts" value={`${summary.attemptsCompleted} / ${summary.attemptsStarted} responses`} />
+      </dl>
+      <section aria-label="Dynamic traversal waves" className="min-w-0"><h4 className="text-xs font-semibold">Traversal waves</h4><div className="mt-2 space-y-2">{visibleWaves.map((wave) => <TraversalWaveRow key={`${wave.waveIndex}:${wave.source}`} wave={wave} />)}</div>{summary.waves.length > INITIAL_WAVES ? <Button variant="ghost" size="sm" onClick={() => setShowAllWaves((value) => !value)}>{showAllWaves ? "Show fewer waves" : `Show all ${summary.waves.length} waves`}</Button> : null}</section>
+      <section aria-label="Dynamic community decisions" className="min-w-0"><h4 className="text-xs font-semibold">Community decisions</h4>{summary.completed ? <><div className="mt-2 space-y-2">{visibleCommunities.map((decision) => <CommunityDecisionRow key={decision.community_id} decision={decision} />)}</div>{summary.decisions.length > INITIAL_COMMUNITIES ? <Button variant="ghost" size="sm" onClick={() => setShowAllCommunities((value) => !value)}>{showAllCommunities ? "Show fewer communities" : `Show all ${summary.decisions.length} communities`}</Button> : null}</> : <p className="mt-2 text-xs text-muted-foreground">Final community decisions are available after selection completes.</p>}</section>
+    </div>
+  )
+}
+
+function TraversalWaveRow({ wave }: { wave: DynamicTraversalWaveView }): React.ReactElement {
+  const [open, setOpen] = useState(false)
+  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 rounded border bg-background/50"><CollapsibleTrigger asChild><button type="button" className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} community IDs for wave ${wave.waveIndex + 1}`}><span className="font-medium">Wave {wave.waveIndex + 1} · {waveSourceLabel(wave.source)}</span><span className="shrink-0 text-muted-foreground">{wave.communityIds.length} communities</span></button></CollapsibleTrigger><CollapsibleContent className="border-t p-3"><ul className="max-h-32 overflow-auto rounded border bg-muted/20 p-2 font-mono text-[11px]">{wave.communityIds.map((id) => <li key={id} className="break-all">{id}</li>)}</ul></CollapsibleContent></Collapsible>
+}
+
+function CommunityDecisionRow({ decision }: { decision: DynamicCommunityDecisionView }): React.ReactElement {
+  const [open, setOpen] = useState(false)
+  const status = dynamicDecisionLabel(decision)
+  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 rounded border bg-background/50"><CollapsibleTrigger asChild><button type="button" className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-expanded={open} aria-label={`${open ? "Collapse" : "Expand"} rating details for community ${decision.community_id}`}><span className="min-w-0"><span className="block truncate font-medium">Community {decision.community_id}</span><span className="text-muted-foreground">Level {decision.level} · Majority rating {decision.selected_rating}</span></span><Badge variant="outline" className="shrink-0">{status}</Badge></button></CollapsibleTrigger><CollapsibleContent className="min-w-0 space-y-3 border-t p-3"><p className="font-mono text-[10px] text-muted-foreground break-all">report_id {decision.report_id}</p><h5 className="text-xs font-semibold">Rating attempts</h5>{decision.attempts.length === 0 ? <p className="text-xs text-muted-foreground">Rating attempt details are not available.</p> : <div className="space-y-2">{decision.attempts.map((attempt) => <RatingAttemptRow key={attempt.identity} attempt={attempt} />)}</div>}</CollapsibleContent></Collapsible>
+}
+
+function RatingAttemptRow({ attempt }: { attempt: DynamicRatingAttemptView }): React.ReactElement {
+  return <div className="min-w-0 space-y-2 rounded border bg-muted/10 p-2 text-xs"><div className="flex min-w-0 items-center justify-between gap-2"><span className="font-medium">Repeat {attempt.repeatIndex + 1}</span><Badge variant="outline">{attempt.status === "response_received" ? "Response received" : "Rating"}</Badge></div><dl className="grid grid-cols-2 gap-2"><Metric label="Model" value={attempt.model ?? "Not available yet"} />{attempt.inputTokens === undefined ? null : <Metric label="Input tokens" value={attempt.inputTokens.toLocaleString()} />}{attempt.outputTokens === undefined ? null : <Metric label="Output tokens" value={attempt.outputTokens.toLocaleString()} />}{attempt.elapsedMs === undefined ? null : <Metric label="Latency" value={`${attempt.elapsedMs.toLocaleString()} ms`} />}</dl><div className="flex min-w-0 flex-wrap gap-2"><CapturedContentViewer buttonLabel="View Rating Prompt" title={`Community ${attempt.communityId} · Repeat ${attempt.repeatIndex + 1} Prompt`} content={attempt.exactPrompt} unavailableMessage="Rating prompt content was not captured. Run with Content or Debug to inspect the exact rendered prompt." testId={`rating-prompt-${attempt.communityId}-${attempt.repeatIndex}`} /><CapturedContentViewer buttonLabel="View Raw Rating Response" title={`Community ${attempt.communityId} · Repeat ${attempt.repeatIndex + 1} Raw Response`} content={attempt.rawResponse} unavailableMessage="Raw rating response content was not captured. Run with Content or Debug to inspect the provider response." testId={`rating-response-${attempt.communityId}-${attempt.repeatIndex}`} preview={false} /></div></div>
 }
 
 function CommunityContextContent({ batches }: { batches: GlobalMapBatchView[] }): React.ReactElement {
@@ -173,7 +226,8 @@ function ReduceDecisionRow({ decision }: { decision: GlobalReduceDecisionView })
 }
 
 function AnswerGenerationContent({ summary }: { summary: Extract<GlobalSemanticStep, { kind: "global-answer-generation" }>["summary"] }): React.ReactElement {
-  if (summary.noDataAnswer) return <p className="mt-3 rounded border bg-muted/20 p-3 text-xs">No-data answer returned. The Reduce LLM was not invoked.</p>
+  if (summary.noDataAnswerReturned) return <p className="mt-3 rounded border bg-muted/20 p-3 text-xs">No-data answer returned. The Reduce LLM was not invoked.</p>
+  if (summary.noDataPathSelected) return <p className="mt-3 rounded border bg-muted/20 p-3 text-xs">No-data path selected. The Reduce LLM was skipped.</p>
   return (
     <div className="mt-3 min-w-0 space-y-3">
       <dl className="grid grid-cols-2 gap-2 text-xs"><Metric label="Calls" value={summary.calls} /><Metric label="Status" value={summary.generated ? "Answer generated" : summary.calls === 0 ? "Waiting" : "Generating"} />{summary.model === undefined ? null : <Metric label="Model" value={summary.model} />}{summary.inputTokens === undefined ? null : <Metric label="Input tokens" value={summary.inputTokens.toLocaleString()} />}{summary.outputTokens === undefined ? null : <Metric label="Output tokens" value={summary.outputTokens.toLocaleString()} />}{summary.elapsedMs === undefined ? null : <Metric label="Latency" value={`${summary.elapsedMs.toLocaleString()} ms`} />}</dl>
@@ -203,6 +257,18 @@ function reduceDecisionLabel(decision: GlobalReduceDecisionView): string {
   if (decision.reason === "selected") return "Included"
   if (decision.reason === "non_positive_score") return "Non-positive"
   return "Token budget"
+}
+
+function waveSourceLabel(source: DynamicTraversalWaveView["source"]): string {
+  if (source === "initial") return "Initial"
+  if (source === "child_expansion") return "Child expansion"
+  return "Fallback"
+}
+
+function dynamicDecisionLabel(decision: DynamicCommunityDecisionView): string {
+  if (decision.selected) return "Selected"
+  if (decision.threshold_passed) return "Passed threshold · not retained"
+  return "Below threshold"
 }
 
 function ReduceDecisionIcon({ decision }: { decision: GlobalReduceDecisionView }): React.ReactElement {

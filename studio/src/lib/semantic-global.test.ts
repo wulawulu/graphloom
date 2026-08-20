@@ -115,7 +115,7 @@ describe("Global semantic timeline", () => {
     if (reduce?.kind !== "evidence-reduction" || answer?.kind !== "global-answer-generation") throw new Error("expected Reduce and Answer")
 
     expect(reduce.summary.skippedReason).toBe("no_positive_points")
-    expect(answer.summary).toMatchObject({ calls: 0, generated: false, noDataAnswer: true })
+    expect(answer.summary).toMatchObject({ calls: 0, generated: false, noDataPathSelected: true, noDataAnswerReturned: false })
   })
 
   it("keeps metadata-only content unavailable instead of fabricating empty strings", () => {
@@ -209,7 +209,7 @@ describe("Global semantic timeline", () => {
     if (reduce?.kind !== "evidence-reduction" || answer?.kind !== "global-answer-generation") throw new Error("expected Reduce and Answer")
 
     expect(reduce.summary).toMatchObject({ positivePointCount: 1, skippedReason: null })
-    expect(answer.summary).toMatchObject({ calls: 1, generated: true, noDataAnswer: false, exactPrompt: "positive prompt", rawResponse: "positive response" })
+    expect(answer.summary).toMatchObject({ calls: 1, generated: true, noDataPathSelected: false, noDataAnswerReturned: false, exactPrompt: "positive prompt", rawResponse: "positive response" })
     expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([2, 3]))
   })
 
@@ -228,7 +228,7 @@ describe("Global semantic timeline", () => {
     if (reduce?.kind !== "evidence-reduction" || answer?.kind !== "global-answer-generation") throw new Error("expected Reduce and Answer")
 
     expect(reduce.summary).toMatchObject({ positivePointCount: 0, skippedReason: "no_positive_points" })
-    expect(answer.summary).toMatchObject({ calls: 0, generated: false, noDataAnswer: true, exactPrompt: null, rawResponse: null })
+    expect(answer.summary).toMatchObject({ calls: 0, generated: false, noDataPathSelected: true, noDataAnswerReturned: false, exactPrompt: null, rawResponse: null })
     expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([2, 3, 4]))
   })
 
@@ -271,5 +271,110 @@ describe("Global semantic timeline", () => {
     expect(map.summary.batchCount).toBeUndefined()
     expect(reduce.summary).toMatchObject({ built: false })
     expect(reduce.summary.candidatePointCount).toBeUndefined()
+  })
+
+  it("prepends Dynamic Community Selection while reusing the four Global stages", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 2, threshold: 3, max_level: 2, keep_parent: false, use_summary: true, num_repeats: 2 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: ["A", "C"] }, "root"),
+      envelope(4, "attempt-a-0", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 2 }, "selection"),
+      envelope(5, "attempt-a-0", { type: "llm_request_started", model_id: "rating", prompt_tokens: 20, prompt: "A PROMPT\n" }, "selection"),
+      envelope(6, "attempt-c-0", { type: "dynamic_community_rating_attempt_started", community_id: "C", report_id: "report-c", repeat_index: 0, repeat_count: 2 }, "selection"),
+      envelope(7, "attempt-c-0", { type: "llm_request_started", model_id: "rating", prompt_tokens: 21, prompt: "C PROMPT" }, "selection"),
+      envelope(8, "attempt-c-0", { type: "llm_request_completed", model_id: "rating", input_tokens: 21, output_tokens: 2, elapsed_ms: 8, response: "C RAW" }, "selection"),
+      envelope(9, "attempt-a-0", { type: "llm_request_completed", model_id: "rating", input_tokens: 20, output_tokens: 3, elapsed_ms: 10, response: "A RAW" }, "selection"),
+      envelope(10, "attempt-a-1", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 1, repeat_count: 2 }, "selection"),
+      envelope(11, "attempt-a-1", { type: "llm_request_started", model_id: "rating", prompt_tokens: 20 }, "selection"),
+      envelope(12, "attempt-a-1", { type: "llm_request_completed", model_id: "rating", input_tokens: 20, output_tokens: 3, elapsed_ms: 9 }, "selection"),
+      envelope(13, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 1, source: "child_expansion", community_ids: ["B"] }, "root"),
+      envelope(14, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 2, source: "fallback", community_ids: ["D"] }, "root"),
+      envelope(15, "selection", { type: "dynamic_community_selection_completed", visited_count: 3, threshold_passed_count: 2, selected_count: 1, selected_community_ids: ["B"], selected_report_ids: ["report-b"], ratings: [
+        { community_id: "A", report_id: "report-a", level: 0, selected_rating: 4, threshold_passed: true, selected: false },
+        { community_id: "C", report_id: "report-c", level: 0, selected_rating: 2, threshold_passed: false, selected: false },
+        { community_id: "B", report_id: "report-b", level: 1, selected_rating: 5, threshold_passed: true, selected: true },
+      ] }, "root"),
+      envelope(16, "context", { type: "global_context_built", batch_count: 0, report_count: 0 }, "root"),
+    ])
+
+    expect(model.globalVariant).toBe("dynamic")
+    expect(model.steps.map((step) => step.title)).toEqual(["Community Selection", "Community Context", "Map Analysis", "Evidence Reduction", "Answer Generation"])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected Community Selection")
+    expect(selection.summary).toMatchObject({ completed: true, visitedCount: 3, selectedCount: 1, threshold: 3, attemptsStarted: 3, attemptsCompleted: 3 })
+    expect(selection.summary.waves.map((wave) => wave.source)).toEqual(["initial", "child_expansion", "fallback"])
+    expect(selection.summary.decisions.map((decision) => [decision.community_id, decision.threshold_passed, decision.selected])).toEqual([
+      ["A", true, false],
+      ["C", false, false],
+      ["B", true, true],
+    ])
+    expect(selection.summary.decisions[0]?.attempts.map((attempt) => attempt.repeatIndex)).toEqual([0, 1])
+    expect(selection.summary.decisions[0]?.attempts[0]).toMatchObject({ exactPrompt: "A PROMPT\n", rawResponse: "A RAW" })
+    expect(selection.summary.decisions[1]?.attempts[0]).toMatchObject({ exactPrompt: "C PROMPT", rawResponse: "C RAW" })
+    expect(model.steps[1]?.kind === "community-context" && model.steps[1].summary.reportCount).toBe(0)
+  })
+
+  it("keeps Dynamic selection progressive without inventing final decisions", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 2, threshold: 3, max_level: 2, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: ["A", "B"] }, "root"),
+      envelope(4, "attempt-a", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 1 }, "selection"),
+      envelope(5, "attempt-a", { type: "llm_request_started", model_id: "rating", prompt_tokens: 20 }, "selection"),
+      envelope(6, "attempt-b", { type: "dynamic_community_rating_attempt_started", community_id: "B", report_id: "report-b", repeat_index: 0, repeat_count: 1 }, "selection"),
+      envelope(7, "attempt-b", { type: "llm_request_started", model_id: "rating", prompt_tokens: 20 }, "selection"),
+      envelope(8, "attempt-b", { type: "llm_request_completed", model_id: "rating", input_tokens: 20, output_tokens: 2, elapsed_ms: 5 }, "selection"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary).toMatchObject({ started: true, completed: false, activeWave: 0, attemptsStarted: 2, attemptsCompleted: 1, decisions: [] })
+  })
+
+  it("anchors Dynamic replay to the latest coherent completion and diagnoses stale lifecycle", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "old-selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "old-selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings: [{ community_id: "old", report_id: "old-report", level: 0, selected_rating: 1, threshold_passed: false, selected: false }] }, "root"),
+      envelope(4, "new-selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 2, max_level: 1, keep_parent: true, use_summary: true, num_repeats: 1 }, "root"),
+      envelope(5, "new-selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["new"], selected_report_ids: ["new-report"], ratings: [{ community_id: "new", report_id: "new-report", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary).toMatchObject({ threshold: 2, selectedCount: 1 })
+    expect(selection.summary.decisions.map((decision) => decision.community_id)).toEqual(["new"])
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([2, 3]))
+  })
+
+  it("does not mix an older completed rating attempt with a newer duplicate attempt", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "old-attempt", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 1 }, "selection"),
+      envelope(4, "old-attempt", { type: "llm_request_started", model_id: "rating", prompt_tokens: 10, prompt: "old prompt" }, "selection"),
+      envelope(5, "old-attempt", { type: "llm_request_completed", model_id: "rating", input_tokens: 10, output_tokens: 1, elapsed_ms: 2, response: "old response" }, "selection"),
+      envelope(6, "new-attempt", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 1 }, "selection"),
+      envelope(7, "new-attempt", { type: "llm_request_started", model_id: "rating", prompt_tokens: 11, prompt: "new prompt" }, "selection"),
+      envelope(8, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.decisions[0]?.attempts[0]).toMatchObject({ spanId: "new-attempt", status: "rating", exactPrompt: "new prompt", rawResponse: null })
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([3, 4, 5]))
+  })
+
+  it.each([
+    ["run_completed", true],
+    ["run_failed", false],
+  ] as const)("only reports a returned no-data answer after a successful terminal: %s", (terminalType, returned) => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 1, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [{ batch_index: 0, point_index: 0, score: 0, selected: false, reason: "non_positive_score" }] }, "root"),
+      envelope(3, "reduce", { type: "global_reduce_skipped", reason: "no_positive_points" }, "root"),
+      envelope(4, "root", terminalType === "run_completed" ? { type: terminalType, elapsed_ms: 4 } : { type: terminalType, error_kind: "query_completion", message: "failed" }),
+    ])
+    const answer = model.steps.find((step) => step.kind === "global-answer-generation")
+    if (answer?.kind !== "global-answer-generation") throw new Error("expected answer")
+    expect(answer.summary.noDataPathSelected).toBe(true)
+    expect(answer.summary.noDataAnswerReturned).toBe(returned)
   })
 })

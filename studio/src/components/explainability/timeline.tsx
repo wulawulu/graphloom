@@ -25,7 +25,7 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
   const model = useMemo(() => buildSemanticTimeline(envelopes), [envelopes])
   const content = (
     <div className="space-y-2 p-3">
-      {runId === null ? <EmptyTimeline title="No Run selected" detail="Choose a historical Run or submit a new Local Query." /> : null}
+      {runId === null ? <EmptyTimeline title="No Run selected" detail="Choose a historical Run or submit a new Query." /> : null}
       {runId !== null && envelopes.length === 0 ? <EmptyTimeline title="Waiting for explainability" detail={streamStatus === "reconnecting" ? "The live connection is reconnecting. Persisted history will be replayed." : "The Run has not emitted any events yet."} /> : null}
       {model.steps.map((step) => isGlobalSemanticStep(step)
         ? <GlobalSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />

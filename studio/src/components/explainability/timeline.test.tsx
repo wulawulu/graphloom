@@ -25,6 +25,8 @@ describe("Timeline", () => {
     const user = userEvent.setup()
     const { rerender } = render(<Timeline runId={null} envelopes={[]} streamStatus="idle" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
     expect(screen.getByText("No Run selected")).toBeInTheDocument()
+    expect(screen.getByText("Choose a historical Run or submit a new Query.")).toBeInTheDocument()
+    expect(screen.queryByText(/Local Query/)).not.toBeInTheDocument()
     rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} envelopes={[envelope({ type: "future_graphloom_event", foo: "bar" })]} />)
     await user.click(screen.getByText(/Diagnostics \/ Raw events/))
     expect(screen.getByText("future graphloom event")).toBeInTheDocument()

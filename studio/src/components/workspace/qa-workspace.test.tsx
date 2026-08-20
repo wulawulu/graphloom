@@ -109,6 +109,13 @@ describe("QaWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
     expect(screen.getByRole("heading", { name: "Community Context" })).toBeInTheDocument()
 
+    const dynamicEnvelopes = [
+      ...globalEnvelopes,
+      envelope(4, { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 2, keep_parent: false, use_summary: false, num_repeats: 1 }, "selection", "root"),
+    ]
+    view.rerender(<QaWorkspace {...values} runId="dynamic-run" envelopes={dynamicEnvelopes} />)
+    expect(screen.getByText("Dynamic Global")).toBeInTheDocument()
+
     view.rerender(<QaWorkspace {...values} runId="local-run" envelopes={events} />)
     expect(screen.getByText("Local")).toBeInTheDocument()
     expect(screen.queryByRole("heading", { name: "Community Context" })).not.toBeInTheDocument()

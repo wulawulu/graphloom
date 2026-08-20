@@ -37,7 +37,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   const [historyOpen, setHistoryOpen] = useState(false)
   const semanticTimeline = useMemo(() => buildSemanticTimeline(props.envelopes), [props.envelopes])
   const decisionCount = semanticTimeline.steps.length
-  const methodLabel = queryMethodLabel(semanticTimeline.method)
+  const methodLabel = queryMethodLabel(semanticTimeline.method, semanticTimeline.globalVariant)
 
   useEffect(() => setAnalysisOpen(false), [props.runId])
 
@@ -115,9 +115,9 @@ function analysisSummary(decisionCount: number, runStatus: string | undefined, s
   return `Analysis process · ${count}`
 }
 
-function queryMethodLabel(method: "local" | "global" | "basic" | "drift" | null): string {
+function queryMethodLabel(method: "local" | "global" | "basic" | "drift" | null, globalVariant: "static" | "dynamic" | null): string {
   if (method === "local") return "Local"
-  if (method === "global") return "Global"
+  if (method === "global") return globalVariant === "dynamic" ? "Dynamic Global" : "Global"
   if (method === "basic") return "Basic"
   if (method === "drift") return "DRIFT"
   return "Unknown"

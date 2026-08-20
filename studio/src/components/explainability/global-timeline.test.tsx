@@ -30,6 +30,28 @@ function globalEvents(content = true): ExplainabilityEnvelope[] {
   ]
 }
 
+function dynamicEvents(content = true): ExplainabilityEnvelope[] {
+  return [
+    envelope(1, "root", { type: "query_started", method: "global" }),
+    envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 2, threshold: 3, max_level: 2, keep_parent: false, use_summary: true, num_repeats: 1 }, "root"),
+    envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: ["A", "C"] }, "root"),
+    envelope(4, "attempt-a", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 1 }, "selection"),
+    envelope(5, "attempt-a", { type: "llm_request_started", model_id: "rating-model", prompt_tokens: 30, ...(content ? { prompt: "RATING PROMPT A\n  exact" } : {}) }, "selection"),
+    envelope(6, "attempt-c", { type: "dynamic_community_rating_attempt_started", community_id: "C", report_id: "report-c", repeat_index: 0, repeat_count: 1 }, "selection"),
+    envelope(7, "attempt-c", { type: "llm_request_started", model_id: "rating-model", prompt_tokens: 31 }, "selection"),
+    envelope(8, "attempt-c", { type: "llm_request_completed", model_id: "rating-model", input_tokens: 31, output_tokens: 2, elapsed_ms: 8, ...(content ? { response: "RAW RATING C" } : {}) }, "selection"),
+    envelope(9, "attempt-a", { type: "llm_request_completed", model_id: "rating-model", input_tokens: 30, output_tokens: 3, elapsed_ms: 10, ...(content ? { response: "RAW RATING A" } : {}) }, "selection"),
+    envelope(10, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 1, source: "child_expansion", community_ids: ["B"] }, "root"),
+    envelope(11, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 2, source: "fallback", community_ids: ["D"] }, "root"),
+    envelope(12, "selection", { type: "dynamic_community_selection_completed", visited_count: 3, threshold_passed_count: 2, selected_count: 1, selected_community_ids: ["B"], selected_report_ids: ["report-b"], ratings: [
+      { community_id: "A", report_id: "report-a", level: 0, selected_rating: 4, threshold_passed: true, selected: false },
+      { community_id: "C", report_id: "report-c", level: 0, selected_rating: 2, threshold_passed: false, selected: false },
+      { community_id: "B", report_id: "report-b", level: 1, selected_rating: 5, threshold_passed: true, selected: true },
+    ] }, "root"),
+    envelope(13, "context", { type: "global_context_built", batch_count: 0, report_count: 0 }, "root"),
+  ]
+}
+
 function renderGlobal(events = globalEvents(), runId = "global-run"): ReturnType<typeof render> {
   return render(<Timeline runId={runId} envelopes={events} streamStatus="closed" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
 }
@@ -45,6 +67,59 @@ describe("Global Timeline", () => {
     expect(screen.getByText("Run started")).toBeInTheDocument()
     expect(screen.getByText("Query started")).toBeInTheDocument()
     expect(screen.getByText("Run completed")).toBeInTheDocument()
+  })
+
+  it("renders Dynamic Global as five steps with waves, three decision states, and coherent attempts", async () => {
+    const user = userEvent.setup()
+    renderGlobal(dynamicEvents())
+    expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter(Boolean)).toEqual(["Community Selection", "Community Context", "Map Analysis", "Evidence Reduction", "Answer Generation"])
+    const selection = screen.getByRole("article", { name: "Community Selection" })
+    expect(within(selection).getByText(/3 communities rated · 1 selected · threshold 3/)).toBeInTheDocument()
+    expect(within(selection).getByText("Wave 1 · Initial")).toBeInTheDocument()
+    expect(within(selection).getByText("Wave 2 · Child expansion")).toBeInTheDocument()
+    expect(within(selection).getByText("Wave 3 · Fallback")).toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "Show community IDs for wave 1" }))
+    expect(within(selection).getByText("A")).toBeInTheDocument()
+    expect(within(selection).getAllByText("Selected")).toHaveLength(2)
+    expect(within(selection).getByText("Passed threshold · not retained")).toBeInTheDocument()
+    expect(within(selection).getByText("Below threshold")).toBeInTheDocument()
+
+    await user.click(within(selection).getByRole("button", { name: "Expand rating details for community A" }))
+    expect(within(selection).getByText("Repeat 1")).toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "View Rating Prompt" }))
+    expect(screen.getByTestId("rating-prompt-A-0").textContent).toBe("RATING PROMPT A\n  exact")
+    await user.click(within(selection).getByRole("button", { name: "Copy exact Community A · Repeat 1 Prompt" }))
+    await expect(navigator.clipboard.readText()).resolves.toBe("RATING PROMPT A\n  exact")
+    await user.click(within(selection).getByRole("button", { name: "View Raw Rating Response" }))
+    expect(screen.getByTestId("rating-response-A-0").textContent).toBe("RAW RATING A")
+    expect(screen.getByRole("article", { name: "Community Context" })).toHaveTextContent("0 community reports")
+  })
+
+  it("shows rating content as not captured in Metadata mode", async () => {
+    const user = userEvent.setup()
+    renderGlobal(dynamicEvents(false))
+    const selection = screen.getByRole("article", { name: "Community Selection" })
+    await user.click(within(selection).getByRole("button", { name: "Expand rating details for community A" }))
+    await user.click(within(selection).getByRole("button", { name: "View Rating Prompt" }))
+    expect(within(selection).getByText(/Rating prompt content was not captured/)).toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "View Raw Rating Response" }))
+    expect(within(selection).getByText(/Raw rating response content was not captured/)).toBeInTheDocument()
+  })
+
+  it("bounds large Dynamic community lists with Show all and Show fewer", async () => {
+    const user = userEvent.setup()
+    const ratings = Array.from({ length: 21 }, (_, index) => ({ community_id: `community-${index}`, report_id: `report-${index}`, level: 0, selected_rating: 0, threshold_passed: false, selected: false }))
+    renderGlobal([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 21, threshold: 3, max_level: 2, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_selection_completed", visited_count: 21, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings }, "root"),
+    ])
+    const selection = screen.getByRole("article", { name: "Community Selection" })
+    expect(within(selection).queryByText("Community community-20")).not.toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "Show all 21 communities" }))
+    expect(within(selection).getByText("Community community-20")).toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "Show fewer communities" }))
+    expect(within(selection).queryByText("Community community-20")).not.toBeInTheDocument()
   })
 
   it("expands batches and separates exact context, raw response, and parsed points", async () => {
@@ -145,8 +220,30 @@ describe("Global Timeline", () => {
     ])
 
     expect(screen.getByText("Reduce skipped — no positive points")).toBeInTheDocument()
-    expect(screen.getByText("No-data answer returned. The Reduce LLM was not invoked.")).toBeInTheDocument()
+    expect(screen.getByText("No-data path selected. The Reduce LLM was skipped.")).toBeInTheDocument()
+    expect(screen.queryByText(/answer returned/)).not.toBeInTheDocument()
     expect(screen.queryByText("Answer generated")).not.toBeInTheDocument()
+  })
+
+  it("only says the no-data answer was returned after RunCompleted", () => {
+    renderGlobal([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 1, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [{ batch_index: 0, point_index: 0, score: 0, selected: false, reason: "non_positive_score" }] }, "root"),
+      envelope(3, "reduce", { type: "global_reduce_skipped", reason: "no_positive_points" }, "root"),
+      envelope(4, "root", { type: "run_completed", elapsed_ms: 4 }),
+    ])
+    expect(screen.getByText("No-data answer returned. The Reduce LLM was not invoked.")).toBeInTheDocument()
+  })
+
+  it("never says the no-data answer was returned after RunFailed", () => {
+    renderGlobal([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 1, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [{ batch_index: 0, point_index: 0, score: 0, selected: false, reason: "non_positive_score" }] }, "root"),
+      envelope(3, "reduce", { type: "global_reduce_skipped", reason: "no_positive_points" }, "root"),
+      envelope(4, "root", { type: "run_failed", error_kind: "query_completion", message: "failed" }),
+    ])
+    expect(screen.getByText("No-data path selected. The Reduce LLM was skipped.")).toBeInTheDocument()
+    expect(screen.queryByText(/answer returned/)).not.toBeInTheDocument()
   })
 
   it("keeps span topology visible inside Technical details", async () => {

@@ -1,4 +1,10 @@
 import type {
+  DynamicCommunityRatingAttemptStartedEvent,
+  DynamicCommunityRatingEvidence,
+  DynamicCommunitySelectionCompletedEvent,
+  DynamicCommunitySelectionStartedEvent,
+  DynamicCommunityTraversalWaveStartedEvent,
+  DynamicTraversalWaveSource,
   ExplainabilityEnvelope,
   ExplainabilityEventPayload,
   GlobalContextBuiltEvent,
@@ -14,6 +20,53 @@ import type {
 } from "@/api/types"
 
 export type GlobalMapBatchStatus = "ready" | "analyzing" | "response_received" | "completed"
+export type DynamicRatingAttemptStatus = "rating" | "response_received"
+
+export interface DynamicTraversalWaveView {
+  waveIndex: number
+  source: DynamicTraversalWaveSource
+  communityIds: string[]
+}
+
+export interface DynamicRatingAttemptView {
+  identity: string
+  spanId: string
+  communityId: string
+  reportId: string
+  repeatIndex: number
+  repeatCount: number
+  status: DynamicRatingAttemptStatus
+  model?: string
+  inputTokens?: number
+  outputTokens?: number
+  elapsedMs?: number
+  exactPrompt: string | null
+  rawResponse: string | null
+  rawEvents: ExplainabilityEnvelope[]
+}
+
+export interface DynamicCommunityDecisionView extends DynamicCommunityRatingEvidence {
+  attempts: DynamicRatingAttemptView[]
+}
+
+export interface DynamicCommunitySelectionSummary {
+  started: boolean
+  completed: boolean
+  initialCommunityCount?: number
+  threshold?: number
+  maxLevel?: number
+  keepParent?: boolean
+  useSummary?: boolean
+  numRepeats?: number
+  activeWave?: number
+  visitedCount?: number
+  thresholdPassedCount?: number
+  selectedCount?: number
+  attemptsStarted: number
+  attemptsCompleted: number
+  waves: DynamicTraversalWaveView[]
+  decisions: DynamicCommunityDecisionView[]
+}
 
 export interface GlobalMapPointView extends GlobalMapPointEvidence {
   identity: string
@@ -77,7 +130,8 @@ export interface GlobalReduceSummary {
 export interface GlobalAnswerGenerationSummary {
   calls: number
   generated: boolean
-  noDataAnswer: boolean
+  noDataPathSelected: boolean
+  noDataAnswerReturned: boolean
   model?: string
   inputTokens?: number
   outputTokens?: number
@@ -87,18 +141,21 @@ export interface GlobalAnswerGenerationSummary {
 }
 
 export type GlobalSemanticStep =
+  | { id: "community-selection"; kind: "community-selection"; title: "Community Selection"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DynamicCommunitySelectionSummary }
   | { id: "community-context"; kind: "community-context"; title: "Community Context"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalCommunityContextSummary }
   | { id: "map-analysis"; kind: "map-analysis"; title: "Map Analysis"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalMapAnalysisSummary }
   | { id: "evidence-reduction"; kind: "evidence-reduction"; title: "Evidence Reduction"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalReduceSummary }
   | { id: "global-answer-generation"; kind: "global-answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalAnswerGenerationSummary }
 
 export interface GlobalSemanticTimelineModel {
+  variant: "static" | "dynamic"
   steps: GlobalSemanticStep[]
   diagnosticEvents: ExplainabilityEnvelope[]
 }
 
 export function isGlobalSemanticStep(step: { kind: string }): step is GlobalSemanticStep {
-  return step.kind === "community-context"
+  return step.kind === "community-selection"
+    || step.kind === "community-context"
     || step.kind === "map-analysis"
     || step.kind === "evidence-reduction"
     || step.kind === "global-answer-generation"
@@ -113,6 +170,10 @@ interface BatchEvidence {
 }
 
 export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnvelope[]): GlobalSemanticTimelineModel {
+  const selectionStartedEvents: Array<ExplainabilityEnvelope & { record: { event: DynamicCommunitySelectionStartedEvent } }> = []
+  const selectionWaveEvents: Array<ExplainabilityEnvelope & { record: { event: DynamicCommunityTraversalWaveStartedEvent } }> = []
+  const ratingAttemptEvents: Array<ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } }> = []
+  const selectionCompletedEvents: Array<ExplainabilityEnvelope & { record: { event: DynamicCommunitySelectionCompletedEvent } }> = []
   let contextBuilt: (ExplainabilityEnvelope & { record: { event: GlobalContextBuiltEvent } }) | undefined
   let mapStarted: (ExplainabilityEnvelope & { record: { event: GlobalMapStartedEvent } }) | undefined
   let reduceBuilt: (ExplainabilityEnvelope & { record: { event: GlobalReduceContextBuiltEvent } }) | undefined
@@ -124,7 +185,11 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
 
   for (const envelope of ordered) {
     const event = envelope.record.event
-    if (isGlobalContextBuilt(event)) contextBuilt = typedEnvelope(envelope, event)
+    if (isDynamicSelectionStarted(event)) selectionStartedEvents.push(typedEnvelope(envelope, event))
+    else if (isDynamicTraversalWaveStarted(event)) selectionWaveEvents.push(typedEnvelope(envelope, event))
+    else if (isDynamicRatingAttemptStarted(event)) ratingAttemptEvents.push(typedEnvelope(envelope, event))
+    else if (isDynamicSelectionCompleted(event)) selectionCompletedEvents.push(typedEnvelope(envelope, event))
+    else if (isGlobalContextBuilt(event)) contextBuilt = typedEnvelope(envelope, event)
     else if (isGlobalMapStarted(event)) mapStarted = typedEnvelope(envelope, event)
     else if (isGlobalMapBatchBuilt(event)) append(batchEvents, event.batch_index, typedEnvelope(envelope, event))
     else if (isGlobalMapPointsProduced(event)) pointsEvents.push(typedEnvelope(envelope, event))
@@ -135,6 +200,15 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
   }
 
   const claimedSequences = new Set<number>()
+  const dynamicSelection = buildDynamicSelection(
+    selectionStartedEvents,
+    selectionWaveEvents,
+    ratingAttemptEvents,
+    selectionCompletedEvents,
+    llmStartedBySpan,
+    llmCompletedBySpan,
+  )
+  dynamicSelection?.rawEvents.forEach((event) => claimedSequences.add(event.sequence))
   const batches = new Map<number, BatchEvidence>()
   const mapSpan = mapStarted?.record.span_id
   for (const [batchIndex, events] of batchEvents) {
@@ -241,11 +315,16 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
   }
   const reduceStarted = reduceLifecycle.started
   const reduceCompleted = reduceLifecycle.completed
-  const noDataAnswer = compatibleReduceSkipped?.record.event.reason === "no_positive_points"
+  const noDataPathSelected = compatibleReduceSkipped?.record.event.reason === "no_positive_points"
+  const terminal = last(ordered.filter((envelope) => envelope.record.event.type === "run_completed" || envelope.record.event.type === "run_failed"))
+  const noDataAnswerReturned = noDataPathSelected
+    && terminal?.record.event.type === "run_completed"
+    && terminal.sequence > (compatibleReduceSkipped?.sequence ?? Number.MAX_SAFE_INTEGER)
   const answerSummary: GlobalAnswerGenerationSummary = {
-    calls: noDataAnswer ? 0 : Number(reduceStarted !== undefined || reduceCompleted !== undefined),
+    calls: noDataPathSelected ? 0 : Number(reduceStarted !== undefined || reduceCompleted !== undefined),
     generated: reduceCompleted !== undefined,
-    noDataAnswer,
+    noDataPathSelected,
+    noDataAnswerReturned,
     model: reduceCompleted?.record.event.model_id ?? reduceStarted?.record.event.model_id,
     inputTokens: reduceCompleted?.record.event.input_tokens ?? reduceStarted?.record.event.prompt_tokens,
     outputTokens: reduceCompleted?.record.event.output_tokens,
@@ -255,6 +334,14 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
   }
 
   const steps: GlobalSemanticStep[] = [
+    ...(dynamicSelection === undefined ? [] : [{
+      id: "community-selection" as const,
+      kind: "community-selection" as const,
+      title: "Community Selection" as const,
+      rawEvents: dynamicSelection.rawEvents,
+      focusEnvelope: null,
+      summary: dynamicSelection.summary,
+    }]),
     {
       id: "community-context",
       kind: "community-context",
@@ -305,7 +392,142 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     },
   ]
   const diagnosticEvents = ordered.filter((envelope) => !claimedSequences.has(envelope.sequence))
-  return { steps, diagnosticEvents }
+  return { variant: dynamicSelection === undefined ? "static" : "dynamic", steps, diagnosticEvents }
+}
+
+interface DynamicSelectionBuild {
+  rawEvents: ExplainabilityEnvelope[]
+  summary: DynamicCommunitySelectionSummary
+}
+
+function buildDynamicSelection(
+  starts: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunitySelectionStartedEvent } })[],
+  waves: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunityTraversalWaveStartedEvent } })[],
+  attempts: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } })[],
+  completions: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunitySelectionCompletedEvent } })[],
+  llmStartedBySpan: ReadonlyMap<string, Array<ExplainabilityEnvelope & { record: { event: LlmRequestStartedEvent } }>>,
+  llmCompletedBySpan: ReadonlyMap<string, Array<ExplainabilityEnvelope & { record: { event: LlmRequestCompletedEvent } }>>,
+): DynamicSelectionBuild | undefined {
+  const completed = last(completions)
+  const latestSignal = last([...starts, ...waves, ...attempts].sort(bySequence))
+  const selectionSpan = completed?.record.span_id
+    ?? (latestSignal?.record.event.type === "dynamic_community_rating_attempt_started"
+      ? latestSignal.record.parent_span_id
+      : latestSignal?.record.span_id)
+  if (selectionSpan === undefined) return undefined
+
+  const selectionParent = completed?.record.parent_span_id
+    ?? last([...starts, ...waves]
+      .filter((event) => event.record.span_id === selectionSpan)
+      .sort(bySequence))?.record.parent_span_id
+  const upperBound = completed?.sequence ?? Number.POSITIVE_INFINITY
+  const started = last(starts.filter((event) => event.record.span_id === selectionSpan
+    && event.record.parent_span_id === selectionParent
+    && event.sequence < upperBound))
+  const lowerBound = started?.sequence ?? Number.NEGATIVE_INFINITY
+  const canonicalWaves = waves.filter((event) => event.record.span_id === selectionSpan
+    && event.record.parent_span_id === selectionParent
+    && event.sequence > lowerBound
+    && event.sequence < upperBound)
+  const latestAttemptByIdentity = new Map<string, ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } }>()
+  for (const attempt of attempts) {
+    if (attempt.record.parent_span_id !== selectionSpan
+      || attempt.sequence <= lowerBound
+      || attempt.sequence >= upperBound) continue
+    const identity = dynamicAttemptIdentity(attempt.record.event.community_id, attempt.record.event.repeat_index)
+    latestAttemptByIdentity.set(identity, attempt)
+  }
+
+  const attemptViews = [...latestAttemptByIdentity.values()]
+    .map((attempt) => buildDynamicAttemptView(
+      attempt,
+      selectionSpan,
+      upperBound,
+      llmStartedBySpan.get(attempt.record.span_id) ?? [],
+      llmCompletedBySpan.get(attempt.record.span_id) ?? [],
+    ))
+    .sort((left, right) => left.communityId.localeCompare(right.communityId) || left.repeatIndex - right.repeatIndex)
+  const attemptsByCommunity = new Map<string, DynamicRatingAttemptView[]>()
+  for (const attempt of attemptViews) append(attemptsByCommunity, attempt.communityId, attempt)
+  const decisions = completed?.record.event.ratings.map((rating) => ({
+    ...rating,
+    attempts: [...(attemptsByCommunity.get(rating.community_id) ?? [])]
+      .sort((left, right) => left.repeatIndex - right.repeatIndex),
+  })) ?? []
+  const rawEvents = [
+    ...(started === undefined ? [] : [started]),
+    ...canonicalWaves,
+    ...attemptViews.flatMap((attempt) => attempt.rawEvents),
+    ...(completed === undefined ? [] : [completed]),
+  ].sort(bySequence)
+  const latestWave = last(canonicalWaves)
+  return {
+    rawEvents,
+    summary: {
+      started: started !== undefined,
+      completed: completed !== undefined,
+      initialCommunityCount: started?.record.event.initial_community_count,
+      threshold: started?.record.event.threshold,
+      maxLevel: started?.record.event.max_level,
+      keepParent: started?.record.event.keep_parent,
+      useSummary: started?.record.event.use_summary,
+      numRepeats: started?.record.event.num_repeats,
+      activeWave: completed === undefined ? latestWave?.record.event.wave_index : undefined,
+      visitedCount: completed?.record.event.visited_count,
+      thresholdPassedCount: completed?.record.event.threshold_passed_count,
+      selectedCount: completed?.record.event.selected_count,
+      attemptsStarted: attemptViews.length,
+      attemptsCompleted: attemptViews.filter((attempt) => attempt.status === "response_received").length,
+      waves: canonicalWaves
+        .map((wave) => ({
+          waveIndex: wave.record.event.wave_index,
+          source: wave.record.event.source,
+          communityIds: [...wave.record.event.community_ids],
+        }))
+        .sort((left, right) => left.waveIndex - right.waveIndex),
+      decisions,
+    },
+  }
+}
+
+function buildDynamicAttemptView(
+  attempt: ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } },
+  selectionSpan: string,
+  upperBound: number,
+  starts: readonly (ExplainabilityEnvelope & { record: { event: LlmRequestStartedEvent } })[],
+  completions: readonly (ExplainabilityEnvelope & { record: { event: LlmRequestCompletedEvent } })[],
+): DynamicRatingAttemptView {
+  const lifecycle = selectLlmLifecycle(
+    starts.filter((event) => event.sequence < upperBound),
+    completions.filter((event) => event.sequence < upperBound),
+    selectionSpan,
+    attempt.sequence,
+  )
+  const rawEvents = [
+    attempt,
+    ...(lifecycle.started === undefined ? [] : [lifecycle.started]),
+    ...(lifecycle.completed === undefined ? [] : [lifecycle.completed]),
+  ].sort(bySequence)
+  return {
+    identity: dynamicAttemptIdentity(attempt.record.event.community_id, attempt.record.event.repeat_index),
+    spanId: attempt.record.span_id,
+    communityId: attempt.record.event.community_id,
+    reportId: attempt.record.event.report_id,
+    repeatIndex: attempt.record.event.repeat_index,
+    repeatCount: attempt.record.event.repeat_count,
+    status: lifecycle.completed === undefined ? "rating" : "response_received",
+    model: lifecycle.completed?.record.event.model_id ?? lifecycle.started?.record.event.model_id,
+    inputTokens: lifecycle.completed?.record.event.input_tokens ?? lifecycle.started?.record.event.prompt_tokens,
+    outputTokens: lifecycle.completed?.record.event.output_tokens,
+    elapsedMs: lifecycle.completed?.record.event.elapsed_ms,
+    exactPrompt: lifecycle.started?.record.event.prompt ?? null,
+    rawResponse: lifecycle.completed?.record.event.response ?? null,
+    rawEvents,
+  }
+}
+
+function dynamicAttemptIdentity(communityId: string, repeatIndex: number): string {
+  return `${communityId}:${repeatIndex}`
 }
 
 function buildBatchView(batch: BatchEvidence): GlobalMapBatchView {
@@ -391,6 +613,69 @@ function isGlobalContextBuilt(event: ExplainabilityEventPayload): event is Globa
   return event.type === "global_context_built" && finiteNumber(event.batch_count) && finiteNumber(event.report_count)
 }
 
+function isDynamicSelectionStarted(event: ExplainabilityEventPayload): event is DynamicCommunitySelectionStartedEvent {
+  return event.type === "dynamic_community_selection_started"
+    && positiveInteger(event.initial_community_count)
+    && safeInteger(event.threshold)
+    && nonNegativeInteger(event.max_level)
+    && typeof event.keep_parent === "boolean"
+    && typeof event.use_summary === "boolean"
+    && positiveInteger(event.num_repeats)
+}
+
+function isDynamicTraversalWaveStarted(event: ExplainabilityEventPayload): event is DynamicCommunityTraversalWaveStartedEvent {
+  return event.type === "dynamic_community_traversal_wave_started"
+    && nonNegativeInteger(event.wave_index)
+    && (event.source === "initial" || event.source === "child_expansion" || event.source === "fallback")
+    && nonEmptyStringArray(event.community_ids)
+}
+
+function isDynamicRatingAttemptStarted(event: ExplainabilityEventPayload): event is DynamicCommunityRatingAttemptStartedEvent {
+  return event.type === "dynamic_community_rating_attempt_started"
+    && nonEmptyString(event.community_id)
+    && nonEmptyString(event.report_id)
+    && nonNegativeInteger(event.repeat_index)
+    && positiveInteger(event.repeat_count)
+    && event.repeat_index < event.repeat_count
+}
+
+function isDynamicSelectionCompleted(event: ExplainabilityEventPayload): event is DynamicCommunitySelectionCompletedEvent {
+  const selectedCommunityIds = event.selected_community_ids
+  const selectedReportIds = event.selected_report_ids
+  const ratings = event.ratings
+  if (event.type !== "dynamic_community_selection_completed"
+    || !nonNegativeInteger(event.visited_count)
+    || !nonNegativeInteger(event.threshold_passed_count)
+    || !nonNegativeInteger(event.selected_count)
+    || !stringArray(selectedCommunityIds)
+    || !stringArray(selectedReportIds)
+    || !selectedCommunityIds.every(nonEmptyString)
+    || !selectedReportIds.every(nonEmptyString)
+    || !Array.isArray(ratings)
+    || !ratings.every(isDynamicRatingEvidence)) return false
+  const passed = ratings.filter((rating) => rating.threshold_passed)
+  const selected = ratings.filter((rating) => rating.selected)
+  return event.visited_count === ratings.length
+    && event.threshold_passed_count === passed.length
+    && event.selected_count === selected.length
+    && selectedCommunityIds.length === selected.length
+    && selectedReportIds.length === selected.length
+    && selected.every((rating, index) => rating.threshold_passed
+      && rating.community_id === selectedCommunityIds[index]
+      && rating.report_id === selectedReportIds[index])
+}
+
+function isDynamicRatingEvidence(value: unknown): value is DynamicCommunityRatingEvidence {
+  if (!isObject(value)) return false
+  return nonEmptyString(value.community_id)
+    && nonEmptyString(value.report_id)
+    && safeInteger(value.level)
+    && safeInteger(value.selected_rating)
+    && typeof value.threshold_passed === "boolean"
+    && typeof value.selected === "boolean"
+    && (!value.selected || value.threshold_passed)
+}
+
 function isGlobalMapStarted(event: ExplainabilityEventPayload): event is GlobalMapStartedEvent {
   return event.type === "global_map_started" && finiteNumber(event.batch_count)
 }
@@ -469,6 +754,26 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
+}
+
+function safeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value)
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return safeInteger(value) && value >= 0
+}
+
+function positiveInteger(value: unknown): value is number {
+  return safeInteger(value) && value > 0
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0
+}
+
+function nonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every(nonEmptyString)
 }
 
 function optionalString(value: unknown): value is string | undefined {

@@ -148,7 +148,60 @@ export interface GlobalReduceSkippedEvent extends GenericExplainabilityEventPayl
   reason: "no_positive_points"
 }
 
+export type DynamicTraversalWaveSource = "initial" | "child_expansion" | "fallback"
+
+export interface DynamicCommunitySelectionStartedEvent extends GenericExplainabilityEventPayload {
+  type: "dynamic_community_selection_started"
+  initial_community_count: number
+  threshold: number
+  max_level: number
+  keep_parent: boolean
+  use_summary: boolean
+  num_repeats: number
+}
+
+export interface DynamicCommunityTraversalWaveStartedEvent extends GenericExplainabilityEventPayload {
+  type: "dynamic_community_traversal_wave_started"
+  wave_index: number
+  source: DynamicTraversalWaveSource
+  community_ids: string[]
+}
+
+export interface DynamicCommunityRatingAttemptStartedEvent extends GenericExplainabilityEventPayload {
+  type: "dynamic_community_rating_attempt_started"
+  community_id: string
+  report_id: string
+  repeat_index: number
+  repeat_count: number
+}
+
+export interface DynamicCommunityRatingEvidence {
+  community_id: string
+  report_id: string
+  level: number
+  selected_rating: number
+  threshold_passed: boolean
+  selected: boolean
+}
+
+export interface DynamicCommunitySelectionCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "dynamic_community_selection_completed"
+  visited_count: number
+  threshold_passed_count: number
+  selected_count: number
+  selected_community_ids: string[]
+  selected_report_ids: string[]
+  ratings: DynamicCommunityRatingEvidence[]
+}
+
+export type DynamicGlobalExplainabilityEventPayload =
+  | DynamicCommunitySelectionStartedEvent
+  | DynamicCommunityTraversalWaveStartedEvent
+  | DynamicCommunityRatingAttemptStartedEvent
+  | DynamicCommunitySelectionCompletedEvent
+
 export type GlobalExplainabilityEventPayload =
+  | DynamicGlobalExplainabilityEventPayload
   | GlobalContextBuiltEvent
   | GlobalMapStartedEvent
   | GlobalMapBatchBuiltEvent

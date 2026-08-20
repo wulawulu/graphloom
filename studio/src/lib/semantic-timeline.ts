@@ -68,6 +68,7 @@ export interface SemanticTimelineModel {
   steps: SemanticStep[]
   diagnosticEvents: ExplainabilityEnvelope[]
   method: "local" | "global" | "basic" | "drift" | null
+  globalVariant: "static" | "dynamic" | null
 }
 
 const ENTITY_MAPPING_EVENTS = new Set(["mapping_query_built", "embedding_started", "embedding_completed", "candidates_retrieved", "candidates_filtered", "entities_selected"])
@@ -94,8 +95,11 @@ const CONTEXT_SECTION_BY_RECORD_TYPE: Record<string, string> = {
 export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope[]): SemanticTimelineModel {
   const ordered = [...envelopes].sort((left, right) => left.sequence - right.sequence)
   const method = detectQueryMethod(ordered)
-  if (method === "global") return { ...buildGlobalSemanticTimeline(ordered), method }
-  if (method === "basic" || method === "drift") return { steps: [], diagnosticEvents: ordered, method }
+  if (method === "global") {
+    const global = buildGlobalSemanticTimeline(ordered)
+    return { ...global, method, globalVariant: global.variant }
+  }
+  if (method === "basic" || method === "drift") return { steps: [], diagnosticEvents: ordered, method, globalVariant: null }
   const grouped = {
     entityMapping: [] as ExplainabilityEnvelope[],
     graphExpansion: [] as ExplainabilityEnvelope[],
@@ -121,7 +125,7 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
   if (grouped.graphExpansion.length > 0) steps.push(buildGraphExpansion(grouped.graphExpansion, finalContext))
   if (grouped.contextAssembly.length > 0) steps.push(buildContextAssembly(grouped.contextAssembly, contextSections))
   if (grouped.answerGeneration.length > 0) steps.push(buildAnswerGeneration(grouped.answerGeneration))
-  return { steps, diagnosticEvents: grouped.diagnostics, method }
+  return { steps, diagnosticEvents: grouped.diagnostics, method, globalVariant: null }
 }
 
 export function detectQueryMethod(envelopes: readonly ExplainabilityEnvelope[]): SemanticTimelineModel["method"] {
