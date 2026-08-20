@@ -1720,20 +1720,26 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 不在 Drop 中执行异步工作、不 spawn 隐藏任务，Run 暂时保持未完成，等待后续 Store/Studio
 阶段通过超时或 abandoned 状态处理。
 
-Core runtime 当前完整接入 Local Query 与 static Global Query Explainability。Dynamic Global、
+Core runtime 当前完整接入 Local Query、static Global 与 Dynamic Global Query Explainability。
 Basic 和 DRIFT 即使收到请求配置也保持安全 no-op，不会创建缺失关键 evidence 的半截 Run。
-Local tracing topology 保持不变；static Global 仅接入 Explainability，不扩展 OpenTelemetry。
+Local tracing topology 保持不变；Global 仅接入 Explainability，不扩展 OpenTelemetry。
 JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence allocator、Live Hub、
 host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
 Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
 Semantic Timeline 已实现；Turso、DuckDB 和 Dynamic Global UI 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
-Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 static Global Explainability 的支持。
+Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 Global Explainability 的支持。
 
-Static Global 的 request-scoped topology 与真实 fan-out/fan-in 如下；每个 batch span 都有独立
-ID，`batch_index` 是语义身份，持久化 sequence 只表示实际 emission 顺序：
+Global 的 request-scoped topology 与真实 selection/fan-out/fan-in 如下；Static Global 不发出
+optional selection span 下的任何事件。每个 rating repeat 与 Map batch 都有独立 ID，持久化
+sequence 只表示实际 emission 顺序：
 
 ```text
 Query root
+├── Dynamic selection（仅 Dynamic Global）
+│   ├── SelectionStarted / TraversalWaveStarted
+│   ├── attempt A repeat 0: AttemptStarted → LLM Started → LLM Completed
+│   ├── attempt B repeat 0: AttemptStarted → LLM Started → LLM Completed
+│   └── ... → SelectionCompleted
 ├── Global context
 │   └── GlobalContextBuilt
 ├── Map
@@ -1745,6 +1751,12 @@ Query root
     ├── ReduceSkipped(NoPositivePoints)，或
     └── LLM Started → streamed completion → LLM Completed
 ```
+
+Dynamic selection 的 attempt evidence 在原有 community 间 `try_buffered_ordered` 并发与
+community 内 repeat 顺序循环中捕获；threshold、majority vote、parent removal、child traversal、
+fallback、final first-seen order 都不重算。Hierarchy `community_id` 与直接来自真实
+`CommunityReport.id` 的 stable `report_id` 分开记录。Selection 完成后仍进入同一 Global Context、
+Map 与 Reduce instrumentation，不存在 Dynamic 专用的 Map/Reduce 事件。
 
 CommunityReport stable ID 在真实 batch-local sort 后、CSV render 前后同一构造路径中作为
 sidecar 捕获，不从 CSV 或 short ID 反推。Reduce decision 也在真实 `score > 0`、stable score

@@ -111,12 +111,13 @@ async fn prepare_global_stream(
             Arc::clone(&runtime.global_context.tokenizer),
             runtime.concurrent_requests,
         )
-        .select(query)
+        .select_explainable(query, explainability.cloned())
         .await?;
-        runtime.global_context.build_selected(
+        runtime.global_context.build_selected_explainable(
             selection.reports,
             selection.usage,
             selection.ratings,
+            explainability.is_some(),
         )?
     } else {
         runtime

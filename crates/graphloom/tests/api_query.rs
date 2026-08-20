@@ -389,6 +389,18 @@ async fn mount_global_query_stub() -> MockServer {
     server
 }
 
+async fn mount_dynamic_rating_failure_stub() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"message": "rating provider unavailable"}
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
 async fn mount_global_no_data_stub() -> MockServer {
     use wiremock::matchers::body_partial_json;
 
@@ -3578,7 +3590,7 @@ async fn test_should_isolate_static_and_dynamic_global_snapshots_in_both_query_o
 }
 
 #[tokio::test]
-async fn test_should_leave_dynamic_global_explainability_as_safe_noop() {
+async fn test_should_explain_dynamic_global_selection_and_reuse_map_reduce() {
     let server = mount_global_query_stub().await;
     let project = TempDir::new().expect("project");
     write_dynamic_global_tables(&project.path().join("output")).await;
@@ -3588,23 +3600,277 @@ async fn test_should_leave_dynamic_global_explainability_as_safe_noop() {
         "default_completion_model".to_owned(),
         model_config(&server, "chat-test"),
     );
+    let baseline_options = {
+        let mut options = global_options(project.path(), "Dynamic question?");
+        options.dynamic_community_selection = true;
+        options
+    };
+    let baseline = query(config.clone(), baseline_options)
+        .await
+        .expect("baseline Dynamic Global Query");
+    let baseline_requests = recorded_request_bodies(&server).await;
+
     let sink = Arc::new(RecordingExplainabilitySink::default());
     let mut options = global_options(project.path(), "Dynamic question?");
     options.dynamic_community_selection = true;
     options.explainability = Some(QueryExplainabilityOptions::new(
-        "dynamic-global-deferred".parse().expect("run id"),
+        "dynamic-global-content".parse().expect("run id"),
         ExplainabilityContentMode::Debug,
         sink.clone(),
     ));
 
     let result = query(config, options)
         .await
-        .expect("Dynamic Global Query remains functional");
+        .expect("explained Dynamic Global Query");
 
-    assert!(!result.response.is_empty());
-    assert!(sink.records().is_empty());
-    assert_eq!(sink.emit_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 0);
+    assert_query_results_equal(&baseline, &result);
+    let requests = recorded_request_bodies(&server).await;
+    assert_eq!(requests.len(), baseline_requests.len().saturating_mul(2));
+    let sorted_requests = |values: &[Value]| {
+        let mut values = values.iter().map(Value::to_string).collect::<Vec<_>>();
+        values.sort();
+        values
+    };
+    assert_eq!(
+        sorted_requests(&requests[baseline_requests.len()..]),
+        sorted_requests(&baseline_requests)
+    );
+
+    let records = sink.records();
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    let selection_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.event,
+                ExplainabilityEvent::DynamicCommunitySelectionStarted(_)
+            )
+            .then(|| record.span_id.clone())
+        })
+        .expect("Dynamic selection span");
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::DynamicCommunityTraversalWaveStarted(event)
+            if event.wave_index == 0
+                && event.source == graphloom::explainability::DynamicTraversalWaveSource::Initial
+                && event.community_ids == ["0", "1", "2", "3"]
+    )));
+    let attempts = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            ExplainabilityEvent::DynamicCommunityRatingAttemptStarted(event) => {
+                Some((record, event))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 4);
+    assert!(attempts.iter().all(|(record, attempt)| {
+        record.parent_span_id.as_ref() == Some(&selection_span)
+            && attempt.repeat_index == 0
+            && attempt.repeat_count == 1
+            && attempt.report_id == format!("report-{}", attempt.community_id)
+            && records
+                .iter()
+                .filter(|candidate| candidate.span_id == record.span_id)
+                .map(|candidate| explainability_event_name(&candidate.event))
+                .collect::<Vec<_>>()
+                == [
+                    "dynamic_community_rating_attempt_started",
+                    "llm_request_started",
+                    "llm_request_completed",
+                ]
+    }));
+    let completed = records
+        .iter()
+        .find_map(|record| match &record.event {
+            ExplainabilityEvent::DynamicCommunitySelectionCompleted(event) => Some(event),
+            _ => None,
+        })
+        .expect("Dynamic selection completed");
+    assert_eq!(completed.visited_count, 4);
+    assert_eq!(completed.threshold_passed_count, 4);
+    assert_eq!(completed.selected_count, 4);
+    assert_eq!(
+        completed.selected_report_ids,
+        ["report-0", "report-1", "report-2", "report-3"]
+    );
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::GlobalMapBatchBuilt(event)
+            if !event.report_ids.is_empty()
+                && event.report_ids.iter().all(|id| id.starts_with("report-"))
+    )));
+    assert!(records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::GlobalReduceContextBuilt(_)
+    )));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_dynamic_global_when_rating_provider_fails() {
+    let server = mount_dynamic_rating_failure_stub().await;
+    let project = TempDir::new().expect("project");
+    write_dynamic_global_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut options = global_options(project.path(), "Dynamic failure?");
+    options.dynamic_community_selection = true;
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        "dynamic-rating-failure".parse().expect("run id"),
+        ExplainabilityContentMode::Content,
+        sink.clone(),
+    ));
+
+    let error = query(config, options)
+        .await
+        .expect_err("rating provider failure");
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                *source,
+                QueryError::QueryCompletion {
+                    operation: "complete dynamic community rating",
+                    ..
+                }
+            )
+    ));
+    let records = sink.records();
+    assert!(records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DynamicCommunityRatingAttemptStarted(_)
+    )));
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_)))
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::LlmRequestCompleted(_)
+            | ExplainabilityEvent::DynamicCommunitySelectionCompleted(_)
+    )));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "query_completion"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_finalize_dynamic_global_without_report_backed_level_zero() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    let output = project.path().join("output");
+    write_dynamic_global_tables(&output).await;
+    let provider = ParquetTableProvider::new(&output).expect("Parquet provider");
+    let mut communities = provider
+        .read_dataframe("communities")
+        .await
+        .expect("communities");
+    communities
+        .replace(
+            "level",
+            Series::new("level".into(), [1_i64, 1, 1, 1]).into(),
+        )
+        .expect("replace levels");
+    provider
+        .write_dataframe("communities", communities)
+        .await
+        .expect("write communities");
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let mut options = global_options(project.path(), "Missing root?");
+    options.dynamic_community_selection = true;
+    options.explainability = Some(QueryExplainabilityOptions::new(
+        "dynamic-no-level-zero".parse().expect("run id"),
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    ));
+
+    let error = query(config, options)
+        .await
+        .expect_err("missing report-backed level zero");
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(
+                *source,
+                QueryError::QueryContext {
+                    operation: "initialize dynamic community selection",
+                    ..
+                }
+            )
+    ));
+    let records = sink.records();
+    assert!(matches!(
+        records.first().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunStarted(_))
+    ));
+    assert!(matches!(
+        records.get(1).map(|record| &record.event),
+        Some(ExplainabilityEvent::QueryStarted(_))
+    ));
+    assert!(!records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DynamicCommunitySelectionStarted(_)
+            | ExplainabilityEvent::DynamicCommunitySelectionCompleted(_)
+    )));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_context"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_keep_dynamic_global_result_when_explainability_sink_fails() {
+    let server = mount_global_query_stub().await;
+    let project = TempDir::new().expect("project");
+    write_dynamic_global_tables(&project.path().join("output")).await;
+    let mut config = GraphRagConfig::default();
+    config.completion_models.insert(
+        "default_completion_model".to_owned(),
+        model_config(&server, "chat-test"),
+    );
+    let mut baseline_options = global_options(project.path(), "Dynamic sink?");
+    baseline_options.dynamic_community_selection = true;
+    let baseline = query(config.clone(), baseline_options)
+        .await
+        .expect("baseline Dynamic Global Query");
+    let sink = Arc::new(RecordingExplainabilitySink::failing());
+    let mut explained_options = global_options(project.path(), "Dynamic sink?");
+    explained_options.dynamic_community_selection = true;
+    explained_options.explainability = Some(QueryExplainabilityOptions::new(
+        "dynamic-sink-failure".parse().expect("run id"),
+        ExplainabilityContentMode::Metadata,
+        sink.clone(),
+    ));
+
+    let explained = query(config, explained_options)
+        .await
+        .expect("Dynamic Query survives Explainability delivery failure");
+    assert_query_results_equal(&baseline, &explained);
+    assert!(matches!(
+        sink.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3647,7 +3913,7 @@ async fn test_should_keep_global_business_result_when_explainability_sink_fails(
 async fn test_should_isolate_concurrent_global_explainability_runs() {
     let server = mount_global_query_stub().await;
     let project = TempDir::new().expect("project");
-    write_local_tables(&project.path().join("output")).await;
+    write_dynamic_global_tables(&project.path().join("output")).await;
     let mut config = GraphRagConfig::default();
     config.completion_models.insert(
         "default_completion_model".to_owned(),
@@ -3658,13 +3924,14 @@ async fn test_should_isolate_concurrent_global_explainability_runs() {
         .expect("Global Query engine");
     let sink_a = Arc::new(RecordingExplainabilitySink::failing());
     let sink_b = Arc::new(RecordingExplainabilitySink::default());
-    let options_a = global_options(project.path(), "Global Run A").with_explainability(
+    let mut options_a = global_options(project.path(), "Global Run A").with_explainability(
         QueryExplainabilityOptions::new(
             "global-run-a".parse().expect("run id"),
             ExplainabilityContentMode::Content,
             sink_a.clone(),
         ),
     );
+    options_a.dynamic_community_selection = true;
     let options_b = global_options(project.path(), "Global Run B").with_explainability(
         QueryExplainabilityOptions::new(
             "global-run-b".parse().expect("run id"),
@@ -3692,6 +3959,15 @@ async fn test_should_isolate_concurrent_global_explainability_runs() {
         &record.event,
         ExplainabilityEvent::QueryStarted(event)
             if event.query.as_deref() == Some("Global Run A")
+    )));
+    assert!(records_a.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DynamicCommunitySelectionCompleted(_)
+    )));
+    assert!(!records_b.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DynamicCommunitySelectionStarted(_)
+            | ExplainabilityEvent::DynamicCommunitySelectionCompleted(_)
     )));
     assert!(records_b.iter().any(|record| matches!(
         &record.event,

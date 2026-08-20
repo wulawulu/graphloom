@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
+    time::Instant,
 };
 
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
@@ -12,7 +13,16 @@ use serde_json::Value;
 use super::parse::{first_balanced_json_object, first_json_object, python_int};
 use crate::{
     config::GlobalSearchConfig,
-    query::{Community, CommunityReport, QueryError, QueryUsageCategory, Result, SearchMethod},
+    explainability::{
+        DynamicCommunityRatingAttemptStarted, DynamicCommunityRatingEvidence,
+        DynamicCommunitySelectionCompleted, DynamicCommunitySelectionStarted,
+        DynamicCommunityTraversalWaveStarted, DynamicTraversalWaveSource, ExplainabilityEvent,
+        LlmRequestCompleted, LlmRequestStarted,
+    },
+    query::{
+        Community, CommunityReport, QueryError, QueryUsageCategory, Result, SearchMethod,
+        explainability::GlobalQueryExplainability,
+    },
 };
 
 // Fixed against Microsoft GraphRAG v3.1.0:
@@ -110,7 +120,16 @@ impl DynamicCommunitySelection {
         }
     }
 
-    pub(super) async fn select(&self, query: &str) -> Result<DynamicSelectionResult> {
+    #[cfg(test)]
+    async fn select(&self, query: &str) -> Result<DynamicSelectionResult> {
+        self.select_explainable(query, None).await
+    }
+
+    pub(super) async fn select_explainable(
+        &self,
+        query: &str,
+        explainability: Option<GlobalQueryExplainability>,
+    ) -> Result<DynamicSelectionResult> {
         let reports_by_id = self
             .reports
             .iter()
@@ -147,7 +166,12 @@ impl DynamicCommunitySelection {
             });
         };
 
+        self.emit_selection_started(starting.len(), explainability.as_ref())
+            .await;
+
         let mut queue = starting.clone();
+        let mut queue_source = DynamicTraversalWaveSource::Initial;
+        let mut wave_index = 0_usize;
         let mut queued_or_visited = queue.iter().cloned().collect::<HashSet<_>>();
         let mut traversal_level = 0_i64;
         let mut relevant = HashSet::<String>::new();
@@ -159,7 +183,11 @@ impl DynamicCommunitySelection {
         let mut usage = QueryUsageCategory::default();
 
         while !queue.is_empty() {
-            let votes = self.rate_queue(&queue, &reports_by_id, query).await?;
+            self.emit_wave_started(wave_index, queue_source, &queue, explainability.as_ref())
+                .await;
+            let votes = self
+                .rate_queue(&queue, &reports_by_id, query, explainability.clone())
+                .await?;
             let mut next_queue = Vec::<String>::new();
             for (community_id, vote) in queue.iter().zip(votes) {
                 usage += vote.usage;
@@ -212,11 +240,13 @@ impl DynamicCommunitySelection {
             }
 
             traversal_level = traversal_level.saturating_add(1);
+            let mut next_source = DynamicTraversalWaveSource::ChildExpansion;
             if next_queue.is_empty()
                 && relevant.is_empty()
                 && traversal_level <= self.config.dynamic_search_max_level
                 && let Some(fallback) = levels.get(&traversal_level)
             {
+                next_source = DynamicTraversalWaveSource::Fallback;
                 for community_id in fallback {
                     if queued_or_visited.insert(community_id.clone()) {
                         next_queue.push(community_id.clone());
@@ -224,6 +254,8 @@ impl DynamicCommunitySelection {
                 }
             }
             queue = next_queue;
+            queue_source = next_source;
+            wave_index = wave_index.saturating_add(1);
         }
 
         for rating in &mut ratings {
@@ -233,7 +265,9 @@ impl DynamicCommunitySelection {
             .into_iter()
             .filter(|community_id| relevant.contains(community_id))
             .filter_map(|community_id| reports_by_id.get(&community_id).copied().cloned())
-            .collect();
+            .collect::<Vec<_>>();
+        self.emit_selection_completed(&reports, &ratings, &reports_by_id, explainability.as_ref())
+            .await;
         Ok(DynamicSelectionResult {
             reports,
             ratings,
@@ -246,17 +280,20 @@ impl DynamicCommunitySelection {
         queue: &[String],
         reports: &HashMap<String, &CommunityReport>,
         query: &str,
+        explainability: Option<GlobalQueryExplainability>,
     ) -> Result<Vec<CommunityVote>> {
         let futures = queue.iter().cloned().map(|community_id| {
             let report = reports.get(&community_id).copied().cloned();
             let query = query.to_owned();
+            let explainability = explainability.clone();
             async move {
                 let report = report.ok_or_else(|| QueryError::QueryContext {
                     method: SearchMethod::Global,
                     operation: "rate dynamic community",
                     message: format!("community {community_id:?} has no report"),
                 })?;
-                self.rate_community(community_id, report, &query).await
+                self.rate_community(community_id, report, &query, explainability)
+                    .await
             }
         });
         crate::query::concurrency::try_buffered_ordered(futures, self.concurrent_requests).await
@@ -267,6 +304,7 @@ impl DynamicCommunitySelection {
         community_id: String,
         report: CommunityReport,
         query: &str,
+        explainability: Option<GlobalQueryExplainability>,
     ) -> Result<CommunityVote> {
         let description = if self.config.dynamic_search_use_summary {
             &report.summary
@@ -292,7 +330,18 @@ impl DynamicCommunitySelection {
                 })?;
         let mut repeated_ratings = Vec::with_capacity(self.config.dynamic_search_num_repeats);
         let mut output_tokens = 0_usize;
-        for _ in 0..self.config.dynamic_search_num_repeats {
+        for repeat_index in 0..self.config.dynamic_search_num_repeats {
+            let attempt_span = explainability
+                .as_ref()
+                .map(GlobalQueryExplainability::rating_attempt_span);
+            self.emit_rating_attempt_started(
+                &community_id,
+                &report.id,
+                repeat_index,
+                explainability.as_ref(),
+                attempt_span.as_ref(),
+            )
+            .await;
             let mut request = CompletionRequest::new(vec![
                 ChatMessage::system(rendered.clone()),
                 ChatMessage::user(query),
@@ -309,6 +358,15 @@ impl DynamicCommunitySelection {
                     operation: "build dynamic rating request",
                     message: source.to_string(),
                 })?;
+            let input_tokens = prompt_tokens.saturating_add(user_tokens);
+            self.emit_llm_started(
+                input_tokens,
+                &rendered,
+                explainability.as_ref(),
+                attempt_span.as_ref(),
+            )
+            .await;
+            let request_started = Instant::now();
             let response = self.model.complete(request).await.map_err(|source| {
                 QueryError::QueryCompletion {
                     method: SearchMethod::Global,
@@ -326,14 +384,24 @@ impl DynamicCommunitySelection {
                     source: Box::new(source),
                 })?
                 .to_owned();
-            output_tokens =
-                output_tokens.saturating_add(self.tokenizer.count(&raw).map_err(|source| {
-                    QueryError::QueryContext {
+            let repeat_output_tokens =
+                self.tokenizer
+                    .count(&raw)
+                    .map_err(|source| QueryError::QueryContext {
                         method: SearchMethod::Global,
                         operation: "count dynamic rating output tokens",
                         message: source.to_string(),
-                    }
-                })?);
+                    })?;
+            output_tokens = output_tokens.saturating_add(repeat_output_tokens);
+            self.emit_llm_completed(
+                input_tokens,
+                repeat_output_tokens,
+                request_started,
+                &raw,
+                explainability.as_ref(),
+                attempt_span.as_ref(),
+            )
+            .await;
             repeated_ratings.push(parse_rating(&raw)?);
         }
         let selected_rating =
@@ -354,6 +422,208 @@ impl DynamicCommunitySelection {
                 output_tokens,
             },
         })
+    }
+
+    async fn emit_selection_started(
+        &self,
+        initial_community_count: usize,
+        explainability: Option<&GlobalQueryExplainability>,
+    ) {
+        let Some(explainability) = explainability else {
+            return;
+        };
+        let Some(initial_community_count) = explainability.usize_to_u32(initial_community_count)
+        else {
+            return;
+        };
+        let Some(num_repeats) = explainability.usize_to_u32(self.config.dynamic_search_num_repeats)
+        else {
+            return;
+        };
+        explainability
+            .emit_contract(
+                explainability.spans().selection(),
+                Some(explainability.root_span()),
+                DynamicCommunitySelectionStarted::try_new(
+                    initial_community_count,
+                    self.config.dynamic_search_threshold,
+                    self.config.dynamic_search_max_level,
+                    self.config.dynamic_search_keep_parent,
+                    self.config.dynamic_search_use_summary,
+                    num_repeats,
+                )
+                .map(ExplainabilityEvent::DynamicCommunitySelectionStarted),
+            )
+            .await;
+    }
+
+    async fn emit_wave_started(
+        &self,
+        wave_index: usize,
+        source: DynamicTraversalWaveSource,
+        queue: &[String],
+        explainability: Option<&GlobalQueryExplainability>,
+    ) {
+        let Some(explainability) = explainability else {
+            return;
+        };
+        let Some(wave_index) = explainability.usize_to_u32(wave_index) else {
+            return;
+        };
+        explainability
+            .emit_contract(
+                explainability.spans().selection(),
+                Some(explainability.root_span()),
+                DynamicCommunityTraversalWaveStarted::try_new(wave_index, source, queue.to_vec())
+                    .map(ExplainabilityEvent::DynamicCommunityTraversalWaveStarted),
+            )
+            .await;
+    }
+
+    async fn emit_rating_attempt_started(
+        &self,
+        community_id: &str,
+        report_id: &str,
+        repeat_index: usize,
+        explainability: Option<&GlobalQueryExplainability>,
+        attempt_span: Option<&crate::explainability::ExplainabilitySpanId>,
+    ) {
+        let (Some(explainability), Some(attempt_span)) = (explainability, attempt_span) else {
+            return;
+        };
+        let Some(repeat_index) = explainability.usize_to_u32(repeat_index) else {
+            return;
+        };
+        let Some(repeat_count) =
+            explainability.usize_to_u32(self.config.dynamic_search_num_repeats)
+        else {
+            return;
+        };
+        explainability
+            .emit_contract(
+                attempt_span,
+                Some(explainability.spans().selection()),
+                DynamicCommunityRatingAttemptStarted::try_new(
+                    community_id.to_owned(),
+                    report_id.to_owned(),
+                    repeat_index,
+                    repeat_count,
+                )
+                .map(ExplainabilityEvent::DynamicCommunityRatingAttemptStarted),
+            )
+            .await;
+    }
+
+    async fn emit_llm_started(
+        &self,
+        input_tokens: usize,
+        rendered: &str,
+        explainability: Option<&GlobalQueryExplainability>,
+        attempt_span: Option<&crate::explainability::ExplainabilitySpanId>,
+    ) {
+        let (Some(explainability), Some(attempt_span)) = (explainability, attempt_span) else {
+            return;
+        };
+        let Some(input_tokens) = explainability.usize_to_u64(input_tokens) else {
+            return;
+        };
+        let mut event = LlmRequestStarted::new(self.model_id.clone(), input_tokens);
+        event.prompt = explainability.content(rendered);
+        explainability
+            .emit(
+                attempt_span,
+                Some(explainability.spans().selection()),
+                ExplainabilityEvent::LlmRequestStarted(event),
+            )
+            .await;
+    }
+
+    async fn emit_llm_completed(
+        &self,
+        input_tokens: usize,
+        output_tokens: usize,
+        started: Instant,
+        raw: &str,
+        explainability: Option<&GlobalQueryExplainability>,
+        attempt_span: Option<&crate::explainability::ExplainabilitySpanId>,
+    ) {
+        let (Some(explainability), Some(attempt_span)) = (explainability, attempt_span) else {
+            return;
+        };
+        let (Some(input_tokens), Some(output_tokens), Some(elapsed_ms)) = (
+            explainability.usize_to_u64(input_tokens),
+            explainability.usize_to_u64(output_tokens),
+            explainability.duration_millis(started.elapsed()),
+        ) else {
+            return;
+        };
+        let mut event = LlmRequestCompleted::new(
+            self.model_id.clone(),
+            input_tokens,
+            output_tokens,
+            elapsed_ms,
+        );
+        event.response = explainability.content(raw);
+        explainability
+            .emit(
+                attempt_span,
+                Some(explainability.spans().selection()),
+                ExplainabilityEvent::LlmRequestCompleted(event),
+            )
+            .await;
+    }
+
+    async fn emit_selection_completed(
+        &self,
+        selected_reports: &[CommunityReport],
+        ratings: &[DynamicRating],
+        reports_by_id: &HashMap<String, &CommunityReport>,
+        explainability: Option<&GlobalQueryExplainability>,
+    ) {
+        let Some(explainability) = explainability else {
+            return;
+        };
+        let event = (|| {
+            let evidence = ratings
+                .iter()
+                .map(|rating| {
+                    let report = reports_by_id.get(&rating.community_id).ok_or(
+                        crate::explainability::ExplainabilityContractError::InvalidDynamicSelection {
+                            reason: "rated community has no stable CommunityReport identity",
+                        },
+                    )?;
+                    DynamicCommunityRatingEvidence::try_new(
+                        rating.community_id.clone(),
+                        report.id.clone(),
+                        rating.level,
+                        rating.selected_rating,
+                        rating.selected_rating >= self.config.dynamic_search_threshold,
+                        rating.selected,
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let selected_community_ids = selected_reports
+                .iter()
+                .map(|report| report.community_id.clone())
+                .collect();
+            let selected_report_ids = selected_reports
+                .iter()
+                .map(|report| report.id.clone())
+                .collect();
+            DynamicCommunitySelectionCompleted::try_new(
+                selected_community_ids,
+                selected_report_ids,
+                evidence,
+            )
+            .map(ExplainabilityEvent::DynamicCommunitySelectionCompleted)
+        })();
+        explainability
+            .emit_contract(
+                explainability.spans().selection(),
+                Some(explainability.root_span()),
+                event,
+            )
+            .await;
     }
 }
 
@@ -586,8 +856,49 @@ mod tests {
     use super::{DynamicCommunitySelection, majority_vote, parse_rating, render_rate_prompt};
     use crate::{
         config::GlobalSearchConfig,
-        query::{Community, CommunityReport, QueryError},
+        explainability::{
+            DynamicTraversalWaveSource, ExplainabilityContentMode, ExplainabilityEvent,
+            ExplainabilityRecord, ExplainabilityRunId, ExplainabilitySink, ExplainabilitySinkError,
+        },
+        query::{
+            Community, CommunityReport, QueryError, QueryExplainabilityOptions,
+            explainability::GlobalQueryExplainability,
+        },
     };
+
+    #[derive(Debug, Default)]
+    struct RecordingDynamicSink {
+        records: Mutex<Vec<Arc<ExplainabilityRecord>>>,
+    }
+
+    #[async_trait]
+    impl ExplainabilitySink for RecordingDynamicSink {
+        async fn emit(
+            &self,
+            record: Arc<ExplainabilityRecord>,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            self.records.lock().expect("records").push(record);
+            Ok(())
+        }
+
+        async fn finish_run(
+            &self,
+            _run_id: &ExplainabilityRunId,
+        ) -> std::result::Result<(), ExplainabilitySinkError> {
+            Ok(())
+        }
+    }
+
+    fn explainability(
+        sink: Arc<RecordingDynamicSink>,
+        mode: ExplainabilityContentMode,
+    ) -> GlobalQueryExplainability {
+        GlobalQueryExplainability::new(&QueryExplainabilityOptions::new(
+            "dynamic-unit".parse().expect("run id"),
+            mode,
+            sink,
+        ))
+    }
 
     #[derive(Debug)]
     struct WordTokenizer;
@@ -907,6 +1218,201 @@ mod tests {
         .expect("fallback");
         assert_eq!(result.reports[0].community_id, "2");
         assert_eq!(result.ratings.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_should_emit_dynamic_decisions_child_wave_and_ordered_repeat_spans() {
+        let model = Arc::new(ScriptedRatingModel::new([
+            (
+                "ROOT-A",
+                vec![r#"{"rating":4}"#, r#"{"rating":4}"#, r#"{"rating":2}"#],
+            ),
+            (
+                "ROOT-C",
+                vec![r#"{"rating":1}"#, r#"{"rating":1}"#, r#"{"rating":5}"#],
+            ),
+            (
+                "CHILD-B",
+                vec![r#"{"rating":5}"#, r#"{"rating":5}"#, r#"{"rating":4}"#],
+            ),
+        ]));
+        let sink = Arc::new(RecordingDynamicSink::default());
+        let result = selector(
+            config(3, false, 3, 2),
+            vec![
+                report(0, "ROOT-A"),
+                report(2, "ROOT-C"),
+                report(1, "CHILD-B"),
+            ],
+            vec![
+                community(0, 0, -1, &[1]),
+                community(2, 0, -1, &[]),
+                community(1, 1, 0, &[]),
+            ],
+            Arc::clone(&model),
+            2,
+        )
+        .select_explainable(
+            "question",
+            Some(explainability(
+                Arc::clone(&sink),
+                ExplainabilityContentMode::Content,
+            )),
+        )
+        .await
+        .expect("explained selection");
+        assert_eq!(
+            result
+                .reports
+                .iter()
+                .map(|report| report.community_id.as_str())
+                .collect::<Vec<_>>(),
+            ["1"]
+        );
+        assert_eq!(model.max_in_flight.load(Ordering::SeqCst), 2);
+
+        let records = sink.records.lock().expect("records");
+        let waves = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                ExplainabilityEvent::DynamicCommunityTraversalWaveStarted(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].source, DynamicTraversalWaveSource::Initial);
+        assert_eq!(waves[0].community_ids, ["0", "2"]);
+        assert_eq!(waves[1].source, DynamicTraversalWaveSource::ChildExpansion);
+        assert_eq!(waves[1].community_ids, ["1"]);
+
+        let completed = records
+            .iter()
+            .find_map(|record| match &record.event {
+                ExplainabilityEvent::DynamicCommunitySelectionCompleted(event) => Some(event),
+                _ => None,
+            })
+            .expect("selection completed");
+        assert_eq!(completed.visited_count, 3);
+        assert_eq!(completed.threshold_passed_count, 2);
+        assert_eq!(completed.selected_count, 1);
+        assert_eq!(completed.selected_community_ids, ["1"]);
+        assert_eq!(completed.selected_report_ids, ["report-1"]);
+        let states = completed
+            .ratings
+            .iter()
+            .map(|rating| {
+                (
+                    rating.community_id.as_str(),
+                    rating.threshold_passed,
+                    rating.selected,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [("0", true, false), ("2", false, false), ("1", true, true)]
+        );
+
+        let attempts = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                ExplainabilityEvent::DynamicCommunityRatingAttemptStarted(event) => {
+                    Some((record, event))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 9);
+        for community_id in ["0", "2", "1"] {
+            let community_attempts = attempts
+                .iter()
+                .filter(|(_, attempt)| attempt.community_id == community_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                community_attempts
+                    .iter()
+                    .map(|(_, attempt)| attempt.repeat_index)
+                    .collect::<Vec<_>>(),
+                [0, 1, 2]
+            );
+            for pair in community_attempts.windows(2) {
+                let prior_span = &pair[0].0.span_id;
+                let prior_completed_position = records
+                    .iter()
+                    .position(|record| {
+                        record.span_id == *prior_span
+                            && matches!(record.event, ExplainabilityEvent::LlmRequestCompleted(_))
+                    })
+                    .expect("prior completion");
+                let next_position = records
+                    .iter()
+                    .position(|record| Arc::ptr_eq(record, pair[1].0))
+                    .expect("next attempt");
+                assert!(prior_completed_position < next_position);
+            }
+        }
+        assert!(records.iter().any(|record| matches!(
+            &record.event,
+            ExplainabilityEvent::LlmRequestStarted(event)
+                if event.prompt.as_deref().is_some_and(|prompt| prompt.contains("ROOT-A"))
+        )));
+        assert!(records.iter().any(|record| matches!(
+            &record.event,
+            ExplainabilityEvent::LlmRequestCompleted(event)
+                if event.response.as_deref() == Some(r#"{"rating":4}"#)
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_should_emit_real_fallback_wave_without_content_in_metadata_mode() {
+        let model = Arc::new(ScriptedRatingModel::new([
+            ("LEVEL0", vec![r#"{"rating":0}"#]),
+            ("LEVEL1", vec![r#"{"rating":5}"#]),
+        ]));
+        let sink = Arc::new(RecordingDynamicSink::default());
+        selector(
+            config(3, false, 1, 1),
+            vec![report(0, "LEVEL0"), report(1, "LEVEL1")],
+            vec![community(0, 0, -1, &[]), community(1, 1, -1, &[])],
+            model,
+            2,
+        )
+        .select_explainable(
+            "question",
+            Some(explainability(
+                Arc::clone(&sink),
+                ExplainabilityContentMode::Metadata,
+            )),
+        )
+        .await
+        .expect("fallback selection");
+
+        let records = sink.records.lock().expect("records");
+        let sources = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                ExplainabilityEvent::DynamicCommunityTraversalWaveStarted(event) => {
+                    Some(event.source)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            [
+                DynamicTraversalWaveSource::Initial,
+                DynamicTraversalWaveSource::Fallback
+            ]
+        );
+        assert!(records.iter().all(|record| match &record.event {
+            ExplainabilityEvent::LlmRequestStarted(event) => event.prompt.is_none(),
+            ExplainabilityEvent::LlmRequestCompleted(event) => event.response.is_none(),
+            _ => true,
+        }));
+        let json = serde_json::to_string(&*records).expect("metadata JSON");
+        assert!(!json.contains("LEVEL0"));
+        assert!(!json.contains("LEVEL1"));
+        assert!(!json.contains("question"));
     }
 
     #[tokio::test]
@@ -1248,6 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_propagate_dynamic_rating_provider_error() {
+        let sink = Arc::new(RecordingDynamicSink::default());
         let selector = DynamicCommunitySelection::new(
             config(1, false, 1, 1),
             vec![report(0, "ROOT")],
@@ -1259,7 +1766,13 @@ mod tests {
             1,
         );
         let error = selector
-            .select("question")
+            .select_explainable(
+                "question",
+                Some(explainability(
+                    Arc::clone(&sink),
+                    ExplainabilityContentMode::Content,
+                )),
+            )
             .await
             .expect_err("provider error");
         assert!(matches!(
@@ -1269,5 +1782,20 @@ mod tests {
                 ..
             }
         ));
+        let records = sink.records.lock().expect("records");
+        assert!(records.iter().any(|record| matches!(
+            record.event,
+            ExplainabilityEvent::DynamicCommunityRatingAttemptStarted(_)
+        )));
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_)))
+        );
+        assert!(!records.iter().any(|record| matches!(
+            record.event,
+            ExplainabilityEvent::LlmRequestCompleted(_)
+                | ExplainabilityEvent::DynamicCommunitySelectionCompleted(_)
+        )));
     }
 }

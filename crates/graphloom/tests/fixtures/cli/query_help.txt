@@ -52,7 +52,7 @@ Options:
           Print the response in a streaming manner.
 
       --explain-output <EXPLAIN_OUTPUT>
-          Write Local or static Global Query Explainability envelopes as JSONL.
+          Write Local or Global Query Explainability envelopes as JSONL.
 
       --explain-content <EXPLAIN_CONTENT>
           Explainability content policy for Query JSONL [possible values: metadata, content, debug].

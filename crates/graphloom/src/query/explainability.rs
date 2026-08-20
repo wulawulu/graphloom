@@ -37,8 +37,8 @@ const GLOBAL_QUERY_ERROR_MESSAGE: &str = "Global query execution failed.";
 ///
 /// The caller owns the run identity and sink. This allows a host such as Studio to create a run,
 /// establish subscriptions, and then execute the Query with the same identity. In the current
-/// runtime supports Local Search and static Global Search. Dynamic Global, Basic, and DRIFT
-/// queries ignore this option without error until their complete evidence contracts are available.
+/// runtime supports Local Search and static or Dynamic Global Search. Basic and DRIFT queries
+/// ignore this option without error until their complete evidence contracts are available.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct QueryExplainabilityOptions {
@@ -145,6 +145,7 @@ impl LocalExplainabilitySpans {
 
 #[derive(Debug)]
 pub(crate) struct GlobalExplainabilitySpans {
+    selection: ExplainabilitySpanId,
     context: ExplainabilitySpanId,
     map: ExplainabilitySpanId,
     reduce: ExplainabilitySpanId,
@@ -153,10 +154,15 @@ pub(crate) struct GlobalExplainabilitySpans {
 impl GlobalExplainabilitySpans {
     fn generate() -> Self {
         Self {
+            selection: ExplainabilitySpanId::generate(),
             context: ExplainabilitySpanId::generate(),
             map: ExplainabilitySpanId::generate(),
             reduce: ExplainabilitySpanId::generate(),
         }
+    }
+
+    pub(crate) const fn selection(&self) -> &ExplainabilitySpanId {
+        &self.selection
     }
 
     pub(crate) const fn context(&self) -> &ExplainabilitySpanId {
@@ -200,8 +206,7 @@ impl QueryExplainabilitySession {
     }
 
     pub(crate) async fn start(options: &QueryOptions) -> Option<Arc<Self>> {
-        let supported = options.method == SearchMethod::Local
-            || (options.method == SearchMethod::Global && !options.dynamic_community_selection);
+        let supported = matches!(options.method, SearchMethod::Local | SearchMethod::Global);
         if !supported {
             return None;
         }
@@ -463,7 +468,7 @@ impl std::ops::Deref for LocalQueryExplainability {
     }
 }
 
-/// Static Global Search stage spans paired with the shared Query lifecycle.
+/// Global Search stage spans paired with the shared Query lifecycle.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalQueryExplainability {
     session: Arc<QueryExplainabilitySession>,
@@ -471,6 +476,14 @@ pub(crate) struct GlobalQueryExplainability {
 }
 
 impl GlobalQueryExplainability {
+    #[cfg(test)]
+    pub(crate) fn new(options: &QueryExplainabilityOptions) -> Self {
+        Self::from_session(Arc::new(QueryExplainabilitySession::new(
+            options,
+            SearchMethod::Global,
+        )))
+    }
+
     pub(crate) fn from_session(session: Arc<QueryExplainabilitySession>) -> Self {
         Self {
             session,
@@ -487,6 +500,10 @@ impl GlobalQueryExplainability {
     }
 
     pub(crate) fn batch_span(&self) -> ExplainabilitySpanId {
+        ExplainabilitySpanId::generate()
+    }
+
+    pub(crate) fn rating_attempt_span(&self) -> ExplainabilitySpanId {
         ExplainabilitySpanId::generate()
     }
 }

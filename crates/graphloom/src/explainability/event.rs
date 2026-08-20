@@ -6,10 +6,10 @@ use serde::{
 };
 
 use super::{
-    ContextSectionKind, ExplainabilityCandidate, ExplainabilityContentMode,
-    ExplainabilityContextSection, ExplainabilityContractError, ExplainabilityQueryMethod,
-    ExplainabilityRecordType, ExplainabilityRunKind, GlobalMapPointDecision,
-    GlobalMapPointDecisionReason, GlobalMapPointEvidence,
+    ContextSectionKind, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
+    ExplainabilityContentMode, ExplainabilityContextSection, ExplainabilityContractError,
+    ExplainabilityQueryMethod, ExplainabilityRecordType, ExplainabilityRunKind,
+    GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
 };
 
 struct ValidatedRecordIds<'a>(&'a [String]);
@@ -527,7 +527,7 @@ pub struct ContextCompleted {
     pub context: Option<String>,
 }
 
-/// Static Global community context completed construction.
+/// Global community context completed construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GlobalContextBuilt {
@@ -535,6 +535,451 @@ pub struct GlobalContextBuilt {
     pub batch_count: u32,
     /// Number of stable CommunityReport IDs across the batches.
     pub report_count: u32,
+}
+
+/// Source that populated one real Dynamic Global traversal queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DynamicTraversalWaveSource {
+    /// Report-backed level-zero communities.
+    Initial,
+    /// Report-backed children of communities that passed the threshold.
+    ChildExpansion,
+    /// The existing max-level fallback branch.
+    Fallback,
+}
+
+/// Dynamic Global community selection began with a valid initial queue.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DynamicCommunitySelectionStartedWire")]
+#[non_exhaustive]
+pub struct DynamicCommunitySelectionStarted {
+    /// Number of report-backed communities in the initial queue.
+    pub initial_community_count: u32,
+    /// Configured relevance threshold.
+    pub threshold: i64,
+    /// Configured deepest fallback hierarchy level.
+    pub max_level: i64,
+    /// Whether relevant parents remain selected after child traversal.
+    pub keep_parent: bool,
+    /// Whether rating prompts use report summaries instead of full content.
+    pub use_summary: bool,
+    /// Number of sequential rating requests per community.
+    pub num_repeats: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DynamicCommunitySelectionStartedWire {
+    initial_community_count: u32,
+    threshold: i64,
+    max_level: i64,
+    keep_parent: bool,
+    use_summary: bool,
+    num_repeats: u32,
+}
+
+impl TryFrom<DynamicCommunitySelectionStartedWire> for DynamicCommunitySelectionStarted {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: DynamicCommunitySelectionStartedWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            initial_community_count: wire.initial_community_count,
+            threshold: wire.threshold,
+            max_level: wire.max_level,
+            keep_parent: wire.keep_parent,
+            use_summary: wire.use_summary,
+            num_repeats: wire.num_repeats,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for DynamicCommunitySelectionStarted {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        DynamicCommunitySelectionStartedWire {
+            initial_community_count: self.initial_community_count,
+            threshold: self.threshold,
+            max_level: self.max_level,
+            keep_parent: self.keep_parent,
+            use_summary: self.use_summary,
+            num_repeats: self.num_repeats,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl DynamicCommunitySelectionStarted {
+    /// Create validated Dynamic Global selection-start metadata.
+    pub fn try_new(
+        initial_community_count: u32,
+        threshold: i64,
+        max_level: i64,
+        keep_parent: bool,
+        use_summary: bool,
+        num_repeats: u32,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let event = Self {
+            initial_community_count,
+            threshold,
+            max_level,
+            keep_parent,
+            use_summary,
+            num_repeats,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        if self.initial_community_count == 0 {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "initial community count must be greater than zero",
+            });
+        }
+        if self.max_level < 0 {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "max level must be non-negative",
+            });
+        }
+        if self.num_repeats == 0 {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "repeat count must be greater than zero",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One real Dynamic Global traversal queue began rating.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DynamicCommunityTraversalWaveStartedWire")]
+#[non_exhaustive]
+pub struct DynamicCommunityTraversalWaveStarted {
+    /// Zero-based traversal-wave identity.
+    pub wave_index: u32,
+    /// Proven source of this queue.
+    pub source: DynamicTraversalWaveSource,
+    /// Hierarchy community identities in the real queue order.
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    pub community_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DynamicCommunityTraversalWaveStartedWire {
+    wave_index: u32,
+    source: DynamicTraversalWaveSource,
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    community_ids: Vec<String>,
+}
+
+impl TryFrom<DynamicCommunityTraversalWaveStartedWire> for DynamicCommunityTraversalWaveStarted {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: DynamicCommunityTraversalWaveStartedWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            wave_index: wire.wave_index,
+            source: wire.source,
+            community_ids: wire.community_ids,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for DynamicCommunityTraversalWaveStarted {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        DynamicCommunityTraversalWaveStartedWire {
+            wave_index: self.wave_index,
+            source: self.source,
+            community_ids: self.community_ids.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl DynamicCommunityTraversalWaveStarted {
+    /// Create validated evidence for one real traversal queue.
+    pub fn try_new(
+        wave_index: u32,
+        source: DynamicTraversalWaveSource,
+        community_ids: Vec<String>,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let event = Self {
+            wave_index,
+            source,
+            community_ids,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        if self.community_ids.is_empty() {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "traversal wave must contain at least one community",
+            });
+        }
+        for community_id in &self.community_ids {
+            super::validation::validate_dynamic_id(community_id, "Dynamic community ID").map_err(
+                |_| ExplainabilityContractError::InvalidIdentifier {
+                    kind: "Dynamic community ID",
+                    reason: "value is empty, too long, or contains disallowed bytes",
+                },
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// One real Dynamic Global rating repeat is about to build and issue its LLM request.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DynamicCommunityRatingAttemptStartedWire")]
+#[non_exhaustive]
+pub struct DynamicCommunityRatingAttemptStarted {
+    /// Hierarchy/traversal community identity.
+    pub community_id: String,
+    /// Stable persisted CommunityReport identity rated by this request.
+    pub report_id: String,
+    /// Zero-based repeat identity within this community.
+    pub repeat_index: u32,
+    /// Configured number of sequential repeats for this community.
+    pub repeat_count: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DynamicCommunityRatingAttemptStartedWire {
+    community_id: String,
+    report_id: String,
+    repeat_index: u32,
+    repeat_count: u32,
+}
+
+impl TryFrom<DynamicCommunityRatingAttemptStartedWire> for DynamicCommunityRatingAttemptStarted {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: DynamicCommunityRatingAttemptStartedWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            community_id: wire.community_id,
+            report_id: wire.report_id,
+            repeat_index: wire.repeat_index,
+            repeat_count: wire.repeat_count,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for DynamicCommunityRatingAttemptStarted {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        DynamicCommunityRatingAttemptStartedWire {
+            community_id: self.community_id.clone(),
+            report_id: self.report_id.clone(),
+            repeat_index: self.repeat_index,
+            repeat_count: self.repeat_count,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl DynamicCommunityRatingAttemptStarted {
+    /// Create validated evidence for one real rating repeat.
+    pub fn try_new(
+        community_id: String,
+        report_id: String,
+        repeat_index: u32,
+        repeat_count: u32,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let event = Self {
+            community_id,
+            report_id,
+            repeat_index,
+            repeat_count,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        super::validation::validate_dynamic_id(&self.community_id, "Dynamic community ID")
+            .map_err(|_| ExplainabilityContractError::InvalidIdentifier {
+                kind: "Dynamic community ID",
+                reason: "value is empty, too long, or contains disallowed bytes",
+            })?;
+        super::validation::validate_dynamic_id(&self.report_id, "CommunityReport ID").map_err(
+            |_| ExplainabilityContractError::InvalidIdentifier {
+                kind: "CommunityReport ID",
+                reason: "value is empty, too long, or contains disallowed bytes",
+            },
+        )?;
+        if self.repeat_count == 0 || self.repeat_index >= self.repeat_count {
+            return Err(ExplainabilityContractError::InvalidDynamicRatingRepeat);
+        }
+        Ok(())
+    }
+}
+
+/// Dynamic Global community selection completed with final retained decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DynamicCommunitySelectionCompletedWire")]
+#[non_exhaustive]
+pub struct DynamicCommunitySelectionCompleted {
+    /// Number of communities rated by the traversal.
+    pub visited_count: u32,
+    /// Number of visited communities whose majority rating passed the threshold.
+    pub threshold_passed_count: u32,
+    /// Number of communities retained in the final selection output.
+    pub selected_count: u32,
+    /// Final hierarchy community identities in Dynamic selection output order.
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    pub selected_community_ids: Vec<String>,
+    /// Final stable CommunityReport identities in Dynamic selection output order.
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    pub selected_report_ids: Vec<String>,
+    /// Final rating decisions in traversal visit order.
+    #[serde(default, with = "super::validation::dynamic_rating_evidence")]
+    pub ratings: Vec<DynamicCommunityRatingEvidence>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DynamicCommunitySelectionCompletedWire {
+    visited_count: u32,
+    threshold_passed_count: u32,
+    selected_count: u32,
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    selected_community_ids: Vec<String>,
+    #[serde(default, with = "super::validation::dynamic_community_ids")]
+    selected_report_ids: Vec<String>,
+    #[serde(default, with = "super::validation::dynamic_rating_evidence")]
+    ratings: Vec<DynamicCommunityRatingEvidence>,
+}
+
+impl TryFrom<DynamicCommunitySelectionCompletedWire> for DynamicCommunitySelectionCompleted {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: DynamicCommunitySelectionCompletedWire) -> Result<Self, Self::Error> {
+        let event = Self {
+            visited_count: wire.visited_count,
+            threshold_passed_count: wire.threshold_passed_count,
+            selected_count: wire.selected_count,
+            selected_community_ids: wire.selected_community_ids,
+            selected_report_ids: wire.selected_report_ids,
+            ratings: wire.ratings,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+impl Serialize for DynamicCommunitySelectionCompleted {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(S::Error::custom)?;
+        DynamicCommunitySelectionCompletedWire {
+            visited_count: self.visited_count,
+            threshold_passed_count: self.threshold_passed_count,
+            selected_count: self.selected_count,
+            selected_community_ids: self.selected_community_ids.clone(),
+            selected_report_ids: self.selected_report_ids.clone(),
+            ratings: self.ratings.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl DynamicCommunitySelectionCompleted {
+    /// Create validated final Dynamic Global selection evidence.
+    pub fn try_new(
+        selected_community_ids: Vec<String>,
+        selected_report_ids: Vec<String>,
+        ratings: Vec<DynamicCommunityRatingEvidence>,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let visited_count = u32::try_from(ratings.len()).unwrap_or(u32::MAX);
+        let threshold_passed_count = u32::try_from(
+            ratings
+                .iter()
+                .filter(|rating| rating.threshold_passed)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let selected_count = u32::try_from(ratings.iter().filter(|rating| rating.selected).count())
+            .unwrap_or(u32::MAX);
+        let event = Self {
+            visited_count,
+            threshold_passed_count,
+            selected_count,
+            selected_community_ids,
+            selected_report_ids,
+            ratings,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        let visited = u32::try_from(self.ratings.len()).unwrap_or(u32::MAX);
+        let passed = u32::try_from(
+            self.ratings
+                .iter()
+                .filter(|rating| rating.threshold_passed)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let selected = self
+            .ratings
+            .iter()
+            .filter(|rating| rating.selected)
+            .collect::<Vec<_>>();
+        let selected_count = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+        if self.visited_count != visited {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Dynamic visited community",
+            });
+        }
+        if self.threshold_passed_count != passed {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Dynamic threshold-passed community",
+            });
+        }
+        if self.selected_count != selected_count
+            || self.selected_community_ids.len() != selected.len()
+            || self.selected_report_ids.len() != selected.len()
+        {
+            return Err(ExplainabilityContractError::CollectionCountMismatch {
+                collection: "Dynamic selected community",
+            });
+        }
+        for ((rating, community_id), report_id) in selected
+            .into_iter()
+            .zip(&self.selected_community_ids)
+            .zip(&self.selected_report_ids)
+        {
+            if !rating.threshold_passed {
+                return Err(ExplainabilityContractError::InvalidDynamicRatingDecision);
+            }
+            if rating.community_id != *community_id || rating.report_id != *report_id {
+                return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                    reason: "selected identities disagree with final rating evidence",
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl GlobalContextBuilt {
@@ -548,7 +993,7 @@ impl GlobalContextBuilt {
     }
 }
 
-/// Static Global map fan-out began for the constructed batches.
+/// Global map fan-out began for the constructed batches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GlobalMapStarted {
@@ -564,7 +1009,7 @@ impl GlobalMapStarted {
     }
 }
 
-/// One actual static Global context batch completed construction for a map analyst.
+/// One actual Global context batch completed construction for a map analyst.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "GlobalMapBatchBuiltWire")]
 #[non_exhaustive]
@@ -671,7 +1116,7 @@ impl GlobalMapBatchBuilt {
     }
 }
 
-/// Parsed points produced by one static Global map analyst.
+/// Parsed points produced by one Global map analyst.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "GlobalMapPointsProducedWire")]
 #[non_exhaustive]
@@ -917,7 +1362,7 @@ impl GlobalReduceContextBuilt {
     }
 }
 
-/// Reason the static Global Reduce LLM was not called.
+/// Reason the Global Reduce LLM was not called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -926,7 +1371,7 @@ pub enum GlobalReduceSkipReason {
     NoPositivePoints,
 }
 
-/// Static Global Reduce was explicitly skipped.
+/// Global Reduce was explicitly skipped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GlobalReduceSkipped {
@@ -1093,17 +1538,25 @@ pub enum ExplainabilityEvent {
     ContextSectionBuilt(ContextSectionBuilt),
     /// The complete context was built.
     ContextCompleted(ContextCompleted),
-    /// Static Global community context completed.
+    /// Global community context completed.
     GlobalContextBuilt(GlobalContextBuilt),
-    /// Static Global map fan-out began.
+    /// Dynamic Global community selection began.
+    DynamicCommunitySelectionStarted(DynamicCommunitySelectionStarted),
+    /// One real Dynamic Global traversal queue began rating.
+    DynamicCommunityTraversalWaveStarted(DynamicCommunityTraversalWaveStarted),
+    /// One real Dynamic Global rating repeat began.
+    DynamicCommunityRatingAttemptStarted(DynamicCommunityRatingAttemptStarted),
+    /// Dynamic Global community selection completed.
+    DynamicCommunitySelectionCompleted(DynamicCommunitySelectionCompleted),
+    /// Global map fan-out began.
     GlobalMapStarted(GlobalMapStarted),
-    /// One actual static Global map batch was built.
+    /// One actual Global map batch was built.
     GlobalMapBatchBuilt(GlobalMapBatchBuilt),
     /// One map analyst's response was parsed into points.
     GlobalMapPointsProduced(GlobalMapPointsProduced),
-    /// Static Global Reduce context fitting completed.
+    /// Global Reduce context fitting completed.
     GlobalReduceContextBuilt(GlobalReduceContextBuilt),
-    /// Static Global Reduce was skipped.
+    /// Global Reduce was skipped.
     GlobalReduceSkipped(GlobalReduceSkipped),
     /// Completion-model request started.
     LlmRequestStarted(LlmRequestStarted),

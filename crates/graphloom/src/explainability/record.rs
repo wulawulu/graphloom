@@ -71,6 +71,18 @@ pub enum ExplainabilityContractError {
     /// Global Reduce token usage exceeded its declared budget.
     #[error("Global Reduce token usage exceeds its token budget")]
     GlobalReduceTokensExceedBudget,
+    /// A Dynamic Global count or configuration value contradicted its contract.
+    #[error("invalid Dynamic Global selection metadata: {reason}")]
+    InvalidDynamicSelection {
+        /// Stable validation failure description without request content.
+        reason: &'static str,
+    },
+    /// A Dynamic Global rating attempt declared an impossible repeat identity.
+    #[error("Dynamic Global rating repeat index must be less than repeat count")]
+    InvalidDynamicRatingRepeat,
+    /// A Dynamic Global selected decision did not pass the configured threshold.
+    #[error("Dynamic Global selected rating evidence must have passed the threshold")]
+    InvalidDynamicRatingDecision,
     /// A persisted envelope used a schema version this reader does not support.
     #[error("unsupported explainability schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion {

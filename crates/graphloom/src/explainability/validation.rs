@@ -9,7 +9,8 @@ use serde::{
 };
 
 use super::{
-    ContextSectionBudget, ExplainabilityCandidate, GlobalMapPointDecision, GlobalMapPointEvidence,
+    ContextSectionBudget, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
+    GlobalMapPointDecision, GlobalMapPointEvidence,
 };
 
 /// Maximum bytes for record IDs, model IDs, codes, titles, and other short metadata.
@@ -26,6 +27,24 @@ pub(crate) const MAX_RECORD_IDS: usize = 10_000;
 pub(crate) const MAX_CONTEXT_SECTIONS: usize = 32;
 /// Maximum Global map points or Reduce decisions in one event.
 pub(crate) const MAX_GLOBAL_MAP_POINTS: usize = 10_000;
+/// Maximum Dynamic Global communities represented by one event.
+pub(crate) const MAX_DYNAMIC_COMMUNITIES: usize = 10_000;
+
+pub(crate) fn validate_dynamic_id(value: &str, label: &str) -> Result<(), String> {
+    validate_string(value, MAX_METADATA_STRING_BYTES, label)?;
+    if value.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(format!(
+            "{label} may contain only ASCII letters, digits, hyphen, underscore, period, or colon"
+        ));
+    }
+    Ok(())
+}
 
 fn validate_string(value: &str, max_bytes: usize, label: &str) -> Result<(), String> {
     if value.len() > max_bytes {
@@ -400,6 +419,78 @@ pub(crate) mod global_map_point_decisions {
         D: Deserializer<'de>,
     {
         deserialize_vec::<D, GlobalMapPointDecision, MAX_GLOBAL_MAP_POINTS>(deserializer)
+    }
+}
+
+pub(crate) mod dynamic_community_ids {
+    use serde::{Deserializer, Serializer, ser::Error as _};
+
+    use super::{
+        BoundedString, MAX_DYNAMIC_COMMUNITIES, MAX_METADATA_STRING_BYTES, deserialize_vec,
+        validate_dynamic_id,
+    };
+
+    pub(crate) fn serialize<S>(value: &[String], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.len() > MAX_DYNAMIC_COMMUNITIES {
+            return Err(S::Error::custom(format!(
+                "Dynamic community ID array exceeds {MAX_DYNAMIC_COMMUNITIES} elements"
+            )));
+        }
+        for id in value {
+            validate_dynamic_id(id, "Dynamic community ID").map_err(S::Error::custom)?;
+        }
+        serde::Serialize::serialize(value, serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = deserialize_vec::<
+            D,
+            BoundedString<MAX_METADATA_STRING_BYTES>,
+            MAX_DYNAMIC_COMMUNITIES,
+        >(deserializer)?;
+        let values = values.into_iter().map(|value| value.0).collect::<Vec<_>>();
+        for id in &values {
+            validate_dynamic_id(id, "Dynamic community ID").map_err(serde::de::Error::custom)?;
+        }
+        Ok(values)
+    }
+}
+
+pub(crate) mod dynamic_rating_evidence {
+    use serde::{Deserializer, Serializer};
+
+    use super::{
+        DynamicCommunityRatingEvidence, MAX_DYNAMIC_COMMUNITIES, deserialize_vec, serialize_slice,
+    };
+
+    pub(crate) fn serialize<S>(
+        value: &[DynamicCommunityRatingEvidence],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(
+            value,
+            serializer,
+            MAX_DYNAMIC_COMMUNITIES,
+            "Dynamic rating evidence array",
+        )
+    }
+
+    pub(crate) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<DynamicCommunityRatingEvidence>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, DynamicCommunityRatingEvidence, MAX_DYNAMIC_COMMUNITIES>(deserializer)
     }
 }
 

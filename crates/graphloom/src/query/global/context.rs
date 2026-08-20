@@ -88,13 +88,14 @@ impl GlobalContextBuilder {
         )
     }
 
-    pub(crate) fn build_selected(
+    pub(crate) fn build_selected_explainable(
         &self,
         reports: Vec<CommunityReport>,
         usage: QueryUsageCategory,
         dynamic_ratings: Vec<DynamicRating>,
+        capture_report_ids: bool,
     ) -> Result<GlobalContextResult> {
-        self.build_selected_with_evidence(reports, usage, dynamic_ratings, false)
+        self.build_selected_with_evidence(reports, usage, dynamic_ratings, capture_report_ids)
     }
 
     fn build_selected_with_evidence(

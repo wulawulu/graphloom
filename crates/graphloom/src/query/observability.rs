@@ -328,8 +328,8 @@ impl QueryMethodExplainability {
 impl QueryInstrumentation {
     /// Start supported observability channels for one Query request.
     ///
-    /// Local Search may start tracing and Explainability. Static Global Search may start
-    /// Explainability only. Dynamic Global, Basic, and DRIFT currently start neither channel.
+    /// Local Search may start tracing and Explainability. Static and Dynamic Global Search may
+    /// start Explainability only. Basic and DRIFT currently start neither channel.
     /// No request-scoped channel is cached on the runtime.
     pub(crate) async fn start(options: &QueryOptions, streaming: bool) -> Option<Self> {
         let explainability = match options.method {
@@ -337,13 +337,11 @@ impl QueryInstrumentation {
                 .await
                 .map(LocalQueryExplainability::from_session)
                 .map(QueryMethodExplainability::Local),
-            SearchMethod::Global if !options.dynamic_community_selection => {
-                QueryExplainabilitySession::start(options)
-                    .await
-                    .map(GlobalQueryExplainability::from_session)
-                    .map(QueryMethodExplainability::Global)
-            }
-            SearchMethod::Basic | SearchMethod::Drift | SearchMethod::Global => None,
+            SearchMethod::Global => QueryExplainabilitySession::start(options)
+                .await
+                .map(GlobalQueryExplainability::from_session)
+                .map(QueryMethodExplainability::Global),
+            SearchMethod::Basic | SearchMethod::Drift => None,
         };
         let trace = (options.method == SearchMethod::Local)
             .then(|| QueryTraceSession::start(options, streaming))
@@ -370,7 +368,7 @@ impl QueryInstrumentation {
         }
     }
 
-    /// Borrow static Global Explainability, when enabled.
+    /// Borrow Global Explainability, when enabled.
     pub(crate) fn global_explainability(&self) -> Option<&GlobalQueryExplainability> {
         match self.explainability.as_ref() {
             Some(QueryMethodExplainability::Global(handle)) => Some(handle),

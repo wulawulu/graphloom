@@ -67,6 +67,112 @@ pub enum GlobalMapPointDecisionReason {
     TokenBudget,
 }
 
+/// Final semantic decision for one community rated by Dynamic Global Search.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DynamicCommunityRatingEvidenceWire")]
+#[non_exhaustive]
+pub struct DynamicCommunityRatingEvidence {
+    /// Hierarchy/traversal community identity.
+    pub community_id: String,
+    /// Stable persisted CommunityReport identity used for this rating.
+    pub report_id: String,
+    /// Real hierarchy level recorded on the rated community.
+    pub level: i64,
+    /// Majority-vote rating produced by the existing algorithm.
+    pub selected_rating: i64,
+    /// Whether the rating met the configured threshold.
+    pub threshold_passed: bool,
+    /// Whether the community remained in the final selected set.
+    pub selected: bool,
+}
+
+#[derive(Deserialize)]
+struct DynamicCommunityRatingEvidenceWire {
+    community_id: String,
+    report_id: String,
+    level: i64,
+    selected_rating: i64,
+    threshold_passed: bool,
+    selected: bool,
+}
+
+impl TryFrom<DynamicCommunityRatingEvidenceWire> for DynamicCommunityRatingEvidence {
+    type Error = ExplainabilityContractError;
+
+    fn try_from(wire: DynamicCommunityRatingEvidenceWire) -> Result<Self, Self::Error> {
+        let evidence = Self {
+            community_id: wire.community_id,
+            report_id: wire.report_id,
+            level: wire.level,
+            selected_rating: wire.selected_rating,
+            threshold_passed: wire.threshold_passed,
+            selected: wire.selected,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+}
+
+impl Serialize for DynamicCommunityRatingEvidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::{Error as _, SerializeStruct as _};
+
+        self.validate().map_err(S::Error::custom)?;
+        let mut state = serializer.serialize_struct("DynamicCommunityRatingEvidence", 6)?;
+        state.serialize_field("community_id", &self.community_id)?;
+        state.serialize_field("report_id", &self.report_id)?;
+        state.serialize_field("level", &self.level)?;
+        state.serialize_field("selected_rating", &self.selected_rating)?;
+        state.serialize_field("threshold_passed", &self.threshold_passed)?;
+        state.serialize_field("selected", &self.selected)?;
+        state.end()
+    }
+}
+
+impl DynamicCommunityRatingEvidence {
+    /// Create validated final rating evidence.
+    pub fn try_new(
+        community_id: String,
+        report_id: String,
+        level: i64,
+        selected_rating: i64,
+        threshold_passed: bool,
+        selected: bool,
+    ) -> Result<Self, ExplainabilityContractError> {
+        let evidence = Self {
+            community_id,
+            report_id,
+            level,
+            selected_rating,
+            threshold_passed,
+            selected,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        super::validation::validate_dynamic_id(&self.community_id, "Dynamic community ID")
+            .map_err(|_| ExplainabilityContractError::InvalidIdentifier {
+                kind: "Dynamic community ID",
+                reason: "value is empty, too long, or contains disallowed bytes",
+            })?;
+        super::validation::validate_dynamic_id(&self.report_id, "CommunityReport ID").map_err(
+            |_| ExplainabilityContractError::InvalidIdentifier {
+                kind: "CommunityReport ID",
+                reason: "value is empty, too long, or contains disallowed bytes",
+            },
+        )?;
+        if self.selected && !self.threshold_passed {
+            return Err(ExplainabilityContractError::InvalidDynamicRatingDecision);
+        }
+        Ok(())
+    }
+}
+
 /// Parsed evidence produced by one Global map analyst.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

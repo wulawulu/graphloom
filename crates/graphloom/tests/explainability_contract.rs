@@ -9,18 +9,20 @@ use chrono::Utc;
 use graphloom::{
     explainability::{
         CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextSectionKind,
-        CovariatesSelected, EXPLAINABILITY_SCHEMA_VERSION, EntitiesSelected,
-        ExplainabilityCandidate, ExplainabilityContentMode, ExplainabilityContextSection,
-        ExplainabilityContractError, ExplainabilityEnvelope, ExplainabilityEvent,
-        ExplainabilityQueryMethod, ExplainabilityRecord, ExplainabilityRecordType,
-        ExplainabilityRun, ExplainabilityRunId, ExplainabilityRunKind, ExplainabilityRunStatus,
-        ExplainabilityScore, ExplainabilitySink, ExplainabilitySinkChain, ExplainabilitySinkError,
-        ExplainabilitySinkOperation, ExplainabilitySpanId, GlobalMapBatchBuilt,
-        GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
-        GlobalMapPointsProduced, GlobalReduceContextBuilt, GlobalReduceSkipReason,
-        GlobalReduceSkipped, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
-        NoopExplainabilitySink, QueryStarted, RelationshipsSelected, RunStarted, SelectionReason,
-        TextUnitsSelected,
+        CovariatesSelected, DynamicCommunityRatingAttemptStarted, DynamicCommunityRatingEvidence,
+        DynamicCommunitySelectionCompleted, DynamicCommunitySelectionStarted,
+        DynamicCommunityTraversalWaveStarted, DynamicTraversalWaveSource,
+        EXPLAINABILITY_SCHEMA_VERSION, EntitiesSelected, ExplainabilityCandidate,
+        ExplainabilityContentMode, ExplainabilityContextSection, ExplainabilityContractError,
+        ExplainabilityEnvelope, ExplainabilityEvent, ExplainabilityQueryMethod,
+        ExplainabilityRecord, ExplainabilityRecordType, ExplainabilityRun, ExplainabilityRunId,
+        ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore, ExplainabilitySink,
+        ExplainabilitySinkChain, ExplainabilitySinkError, ExplainabilitySinkOperation,
+        ExplainabilitySpanId, GlobalMapBatchBuilt, GlobalMapPointDecision,
+        GlobalMapPointDecisionReason, GlobalMapPointEvidence, GlobalMapPointsProduced,
+        GlobalReduceContextBuilt, GlobalReduceSkipReason, GlobalReduceSkipped,
+        JsonlExplainabilityOptions, JsonlExplainabilityRecorder, NoopExplainabilitySink,
+        QueryStarted, RelationshipsSelected, RunStarted, SelectionReason, TextUnitsSelected,
     },
     query::{QueryExplainabilityOptions, QueryOptions, SearchMethod},
 };
@@ -67,6 +69,115 @@ fn test_should_expose_additive_static_global_event_contract() -> TestResult {
         let value = serde_json::to_value(&event)?;
         assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
     }
+    Ok(())
+}
+
+#[test]
+fn test_should_expose_validated_additive_dynamic_global_event_contract() -> TestResult {
+    let selected = DynamicCommunityRatingEvidence::try_new(
+        "42".to_owned(),
+        "report-42".to_owned(),
+        1,
+        5,
+        true,
+        true,
+    )?;
+    let not_retained = DynamicCommunityRatingEvidence::try_new(
+        "17".to_owned(),
+        "report-17".to_owned(),
+        0,
+        4,
+        true,
+        false,
+    )?;
+    let below = DynamicCommunityRatingEvidence::try_new(
+        "8".to_owned(),
+        "report-8".to_owned(),
+        0,
+        2,
+        false,
+        false,
+    )?;
+    let events = [
+        ExplainabilityEvent::DynamicCommunitySelectionStarted(
+            DynamicCommunitySelectionStarted::try_new(2, 3, 2, false, true, 3)?,
+        ),
+        ExplainabilityEvent::DynamicCommunityTraversalWaveStarted(
+            DynamicCommunityTraversalWaveStarted::try_new(
+                0,
+                DynamicTraversalWaveSource::Initial,
+                vec!["17".to_owned(), "8".to_owned()],
+            )?,
+        ),
+        ExplainabilityEvent::DynamicCommunityRatingAttemptStarted(
+            DynamicCommunityRatingAttemptStarted::try_new(
+                "17".to_owned(),
+                "report-17".to_owned(),
+                2,
+                3,
+            )?,
+        ),
+        ExplainabilityEvent::DynamicCommunitySelectionCompleted(
+            DynamicCommunitySelectionCompleted::try_new(
+                vec!["42".to_owned()],
+                vec!["report-42".to_owned()],
+                vec![not_retained, below, selected],
+            )?,
+        ),
+    ];
+    let discriminators = [
+        "dynamic_community_selection_started",
+        "dynamic_community_traversal_wave_started",
+        "dynamic_community_rating_attempt_started",
+        "dynamic_community_selection_completed",
+    ];
+    for (event, discriminator) in events.into_iter().zip(discriminators) {
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(value["type"], discriminator);
+        assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
+    }
+
+    assert!(DynamicCommunitySelectionStarted::try_new(0, 3, 2, false, false, 1).is_err());
+    assert!(DynamicCommunitySelectionStarted::try_new(1, 3, -1, false, false, 1).is_err());
+    assert!(
+        DynamicCommunityRatingAttemptStarted::try_new(
+            "42".to_owned(),
+            "report-42".to_owned(),
+            3,
+            3,
+        )
+        .is_err()
+    );
+    assert!(
+        DynamicCommunityRatingEvidence::try_new(
+            "42".to_owned(),
+            "report-42".to_owned(),
+            0,
+            2,
+            false,
+            true,
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ExplainabilityEvent>(json!({
+            "type": "dynamic_community_selection_completed",
+            "visited_count": 1,
+            "threshold_passed_count": 1,
+            "selected_count": 1,
+            "selected_community_ids": ["wrong"],
+            "selected_report_ids": ["report-42"],
+            "ratings": [{
+                "community_id": "42",
+                "report_id": "report-42",
+                "level": 0,
+                "selected_rating": 5,
+                "threshold_passed": true,
+                "selected": true
+            }]
+        }))
+        .is_err()
+    );
     Ok(())
 }
 

@@ -35,19 +35,22 @@ mod validation;
 
 pub use content_mode::ExplainabilityContentMode;
 pub use dto::{
-    ContextSectionKind, ExplainabilityCandidate, ExplainabilityContextSection,
-    ExplainabilityQueryMethod, ExplainabilityRecordType, ExplainabilityRun, ExplainabilityRunKind,
-    ExplainabilityRunStatus, ExplainabilityScore, GlobalMapPointDecision,
-    GlobalMapPointDecisionReason, GlobalMapPointEvidence, SelectionReason,
+    ContextSectionKind, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
+    ExplainabilityContextSection, ExplainabilityQueryMethod, ExplainabilityRecordType,
+    ExplainabilityRun, ExplainabilityRunKind, ExplainabilityRunStatus, ExplainabilityScore,
+    GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence, SelectionReason,
 };
 pub use event::{
     CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextBudgetAllocated,
     ContextCompleted, ContextSectionBudget, ContextSectionBuilt, CovariatesSelected,
-    EmbeddingCompleted, EmbeddingStarted, EntitiesSelected, ExplainabilityEvent,
-    ExplainabilityWarning, GlobalContextBuilt, GlobalMapBatchBuilt, GlobalMapPointsProduced,
-    GlobalMapStarted, GlobalReduceContextBuilt, GlobalReduceSkipReason, GlobalReduceSkipped,
-    GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted, MappingQueryBuilt, QueryStarted,
-    RelationshipsSelected, RunCompleted, RunFailed, RunStarted, TextUnitsSelected,
+    DynamicCommunityRatingAttemptStarted, DynamicCommunitySelectionCompleted,
+    DynamicCommunitySelectionStarted, DynamicCommunityTraversalWaveStarted,
+    DynamicTraversalWaveSource, EmbeddingCompleted, EmbeddingStarted, EntitiesSelected,
+    ExplainabilityEvent, ExplainabilityWarning, GlobalContextBuilt, GlobalMapBatchBuilt,
+    GlobalMapPointsProduced, GlobalMapStarted, GlobalReduceContextBuilt, GlobalReduceSkipReason,
+    GlobalReduceSkipped, GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted,
+    MappingQueryBuilt, QueryStarted, RelationshipsSelected, RunCompleted, RunFailed, RunStarted,
+    TextUnitsSelected,
 };
 pub use jsonl::{
     JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,
