@@ -1,16 +1,15 @@
 import { useState } from "react"
-import { Braces, Check, Circle, Copy, DatabaseZap, GitBranch, Sparkles, X } from "lucide-react"
+import { Braces, Check, Circle, DatabaseZap, GitBranch, Sparkles, X } from "lucide-react"
 
 import type { ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
-import { TimelineEvent } from "@/components/explainability/timeline-event"
-import { SafeMarkdown } from "@/components/content/safe-markdown"
+import { CapturedContentViewer } from "@/components/explainability/captured-content-viewer"
+import { TechnicalDetails } from "@/components/explainability/technical-details"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import type { ExplainabilityRecordView, SemanticStep } from "@/lib/semantic-timeline"
+import type { ExplainabilityRecordView, LocalSemanticStep } from "@/lib/semantic-timeline"
 
 interface SemanticStepCardProps {
-  step: SemanticStep
+  step: LocalSemanticStep
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
   onInspectCandidate: (candidate: ExplainabilityRecordView) => void
 }
@@ -34,12 +33,12 @@ export function SemanticStepCard({ step, onFocusGraph, onInspectCandidate }: Sem
         {focusEnvelope === null ? null : <Button variant="outline" size="sm" onClick={() => onFocusGraph(focusEnvelope)}>Focus in graph</Button>}
       </div>
       <StepContent step={step} onInspectCandidate={onInspectCandidate} />
-      <TechnicalDetails step={step} onFocusGraph={onFocusGraph} />
+      <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
     </article>
   )
 }
 
-function StepIcon({ kind }: { kind: SemanticStep["kind"] }): React.ReactElement {
+function StepIcon({ kind }: { kind: LocalSemanticStep["kind"] }): React.ReactElement {
   const className = "size-4"
   if (kind === "entity-mapping") return <DatabaseZap className={className} />
   if (kind === "graph-expansion") return <GitBranch className={className} />
@@ -47,7 +46,7 @@ function StepIcon({ kind }: { kind: SemanticStep["kind"] }): React.ReactElement 
   return <Sparkles className={className} />
 }
 
-function StepSummary({ step }: { step: SemanticStep }): React.ReactElement {
+function StepSummary({ step }: { step: LocalSemanticStep }): React.ReactElement {
   if (step.kind === "entity-mapping") {
     const summary = step.summary
     return <p className="mt-1 text-xs text-muted-foreground">{summary.retrievedCount} retrieved · {summary.selectedCount} selected · {summary.excludedCount} excluded{summary.pendingCount === 0 ? "" : ` · ${summary.pendingCount} pending`}</p>
@@ -63,7 +62,7 @@ function StepSummary({ step }: { step: SemanticStep }): React.ReactElement {
   return <p className="mt-1 text-xs text-muted-foreground">{step.summary.calls} {step.summary.calls === 1 ? "call" : "calls"} · {step.summary.inputTokens.toLocaleString()} input · {step.summary.outputTokens.toLocaleString()} output</p>
 }
 
-function StepContent({ step, onInspectCandidate }: { step: SemanticStep; onInspectCandidate: (candidate: ExplainabilityRecordView) => void }): React.ReactNode {
+function StepContent({ step, onInspectCandidate }: { step: LocalSemanticStep; onInspectCandidate: (candidate: ExplainabilityRecordView) => void }): React.ReactNode {
   if (step.kind === "entity-mapping") {
     const metadata = [
       step.summary.model,
@@ -78,7 +77,7 @@ function StepContent({ step, onInspectCandidate }: { step: SemanticStep; onInspe
     return <div className="mt-3 space-y-3">{counts.length === 0 ? <p className="text-xs text-muted-foreground">No expansion records were selected.</p> : <dl className="grid grid-cols-2 gap-2 text-xs">{counts.map(([type, count]) => <div key={type} className="flex justify-between rounded border bg-muted/20 px-2 py-1.5"><dt>{RECORD_LABELS[type] ?? type.replaceAll("_", " ")}</dt><dd className="font-mono">{count}</dd></div>)}</dl>}<DecisionRecordList records={step.summary.records} onInspectCandidate={onInspectCandidate} /></div>
   }
   if (step.kind === "context-assembly") {
-    return <div className="mt-3 min-w-0 space-y-2">{step.summary.sections.map((section) => <ContextSectionRow key={`${section.section}:${section.name ?? ""}`} section={section} />)}<LlmContextPanel exactContext={step.summary.exactContext} /></div>
+    return <div className="mt-3 min-w-0 space-y-2">{step.summary.sections.map((section) => <ContextSectionRow key={`${section.section}:${section.name ?? ""}`} section={section} />)}<CapturedContentViewer buttonLabel="View LLM Context" title="LLM Context" content={step.summary.exactContext} unavailableMessage="LLM context content was not captured. Run with Content or Debug explainability mode to inspect the exact LLM context." testId="exact-llm-context" exactTabLabel="Exact input" copyLabel="Copy exact LLM context" description="Exact input is the captured source of truth; Preview is presentation only." /></div>
   }
   const summary = step.summary
   return <dl className="mt-3 grid grid-cols-2 gap-2 text-xs"><Metric label="Calls" value={summary.calls} /><Metric label="Input tokens" value={summary.inputTokens.toLocaleString()} /><Metric label="Output tokens" value={summary.outputTokens.toLocaleString()} /><Metric label="Latency" value={`${summary.elapsedMs.toLocaleString()} ms`} />{summary.model === undefined ? null : <Metric label="Model" value={summary.model} />}</dl>
@@ -141,27 +140,6 @@ function ContextSectionRow({ section }: { section: ExplainabilityContextSection 
   )
 }
 
-function LlmContextPanel({ exactContext }: { exactContext: string | null }): React.ReactElement {
-  const [view, setView] = useState<"exact" | "preview">("exact")
-  const [copied, setCopied] = useState(false)
-  const copy = (): void => {
-    if (exactContext === null || navigator.clipboard === undefined) return
-    void navigator.clipboard.writeText(exactContext).then(() => setCopied(true)).catch(() => setCopied(false))
-  }
-  return (
-    <Collapsible>
-      <CollapsibleTrigger asChild><Button variant="outline" size="sm" className="mt-1">View LLM Context</Button></CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 min-w-0 overflow-hidden rounded-md border bg-background/60 p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><p className="text-xs font-semibold">LLM Context</p><p className="text-[10px] text-muted-foreground">Exact input is the captured source of truth; Preview is presentation only.</p></div>
-          {exactContext === null ? null : <Button variant="ghost" size="sm" onClick={copy} aria-label="Copy exact LLM context"><Copy className="size-3.5" />{copied ? "Copied" : "Copy"}</Button>}
-        </div>
-        {exactContext === null ? <p className="mt-3 rounded border bg-muted/20 p-3 text-xs text-muted-foreground">LLM context content was not captured. Run with Content or Debug explainability mode to inspect the exact LLM context.</p> : <div className="mt-3 min-w-0"><div className="flex gap-1" role="tablist" aria-label="LLM context view"><Button role="tab" aria-selected={view === "exact"} variant={view === "exact" ? "secondary" : "ghost"} size="sm" onClick={() => setView("exact")}>Exact input</Button><Button role="tab" aria-selected={view === "preview"} variant={view === "preview" ? "secondary" : "ghost"} size="sm" onClick={() => setView("preview")}>Preview</Button></div>{view === "exact" ? <pre className="mt-2 max-h-80 max-w-full overflow-auto whitespace-pre font-mono text-[11px] leading-5" data-testid="exact-llm-context">{exactContext}</pre> : <SafeMarkdown className="markdown-answer mt-2 max-h-80 overflow-auto" >{exactContext}</SafeMarkdown>}</div>}
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
 function DecisionIcon({ record }: { record: ExplainabilityRecordView }): React.ReactElement {
   if (record.selectionStatus === "pending") return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label="Retrieved; selection pending" />
   if (record.selectionStatus === "excluded") return <X className="size-3.5 shrink-0 text-muted-foreground" aria-label="Excluded" />
@@ -175,15 +153,4 @@ function decisionLabel(record: ExplainabilityRecordView): string {
   if (record.finalContext === "included") return "Included"
   if (record.finalContext === "excluded") return "Not in final context"
   return "Selected · context unknown"
-}
-
-function TechnicalDetails({ step, onFocusGraph }: { step: SemanticStep; onFocusGraph: (envelope: ExplainabilityEnvelope) => void }): React.ReactElement {
-  return (
-    <Collapsible>
-      <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="mt-3 px-1 text-muted-foreground">Technical details · {step.rawEvents.length} raw events</Button></CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 space-y-2 border-t pt-3">
-        {step.rawEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}
-      </CollapsibleContent>
-    </Collapsible>
-  )
 }

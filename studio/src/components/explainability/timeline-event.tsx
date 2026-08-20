@@ -42,6 +42,7 @@ export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): R
                 <span className="font-mono text-[10px] text-muted-foreground">#{envelope.sequence}</span>
               </div>
               {summary.length > 0 ? <p className="mt-1 text-xs text-muted-foreground">{summary}</p> : null}
+              <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">span {envelope.record.span_id}{envelope.record.parent_span_id === undefined ? "" : ` · parent ${envelope.record.parent_span_id}`}</p>
               <time className="mt-1 block text-[10px] text-muted-foreground">{new Date(envelope.record.timestamp).toLocaleTimeString()}</time>
             </div>
             <div className="flex shrink-0 gap-1">

@@ -1,5 +1,6 @@
 import type { ExplainabilityCandidate, ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
 import { latestContextSections } from "@/lib/context-evidence"
+import { buildGlobalSemanticTimeline, type GlobalSemanticStep } from "@/lib/semantic-global"
 
 export type SemanticStepKind = "entity-mapping" | "graph-expansion" | "context-assembly" | "answer-generation"
 export type FinalContextStatus = "included" | "excluded" | "unknown"
@@ -55,15 +56,18 @@ export interface AnswerGenerationSummary {
   model?: string
 }
 
-export type SemanticStep =
+export type LocalSemanticStep =
   | { id: "entity-mapping"; kind: "entity-mapping"; title: "Entity Mapping"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: EntityMappingSummary }
   | { id: "graph-expansion"; kind: "graph-expansion"; title: "Graph Expansion"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: GraphExpansionSummary }
   | { id: "context-assembly"; kind: "context-assembly"; title: "Context Assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: ContextAssemblySummary }
   | { id: "answer-generation"; kind: "answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: AnswerGenerationSummary }
 
+export type SemanticStep = LocalSemanticStep | GlobalSemanticStep
+
 export interface SemanticTimelineModel {
   steps: SemanticStep[]
   diagnosticEvents: ExplainabilityEnvelope[]
+  method: "local" | "global" | "basic" | "drift" | null
 }
 
 const ENTITY_MAPPING_EVENTS = new Set(["mapping_query_built", "embedding_started", "embedding_completed", "candidates_retrieved", "candidates_filtered", "entities_selected"])
@@ -89,6 +93,9 @@ const CONTEXT_SECTION_BY_RECORD_TYPE: Record<string, string> = {
 
 export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope[]): SemanticTimelineModel {
   const ordered = [...envelopes].sort((left, right) => left.sequence - right.sequence)
+  const method = detectQueryMethod(ordered)
+  if (method === "global") return { ...buildGlobalSemanticTimeline(ordered), method }
+  if (method === "basic" || method === "drift") return { steps: [], diagnosticEvents: ordered, method }
   const grouped = {
     entityMapping: [] as ExplainabilityEnvelope[],
     graphExpansion: [] as ExplainabilityEnvelope[],
@@ -114,10 +121,19 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
   if (grouped.graphExpansion.length > 0) steps.push(buildGraphExpansion(grouped.graphExpansion, finalContext))
   if (grouped.contextAssembly.length > 0) steps.push(buildContextAssembly(grouped.contextAssembly, contextSections))
   if (grouped.answerGeneration.length > 0) steps.push(buildAnswerGeneration(grouped.answerGeneration))
-  return { steps, diagnosticEvents: grouped.diagnostics }
+  return { steps, diagnosticEvents: grouped.diagnostics, method }
 }
 
-function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: FinalContextIndex): SemanticStep {
+export function detectQueryMethod(envelopes: readonly ExplainabilityEnvelope[]): SemanticTimelineModel["method"] {
+  for (const envelope of [...envelopes].sort((left, right) => left.sequence - right.sequence)) {
+    const event = envelope.record.event
+    if (event.type !== "query_started") continue
+    if (event.method === "local" || event.method === "global" || event.method === "basic" || event.method === "drift") return event.method
+  }
+  return null
+}
+
+function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: FinalContextIndex): LocalSemanticStep {
   const candidates = new Map<string, CandidateAccumulator>()
   const retrieved = new Set<string>()
   let focusEnvelope: ExplainabilityEnvelope | null = null
@@ -182,7 +198,7 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
   }
 }
 
-function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: FinalContextIndex): SemanticStep {
+function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: FinalContextIndex): LocalSemanticStep {
   const candidates = new Map<string, ExplainabilityCandidate>()
   let focusEnvelope: ExplainabilityEnvelope | null = null
   for (const envelope of rawEvents) {
@@ -201,7 +217,7 @@ function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: 
   return { id: "graph-expansion", kind: "graph-expansion", title: "Graph Expansion", rawEvents, focusEnvelope, summary: { records, selectedCounts } }
 }
 
-function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: ExplainabilityContextSection[]): SemanticStep {
+function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: ExplainabilityContextSection[]): LocalSemanticStep {
   let totalTokenBudget: number | undefined
   let tokensUsed: number | undefined
   let exactContext: string | null = null
@@ -217,7 +233,7 @@ function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: Exp
   return { id: "context-assembly", kind: "context-assembly", title: "Context Assembly", rawEvents, focusEnvelope: null, summary: { sections, totalTokenBudget, tokensUsed, exactContext } }
 }
 
-function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): SemanticStep {
+function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): LocalSemanticStep {
   let startedCalls = 0
   let completedCalls = 0
   let startedInputTokens = 0

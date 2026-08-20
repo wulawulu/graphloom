@@ -1726,7 +1726,7 @@ Local tracing topology 保持不变；static Global 仅接入 Explainability，�
 JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence allocator、Live Hub、
 host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
 Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
-Semantic Timeline 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
+Semantic Timeline 已实现；Turso、DuckDB 和 Dynamic Global UI 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
 Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 static Global Explainability 的支持。
 
 Static Global 的 request-scoped topology 与真实 fan-out/fan-in 如下；每个 batch span 都有独立
@@ -1749,6 +1749,32 @@ Query root
 CommunityReport stable ID 在真实 batch-local sort 后、CSV render 前后同一构造路径中作为
 sidecar 捕获，不从 CSV 或 short ID 反推。Reduce decision 也在真实 `score > 0`、stable score
 sort 与 first-over-budget `break` 循环中捕获；Explainability 不重新执行 selection。
+
+Studio 使用 `QueryStarted.method` 分派 method-specific semantic presentation。Local builder 保持原
+四步模型；static Global builder 单次按 sequence 扫描，并使用 `batch_index`、`span_id` 和
+`parent_span_id` 聚合并行 batch。React 只消费纯函数产生的 view model，不扫描 raw envelopes：
+
+```text
+Explainability envelopes
+          │
+          ▼
+ QueryStarted.method dispatcher
+          │
+    ┌─────┴─────┐
+    ▼           ▼
+ Local builder  Static Global builder
+    │           │
+    │           ├─ Community Context
+    │           ├─ Map Analysis (batch_index stable order)
+    │           ├─ Evidence Reduction
+    │           └─ Answer Generation
+    ▼
+ Entity Mapping → Graph Expansion → Context Assembly → Answer Generation
+```
+
+Global exact Map/Reduce context、prompt 和 raw response 直接使用 G1 捕获字段；Preview 只是安全
+presentation，前端不重建 exact input、不重新执行 Reduce selection，也不把 report/point 猜成
+Graph focus。
 
 前端可据此处理：
 

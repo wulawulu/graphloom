@@ -63,10 +63,104 @@ export type QueryResultState =
   | { state: "gone" }
   | { state: "missing" }
 
-export interface ExplainabilityEventPayload {
+export interface GenericExplainabilityEventPayload {
   type: string
   [key: string]: unknown
 }
+
+export interface QueryStartedEvent extends GenericExplainabilityEventPayload {
+  type: "query_started"
+  method: "local" | "global" | "basic" | "drift"
+  query?: string
+}
+
+export interface LlmRequestStartedEvent extends GenericExplainabilityEventPayload {
+  type: "llm_request_started"
+  model_id: string
+  prompt_tokens: number
+  prompt?: string
+}
+
+export interface LlmRequestCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "llm_request_completed"
+  model_id: string
+  input_tokens: number
+  output_tokens: number
+  elapsed_ms: number
+  response?: string
+}
+
+export interface GlobalContextBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "global_context_built"
+  batch_count: number
+  report_count: number
+}
+
+export interface GlobalMapStartedEvent extends GenericExplainabilityEventPayload {
+  type: "global_map_started"
+  batch_count: number
+}
+
+export interface GlobalMapBatchBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "global_map_batch_built"
+  batch_index: number
+  report_count: number
+  report_ids: string[]
+  tokens_used: number
+  token_budget: number
+  context?: string
+}
+
+export interface GlobalMapPointEvidence {
+  batch_index: number
+  point_index: number
+  score: number
+  answer?: string
+}
+
+export interface GlobalMapPointsProducedEvent extends GenericExplainabilityEventPayload {
+  type: "global_map_points_produced"
+  batch_index: number
+  points: GlobalMapPointEvidence[]
+}
+
+export type GlobalMapPointDecisionReason = "selected" | "non_positive_score" | "token_budget"
+
+export interface GlobalMapPointDecision extends GlobalMapPointEvidence {
+  selected: boolean
+  reason: GlobalMapPointDecisionReason
+}
+
+export interface GlobalReduceContextBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "global_reduce_context_built"
+  candidate_point_count: number
+  positive_point_count: number
+  selected_point_count: number
+  token_budget: number
+  tokens_used: number
+  truncated: boolean
+  points: GlobalMapPointDecision[]
+  context?: string
+}
+
+export interface GlobalReduceSkippedEvent extends GenericExplainabilityEventPayload {
+  type: "global_reduce_skipped"
+  reason: "no_positive_points"
+}
+
+export type GlobalExplainabilityEventPayload =
+  | GlobalContextBuiltEvent
+  | GlobalMapStartedEvent
+  | GlobalMapBatchBuiltEvent
+  | GlobalMapPointsProducedEvent
+  | GlobalReduceContextBuiltEvent
+  | GlobalReduceSkippedEvent
+  | LlmRequestStartedEvent
+  | LlmRequestCompletedEvent
+
+export type KnownExplainabilityEventPayload = QueryStartedEvent | GlobalExplainabilityEventPayload
+
+export type ExplainabilityEventPayload = KnownExplainabilityEventPayload | GenericExplainabilityEventPayload
 
 export interface ExplainabilityCandidate {
   id: string

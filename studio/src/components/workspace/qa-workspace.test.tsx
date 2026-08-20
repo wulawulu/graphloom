@@ -7,12 +7,12 @@ import { QaWorkspace } from "@/components/workspace/qa-workspace"
 
 afterEach(cleanup)
 
-function envelope(sequence: number, event: ExplainabilityEventPayload): ExplainabilityEnvelope {
-  return { schema_version: 1, sequence, record: { run_id: "run-1", timestamp: "2026-08-09T00:00:00Z", span_id: "span", event } }
+function envelope(sequence: number, event: ExplainabilityEventPayload, spanId = "span", parentSpanId?: string): ExplainabilityEnvelope {
+  return { schema_version: 1, sequence, record: { run_id: "run-1", timestamp: "2026-08-09T00:00:00Z", span_id: spanId, parent_span_id: parentSpanId, event } }
 }
 
 const events = [
-  envelope(1, { type: "query_started" }),
+  envelope(1, { type: "query_started", method: "local" }),
   envelope(2, { type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: true }] }),
 ]
 
@@ -90,6 +90,28 @@ describe("QaWorkspace", () => {
     expect(screen.queryByText("Entity Mapping")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+  })
+
+  it("switches Local and Global semantic presentations without retaining expanded analysis", async () => {
+    const user = userEvent.setup()
+    const values = props()
+    const view = render(<QaWorkspace {...values} />)
+    expect(screen.getByText("Local")).toBeInTheDocument()
+
+    const globalEnvelopes = [
+      envelope(1, { type: "query_started", method: "global" }),
+      envelope(2, { type: "global_map_started", batch_count: 1 }, "map", "root"),
+      envelope(3, { type: "global_map_batch_built", batch_index: 0, report_count: 1, report_ids: ["report-1"], tokens_used: 10, token_budget: 20 }, "batch-0", "map"),
+    ]
+    view.rerender(<QaWorkspace {...values} runId="global-run" envelopes={globalEnvelopes} />)
+    expect(screen.getByText("Global")).toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Community Context" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    expect(screen.getByRole("heading", { name: "Community Context" })).toBeInTheDocument()
+
+    view.rerender(<QaWorkspace {...values} runId="local-run" envelopes={events} />)
+    expect(screen.getByText("Local")).toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Community Context" })).not.toBeInTheDocument()
   })
 
   it("opens History on demand, preserves metadata privacy, and selects through the existing callback", async () => {

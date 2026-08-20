@@ -35,7 +35,9 @@ interface QaWorkspaceProps {
 export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const decisionCount = useMemo(() => buildSemanticTimeline(props.envelopes).steps.length, [props.envelopes])
+  const semanticTimeline = useMemo(() => buildSemanticTimeline(props.envelopes), [props.envelopes])
+  const decisionCount = semanticTimeline.steps.length
+  const methodLabel = queryMethodLabel(semanticTimeline.method)
 
   useEffect(() => setAnalysisOpen(false), [props.runId])
 
@@ -47,7 +49,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   return (
     <section className="flex size-full min-h-0 flex-col bg-card/20" aria-label="Graph QA workspace">
       <header className="flex h-12 shrink-0 items-center justify-between border-b px-3">
-        <div className="flex items-center gap-2"><MessageSquareText className="size-4 text-primary" /><h2 className="text-sm font-semibold">Graph QA</h2><Badge variant="outline">Local</Badge></div>
+        <div className="flex items-center gap-2"><MessageSquareText className="size-4 text-primary" /><h2 className="text-sm font-semibold">Graph QA</h2><Badge variant="outline">{methodLabel}</Badge></div>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="sm" onClick={props.onNewQuery}><Plus /> New Query</Button>
           <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}><History /> History</Button>
@@ -111,4 +113,12 @@ function analysisSummary(decisionCount: number, runStatus: string | undefined, s
     return `Analysis process · ${count} · running`
   }
   return `Analysis process · ${count}`
+}
+
+function queryMethodLabel(method: "local" | "global" | "basic" | "drift" | null): string {
+  if (method === "local") return "Local"
+  if (method === "global") return "Global"
+  if (method === "basic") return "Basic"
+  if (method === "drift") return "DRIFT"
+  return "Unknown"
 }
