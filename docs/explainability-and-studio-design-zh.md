@@ -1720,9 +1720,10 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 不在 Drop 中执行异步工作、不 spawn 隐藏任务，Run 暂时保持未完成，等待后续 Store/Studio
 阶段通过超时或 abandoned 状态处理。
 
-Core runtime 当前完整接入 Local Query、static Global 与 Dynamic Global Query Explainability。
-Basic 和 DRIFT 即使收到请求配置也保持安全 no-op，不会创建缺失关键 evidence 的半截 Run。
-Local tracing topology 保持不变；Global 仅接入 Explainability，不扩展 OpenTelemetry。
+Core runtime 当前完整接入 Local Query、static Global、Dynamic Global 与 Basic Query
+Explainability。DRIFT 即使收到请求配置也保持安全 no-op，不会创建缺失关键 evidence 的半截
+Run。Local tracing topology 保持不变；Global 与 Basic 仅接入 Explainability，不扩展
+OpenTelemetry。
 JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence allocator、Live Hub、
 host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
 Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
@@ -1773,15 +1774,17 @@ Explainability envelopes
           ▼
  QueryStarted.method dispatcher
           │
-    ┌─────┴─────┐
-    ▼           ▼
- Local builder     Global builder
-    │           │
-    │           ├─ Community Selection（仅 Dynamic）
-    │           ├─ Community Context
-    │           ├─ Map Analysis (batch_index stable order)
-    │           ├─ Evidence Reduction
-    │           └─ Answer Generation
+    ┌──────────────┼──────────────┐
+    ▼              ▼              ▼
+ Local builder  Global builder  Basic builder
+    │              │              │
+    │              ├─ Community   ├─ Text Retrieval
+    │              │  Selection   ├─ Context Assembly
+    │              │ （仅 Dynamic）└─ Answer Generation
+    │              ├─ Community Context
+    │              ├─ Map Analysis (batch_index stable order)
+    │              ├─ Evidence Reduction
+    │              └─ Answer Generation
     ▼
  Entity Mapping → Graph Expansion → Context Assembly → Answer Generation
 ```
@@ -1795,6 +1798,15 @@ Dynamic selection view model 以最新可信 SelectionCompleted 为 final anchor
 判断，冲突 replay 留在 Diagnostics。Community decisions 明确区分 Selected、Below threshold 与
 Passed threshold but not retained，且 selection count 不与后续 Context report count 合并。Rating
 prompt/raw response 仅从 generic LLM events 的 captured content 展示；Metadata 不重建内容。
+
+Basic 的 request-scoped Explainability topology 是 `root → embedding / retrieval / context / llm`。
+`CandidatesRetrieved` 严格保留 ANN provider order；`CandidatesFiltered` 严格保留业务随后遍历
+TextUnit table 的 effective order。两者不能合并或按 score 重排。Context fitting 继续使用真实
+first-over-budget `break`：首个超预算 row 与其后的 effective candidates 都标记为 token-budget
+stop 后未进入 Context，前端不重跑 token fitting。`ContextSectionBuilt.tokens_used` 是真实 selection
+loop 使用的 budget-accounted tokens；`ContextCompleted.tokens_used` 是 exact rendered Sources
+context 的 token count，exact context 字符串直接来自真正传给 Basic prompt 的 `context_data`。
+Empty query 通过 `BasicRetrievalSkipped(empty_query)` 明确表示 embedding 与 ANN 未发生。
 
 前端可据此处理：
 

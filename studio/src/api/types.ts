@@ -74,6 +74,53 @@ export interface QueryStartedEvent extends GenericExplainabilityEventPayload {
   query?: string
 }
 
+export interface EmbeddingStartedEvent extends GenericExplainabilityEventPayload {
+  type: "embedding_started"
+  model_id: string
+  input?: string
+}
+
+export interface EmbeddingCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "embedding_completed"
+  model_id: string
+  prompt_tokens: number
+  dimensions: number
+}
+
+export interface CandidatesRetrievedEvent extends GenericExplainabilityEventPayload {
+  type: "candidates_retrieved"
+  record_type: string
+  candidates: ExplainabilityCandidate[]
+}
+
+export interface CandidatesFilteredEvent extends GenericExplainabilityEventPayload {
+  type: "candidates_filtered"
+  record_type: string
+  candidates: ExplainabilityCandidate[]
+}
+
+export interface ContextBudgetAllocatedEvent extends GenericExplainabilityEventPayload {
+  type: "context_budget_allocated"
+  total_token_budget: number
+  sections: Array<{ section: string; token_budget: number }>
+}
+
+export interface ContextSectionBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "context_section_built"
+  section: ExplainabilityContextSection
+}
+
+export interface ContextCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "context_completed"
+  tokens_used: number
+  context?: string
+}
+
+export interface BasicRetrievalSkippedEvent extends GenericExplainabilityEventPayload {
+  type: "basic_retrieval_skipped"
+  reason: "empty_query"
+}
+
 export interface LlmRequestStartedEvent extends GenericExplainabilityEventPayload {
   type: "llm_request_started"
   model_id: string
@@ -211,7 +258,19 @@ export type GlobalExplainabilityEventPayload =
   | LlmRequestStartedEvent
   | LlmRequestCompletedEvent
 
-export type KnownExplainabilityEventPayload = QueryStartedEvent | GlobalExplainabilityEventPayload
+export type BasicExplainabilityEventPayload =
+  | EmbeddingStartedEvent
+  | EmbeddingCompletedEvent
+  | CandidatesRetrievedEvent
+  | CandidatesFilteredEvent
+  | ContextBudgetAllocatedEvent
+  | ContextSectionBuiltEvent
+  | ContextCompletedEvent
+  | BasicRetrievalSkippedEvent
+  | LlmRequestStartedEvent
+  | LlmRequestCompletedEvent
+
+export type KnownExplainabilityEventPayload = QueryStartedEvent | BasicExplainabilityEventPayload | GlobalExplainabilityEventPayload
 
 export type ExplainabilityEventPayload = KnownExplainabilityEventPayload | GenericExplainabilityEventPayload
 

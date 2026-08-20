@@ -1,5 +1,6 @@
 import type { ExplainabilityCandidate, ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
 import { latestContextSections } from "@/lib/context-evidence"
+import { buildBasicSemanticTimeline, type BasicSemanticStep } from "@/lib/semantic-basic"
 import { buildGlobalSemanticTimeline, type GlobalSemanticStep } from "@/lib/semantic-global"
 
 export type SemanticStepKind = "entity-mapping" | "graph-expansion" | "context-assembly" | "answer-generation"
@@ -62,7 +63,7 @@ export type LocalSemanticStep =
   | { id: "context-assembly"; kind: "context-assembly"; title: "Context Assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: ContextAssemblySummary }
   | { id: "answer-generation"; kind: "answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: AnswerGenerationSummary }
 
-export type SemanticStep = LocalSemanticStep | GlobalSemanticStep
+export type SemanticStep = LocalSemanticStep | GlobalSemanticStep | BasicSemanticStep
 
 export interface SemanticTimelineModel {
   steps: SemanticStep[]
@@ -99,7 +100,11 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
     const global = buildGlobalSemanticTimeline(ordered)
     return { ...global, method, globalVariant: global.variant }
   }
-  if (method === "basic" || method === "drift") return { steps: [], diagnosticEvents: ordered, method, globalVariant: null }
+  if (method === "basic") {
+    const basic = buildBasicSemanticTimeline(ordered)
+    return { ...basic, method, globalVariant: null }
+  }
+  if (method === "drift") return { steps: [], diagnosticEvents: ordered, method, globalVariant: null }
   const grouped = {
     entityMapping: [] as ExplainabilityEnvelope[],
     graphExpansion: [] as ExplainabilityEnvelope[],
@@ -131,6 +136,7 @@ export function buildSemanticTimeline(envelopes: readonly ExplainabilityEnvelope
 export function detectQueryMethod(envelopes: readonly ExplainabilityEnvelope[]): SemanticTimelineModel["method"] {
   for (const envelope of [...envelopes].sort((left, right) => left.sequence - right.sequence)) {
     const event = envelope.record.event
+    if (envelope.record.parent_span_id !== undefined) continue
     if (event.type !== "query_started") continue
     if (event.method === "local" || event.method === "global" || event.method === "basic" || event.method === "drift") return event.method
   }

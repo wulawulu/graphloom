@@ -92,7 +92,7 @@ describe("QaWorkspace", () => {
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
   })
 
-  it("switches Local and Global semantic presentations without retaining expanded analysis", async () => {
+  it("switches Local, Global, Dynamic Global, and Basic presentations without retaining expanded analysis", async () => {
     const user = userEvent.setup()
     const values = props()
     const view = render(<QaWorkspace {...values} />)
@@ -115,6 +115,16 @@ describe("QaWorkspace", () => {
     ]
     view.rerender(<QaWorkspace {...values} runId="dynamic-run" envelopes={dynamicEnvelopes} />)
     expect(screen.getByText("Dynamic Global")).toBeInTheDocument()
+
+    const basicEnvelopes = [
+      envelope(1, { type: "query_started", method: "basic" }, "basic-root"),
+      envelope(2, { type: "basic_retrieval_skipped", reason: "empty_query" }, "basic-retrieval", "basic-root"),
+    ]
+    view.rerender(<QaWorkspace {...values} runId="basic-run" envelopes={basicEnvelopes} />)
+    expect(screen.getByText("Basic")).toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Community Context" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    expect(screen.getByRole("heading", { name: "Text Retrieval" })).toBeInTheDocument()
 
     view.rerender(<QaWorkspace {...values} runId="local-run" envelopes={events} />)
     expect(screen.getByText("Local")).toBeInTheDocument()

@@ -180,7 +180,7 @@ pub struct QueryArgs {
     #[arg(
         long = "explain-output",
         value_name = "EXPLAIN_OUTPUT",
-        help = "Write Local or Global Query Explainability envelopes as JSONL."
+        help = "Write Local, Global, or Basic Query Explainability envelopes as JSONL."
     )]
     pub explain_output: Option<PathBuf>,
     /// Explainability content policy; valid only with `--explain-output` and defaults to metadata.
