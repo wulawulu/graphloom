@@ -41,16 +41,16 @@ pub use dto::{
     GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence, SelectionReason,
 };
 pub use event::{
-    CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextBudgetAllocated,
-    ContextCompleted, ContextSectionBudget, ContextSectionBuilt, CovariatesSelected,
-    DynamicCommunityRatingAttemptStarted, DynamicCommunitySelectionCompleted,
-    DynamicCommunitySelectionStarted, DynamicCommunityTraversalWaveStarted,
-    DynamicTraversalWaveSource, EmbeddingCompleted, EmbeddingStarted, EntitiesSelected,
-    ExplainabilityEvent, ExplainabilityWarning, GlobalContextBuilt, GlobalMapBatchBuilt,
-    GlobalMapPointsProduced, GlobalMapStarted, GlobalReduceContextBuilt, GlobalReduceSkipReason,
-    GlobalReduceSkipped, GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted,
-    MappingQueryBuilt, QueryStarted, RelationshipsSelected, RunCompleted, RunFailed, RunStarted,
-    TextUnitsSelected,
+    BasicRetrievalSkipReason, BasicRetrievalSkipped, CandidatesFiltered, CandidatesRetrieved,
+    CommunityReportsSelected, ContextBudgetAllocated, ContextCompleted, ContextSectionBudget,
+    ContextSectionBuilt, CovariatesSelected, DynamicCommunityRatingAttemptStarted,
+    DynamicCommunitySelectionCompleted, DynamicCommunitySelectionStarted,
+    DynamicCommunityTraversalWaveStarted, DynamicTraversalWaveSource, EmbeddingCompleted,
+    EmbeddingStarted, EntitiesSelected, ExplainabilityEvent, ExplainabilityWarning,
+    GlobalContextBuilt, GlobalMapBatchBuilt, GlobalMapPointsProduced, GlobalMapStarted,
+    GlobalReduceContextBuilt, GlobalReduceSkipReason, GlobalReduceSkipped, GraphExpansionStarted,
+    LlmRequestCompleted, LlmRequestStarted, MappingQueryBuilt, QueryStarted, RelationshipsSelected,
+    RunCompleted, RunFailed, RunStarted, TextUnitsSelected,
 };
 pub use jsonl::{
     JsonlExplainabilityError, JsonlExplainabilityOptions, JsonlExplainabilityRecorder,

@@ -150,8 +150,8 @@ pub struct QueryOptions {
     pub conversation_history: Option<ConversationHistory>,
     /// Optional request-scoped Explainability configuration.
     ///
-    /// Current runtime support covers Local Search and static or Dynamic Global Search. Basic and
-    /// DRIFT queries ignore this option without error.
+    /// Current runtime support covers Local, Basic, and static or Dynamic Global Search. DRIFT
+    /// queries ignore this option without error.
     pub explainability: Option<QueryExplainabilityOptions>,
 }
 

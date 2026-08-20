@@ -201,7 +201,13 @@ async fn query_loaded_with_session(
     match options.method {
         SearchMethod::Basic => {
             let runtime = crate::query::QueryRuntimeFactory::build_basic(project, options).await?;
-            Ok(run_basic(runtime, &options.query, &options.response_type).await?)
+            Ok(run_basic(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
         SearchMethod::Local => {
             let trace = instrumentation.as_ref().and_then(|item| item.trace());
@@ -257,7 +263,13 @@ async fn query_loaded_stream_with_session(
     match options.method {
         SearchMethod::Basic => {
             let runtime = crate::query::QueryRuntimeFactory::build_basic(project, options).await?;
-            Ok(run_basic_streaming(runtime, &options.query, &options.response_type).await?)
+            Ok(run_basic_streaming(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
         SearchMethod::Local => {
             let trace = instrumentation.as_ref().and_then(|item| item.trace());

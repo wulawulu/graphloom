@@ -152,7 +152,13 @@ impl QueryEngine {
             SearchMethod::Basic => {
                 self.validate_project_root(options).await?;
                 let runtime = self.basic_runtime(options).await?;
-                Ok(basic_search(runtime, &options.query, &options.response_type).await?)
+                Ok(basic_search(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
+                )
+                .await?)
             }
             SearchMethod::Local => {
                 let trace = instrumentation.as_ref().and_then(|item| item.trace());
@@ -220,7 +226,13 @@ impl QueryEngine {
             SearchMethod::Basic => {
                 self.validate_project_root(options).await?;
                 let runtime = self.basic_runtime(options).await?;
-                Ok(basic_search_streaming(runtime, &options.query, &options.response_type).await?)
+                Ok(basic_search_streaming(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
+                )
+                .await?)
             }
             SearchMethod::Local => {
                 let trace = instrumentation.as_ref().and_then(|item| item.trace());

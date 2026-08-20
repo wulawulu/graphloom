@@ -32,13 +32,14 @@ const DELIVERY_ERROR_KIND: &str = "explainability_delivery";
 const DELIVERY_ERROR_MESSAGE: &str = "One or more explainability records could not be delivered.";
 const LOCAL_QUERY_ERROR_MESSAGE: &str = "Local query execution failed.";
 const GLOBAL_QUERY_ERROR_MESSAGE: &str = "Global query execution failed.";
+const BASIC_QUERY_ERROR_MESSAGE: &str = "Basic query execution failed.";
 
 /// Request-scoped configuration for Query Explainability.
 ///
 /// The caller owns the run identity and sink. This allows a host such as Studio to create a run,
 /// establish subscriptions, and then execute the Query with the same identity. In the current
-/// runtime supports Local Search and static or Dynamic Global Search. Basic and DRIFT queries
-/// ignore this option without error until their complete evidence contracts are available.
+/// runtime supports Local, Basic, and static or Dynamic Global Search. DRIFT queries ignore this
+/// option without error until their complete evidence contract is available.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct QueryExplainabilityOptions {
@@ -151,6 +152,41 @@ pub(crate) struct GlobalExplainabilitySpans {
     reduce: ExplainabilitySpanId,
 }
 
+#[derive(Debug)]
+pub(crate) struct BasicExplainabilitySpans {
+    embedding: ExplainabilitySpanId,
+    retrieval: ExplainabilitySpanId,
+    context: ExplainabilitySpanId,
+    llm: ExplainabilitySpanId,
+}
+
+impl BasicExplainabilitySpans {
+    fn generate() -> Self {
+        Self {
+            embedding: ExplainabilitySpanId::generate(),
+            retrieval: ExplainabilitySpanId::generate(),
+            context: ExplainabilitySpanId::generate(),
+            llm: ExplainabilitySpanId::generate(),
+        }
+    }
+
+    pub(crate) const fn embedding(&self) -> &ExplainabilitySpanId {
+        &self.embedding
+    }
+
+    pub(crate) const fn retrieval(&self) -> &ExplainabilitySpanId {
+        &self.retrieval
+    }
+
+    pub(crate) const fn context(&self) -> &ExplainabilitySpanId {
+        &self.context
+    }
+
+    pub(crate) const fn llm(&self) -> &ExplainabilitySpanId {
+        &self.llm
+    }
+}
+
 impl GlobalExplainabilitySpans {
     fn generate() -> Self {
         Self {
@@ -206,7 +242,10 @@ impl QueryExplainabilitySession {
     }
 
     pub(crate) async fn start(options: &QueryOptions) -> Option<Arc<Self>> {
-        let supported = matches!(options.method, SearchMethod::Local | SearchMethod::Global);
+        let supported = matches!(
+            options.method,
+            SearchMethod::Basic | SearchMethod::Local | SearchMethod::Global
+        );
         if !supported {
             return None;
         }
@@ -420,9 +459,10 @@ impl QueryExplainabilitySession {
     const fn query_error_message(&self) -> &'static str {
         match self.method {
             ExplainabilityQueryMethod::Global => GLOBAL_QUERY_ERROR_MESSAGE,
-            ExplainabilityQueryMethod::Basic
-            | ExplainabilityQueryMethod::Local
-            | ExplainabilityQueryMethod::Drift => LOCAL_QUERY_ERROR_MESSAGE,
+            ExplainabilityQueryMethod::Basic => BASIC_QUERY_ERROR_MESSAGE,
+            ExplainabilityQueryMethod::Local | ExplainabilityQueryMethod::Drift => {
+                LOCAL_QUERY_ERROR_MESSAGE
+            }
         }
     }
 }
@@ -509,6 +549,46 @@ impl GlobalQueryExplainability {
 }
 
 impl std::ops::Deref for GlobalQueryExplainability {
+    type Target = QueryExplainabilitySession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session()
+    }
+}
+
+/// Basic Search stage spans paired with the shared Query lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) struct BasicQueryExplainability {
+    session: Arc<QueryExplainabilitySession>,
+    spans: Arc<BasicExplainabilitySpans>,
+}
+
+impl BasicQueryExplainability {
+    #[cfg(test)]
+    pub(crate) fn new(options: &QueryExplainabilityOptions) -> Self {
+        Self::from_session(Arc::new(QueryExplainabilitySession::new(
+            options,
+            SearchMethod::Basic,
+        )))
+    }
+
+    pub(crate) fn from_session(session: Arc<QueryExplainabilitySession>) -> Self {
+        Self {
+            session,
+            spans: Arc::new(BasicExplainabilitySpans::generate()),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &BasicExplainabilitySpans {
+        self.spans.as_ref()
+    }
+
+    pub(crate) fn session(&self) -> &QueryExplainabilitySession {
+        self.session.as_ref()
+    }
+}
+
+impl std::ops::Deref for BasicQueryExplainability {
     type Target = QueryExplainabilitySession;
 
     fn deref(&self) -> &Self::Target {

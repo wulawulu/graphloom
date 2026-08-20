@@ -1184,14 +1184,7 @@ async fn test_should_export_all_query_apis_and_force_method_specific_dispatch() 
 async fn test_should_make_unified_and_method_specific_basic_requests_identical() {
     let server = mount_query_stub().await;
     let fixture = fixture(&server).await;
-    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
-    let options = basic_options(fixture.project.path(), "What are the facts?").with_explainability(
-        QueryExplainabilityOptions::new(
-            "ignored-basic".parse().expect("Basic run id"),
-            ExplainabilityContentMode::Debug,
-            ignored_explainability.clone(),
-        ),
-    );
+    let options = basic_options(fixture.project.path(), "What are the facts?");
 
     let method_result = basic_search(fixture.config.clone(), options.clone())
         .await
@@ -1226,11 +1219,6 @@ async fn test_should_make_unified_and_method_specific_basic_requests_identical()
             unified_tokens.push(token);
         }
     }
-    assert!(ignored_explainability.records().is_empty());
-    assert_eq!(
-        ignored_explainability.finish_calls.load(Ordering::SeqCst),
-        0
-    );
     assert_eq!(method_tokens, unified_tokens);
 
     let requests = server.received_requests().await.expect("recorded requests");
@@ -1480,6 +1468,192 @@ async fn test_should_run_basic_api_and_stream_events_without_mutating_index() {
             .as_str()
             .is_some_and(|value| value.contains("0|first source\n1|second source"))
     );
+}
+
+#[tokio::test]
+async fn test_should_explain_basic_search_without_changing_business_requests_or_result() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let query_text = "BASIC_USER_QUERY_SECRET";
+    let baseline = query(
+        fixture.config.clone(),
+        basic_options(fixture.project.path(), query_text),
+    )
+    .await
+    .expect("baseline Basic Query");
+    let baseline_requests = recorded_request_bodies(&server).await;
+
+    let metadata_sink = Arc::new(RecordingExplainabilitySink::default());
+    let metadata = query(
+        fixture.config.clone(),
+        basic_options(fixture.project.path(), query_text).with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-metadata".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                metadata_sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("metadata Basic Query");
+    assert_query_results_equal(&baseline, &metadata);
+
+    let content_sink = Arc::new(RecordingExplainabilitySink::default());
+    let content = query(
+        fixture.config,
+        basic_options(fixture.project.path(), query_text).with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-content".parse().expect("run id"),
+                ExplainabilityContentMode::Content,
+                content_sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("content Basic Query");
+    assert_query_results_equal(&baseline, &content);
+
+    let requests = recorded_request_bodies(&server).await;
+    assert_eq!(baseline_requests.len(), 2);
+    assert_eq!(&requests[2..4], baseline_requests.as_slice());
+    assert_eq!(&requests[4..6], baseline_requests.as_slice());
+
+    let metadata_json = serde_json::to_string(&metadata_sink.records()).expect("metadata JSON");
+    for secret in [query_text, "first source", "second source", "Basic answer."] {
+        assert!(!metadata_json.contains(secret), "metadata leaked {secret}");
+    }
+    let records = content_sink.records();
+    let root = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::QueryStarted(_))
+                .then(|| record.span_id.clone())
+        })
+        .expect("Basic root span");
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::QueryStarted(event)
+            if event.method == ExplainabilityQueryMethod::Basic
+                && event.query.as_deref() == Some(query_text)
+    )));
+    assert!(records.iter().any(|record| {
+        record.parent_span_id.as_ref() == Some(&root)
+            && matches!(record.event, ExplainabilityEvent::EmbeddingStarted(_))
+    }));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::ContextCompleted(event)
+            if event.context.as_deref() == Some("id|text\n0|first source\n1|second source\n")
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::LlmRequestStarted(event)
+            if event.prompt.as_deref().is_some_and(|prompt| prompt.contains("first source"))
+    )));
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        ExplainabilityEvent::LlmRequestCompleted(event)
+            if event.response.as_deref() == Some("Basic answer.")
+    )));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert_eq!(content_sink.finish_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_explain_empty_basic_query_as_intentional_retrieval_skip() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = query(
+        fixture.config,
+        basic_options(fixture.project.path(), "").with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-empty".parse().expect("run id"),
+                ExplainabilityContentMode::Content,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await
+    .expect("empty Basic Query");
+
+    assert!(matches!(result.context.text, QueryContextText::Text(ref text) if text == "id|text\n"));
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::BasicRetrievalSkipped(_)))
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::EmbeddingStarted(_)
+            | ExplainabilityEvent::EmbeddingCompleted(_)
+            | ExplainabilityEvent::CandidatesRetrieved(_)
+    )));
+    let requests = recorded_request_bodies(&server).await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("messages").is_some());
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_should_isolate_concurrent_basic_explainability_runs_and_sink_failure() {
+    let server = mount_query_stub().await;
+    let fixture = fixture(&server).await;
+    let engine = Arc::new(
+        QueryEngine::load(fixture.config, fixture.project.path())
+            .await
+            .expect("Basic engine"),
+    );
+    let sink_a = Arc::new(RecordingExplainabilitySink::default());
+    let sink_b = Arc::new(RecordingExplainabilitySink::failing());
+    let options_a = basic_options(fixture.project.path(), "Basic A").with_explainability(
+        QueryExplainabilityOptions::new(
+            "basic-concurrent-a".parse().expect("run id"),
+            ExplainabilityContentMode::Content,
+            sink_a.clone(),
+        ),
+    );
+    let options_b = basic_options(fixture.project.path(), "Basic B").with_explainability(
+        QueryExplainabilityOptions::new(
+            "basic-concurrent-b".parse().expect("run id"),
+            ExplainabilityContentMode::Metadata,
+            sink_b.clone(),
+        ),
+    );
+
+    let (result_a, result_b) = tokio::join!(engine.query(options_a), engine.query(options_b));
+    assert_eq!(result_a.expect("Basic A").response, "Basic answer.");
+    assert_eq!(result_b.expect("Basic B").response, "Basic answer.");
+    assert!(
+        sink_a
+            .records()
+            .iter()
+            .all(|record| record.run_id.as_str() == "basic-concurrent-a")
+    );
+    assert!(
+        sink_b
+            .records()
+            .iter()
+            .all(|record| record.run_id.as_str() == "basic-concurrent-b")
+    );
+    assert!(matches!(
+        sink_a.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    assert!(matches!(
+        sink_b.records().last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "explainability_delivery"
+    ));
+    assert_eq!(sink_a.finish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink_b.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -2622,6 +2796,53 @@ async fn test_should_preserve_handshake_error_and_finalize_explainability_run() 
         records.last().map(|record| &record.event),
         Some(ExplainabilityEvent::RunFailed(event)) if event.error_kind == "query_completion"
     ));
+}
+
+#[tokio::test]
+async fn test_should_finalize_basic_handshake_failure_without_fake_completion() {
+    let server = mount_local_handshake_failure_stub().await;
+    let fixture = fixture(&server).await;
+    let sink = Arc::new(RecordingExplainabilitySink::default());
+    let result = query_stream(
+        fixture.config,
+        basic_options(fixture.project.path(), "Basic failure").with_explainability(
+            QueryExplainabilityOptions::new(
+                "basic-handshake-error".parse().expect("run id"),
+                ExplainabilityContentMode::Metadata,
+                sink.clone(),
+            ),
+        ),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("Basic stream handshake must fail");
+    };
+    assert!(matches!(
+        error,
+        GraphLoomError::Query(source)
+            if matches!(source.as_ref(), QueryError::QueryCompletion {
+                method: SearchMethod::Basic,
+                operation: "start Basic Search completion stream",
+                ..
+            })
+    ));
+    let records = sink.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestStarted(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::LlmRequestCompleted(_)))
+    );
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunFailed(event))
+            if event.error_kind == "query_completion"
+    ));
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

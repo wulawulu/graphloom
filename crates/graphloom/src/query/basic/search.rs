@@ -7,10 +7,13 @@ use graphloom_llm::{ChatMessage, CompletionRequest};
 use serde::Serialize;
 
 use super::super::{
-    BasicQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryResult, Result, SearchMethod,
+    BasicQueryRuntime, QueryError, QueryEvent, QueryEventStream, QueryInstrumentation, QueryResult,
+    Result, SearchMethod,
+    explainability::BasicQueryExplainability,
     result::count_completion_input,
     streaming::{CompletionStreamState, completion_event_stream},
 };
+use crate::explainability::{ExplainabilityEvent, LlmRequestCompleted, LlmRequestStarted};
 
 #[derive(Debug, Serialize)]
 struct BasicPromptContext<'a> {
@@ -22,8 +25,9 @@ pub(crate) async fn basic_search(
     runtime: BasicQueryRuntime,
     query: &str,
     response_type: &str,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryResult> {
-    let mut events = basic_search_streaming(runtime, query, response_type).await?;
+    let mut events = basic_search_streaming(runtime, query, response_type, instrumentation).await?;
     while let Some(event) = events.next().await {
         if let QueryEvent::Completed(result) = event? {
             return Ok(result);
@@ -45,9 +49,33 @@ pub(crate) async fn basic_search_streaming(
     runtime: BasicQueryRuntime,
     query: &str,
     response_type: &str,
+    instrumentation: Option<QueryInstrumentation>,
+) -> Result<QueryEventStream> {
+    match prepare_basic_stream(runtime, query, response_type, instrumentation.clone()).await {
+        Ok(events) => Ok(events),
+        Err(error) => {
+            if let Some(instrumentation) = instrumentation {
+                instrumentation.finish_query_error(&error).await;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn prepare_basic_stream(
+    runtime: BasicQueryRuntime,
+    query: &str,
+    response_type: &str,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryEventStream> {
     let started = Instant::now();
-    let built = runtime.basic_context.build(query).await?;
+    let explainability = instrumentation
+        .as_ref()
+        .and_then(QueryInstrumentation::basic_explainability);
+    let built = runtime
+        .basic_context
+        .build_explainable(query, explainability)
+        .await?;
     let context_text = match &built.context.text {
         super::super::QueryContextText::Text(value) => value.as_str(),
         _ => {
@@ -93,6 +121,23 @@ pub(crate) async fn basic_search_streaming(
             message: source.to_string(),
         })?;
     runtime.callbacks.on_context(&built.context);
+    if let Some(session) = explainability
+        && let Some(prompt_tokens) = session.usize_to_u64(prompt_tokens)
+    {
+        let mut event = LlmRequestStarted::new(runtime.completion_model_id.clone(), prompt_tokens);
+        event.prompt = request
+            .messages
+            .first()
+            .and_then(|message| session.content(message.content.as_str()));
+        session
+            .emit(
+                session.spans().llm(),
+                Some(session.root_span()),
+                ExplainabilityEvent::LlmRequestStarted(event),
+            )
+            .await;
+    }
+    let llm_started = Instant::now();
     let provider = runtime
         .completion_model
         .stream(request)
@@ -103,6 +148,7 @@ pub(crate) async fn basic_search_streaming(
             model: runtime.completion_model_id.clone(),
             source: Box::new(source),
         })?;
+    let completion_model_id = runtime.completion_model_id.clone();
     let state = CompletionStreamState {
         provider,
         context: built.context,
@@ -119,7 +165,106 @@ pub(crate) async fn basic_search_streaming(
         output_count_is_context_error: false,
         notify_reduce_end: false,
     };
-    Ok(completion_event_stream(state))
+    Ok(instrument_basic_completion_stream(
+        completion_event_stream(state),
+        instrumentation,
+        llm_started,
+        completion_model_id,
+    ))
+}
+
+struct BasicCompletionState {
+    events: QueryEventStream,
+    instrumentation: Option<QueryInstrumentation>,
+    llm_started: Instant,
+    completion_model_id: String,
+}
+
+fn instrument_basic_completion_stream(
+    events: QueryEventStream,
+    instrumentation: Option<QueryInstrumentation>,
+    llm_started: Instant,
+    completion_model_id: String,
+) -> QueryEventStream {
+    Box::pin(futures_util::stream::unfold(
+        Some(BasicCompletionState {
+            events,
+            instrumentation,
+            llm_started,
+            completion_model_id,
+        }),
+        next_basic_completion_event,
+    ))
+}
+
+async fn next_basic_completion_event(
+    state: Option<BasicCompletionState>,
+) -> Option<(Result<QueryEvent>, Option<BasicCompletionState>)> {
+    let mut state = state?;
+    match state.events.next().await {
+        Some(Ok(QueryEvent::Completed(result))) => {
+            if let Some(instrumentation) = &state.instrumentation {
+                if let Some(session) = instrumentation.basic_explainability() {
+                    emit_llm_completed(
+                        session,
+                        &state.completion_model_id,
+                        state.llm_started,
+                        &result,
+                    )
+                    .await;
+                }
+                instrumentation.finish_explainability_success().await;
+            }
+            Some((Ok(QueryEvent::Completed(result)), None))
+        }
+        Some(Ok(event)) => Some((Ok(event), Some(state))),
+        Some(Err(error)) => {
+            if let Some(instrumentation) = &state.instrumentation {
+                instrumentation.finish_query_error(&error).await;
+            }
+            Some((Err(error), None))
+        }
+        None => {
+            if let Some(instrumentation) = &state.instrumentation {
+                instrumentation.finish_stream_ended().await;
+            }
+            None
+        }
+    }
+}
+
+async fn emit_llm_completed(
+    session: &BasicQueryExplainability,
+    completion_model_id: &str,
+    llm_started: Instant,
+    result: &QueryResult,
+) {
+    let Some(usage) = result.usage.categories.get("response") else {
+        session.mark_sidecar_failure("missing_llm_usage");
+        return;
+    };
+    let values = (
+        session.usize_to_u64(usage.prompt_tokens),
+        session.usize_to_u64(usage.output_tokens),
+        session.duration_millis(llm_started.elapsed()),
+    );
+    let (Some(input_tokens), Some(output_tokens), Some(elapsed_ms)) = values else {
+        return;
+    };
+    let mut event = LlmRequestCompleted::new(
+        completion_model_id.to_owned(),
+        input_tokens,
+        output_tokens,
+        elapsed_ms,
+    );
+    event.response = session.content(&result.response);
+    session
+        .emit(
+            session.spans().llm(),
+            Some(session.root_span()),
+            ExplainabilityEvent::LlmRequestCompleted(event),
+        )
+        .await;
 }
 
 #[cfg(test)]
@@ -337,7 +482,7 @@ mod tests {
         let order = Arc::new(Mutex::new(Vec::new()));
         let runtime = runtime(&tempdir, Arc::clone(&requests), Arc::clone(&order)).await;
 
-        let mut events = basic_search_streaming(runtime, "What happened?", "Short Answer")
+        let mut events = basic_search_streaming(runtime, "What happened?", "Short Answer", None)
             .await
             .expect("stream");
         let mut kinds = Vec::new();

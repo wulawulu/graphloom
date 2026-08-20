@@ -207,6 +207,31 @@ pub struct EmbeddingCompleted {
     pub dimensions: u32,
 }
 
+/// Proven reason Basic Search did not perform embedding or ANN retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BasicRetrievalSkipReason {
+    /// The user query was empty, which the compatible Basic path treats as no matches.
+    EmptyQuery,
+}
+
+/// Basic Search intentionally skipped its embedding and ANN retrieval stages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BasicRetrievalSkipped {
+    /// Proven reason retrieval was not invoked.
+    pub reason: BasicRetrievalSkipReason,
+}
+
+impl BasicRetrievalSkipped {
+    /// Create a Basic-retrieval skip payload.
+    #[must_use]
+    pub const fn new(reason: BasicRetrievalSkipReason) -> Self {
+        Self { reason }
+    }
+}
+
 impl EmbeddingCompleted {
     /// Create an embedding-completion payload.
     #[must_use]
@@ -271,7 +296,7 @@ impl CandidatesRetrieved {
 pub struct CandidatesFiltered {
     /// Category shared by the filtered candidates.
     record_type: ExplainabilityRecordType,
-    /// Candidates annotated with actual selection state and reason where known.
+    /// Candidates in the real filtering/selection order, annotated with actual decisions.
     #[serde(default, with = "super::validation::candidates")]
     candidates: Vec<ExplainabilityCandidate>,
 }
@@ -302,7 +327,7 @@ impl CandidatesFiltered {
         self.record_type
     }
 
-    /// Borrow the candidates in provider result order.
+    /// Borrow candidates in the order used by the real filtering/selection stage.
     #[must_use]
     pub fn candidates(&self) -> &[ExplainabilityCandidate] {
         &self.candidates
@@ -1554,6 +1579,8 @@ pub enum ExplainabilityEvent {
     EmbeddingStarted(EmbeddingStarted),
     /// Query embedding completed.
     EmbeddingCompleted(EmbeddingCompleted),
+    /// Basic Search intentionally skipped embedding and ANN retrieval.
+    BasicRetrievalSkipped(BasicRetrievalSkipped),
     /// Retrieval returned candidates.
     CandidatesRetrieved(CandidatesRetrieved),
     /// Candidate filtering completed.
@@ -1609,14 +1636,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CandidatesFiltered, CandidatesRetrieved, CommunityReportsSelected, ContextBudgetAllocated,
-        ContextCompleted, ContextSectionBuilt, CovariatesSelected, EmbeddingCompleted,
-        EmbeddingStarted, EntitiesSelected, ExplainabilityEvent, ExplainabilityWarning,
-        GlobalContextBuilt, GlobalMapBatchBuilt, GlobalMapPointsProduced, GlobalMapStarted,
-        GlobalReduceContextBuilt, GlobalReduceSkipReason, GlobalReduceSkipped,
-        GraphExpansionStarted, LlmRequestCompleted, LlmRequestStarted, MappingQueryBuilt,
-        QueryStarted, RelationshipsSelected, RunCompleted, RunFailed, RunStarted,
-        TextUnitsSelected,
+        BasicRetrievalSkipReason, BasicRetrievalSkipped, CandidatesFiltered, CandidatesRetrieved,
+        CommunityReportsSelected, ContextBudgetAllocated, ContextCompleted, ContextSectionBuilt,
+        CovariatesSelected, EmbeddingCompleted, EmbeddingStarted, EntitiesSelected,
+        ExplainabilityEvent, ExplainabilityWarning, GlobalContextBuilt, GlobalMapBatchBuilt,
+        GlobalMapPointsProduced, GlobalMapStarted, GlobalReduceContextBuilt,
+        GlobalReduceSkipReason, GlobalReduceSkipped, GraphExpansionStarted, LlmRequestCompleted,
+        LlmRequestStarted, MappingQueryBuilt, QueryStarted, RelationshipsSelected, RunCompleted,
+        RunFailed, RunStarted, TextUnitsSelected,
     };
     use crate::explainability::{
         ContextSectionKind, ExplainabilityContentMode, ExplainabilityContextSection,
@@ -1781,6 +1808,12 @@ mod tests {
                     1_536,
                 )),
                 "embedding_completed",
+            ),
+            (
+                ExplainabilityEvent::BasicRetrievalSkipped(BasicRetrievalSkipped::new(
+                    BasicRetrievalSkipReason::EmptyQuery,
+                )),
+                "basic_retrieval_skipped",
             ),
             (
                 ExplainabilityEvent::CandidatesRetrieved(CandidatesRetrieved::try_new(
