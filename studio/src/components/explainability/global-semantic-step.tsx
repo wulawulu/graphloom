@@ -27,6 +27,7 @@ const INITIAL_BATCHES = 6
 const INITIAL_POINTS = 20
 const INITIAL_COMMUNITIES = 20
 const INITIAL_WAVES = 5
+const WAVE_ID_PAGE_SIZE = 20
 
 export function GlobalSemanticStepCard({ step, onFocusGraph }: GlobalSemanticStepCardProps): React.ReactElement {
   return (
@@ -117,7 +118,10 @@ function CommunitySelectionContent({ summary }: { summary: DynamicCommunitySelec
 
 function TraversalWaveRow({ wave }: { wave: DynamicTraversalWaveView }): React.ReactElement {
   const [open, setOpen] = useState(false)
-  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 rounded border bg-background/50"><CollapsibleTrigger asChild><button type="button" className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} community IDs for wave ${wave.waveIndex + 1}`}><span className="font-medium">Wave {wave.waveIndex + 1} · {waveSourceLabel(wave.source)}</span><span className="shrink-0 text-muted-foreground">{wave.communityIds.length} communities</span></button></CollapsibleTrigger><CollapsibleContent className="border-t p-3"><ul className="max-h-32 overflow-auto rounded border bg-muted/20 p-2 font-mono text-[11px]">{wave.communityIds.map((id) => <li key={id} className="break-all">{id}</li>)}</ul></CollapsibleContent></Collapsible>
+  const [visibleIdCount, setVisibleIdCount] = useState(WAVE_ID_PAGE_SIZE)
+  const visibleIds = wave.communityIds.slice(0, visibleIdCount)
+  const remainingIdCount = wave.communityIds.length - visibleIds.length
+  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 rounded border bg-background/50"><CollapsibleTrigger asChild><button type="button" className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} community IDs for wave ${wave.waveIndex + 1}`}><span className="font-medium">Wave {wave.waveIndex + 1} · {waveSourceLabel(wave.source)}</span><span className="shrink-0 text-muted-foreground">{wave.communityIds.length} communities</span></button></CollapsibleTrigger><CollapsibleContent className="border-t p-3"><ul className="max-h-32 overflow-auto rounded border bg-muted/20 p-2 font-mono text-[11px]">{visibleIds.map((id) => <li key={id} className="break-all">{id}</li>)}</ul><div className="mt-1 flex flex-wrap gap-1">{remainingIdCount > 0 ? <Button variant="ghost" size="sm" onClick={() => setVisibleIdCount((count) => Math.min(count + WAVE_ID_PAGE_SIZE, wave.communityIds.length))}>Show next {Math.min(WAVE_ID_PAGE_SIZE, remainingIdCount)} community IDs</Button> : null}{visibleIdCount > WAVE_ID_PAGE_SIZE ? <Button variant="ghost" size="sm" onClick={() => setVisibleIdCount(WAVE_ID_PAGE_SIZE)}>Show fewer community IDs</Button> : null}</div></CollapsibleContent></Collapsible>
 }
 
 function CommunityDecisionRow({ decision }: { decision: DynamicCommunityDecisionView }): React.ReactElement {

@@ -99,7 +99,7 @@ describe("QaWorkspace", () => {
     expect(screen.getByText("Local")).toBeInTheDocument()
 
     const globalEnvelopes = [
-      envelope(1, { type: "query_started", method: "global" }),
+      envelope(1, { type: "query_started", method: "global" }, "root"),
       envelope(2, { type: "global_map_started", batch_count: 1 }, "map", "root"),
       envelope(3, { type: "global_map_batch_built", batch_index: 0, report_count: 1, report_ids: ["report-1"], tokens_used: 10, token_budget: 20 }, "batch-0", "map"),
     ]

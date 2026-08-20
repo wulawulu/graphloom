@@ -122,6 +122,24 @@ describe("Global Timeline", () => {
     expect(within(selection).queryByText("Community community-20")).not.toBeInTheDocument()
   })
 
+  it("pages large traversal wave identity lists without mounting every ID", async () => {
+    const user = userEvent.setup()
+    const communityIds = Array.from({ length: 21 }, (_, index) => `wave-community-${index}`)
+    renderGlobal([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 21, threshold: 3, max_level: 2, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: communityIds }, "root"),
+    ])
+    const selection = screen.getByRole("article", { name: "Community Selection" })
+    await user.click(within(selection).getByRole("button", { name: "Show community IDs for wave 1" }))
+    expect(within(selection).getByText("wave-community-19")).toBeInTheDocument()
+    expect(within(selection).queryByText("wave-community-20")).not.toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "Show next 1 community IDs" }))
+    expect(within(selection).getByText("wave-community-20")).toBeInTheDocument()
+    await user.click(within(selection).getByRole("button", { name: "Show fewer community IDs" }))
+    expect(within(selection).queryByText("wave-community-20")).not.toBeInTheDocument()
+  })
+
   it("expands batches and separates exact context, raw response, and parsed points", async () => {
     const user = userEvent.setup()
     renderGlobal()

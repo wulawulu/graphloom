@@ -1,5 +1,7 @@
 //! Versioned explainability event vocabulary and named payloads.
 
+use std::collections::HashSet;
+
 use serde::{
     Deserialize, Serialize, Serializer,
     ser::{Error as _, SerializeStruct},
@@ -652,6 +654,13 @@ impl DynamicCommunitySelectionStarted {
                 reason: "repeat count must be greater than zero",
             });
         }
+        if usize::try_from(self.initial_community_count).unwrap_or(usize::MAX)
+            > super::validation::MAX_DYNAMIC_COMMUNITIES
+        {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "initial community count exceeds the contract limit",
+            });
+        }
         Ok(())
     }
 }
@@ -729,6 +738,12 @@ impl DynamicCommunityTraversalWaveStarted {
                 reason: "traversal wave must contain at least one community",
             });
         }
+        if self.community_ids.len() > super::validation::MAX_DYNAMIC_COMMUNITIES {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "traversal wave exceeds the community contract limit",
+            });
+        }
+        let mut unique_ids = HashSet::with_capacity(self.community_ids.len());
         for community_id in &self.community_ids {
             super::validation::validate_dynamic_id(community_id, "Dynamic community ID").map_err(
                 |_| ExplainabilityContractError::InvalidIdentifier {
@@ -736,6 +751,11 @@ impl DynamicCommunityTraversalWaveStarted {
                     reason: "value is empty, too long, or contains disallowed bytes",
                 },
             )?;
+            if !unique_ids.insert(community_id) {
+                return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                    reason: "traversal wave contains duplicate community identities",
+                });
+            }
         }
         Ok(())
     }
@@ -932,6 +952,14 @@ impl DynamicCommunitySelectionCompleted {
     }
 
     fn validate(&self) -> Result<(), ExplainabilityContractError> {
+        if self.ratings.len() > super::validation::MAX_DYNAMIC_COMMUNITIES
+            || self.selected_community_ids.len() > super::validation::MAX_DYNAMIC_COMMUNITIES
+            || self.selected_report_ids.len() > super::validation::MAX_DYNAMIC_COMMUNITIES
+        {
+            return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                reason: "selection evidence exceeds the community contract limit",
+            });
+        }
         let visited = u32::try_from(self.ratings.len()).unwrap_or(u32::MAX);
         let passed = u32::try_from(
             self.ratings
@@ -946,6 +974,16 @@ impl DynamicCommunitySelectionCompleted {
             .filter(|rating| rating.selected)
             .collect::<Vec<_>>();
         let selected_count = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+        let mut community_ids = HashSet::with_capacity(self.ratings.len());
+        let mut report_ids = HashSet::with_capacity(self.ratings.len());
+        for rating in &self.ratings {
+            if !community_ids.insert(&rating.community_id) || !report_ids.insert(&rating.report_id)
+            {
+                return Err(ExplainabilityContractError::InvalidDynamicSelection {
+                    reason: "selection evidence contains duplicate community or report identities",
+                });
+            }
+        }
         if self.visited_count != visited {
             return Err(ExplainabilityContractError::CollectionCountMismatch {
                 collection: "Dynamic visited community",

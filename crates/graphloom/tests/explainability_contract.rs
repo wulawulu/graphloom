@@ -139,6 +139,23 @@ fn test_should_expose_validated_additive_dynamic_global_event_contract() -> Test
 
     assert!(DynamicCommunitySelectionStarted::try_new(0, 3, 2, false, false, 1).is_err());
     assert!(DynamicCommunitySelectionStarted::try_new(1, 3, -1, false, false, 1).is_err());
+    assert!(DynamicCommunitySelectionStarted::try_new(10_001, 3, 2, false, false, 1).is_err());
+    assert!(
+        DynamicCommunityTraversalWaveStarted::try_new(
+            0,
+            DynamicTraversalWaveSource::Initial,
+            vec!["duplicate".to_owned(), "duplicate".to_owned()],
+        )
+        .is_err()
+    );
+    assert!(
+        DynamicCommunityTraversalWaveStarted::try_new(
+            0,
+            DynamicTraversalWaveSource::Initial,
+            vec!["community".to_owned(); 10_001],
+        )
+        .is_err()
+    );
     assert!(
         DynamicCommunityRatingAttemptStarted::try_new(
             "42".to_owned(),
@@ -176,6 +193,38 @@ fn test_should_expose_validated_additive_dynamic_global_event_contract() -> Test
                 "selected": true
             }]
         }))
+        .is_err()
+    );
+    let excessive_ratings = (0..10_001)
+        .map(|index| {
+            DynamicCommunityRatingEvidence::try_new(
+                format!("community-{index}"),
+                format!("report-{index}"),
+                0,
+                0,
+                false,
+                false,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        DynamicCommunitySelectionCompleted::try_new(Vec::new(), Vec::new(), excessive_ratings)
+            .is_err()
+    );
+    let duplicate_rating = DynamicCommunityRatingEvidence::try_new(
+        "duplicate".to_owned(),
+        "report-duplicate".to_owned(),
+        0,
+        0,
+        false,
+        false,
+    )?;
+    assert!(
+        DynamicCommunitySelectionCompleted::try_new(
+            Vec::new(),
+            Vec::new(),
+            vec![duplicate_rating.clone(), duplicate_rating],
+        )
         .is_err()
     );
     Ok(())

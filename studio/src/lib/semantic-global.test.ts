@@ -345,6 +345,91 @@ describe("Global semantic timeline", () => {
     expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([2, 3]))
   })
 
+  it("uses the latest traversal fact per wave index and diagnoses replay conflicts", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: ["stale"] }, "root"),
+      envelope(4, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "fallback", community_ids: ["current"] }, "root"),
+      envelope(5, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings: [{ community_id: "current", report_id: "report-current", level: 1, selected_rating: 1, threshold_passed: false, selected: false }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.waves).toEqual([{ waveIndex: 0, source: "fallback", communityIds: ["current"] }])
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toContain(3)
+  })
+
+  it("keeps attempts with conflicting wave, repeat, or report identity in Diagnostics", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 2 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_traversal_wave_started", wave_index: 0, source: "initial", community_ids: ["A"] }, "root"),
+      envelope(4, "wrong-wave", { type: "dynamic_community_rating_attempt_started", community_id: "B", report_id: "report-b", repeat_index: 0, repeat_count: 2 }, "selection"),
+      envelope(5, "wrong-repeat", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 3 }, "selection"),
+      envelope(6, "wrong-report", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "other-report", repeat_index: 0, repeat_count: 2 }, "selection"),
+      envelope(7, "valid", { type: "dynamic_community_rating_attempt_started", community_id: "A", report_id: "report-a", repeat_index: 0, repeat_count: 2 }, "selection"),
+      envelope(8, "valid", { type: "llm_request_started", model_id: "rating", prompt_tokens: 10, prompt: "valid prompt" }, "selection"),
+      envelope(9, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.decisions[0]?.attempts).toHaveLength(1)
+    expect(selection.summary.decisions[0]?.attempts[0]).toMatchObject({ spanId: "valid", exactPrompt: "valid prompt" })
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([4, 5, 6]))
+  })
+
+  it("falls back from a completion whose threshold decision contradicts SelectionStarted", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+      envelope(4, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: false, selected: false }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary).toMatchObject({ completed: true, selectedCount: 1 })
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toContain(4)
+  })
+
+  it("does not let a later orphan completion displace a coherent selection lifecycle", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+      envelope(4, "orphan", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings: [{ community_id: "orphan", report_id: "report-orphan", level: 0, selected_rating: 1, threshold_passed: false, selected: false }] }, "root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.decisions.map((decision) => decision.community_id)).toEqual(["A"])
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toContain(4)
+  })
+
+  it("does not let a coherent selection lifecycle under a foreign parent displace the Query lifecycle", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+      envelope(4, "foreign-selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "foreign-root"),
+      envelope(5, "foreign-selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 0, selected_count: 0, selected_community_ids: [], selected_report_ids: [], ratings: [{ community_id: "foreign", report_id: "report-foreign", level: 0, selected_rating: 1, threshold_passed: false, selected: false }] }, "foreign-root"),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.decisions.map((decision) => decision.community_id)).toEqual(["A"])
+    expect(model.diagnosticEvents.map((event) => event.sequence)).toEqual(expect.arrayContaining([4, 5]))
+  })
+
+  it("keeps the first root QueryStarted as the immutable lifecycle anchor", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "selection", { type: "dynamic_community_selection_started", initial_community_count: 1, threshold: 3, max_level: 1, keep_parent: false, use_summary: false, num_repeats: 1 }, "root"),
+      envelope(3, "selection", { type: "dynamic_community_selection_completed", visited_count: 1, threshold_passed_count: 1, selected_count: 1, selected_community_ids: ["A"], selected_report_ids: ["report-a"], ratings: [{ community_id: "A", report_id: "report-a", level: 0, selected_rating: 5, threshold_passed: true, selected: true }] }, "root"),
+      envelope(4, "orphan-root", { type: "query_started", method: "global" }),
+    ])
+    const selection = model.steps[0]
+    if (selection?.kind !== "community-selection") throw new Error("expected selection")
+    expect(selection.summary.decisions.map((decision) => decision.community_id)).toEqual(["A"])
+  })
+
   it("does not mix an older completed rating attempt with a newer duplicate attempt", () => {
     const model = buildSemanticTimeline([
       envelope(1, "root", { type: "query_started", method: "global" }),
@@ -376,5 +461,30 @@ describe("Global semantic timeline", () => {
     if (answer?.kind !== "global-answer-generation") throw new Error("expected answer")
     expect(answer.summary.noDataPathSelected).toBe(true)
     expect(answer.summary.noDataAnswerReturned).toBe(returned)
+  })
+
+  it("does not accept a foreign-span completion as proof that the no-data answer returned", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 1, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [{ batch_index: 0, point_index: 0, score: 0, selected: false, reason: "non_positive_score" }] }, "root"),
+      envelope(3, "reduce", { type: "global_reduce_skipped", reason: "no_positive_points" }, "root"),
+      envelope(4, "foreign", { type: "run_completed", elapsed_ms: 4 }),
+    ])
+    const answer = model.steps.find((step) => step.kind === "global-answer-generation")
+    if (answer?.kind !== "global-answer-generation") throw new Error("expected answer")
+    expect(answer.summary).toMatchObject({ noDataPathSelected: true, noDataAnswerReturned: false })
+  })
+
+  it("does not accept a child QueryStarted and matching terminal as root completion proof", () => {
+    const model = buildSemanticTimeline([
+      envelope(1, "root", { type: "query_started", method: "global" }),
+      envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 1, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [{ batch_index: 0, point_index: 0, score: 0, selected: false, reason: "non_positive_score" }] }, "root"),
+      envelope(3, "reduce", { type: "global_reduce_skipped", reason: "no_positive_points" }, "root"),
+      envelope(4, "child", { type: "query_started", method: "global" }, "root"),
+      envelope(5, "child", { type: "run_completed", elapsed_ms: 4 }),
+    ])
+    const answer = model.steps.find((step) => step.kind === "global-answer-generation")
+    if (answer?.kind !== "global-answer-generation") throw new Error("expected answer")
+    expect(answer.summary).toMatchObject({ noDataPathSelected: true, noDataAnswerReturned: false })
   })
 })

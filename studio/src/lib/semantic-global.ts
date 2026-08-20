@@ -200,7 +200,11 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
   }
 
   const claimedSequences = new Set<number>()
+  const queryRootSpan = ordered.find((envelope) => envelope.record.event.type === "query_started"
+    && envelope.record.event.method === "global"
+    && envelope.record.parent_span_id === undefined)?.record.span_id
   const dynamicSelection = buildDynamicSelection(
+    queryRootSpan,
     selectionStartedEvents,
     selectionWaveEvents,
     ratingAttemptEvents,
@@ -316,7 +320,10 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
   const reduceStarted = reduceLifecycle.started
   const reduceCompleted = reduceLifecycle.completed
   const noDataPathSelected = compatibleReduceSkipped?.record.event.reason === "no_positive_points"
-  const terminal = last(ordered.filter((envelope) => envelope.record.event.type === "run_completed" || envelope.record.event.type === "run_failed"))
+  const terminal = last(ordered.filter((envelope) => (envelope.record.event.type === "run_completed"
+    || envelope.record.event.type === "run_failed")
+    && envelope.record.span_id === queryRootSpan
+    && envelope.record.parent_span_id === undefined))
   const noDataAnswerReturned = noDataPathSelected
     && terminal?.record.event.type === "run_completed"
     && terminal.sequence > (compatibleReduceSkipped?.sequence ?? Number.MAX_SAFE_INTEGER)
@@ -401,6 +408,7 @@ interface DynamicSelectionBuild {
 }
 
 function buildDynamicSelection(
+  queryRootSpan: string | undefined,
   starts: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunitySelectionStartedEvent } })[],
   waves: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunityTraversalWaveStartedEvent } })[],
   attempts: readonly (ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } })[],
@@ -408,8 +416,20 @@ function buildDynamicSelection(
   llmStartedBySpan: ReadonlyMap<string, Array<ExplainabilityEnvelope & { record: { event: LlmRequestStartedEvent } }>>,
   llmCompletedBySpan: ReadonlyMap<string, Array<ExplainabilityEnvelope & { record: { event: LlmRequestCompletedEvent } }>>,
 ): DynamicSelectionBuild | undefined {
-  const completed = last(completions)
-  const latestSignal = last([...starts, ...waves, ...attempts].sort(bySequence))
+  if (queryRootSpan === undefined) return undefined
+  const rootStarts = starts.filter((event) => event.record.parent_span_id === queryRootSpan)
+  const rootWaves = waves.filter((event) => event.record.parent_span_id === queryRootSpan)
+  const rootSelectionSpans = new Set([...rootStarts, ...rootWaves].map((event) => event.record.span_id))
+  const rootAttempts = attempts.filter((event) => rootSelectionSpans.has(event.record.parent_span_id ?? ""))
+  const completed = [...completions].reverse().find((candidate) => {
+    if (candidate.record.parent_span_id !== queryRootSpan) return false
+    const candidateStart = last(rootStarts.filter((event) => event.record.span_id === candidate.record.span_id
+      && event.record.parent_span_id === candidate.record.parent_span_id
+      && event.sequence < candidate.sequence))
+    return candidateStart !== undefined && candidate.record.event.ratings.every((rating) =>
+      rating.threshold_passed === (rating.selected_rating >= candidateStart.record.event.threshold))
+  })
+  const latestSignal = last([...rootStarts, ...rootWaves, ...rootAttempts].sort(bySequence))
   const selectionSpan = completed?.record.span_id
     ?? (latestSignal?.record.event.type === "dynamic_community_rating_attempt_started"
       ? latestSignal.record.parent_span_id
@@ -417,23 +437,33 @@ function buildDynamicSelection(
   if (selectionSpan === undefined) return undefined
 
   const selectionParent = completed?.record.parent_span_id
-    ?? last([...starts, ...waves]
+    ?? last([...rootStarts, ...rootWaves]
       .filter((event) => event.record.span_id === selectionSpan)
       .sort(bySequence))?.record.parent_span_id
   const upperBound = completed?.sequence ?? Number.POSITIVE_INFINITY
-  const started = last(starts.filter((event) => event.record.span_id === selectionSpan
+  const started = last(rootStarts.filter((event) => event.record.span_id === selectionSpan
     && event.record.parent_span_id === selectionParent
     && event.sequence < upperBound))
   const lowerBound = started?.sequence ?? Number.NEGATIVE_INFINITY
-  const canonicalWaves = waves.filter((event) => event.record.span_id === selectionSpan
+  const matchingWaves = rootWaves.filter((event) => event.record.span_id === selectionSpan
     && event.record.parent_span_id === selectionParent
     && event.sequence > lowerBound
     && event.sequence < upperBound)
+  const latestWaveByIndex = new Map<number, ExplainabilityEnvelope & { record: { event: DynamicCommunityTraversalWaveStartedEvent } }>()
+  for (const wave of matchingWaves) latestWaveByIndex.set(wave.record.event.wave_index, wave)
+  const canonicalWaves = [...latestWaveByIndex.values()].sort(bySequence)
+  const canonicalCommunityIds = new Set(canonicalWaves.flatMap((wave) => wave.record.event.community_ids))
+  const finalReports = new Map(completed?.record.event.ratings.map((rating) => [rating.community_id, rating.report_id]) ?? [])
   const latestAttemptByIdentity = new Map<string, ExplainabilityEnvelope & { record: { event: DynamicCommunityRatingAttemptStartedEvent } }>()
-  for (const attempt of attempts) {
+  for (const attempt of rootAttempts) {
     if (attempt.record.parent_span_id !== selectionSpan
       || attempt.sequence <= lowerBound
       || attempt.sequence >= upperBound) continue
+    if (canonicalWaves.length > 0 && !canonicalCommunityIds.has(attempt.record.event.community_id)) continue
+    if (started !== undefined && attempt.record.event.repeat_count !== started.record.event.num_repeats) continue
+    const finalReportId = finalReports.get(attempt.record.event.community_id)
+    if (completed !== undefined
+      && (finalReportId === undefined || finalReportId !== attempt.record.event.report_id)) continue
     const identity = dynamicAttemptIdentity(attempt.record.event.community_id, attempt.record.event.repeat_index)
     latestAttemptByIdentity.set(identity, attempt)
   }
