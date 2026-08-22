@@ -137,6 +137,135 @@ export interface LlmRequestCompletedEvent extends GenericExplainabilityEventPayl
   response?: string
 }
 
+export interface DriftHydeStartedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_hyde_started"
+  template_report_id: string
+  template_short_id: string
+  template_community_id: string
+  template_index: number
+  report_count: number
+}
+
+export interface DriftHydeCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_hyde_completed"
+  used_original_query: boolean
+}
+
+export interface DriftRankedReportEvidence {
+  report_id: string
+  short_id: string
+  community_id: string
+  similarity: number
+  rank: number
+}
+
+export interface DriftReportsRankedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_reports_ranked"
+  reports: DriftRankedReportEvidence[]
+}
+
+export interface DriftPrimerStartedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_primer_started"
+  fold_count: number
+  ranked_report_count: number
+}
+
+export interface DriftPrimerFoldStartedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_primer_fold_started"
+  fold_index: number
+  fold_count: number
+  report_ids: string[]
+}
+
+export interface DriftPrimerFoldCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_primer_fold_completed"
+  fold_index: number
+  score: number
+  follow_up_count: number
+  intermediate_answer?: string
+  follow_up_queries?: string[]
+}
+
+export interface DriftPrimerCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_primer_completed"
+  score: number
+  root_action_id: number
+  follow_up_count: number
+  follow_up_action_ids: number[]
+  answer?: string
+  follow_up_queries?: string[]
+}
+
+export interface DriftExplorationStartedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_exploration_started"
+  max_depth: number
+  selection_limit: number
+  root_action_id: number
+}
+
+export interface DriftDepthActionsSelectedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_depth_actions_selected"
+  depth_index: number
+  candidate_action_ids: number[]
+  selected_action_ids: number[]
+  selection_limit: number
+}
+
+export interface DriftActionAttemptStartedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_action_attempt_started"
+  depth_index: number
+  action_id: number
+  query?: string
+}
+
+export interface DriftActionContextBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "drift_action_context_built"
+  action_id: number
+  context?: string
+}
+
+export interface DriftActionAttemptCompletedEvent extends GenericExplainabilityEventPayload {
+  type: "drift_action_attempt_completed"
+  depth_index: number
+  action_id: number
+  answer_present: boolean
+  answer_non_empty: boolean
+  score?: number
+  follow_up_count: number
+  target_action_ids: number[]
+  answer?: string
+  follow_up_queries?: string[]
+}
+
+export interface DriftReduceContextBuiltEvent extends GenericExplainabilityEventPayload {
+  type: "drift_reduce_context_built"
+  node_count: number
+  edge_count: number
+  included_answer_count: number
+  included_action_ids: number[]
+  state_context?: string
+  reduce_context?: string
+}
+
+export type DriftExplainabilityEventPayload =
+  | DriftHydeStartedEvent
+  | DriftHydeCompletedEvent
+  | DriftReportsRankedEvent
+  | DriftPrimerStartedEvent
+  | DriftPrimerFoldStartedEvent
+  | DriftPrimerFoldCompletedEvent
+  | DriftPrimerCompletedEvent
+  | DriftExplorationStartedEvent
+  | DriftDepthActionsSelectedEvent
+  | DriftActionAttemptStartedEvent
+  | DriftActionContextBuiltEvent
+  | DriftActionAttemptCompletedEvent
+  | DriftReduceContextBuiltEvent
+  | EmbeddingStartedEvent
+  | EmbeddingCompletedEvent
+  | LlmRequestStartedEvent
+  | LlmRequestCompletedEvent
+
 export interface GlobalContextBuiltEvent extends GenericExplainabilityEventPayload {
   type: "global_context_built"
   batch_count: number
@@ -270,7 +399,7 @@ export type BasicExplainabilityEventPayload =
   | LlmRequestStartedEvent
   | LlmRequestCompletedEvent
 
-export type KnownExplainabilityEventPayload = QueryStartedEvent | BasicExplainabilityEventPayload | GlobalExplainabilityEventPayload
+export type KnownExplainabilityEventPayload = QueryStartedEvent | BasicExplainabilityEventPayload | GlobalExplainabilityEventPayload | DriftExplainabilityEventPayload
 
 export type ExplainabilityEventPayload = KnownExplainabilityEventPayload | GenericExplainabilityEventPayload
 

@@ -1227,6 +1227,20 @@ pub enum ExplainabilityEvent {
     ContextSectionBuilt(ContextSectionBuilt),
     ContextCompleted(ContextCompleted),
 
+    DriftHydeStarted(DriftHydeStarted),
+    DriftHydeCompleted(DriftHydeCompleted),
+    DriftReportsRanked(DriftReportsRanked),
+    DriftPrimerStarted(DriftPrimerStarted),
+    DriftPrimerFoldStarted(DriftPrimerFoldStarted),
+    DriftPrimerFoldCompleted(DriftPrimerFoldCompleted),
+    DriftPrimerCompleted(DriftPrimerCompleted),
+    DriftExplorationStarted(DriftExplorationStarted),
+    DriftDepthActionsSelected(DriftDepthActionsSelected),
+    DriftActionAttemptStarted(DriftActionAttemptStarted),
+    DriftActionContextBuilt(DriftActionContextBuilt),
+    DriftActionAttemptCompleted(DriftActionAttemptCompleted),
+    DriftReduceContextBuilt(DriftReduceContextBuilt),
+
     LlmRequestStarted(LlmRequestStarted),
     LlmRequestCompleted(LlmRequestCompleted),
 
@@ -1234,10 +1248,9 @@ pub enum ExplainabilityEvent {
 }
 ```
 
-当前 Query runtime 已接入 Local、Static Global、Dynamic Global 与 Basic；后续扩展：
+当前 Query runtime 已接入 Local、Static Global、Dynamic Global、Basic 与 DRIFT；后续扩展：
 
-* DRIFT；
-  -Index；
+* Index；
   -Update；
   -Prompt Tune。
 
@@ -1717,15 +1730,15 @@ Local streaming 只包装共享的 completion event stream：Context、Token、C
 不在 Drop 中执行异步工作、不 spawn 隐藏任务，Run 暂时保持未完成，等待后续 Store/Studio
 阶段通过超时或 abandoned 状态处理。
 
-Core runtime 当前完整接入 Local Query、static Global、Dynamic Global 与 Basic Query
-Explainability。DRIFT 即使收到请求配置也保持安全 no-op，不会创建缺失关键 evidence 的半截
-Run。Local tracing topology 保持不变；Global 与 Basic 仅接入 Explainability，不扩展
+Core runtime 当前完整接入 Local Query、static Global、Dynamic Global、Basic Query 与 DRIFT
+Explainability。Local tracing topology 保持不变；Global、Basic 与 DRIFT 仅接入 Explainability，不扩展
 OpenTelemetry。
 JSONL Recorder、Store、SQLite、bounded persistence writer、每 Run sequence allocator、Live Hub、
 host-side Explainability SSE、Studio Local Query API、Query Result、Run metadata、Run history API、
 Query-visible Graph Explorer API 与浏览器 Frontend MVP 已实现；Turso、DuckDB 和 Global Studio
-Semantic Timeline 已实现；Turso 与 DuckDB 仍属于后续阶段。Studio Query composer 当前仍只开放 Local，因此对 Basic、
-Global 与 DRIFT 返回 422；这不限制 Core/CLI 对 Global 与 Basic Explainability 的支持。
+Semantic Timeline（含 DRIFT Action Graph）已实现；Turso 与 DuckDB 仍属于后续阶段。Studio Query
+composer 当前仍只开放 Local，因此对 Basic、Global 与 DRIFT 返回 422；这不限制 Core/CLI 对全部
+Query 方法 Explainability 的支持。
 
 Global 的 request-scoped topology 与真实 selection/fan-out/fan-in 如下；Static Global 不发出
 optional selection span 下的任何事件。每个 rating repeat 与 Map batch 都有独立 ID，持久化
@@ -1771,19 +1784,18 @@ Explainability envelopes
           ▼
  QueryStarted.method dispatcher
           │
-    ┌──────────────┼──────────────┐
-    ▼              ▼              ▼
- Local builder  Global builder  Basic builder
-    │              │              │
-    │              ├─ Community   ├─ Text Retrieval
-    │              │  Selection   ├─ Context Assembly
-    │              │ （仅 Dynamic）└─ Answer Generation
-    │              ├─ Community Context
-    │              ├─ Map Analysis (batch_index stable order)
-    │              ├─ Evidence Reduction
-    │              └─ Answer Generation
-    ▼
- Entity Mapping → Graph Expansion → Context Assembly → Answer Generation
+    ┌──────┬────────┴────────┬───────┐
+    ▼      ▼                 ▼       ▼
+ Local  Global             Basic   DRIFT
+    │      │                 │       │
+    │      ├ Community       ├ Text Retrieval
+    │      │ Selection       ├ Context Assembly
+    │      │ (Dynamic only)  └ Answer Generation
+    │      ├ Community Context       ├ Primer & Ranking
+    │      ├ Map Analysis            ├ Exploration
+    │      ├ Evidence Reduction      └ Final Synthesis
+    │      └ Answer Generation
+    └ Entity Mapping → Graph Expansion → Context Assembly → Answer Generation
 ```
 
 Global exact Map/Reduce context、prompt 和 raw response 直接使用 G1 捕获字段；Preview 只是安全
@@ -1805,6 +1817,47 @@ stop 后未进入 Context，前端不重跑 token fitting。`ContextSectionBuilt
 Explainability 重新 tokenize rendered CSV；exact context 字符串直接来自真正传给 Basic prompt 的
 `context_data`。
 Empty query 通过 `BasicRetrievalSkipped(empty_query)` 明确表示 embedding 与 ANN 未发生。
+
+DRIFT 的 request-scoped topology 保留真实 fan-out / depth-wave / fan-in 结构，而不是线性 Retrieval：
+
+```text
+Query root
+├── HyDE
+├── Embedding
+├── Ranking
+├── Primer
+│   ├── fold 0
+│   ├── fold 1
+│   └── ...（并行；empty fold 合法）
+├── Exploration
+│   ├── action attempt（depth_index, action_id, span_id）
+│   ├── action attempt
+│   └── ...（同一 action_id 可跨 depth 重试）
+└── Reduce
+```
+
+HyDE template ID 直接来自本次真实随机选择；Explainability 不再次调用 RNG。每个 depth event 同时
+保存 shuffle 前的 `candidate_action_ids` 与同一次真实 shuffle + truncate 后的
+`selected_action_ids`，Studio 明确显示 “Randomly selected from incomplete actions”，不声称按 score
+选择。Primer fold 与 action attempt 均以独立 span 绑定各自 generic LLM lifecycle；fold completion
+乱序不改变 `fold_index` 身份，action provider completion 乱序不改变 selected/result ordered state
+apply。
+
+DRIFT state 是 query-identity 去重节点、每次 follow-up 都追加边的 directed multigraph。Studio 的
+Action Graph 直接消费 backend `root_action_id` / `target_action_ids`，保留 duplicate edge 与 multiple
+parents；它不是 tree，也不会投影或修改右侧 Knowledge Graph。`answer=None` 显示 Remains incomplete；
+`Some("")` 显示 Completed · empty answer；`Some("   ")` 显示 Completed 并仍可进入 Reduce，前端不
+trim。最终 included action IDs、exact `state.to_json()` 与 exact `python_list_repr()` 都直接来自
+`DriftReduceContextBuilt`，Studio 不重新筛选或拼接。
+
+DRIFT 事件是 schema version 1 的 additive variants。Metadata 只保存 stable report/community IDs、
+排名与 cosine similarity、fold/depth/action IDs、随机候选与 selected IDs、有限 score、counts、
+tokens/model/latency；query、prompts、contexts、raw/parsed responses、answers、state JSON 与 Reduce
+context 只通过统一 Content/Debug policy 捕获。Replay 使用第一个合法 root-level
+`QueryStarted(method=drift)` 作为 immutable anchor，并以第一个可信 root terminal 为 cutoff；HyDE、
+Embedding、Ranking、Primer、Exploration、Reduce 必须是 root children，fold 必须是 Primer child，
+attempt 必须是 Exploration child。同一 fold 以 `(fold_index, span_id)`、同一 attempt 以
+`(depth_index, action_id, span_id)` 绑定，duplicate/foreign/conflicting facts 留在 Diagnostics。
 
 前端可据此处理：
 
@@ -2536,8 +2589,8 @@ JsonlExplainabilityRecorder
     └── compact JSON + LF → write_all → flush
 ```
 
-`--explain-output` 当前只允许 Local Query；`--explain-content` 支持 `metadata`、`content`
-和 `debug`，省略时采用 `metadata`。CLI 在项目配置与日志初始化成功后创建 Recorder、生成
+`--explain-output` 当前允许 Basic、Local、Global（Static/Dynamic）与 DRIFT；
+`--explain-content` 支持 `metadata`、`content` 和 `debug`，省略时采用 `metadata`。CLI 在项目配置与日志初始化成功后创建 Recorder、生成
 run ID 并提交 `QueryOptions`；因此 settings、`.env` 或配置解析失败不会创建 Run。Query、
 stream 消费或 stdout 失败后，CLI 仍显式调用 `shutdown()`；Query 与 Recorder 同时失败时，
 原 Query 错误保持主错误，Recorder 错误进入不含用户内容的安全日志。
@@ -3221,8 +3274,8 @@ Explainability SSE 已用 in-memory Store、真实 Recorder/Live Hub 链路及 S
 ## 29.2 Query Chat
 
 * 输入问题；
-  -Studio composer 当前提交 Local Query；Core/CLI 已具备 Local、Static/Dynamic Global 与 Basic
-  Explainability，DRIFT deferred；
+  -Studio composer 当前提交 Local Query；Core/CLI 已具备 Local、Static/Dynamic Global、Basic 与
+  DRIFT Explainability；
   -Metadata/Content/Debug Explainability 模式；
   -异步接受 Run；
   -通过独立 Query Result API 展示最终回答；
@@ -3300,7 +3353,7 @@ HTTP request 重新读取 snapshot，当前未增加 cache。
 
 * Index 实时动画；
   -Update 实时动画；
-  -DRIFT 完整可视化；
+  -Basic/Global/DRIFT Query composer；
   -多用户权限；
   -云端同步；
   -复杂 Trace 搜索；
@@ -3411,12 +3464,11 @@ HTTP request 重新读取 snapshot，当前未增加 cache。
 ## Phase 9：后续扩展
 
 1. Basic/Global/DRIFT Query composer；
-   2.DRIFT Semantic Timeline；
-   3.Index Timeline；
-   4.Update Timeline；
-   5.Turso Store；
-   6.DuckDB Analytics；
-   7.compatible/optimized 对比。
+   2.Index Timeline；
+   3.Update Timeline；
+   4.Turso Store；
+   5.DuckDB Analytics；
+   6.compatible/optimized 对比。
 
 ### Future：Provenance Graph（V3 Phase 2，尚未实现）
 

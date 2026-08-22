@@ -8,9 +8,11 @@ import type { StreamStatus } from "@/hooks/use-explainability-stream"
 import { buildSemanticTimeline, type ExplainabilityRecordView } from "@/lib/semantic-timeline"
 import { isBasicSemanticStep } from "@/lib/semantic-basic"
 import { isGlobalSemanticStep } from "@/lib/semantic-global"
+import { isDriftSemanticStep } from "@/lib/semantic-drift"
 
 import { BasicSemanticStepCard } from "./basic-semantic-step"
 import { GlobalSemanticStepCard } from "./global-semantic-step"
+import { DriftSemanticStepCard } from "./drift-semantic-step"
 import { SemanticStepCard } from "./semantic-step"
 import { TimelineEvent } from "./timeline-event"
 
@@ -31,6 +33,8 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
       {runId !== null && envelopes.length === 0 ? <EmptyTimeline title="Waiting for explainability" detail={streamStatus === "reconnecting" ? "The live connection is reconnecting. Persisted history will be replayed." : "The Run has not emitted any events yet."} /> : null}
       {model.steps.map((step) => isGlobalSemanticStep(step)
         ? <GlobalSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
+        : isDriftSemanticStep(step)
+          ? <DriftSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : isBasicSemanticStep(step)
           ? <BasicSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : <SemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} onInspectCandidate={onInspectCandidate} />)}
