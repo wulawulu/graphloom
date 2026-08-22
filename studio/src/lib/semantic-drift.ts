@@ -214,7 +214,8 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
     else if (isDriftReportsRanked(event) && parent === rootSpan && embeddingCompleted !== undefined && envelope.sequence > embeddingCompleted.sequence && ranked === undefined) ranked = typed(envelope, event)
     else if (isDriftPrimerStarted(event) && parent === rootSpan && ranked !== undefined && envelope.sequence > ranked.sequence && primerStarted === undefined) primerStarted = typed(envelope, event)
     else if (isDriftPrimerFoldStarted(event)
-      && primerStarted?.record.span_id === parent
+      && primerStarted !== undefined
+      && primerStarted.record.span_id === parent
       && envelope.sequence > primerStarted.sequence
       && !foldStarts.has(event.fold_index)
       && !foldSpans.has(span)) {
@@ -222,15 +223,16 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
       foldSpans.add(span)
     }
     else if (isDriftPrimerFoldCompleted(event) && !foldCompletedBySpan.has(span)) foldCompletedBySpan.set(span, typed(envelope, event))
-    else if (isDriftPrimerCompleted(event) && primerStarted?.record.span_id === span && parent === rootSpan && envelope.sequence > primerStarted.sequence && primerCompleted === undefined) primerCompleted = typed(envelope, event)
+    else if (isDriftPrimerCompleted(event) && primerStarted !== undefined && primerStarted.record.span_id === span && parent === rootSpan && envelope.sequence > primerStarted.sequence && primerCompleted === undefined) primerCompleted = typed(envelope, event)
     else if (isDriftExplorationStarted(event) && parent === rootSpan && primerCompleted !== undefined && envelope.sequence > primerCompleted.sequence && event.root_action_id === primerCompleted.record.event.root_action_id && explorationStarted === undefined) explorationStarted = typed(envelope, event)
     else if (isDriftDepthActionsSelected(event)
-      && explorationStarted?.record.span_id === span
+      && explorationStarted !== undefined
+      && explorationStarted.record.span_id === span
       && parent === rootSpan
       && envelope.sequence > explorationStarted.sequence
       && event.depth_index < explorationStarted.record.event.max_depth
       && !depthSelections.has(event.depth_index)) depthSelections.set(event.depth_index, typed(envelope, event))
-    else if (isDriftActionAttemptStarted(event) && explorationStarted?.record.span_id === parent) {
+    else if (isDriftActionAttemptStarted(event) && explorationStarted !== undefined && explorationStarted.record.span_id === parent) {
       const selection = depthSelections.get(event.depth_index)
       const identity = `${event.depth_index}:${event.action_id}`
       if (selection !== undefined
