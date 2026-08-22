@@ -231,7 +231,7 @@ async fn run_fold(
         .join("\n\n");
     let prompt = render_primer_prompt(query, &report_text)?;
     let prompt_tokens = count(&*tokenizer, &prompt, "count DRIFT primer prompt")?;
-    let mut request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
+    let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
     request
         .apply_call_args(call_args)
         .and_then(|()| {
@@ -251,7 +251,10 @@ async fn run_fold(
             session.spans().primer(),
             model_id,
             prompt_tokens,
-            &prompt,
+            request
+                .messages
+                .first()
+                .map_or("", |message| message.content.as_str()),
         )
         .await;
     }

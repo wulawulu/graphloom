@@ -3530,38 +3530,37 @@ fn assert_complete_drift_explainability(sink: &RecordingExplainabilitySink) {
         })
         .expect("DRIFT Reduce context");
     assert_eq!(reduce.0.parent_span_id.as_ref(), Some(&root_span));
-    assert_eq!(reduce.1.included_action_ids, [0, 1]);
-    assert_eq!(reduce.1.included_answer_count, 2);
+    assert_eq!(reduce.1.included_action_ids(), [0, 1]);
+    assert_eq!(reduce.1.included_answer_count(), 2);
     assert_eq!(
-        reduce.1.reduce_context.as_deref(),
+        reduce.1.reduce_context(),
         Some("['Primer answer.', 'Action answer.']")
     );
     assert!(
         reduce
             .1
-            .state_context
-            .as_deref()
+            .state_context()
             .is_some_and(|value| value.contains("\"query\":\"What changed?\""))
     );
     for record in &records {
         match &record.event {
             ExplainabilityEvent::DriftHydeStarted(event) => {
                 assert_eq!(record.parent_span_id.as_ref(), Some(&root_span));
-                assert!(!event.template_report_id.is_empty());
-                assert_eq!(event.template_index, 0);
-                assert_eq!(event.report_count, 1);
+                assert!(!event.template_report_id().is_empty());
+                assert_eq!(event.template_index(), 0);
+                assert_eq!(event.report_count(), 1);
             }
             ExplainabilityEvent::DriftReportsRanked(event) => {
                 assert_eq!(record.parent_span_id.as_ref(), Some(&root_span));
-                assert_eq!(event.reports.len(), 1);
-                assert_eq!(event.reports[0].rank, 1);
-                assert!(!event.reports[0].report_id.is_empty());
+                assert_eq!(event.reports().len(), 1);
+                assert_eq!(event.reports()[0].rank, 1);
+                assert!(!event.reports()[0].report_id.is_empty());
             }
             ExplainabilityEvent::DriftPrimerFoldStarted(event) => {
                 assert_eq!(record.parent_span_id.as_ref(), Some(&primer_span));
-                assert_eq!(event.fold_index, 0);
-                assert_eq!(event.fold_count, 1);
-                assert_eq!(event.report_ids.len(), 1);
+                assert_eq!(event.fold_index(), 0);
+                assert_eq!(event.fold_count(), 1);
+                assert_eq!(event.report_ids().len(), 1);
             }
             ExplainabilityEvent::DriftActionAttemptStarted(event) => {
                 assert_eq!(record.parent_span_id.as_ref(), Some(&exploration_span));
@@ -3579,9 +3578,9 @@ fn assert_complete_drift_explainability(sink: &RecordingExplainabilitySink) {
             }
             ExplainabilityEvent::DriftActionAttemptCompleted(event) => {
                 assert_eq!(record.parent_span_id.as_ref(), Some(&exploration_span));
-                assert!(event.answer_present);
-                assert!(event.answer_non_empty);
-                assert_eq!(event.answer.as_deref(), Some("Action answer."));
+                assert!(event.answer_present());
+                assert!(event.answer_non_empty());
+                assert_eq!(event.answer(), Some("Action answer."));
             }
             _ => {}
         }

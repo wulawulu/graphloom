@@ -173,12 +173,14 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
     && envelope.record.event.method === "drift")
   if (root === undefined) return { steps: [], diagnosticEvents: ordered }
   const rootSpan = root.record.span_id
+  const runId = root.record.run_id
   const terminal = ordered.find((envelope) => envelope.sequence > root.sequence
+    && envelope.record.run_id === runId
     && envelope.record.span_id === rootSpan
     && envelope.record.parent_span_id === undefined
     && (envelope.record.event.type === "run_completed" || envelope.record.event.type === "run_failed"))
   const cutoff = terminal?.sequence ?? Number.MAX_SAFE_INTEGER
-  const claimed = new Set<number>()
+  const claimed = new Set<string>()
 
   let hydeStarted: TypedEnvelope<DriftHydeStartedEvent> | undefined
   let hydeCompleted: TypedEnvelope<DriftHydeCompletedEvent> | undefined
@@ -190,7 +192,9 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
   let explorationStarted: TypedEnvelope<DriftExplorationStartedEvent> | undefined
   let reduceBuilt: TypedEnvelope<DriftReduceContextBuiltEvent> | undefined
   const foldStarts = new Map<number, TypedEnvelope<DriftPrimerFoldStartedEvent>>()
+  const foldSpans = new Set<string>()
   const attemptStarts = new Map<string, TypedEnvelope<DriftActionAttemptStartedEvent>>()
+  const attemptIdentities = new Set<string>()
   const depthSelections = new Map<number, TypedEnvelope<DriftDepthActionsSelectedEvent>>()
   const contextsBySpan = new Map<string, TypedEnvelope<DriftActionContextBuiltEvent>>()
   const foldCompletedBySpan = new Map<string, TypedEnvelope<DriftPrimerFoldCompletedEvent>>()
@@ -199,33 +203,48 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
   const llmCompletedBySpan = new Map<string, TypedEnvelope<LlmRequestCompletedEvent>>()
 
   for (const envelope of ordered) {
-    if (envelope.sequence <= root.sequence || envelope.sequence >= cutoff) continue
+    if (envelope.sequence <= root.sequence || envelope.sequence >= cutoff || envelope.record.run_id !== runId) continue
     const event = envelope.record.event
     const parent = envelope.record.parent_span_id
     const span = envelope.record.span_id
     if (isDriftHydeStarted(event) && parent === rootSpan && hydeStarted === undefined) hydeStarted = typed(envelope, event)
-    else if (isDriftHydeCompleted(event) && hydeStarted?.record.span_id === span && parent === rootSpan && hydeCompleted === undefined) hydeCompleted = typed(envelope, event)
-    else if (isEmbeddingStarted(event) && parent === rootSpan && hydeStarted !== undefined && embeddingStarted === undefined) embeddingStarted = typed(envelope, event)
-    else if (isEmbeddingCompleted(event) && embeddingStarted?.record.span_id === span && parent === rootSpan && embeddingCompleted === undefined) embeddingCompleted = typed(envelope, event)
-    else if (isDriftReportsRanked(event) && parent === rootSpan && ranked === undefined) ranked = typed(envelope, event)
-    else if (isDriftPrimerStarted(event) && parent === rootSpan && primerStarted === undefined) primerStarted = typed(envelope, event)
+    else if (isDriftHydeCompleted(event) && hydeStarted?.record.span_id === span && parent === rootSpan && envelope.sequence > hydeStarted.sequence && hydeCompleted === undefined) hydeCompleted = typed(envelope, event)
+    else if (isEmbeddingStarted(event) && parent === rootSpan && hydeCompleted !== undefined && envelope.sequence > hydeCompleted.sequence && embeddingStarted === undefined) embeddingStarted = typed(envelope, event)
+    else if (isEmbeddingCompleted(event) && embeddingStarted?.record.span_id === span && parent === rootSpan && envelope.sequence > embeddingStarted.sequence && embeddingCompleted === undefined) embeddingCompleted = typed(envelope, event)
+    else if (isDriftReportsRanked(event) && parent === rootSpan && embeddingCompleted !== undefined && envelope.sequence > embeddingCompleted.sequence && ranked === undefined) ranked = typed(envelope, event)
+    else if (isDriftPrimerStarted(event) && parent === rootSpan && ranked !== undefined && envelope.sequence > ranked.sequence && primerStarted === undefined) primerStarted = typed(envelope, event)
     else if (isDriftPrimerFoldStarted(event)
       && primerStarted?.record.span_id === parent
+      && envelope.sequence > primerStarted.sequence
       && !foldStarts.has(event.fold_index)
-      && ![...foldStarts.values()].some((item) => item.record.span_id === span)) foldStarts.set(event.fold_index, typed(envelope, event))
+      && !foldSpans.has(span)) {
+      foldStarts.set(event.fold_index, typed(envelope, event))
+      foldSpans.add(span)
+    }
     else if (isDriftPrimerFoldCompleted(event) && !foldCompletedBySpan.has(span)) foldCompletedBySpan.set(span, typed(envelope, event))
-    else if (isDriftPrimerCompleted(event) && primerStarted?.record.span_id === span && parent === rootSpan && primerCompleted === undefined) primerCompleted = typed(envelope, event)
-    else if (isDriftExplorationStarted(event) && parent === rootSpan && explorationStarted === undefined) explorationStarted = typed(envelope, event)
+    else if (isDriftPrimerCompleted(event) && primerStarted?.record.span_id === span && parent === rootSpan && envelope.sequence > primerStarted.sequence && primerCompleted === undefined) primerCompleted = typed(envelope, event)
+    else if (isDriftExplorationStarted(event) && parent === rootSpan && primerCompleted !== undefined && envelope.sequence > primerCompleted.sequence && event.root_action_id === primerCompleted.record.event.root_action_id && explorationStarted === undefined) explorationStarted = typed(envelope, event)
     else if (isDriftDepthActionsSelected(event)
       && explorationStarted?.record.span_id === span
       && parent === rootSpan
+      && envelope.sequence > explorationStarted.sequence
+      && event.depth_index < explorationStarted.record.event.max_depth
       && !depthSelections.has(event.depth_index)) depthSelections.set(event.depth_index, typed(envelope, event))
-    else if (isDriftActionAttemptStarted(event)
-      && explorationStarted?.record.span_id === parent
-      && !attemptStarts.has(span)) attemptStarts.set(span, typed(envelope, event))
+    else if (isDriftActionAttemptStarted(event) && explorationStarted?.record.span_id === parent) {
+      const selection = depthSelections.get(event.depth_index)
+      const identity = `${event.depth_index}:${event.action_id}`
+      if (selection !== undefined
+        && envelope.sequence > selection.sequence
+        && selection.record.event.selected_action_ids.includes(event.action_id)
+        && !attemptStarts.has(span)
+        && !attemptIdentities.has(identity)) {
+        attemptStarts.set(span, typed(envelope, event))
+        attemptIdentities.add(identity)
+      }
+    }
     else if (isDriftActionContextBuilt(event) && !contextsBySpan.has(span)) contextsBySpan.set(span, typed(envelope, event))
     else if (isDriftActionAttemptCompleted(event) && !attemptCompletedBySpan.has(span)) attemptCompletedBySpan.set(span, typed(envelope, event))
-    else if (isDriftReduceContextBuilt(event) && parent === rootSpan && reduceBuilt === undefined) reduceBuilt = typed(envelope, event)
+    else if (isDriftReduceContextBuilt(event) && parent === rootSpan && explorationStarted !== undefined && envelope.sequence > explorationStarted.sequence && reduceBuilt === undefined) reduceBuilt = typed(envelope, event)
     else if (isLlmRequestStarted(event) && !llmStartedBySpan.has(span)) llmStartedBySpan.set(span, typed(envelope, event))
     else if (isLlmRequestCompleted(event) && !llmCompletedBySpan.has(span)) llmCompletedBySpan.set(span, typed(envelope, event))
   }
@@ -332,7 +351,7 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
       } },
       { id: "drift-final-synthesis", kind: "drift-final-synthesis", title: "Final Synthesis", rawEvents: synthesisRaw.sort(bySequence), focusEnvelope: null, summary: synthesisSummary },
     ],
-    diagnosticEvents: ordered.filter((envelope) => !claimed.has(envelope.sequence)),
+    diagnosticEvents: ordered.filter((envelope) => !claimed.has(envelopeKey(envelope))),
   }
 }
 
@@ -342,7 +361,7 @@ function buildFold(
   completedBySpan: ReadonlyMap<string, TypedEnvelope<DriftPrimerFoldCompletedEvent>>,
   llmStartedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestStartedEvent>>,
   llmCompletedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestCompletedEvent>>,
-  claimed: Set<number>,
+  claimed: Set<string>,
   raw: ExplainabilityEnvelope[],
 ): DriftPrimerFoldView {
   const span = started.record.span_id
@@ -376,7 +395,7 @@ function buildAttempt(
   completedBySpan: ReadonlyMap<string, TypedEnvelope<DriftActionAttemptCompletedEvent>>,
   llmStartedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestStartedEvent>>,
   llmCompletedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestCompletedEvent>>,
-  claimed: Set<number>,
+  claimed: Set<string>,
   raw: ExplainabilityEnvelope[],
 ): DriftActionAttemptView {
   const span = started.record.span_id
@@ -433,9 +452,12 @@ function buildActionGraph(
   const rootId = primer?.record.event.root_action_id
   if (rootId !== undefined) nodeQueries.set(rootId, root.record.event.query === undefined ? null : String(root.record.event.query))
   const edges: DriftEdgeView[] = []
+  const outgoingByAction = new Map<number, DriftEdgeView[]>()
   const appendEdges = (source: number, targets: readonly number[], queries: readonly string[] | null): void => {
     targets.forEach((target, index) => {
-      edges.push({ sourceActionId: source, targetActionId: target, ordinal: edges.length })
+      const edge = { sourceActionId: source, targetActionId: target, ordinal: edges.length }
+      edges.push(edge)
+      append(outgoingByAction, source, edge)
       if (!nodeQueries.has(target)) nodeQueries.set(target, queries?.[index] ?? null)
     })
   }
@@ -457,7 +479,7 @@ function buildActionGraph(
         query: nodeQueries.get(actionId) ?? lastAttempt?.query ?? null,
         status: actionId === rootId ? "root" : lastAttempt?.status ?? "not_explored",
         attempts: actionAttempts,
-        outgoingEdges: edges.filter((edge) => edge.sourceActionId === actionId),
+        outgoingEdges: outgoingByAction.get(actionId) ?? [],
       }
     }),
   }
@@ -468,7 +490,7 @@ function stageLlm(
   parent: string | undefined,
   startedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestStartedEvent>>,
   completedBySpan: ReadonlyMap<string, TypedEnvelope<LlmRequestCompletedEvent>>,
-  claimed: Set<number>,
+  claimed: Set<string>,
   raw: ExplainabilityEnvelope[],
 ): DriftLlmView & { started?: TypedEnvelope<LlmRequestStartedEvent>; completed?: TypedEnvelope<LlmRequestCompletedEvent> } {
   const span = anchor?.record.span_id
@@ -494,10 +516,14 @@ function stageLlm(
   }
 }
 
-function claim(envelope: ExplainabilityEnvelope | undefined, claimed: Set<number>, raw: ExplainabilityEnvelope[]): void {
-  if (envelope === undefined || claimed.has(envelope.sequence)) return
-  claimed.add(envelope.sequence)
+function claim(envelope: ExplainabilityEnvelope | undefined, claimed: Set<string>, raw: ExplainabilityEnvelope[]): void {
+  if (envelope === undefined || claimed.has(envelopeKey(envelope))) return
+  claimed.add(envelopeKey(envelope))
   raw.push(envelope)
+}
+
+function envelopeKey(envelope: ExplainabilityEnvelope): string {
+  return `${envelope.record.run_id}:${envelope.sequence}`
 }
 
 function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {

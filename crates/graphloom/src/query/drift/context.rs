@@ -265,7 +265,7 @@ impl DriftContextBuilder {
         }
         let prompt = hyde_prompt(query, &template.full_content);
         let prompt_tokens = count(&*self.tokenizer, &prompt, "count DRIFT HyDE prompt")?;
-        let mut request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
         request
             .apply_call_args(&self.completion_config.call_args)
             .and_then(|()| {
@@ -285,7 +285,10 @@ impl DriftContextBuilder {
                 session.root_span(),
                 &self.completion_model_id,
                 prompt_tokens,
-                &prompt,
+                request
+                    .messages
+                    .first()
+                    .map_or("", |message| message.content.as_str()),
             )
             .await;
         }

@@ -199,7 +199,7 @@ pub(crate) async fn drift_search_streaming(
         callbacks: runtime.callbacks,
         phase: DriftStreamPhase::Context,
         instrumentation,
-        reduce_started: Instant::now(),
+        reduce_started: started,
     };
     Ok(Box::pin(stream::unfold(Some(state), next_stream_event)))
 }
@@ -300,10 +300,9 @@ async fn run_depths(
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let calls = attempts
-            .clone()
-            .into_iter()
-            .map(|(action_id, query, span)| {
+        let calls = attempts.into_iter().map(|(action_id, query, span)| {
+            let result_span = span.clone();
+            async move {
                 run_action(
                     runtime,
                     original_query,
@@ -313,13 +312,16 @@ async fn run_depths(
                     explainability.cloned(),
                     span,
                 )
-            });
+                .await
+                .map(|result| (action_id, result_span, result))
+            }
+        });
         let results = crate::query::concurrency::try_buffered_ordered(
             calls,
             runtime.context.config.concurrency,
         )
         .await?;
-        for ((id, _, span), (response, metadata)) in attempts.into_iter().zip(results) {
+        for (id, span, (response, metadata)) in results {
             total += metadata.usage;
             let answer_present = response.answer.is_some();
             let answer_non_empty = response
@@ -1038,6 +1040,7 @@ async fn next_stream_event(
                     finish_drift_stream_error(state.instrumentation.clone(), &error).await;
                     return Some((Err(error), None));
                 };
+                state.reduce_started = Instant::now();
                 match state.model.stream(request).await {
                     Ok(provider) => {
                         state.provider = Some(provider);

@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest"
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { buildSemanticTimeline, type SemanticTimelineModel } from "@/lib/semantic-timeline"
 
-function envelope(sequence: number, spanId: string, event: ExplainabilityEventPayload, parentSpanId?: string): ExplainabilityEnvelope {
-  return { schema_version: 1, sequence, record: { run_id: "drift-run", timestamp: new Date(sequence * 10).toISOString(), span_id: spanId, ...(parentSpanId === undefined ? {} : { parent_span_id: parentSpanId }), event } }
+function envelope(sequence: number, spanId: string, event: ExplainabilityEventPayload, parentSpanId?: string, runId = "drift-run"): ExplainabilityEnvelope {
+  return { schema_version: 1, sequence, record: { run_id: runId, timestamp: new Date(sequence * 10).toISOString(), span_id: spanId, ...(parentSpanId === undefined ? {} : { parent_span_id: parentSpanId }), event } }
 }
 
 function fullDriftRun(): ExplainabilityEnvelope[] {
@@ -154,6 +154,9 @@ describe("DRIFT semantic timeline", () => {
     events.splice(5, 0,
       envelope(4.1, "foreign-hyde", { type: "drift_hyde_started", template_report_id: "WRONG", template_short_id: "WRONG", template_community_id: "WRONG", template_index: 0, report_count: 1 }, "foreign-root"),
       envelope(4.2, "hyde", { type: "llm_request_completed", model_id: "wrong", input_tokens: 1, output_tokens: 1, elapsed_ms: 1, response: "WRONG" }, "root"),
+      envelope(5.1, "ranking-early", { type: "drift_reports_ranked", reports: [] }, "root"),
+      envelope(7, "embedding", { type: "embedding_completed", model_id: "wrong-run", prompt_tokens: 1, dimensions: 1 }, "root", "foreign-run"),
+      envelope(24.1, "unselected-attempt", { type: "drift_action_attempt_started", depth_index: 0, action_id: 99, query: "not selected" }, "exploration"),
     )
     events.push(
       envelope(45, "late-reduce", { type: "drift_reduce_context_built", node_count: 999, edge_count: 999, included_answer_count: 0, included_action_ids: [] }, "root"),
@@ -165,7 +168,9 @@ describe("DRIFT semantic timeline", () => {
     expect(primer.summary.hyde?.templateReportId).toBe("report-stable")
     expect(primer.summary.hyde?.rawResponse).toBe("HYDE OUTPUT")
     expect(synthesis.summary.nodeCount).toBe(4)
-    expect(model.diagnosticEvents.map((item) => item.sequence)).toEqual(expect.arrayContaining([4.1, 4.2, 45, 46]))
+    expect(driftStep(model, "drift-exploration").summary.nodes.some((node) => node.actionId === 99)).toBe(false)
+    expect(model.diagnosticEvents.some((item) => item.record.run_id === "foreign-run")).toBe(true)
+    expect(model.diagnosticEvents.map((item) => item.sequence)).toEqual(expect.arrayContaining([4.1, 4.2, 5.1, 7, 24.1, 45, 46]))
   })
 
   it("returns progressive three-step models without inventing final aggregates", () => {

@@ -17,17 +17,17 @@ fn invalid(reason: &'static str) -> ExplainabilityContractError {
 pub struct DriftHydeStarted {
     /// Stable persisted [`CommunityReport`](crate::query::CommunityReport) identifier.
     #[serde(with = "super::validation::metadata_string")]
-    pub template_report_id: String,
+    template_report_id: String,
     /// Human-readable report short identifier.
     #[serde(with = "super::validation::metadata_string")]
-    pub template_short_id: String,
+    template_short_id: String,
     /// Community identifier attached to the report.
     #[serde(with = "super::validation::metadata_string")]
-    pub template_community_id: String,
+    template_community_id: String,
     /// Zero-based index selected from the real report array.
-    pub template_index: u32,
+    template_index: u32,
     /// Number of reports available to the random selection.
-    pub report_count: u32,
+    report_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +67,36 @@ impl DriftHydeStarted {
             template_index,
             report_count,
         })
+    }
+
+    /// Stable persisted report identifier.
+    #[must_use]
+    pub fn template_report_id(&self) -> &str {
+        &self.template_report_id
+    }
+
+    /// Human-readable report short identifier.
+    #[must_use]
+    pub fn template_short_id(&self) -> &str {
+        &self.template_short_id
+    }
+
+    /// Community identifier attached to the report.
+    #[must_use]
+    pub fn template_community_id(&self) -> &str {
+        &self.template_community_id
+    }
+
+    /// Zero-based selected template index.
+    #[must_use]
+    pub const fn template_index(&self) -> u32 {
+        self.template_index
+    }
+
+    /// Number of available reports.
+    #[must_use]
+    pub const fn report_count(&self) -> u32 {
+        self.report_count
     }
 }
 
@@ -118,7 +148,7 @@ pub struct DriftRankedReportEvidence {
 pub struct DriftReportsRanked {
     /// Reports in real ranking order; the frontend must not re-sort them.
     #[serde(default, with = "super::validation::drift_ranked_reports")]
-    pub reports: Vec<DriftRankedReportEvidence>,
+    reports: Vec<DriftRankedReportEvidence>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +177,12 @@ impl DriftReportsRanked {
         }
         Ok(Self { reports })
     }
+
+    /// Reports in the exact effective ranking order.
+    #[must_use]
+    pub fn reports(&self) -> &[DriftRankedReportEvidence] {
+        &self.reports
+    }
 }
 
 impl TryFrom<DriftReportsRankedWire> for DriftReportsRanked {
@@ -163,9 +199,9 @@ impl TryFrom<DriftReportsRankedWire> for DriftReportsRanked {
 #[non_exhaustive]
 pub struct DriftPrimerStarted {
     /// Number of real fold requests, including empty folds.
-    pub fold_count: u32,
+    fold_count: u32,
     /// Number of ranked reports split across the folds.
-    pub ranked_report_count: u32,
+    ranked_report_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +228,18 @@ impl DriftPrimerStarted {
             ranked_report_count,
         })
     }
+
+    /// Number of real fold requests.
+    #[must_use]
+    pub const fn fold_count(&self) -> u32 {
+        self.fold_count
+    }
+
+    /// Number of ranked reports split across folds.
+    #[must_use]
+    pub const fn ranked_report_count(&self) -> u32 {
+        self.ranked_report_count
+    }
 }
 
 impl TryFrom<DriftPrimerStartedWire> for DriftPrimerStarted {
@@ -208,12 +256,12 @@ impl TryFrom<DriftPrimerStartedWire> for DriftPrimerStarted {
 #[non_exhaustive]
 pub struct DriftPrimerFoldStarted {
     /// Zero-based fold index.
-    pub fold_index: u32,
+    fold_index: u32,
     /// Total real fold count.
-    pub fold_count: u32,
+    fold_count: u32,
     /// Stable report IDs in this fold; an empty array is valid.
     #[serde(default, with = "super::validation::record_ids")]
-    pub report_ids: Vec<String>,
+    report_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -244,6 +292,24 @@ impl DriftPrimerFoldStarted {
             report_ids,
         })
     }
+
+    /// Zero-based fold index.
+    #[must_use]
+    pub const fn fold_index(&self) -> u32 {
+        self.fold_index
+    }
+
+    /// Total real fold count.
+    #[must_use]
+    pub const fn fold_count(&self) -> u32 {
+        self.fold_count
+    }
+
+    /// Stable report IDs assigned to the fold.
+    #[must_use]
+    pub fn report_ids(&self) -> &[String] {
+        &self.report_ids
+    }
 }
 
 impl TryFrom<DriftPrimerFoldStartedWire> for DriftPrimerFoldStarted {
@@ -260,25 +326,25 @@ impl TryFrom<DriftPrimerFoldStartedWire> for DriftPrimerFoldStarted {
 #[non_exhaustive]
 pub struct DriftPrimerFoldCompleted {
     /// Zero-based fold index.
-    pub fold_index: u32,
+    fold_index: u32,
     /// Parsed finite Primer score.
-    pub score: ExplainabilityScore,
+    score: ExplainabilityScore,
     /// Number of parsed follow-up queries.
-    pub follow_up_count: u64,
+    follow_up_count: u64,
     /// Parsed intermediate answer when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_string"
     )]
-    pub intermediate_answer: Option<String>,
+    intermediate_answer: Option<String>,
     /// Parsed follow-up queries when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_strings"
     )]
-    pub follow_up_queries: Option<Vec<String>>,
+    follow_up_queries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +384,36 @@ impl DriftPrimerFoldCompleted {
             follow_up_queries,
         })
     }
+
+    /// Zero-based fold index.
+    #[must_use]
+    pub const fn fold_index(&self) -> u32 {
+        self.fold_index
+    }
+
+    /// Parsed finite Primer score.
+    #[must_use]
+    pub const fn score(&self) -> ExplainabilityScore {
+        self.score
+    }
+
+    /// Number of parsed follow-up queries.
+    #[must_use]
+    pub const fn follow_up_count(&self) -> u64 {
+        self.follow_up_count
+    }
+
+    /// Captured intermediate answer, when available.
+    #[must_use]
+    pub fn intermediate_answer(&self) -> Option<&str> {
+        self.intermediate_answer.as_deref()
+    }
+
+    /// Captured follow-up queries, when available.
+    #[must_use]
+    pub fn follow_up_queries(&self) -> Option<&[String]> {
+        self.follow_up_queries.as_deref()
+    }
 }
 
 impl TryFrom<DriftPrimerFoldCompletedWire> for DriftPrimerFoldCompleted {
@@ -340,28 +436,28 @@ impl TryFrom<DriftPrimerFoldCompletedWire> for DriftPrimerFoldCompleted {
 #[non_exhaustive]
 pub struct DriftPrimerCompleted {
     /// Backend-computed aggregate score.
-    pub score: ExplainabilityScore,
+    score: ExplainabilityScore,
     /// Root action node ID.
-    pub root_action_id: u64,
+    root_action_id: u64,
     /// Aggregate follow-up count.
-    pub follow_up_count: u64,
+    follow_up_count: u64,
     /// Target IDs in edge insertion order; duplicates are intentionally preserved.
     #[serde(default, with = "super::validation::action_ids")]
-    pub follow_up_action_ids: Vec<u64>,
+    follow_up_action_ids: Vec<u64>,
     /// Aggregate answer when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_string"
     )]
-    pub answer: Option<String>,
+    answer: Option<String>,
     /// Aggregate follow-up queries when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_strings"
     )]
-    pub follow_up_queries: Option<Vec<String>>,
+    follow_up_queries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -410,6 +506,42 @@ impl DriftPrimerCompleted {
             follow_up_queries,
         })
     }
+
+    /// Backend-computed aggregate score.
+    #[must_use]
+    pub const fn score(&self) -> ExplainabilityScore {
+        self.score
+    }
+
+    /// Root action node ID.
+    #[must_use]
+    pub const fn root_action_id(&self) -> u64 {
+        self.root_action_id
+    }
+
+    /// Aggregate follow-up count.
+    #[must_use]
+    pub const fn follow_up_count(&self) -> u64 {
+        self.follow_up_count
+    }
+
+    /// Target IDs in edge insertion order, including duplicates.
+    #[must_use]
+    pub fn follow_up_action_ids(&self) -> &[u64] {
+        &self.follow_up_action_ids
+    }
+
+    /// Captured aggregate answer, when available.
+    #[must_use]
+    pub fn answer(&self) -> Option<&str> {
+        self.answer.as_deref()
+    }
+
+    /// Captured aggregate follow-up queries, when available.
+    #[must_use]
+    pub fn follow_up_queries(&self) -> Option<&[String]> {
+        self.follow_up_queries.as_deref()
+    }
 }
 
 impl TryFrom<DriftPrimerCompletedWire> for DriftPrimerCompleted {
@@ -445,15 +577,15 @@ pub struct DriftExplorationStarted {
 #[non_exhaustive]
 pub struct DriftDepthActionsSelected {
     /// Zero-based DRIFT loop depth.
-    pub depth_index: u32,
+    depth_index: u32,
     /// Incomplete IDs before the real shuffle, in state insertion order.
     #[serde(default, with = "super::validation::action_ids")]
-    pub candidate_action_ids: Vec<u64>,
+    candidate_action_ids: Vec<u64>,
     /// IDs after the same real shuffle and truncation.
     #[serde(default, with = "super::validation::action_ids")]
-    pub selected_action_ids: Vec<u64>,
+    selected_action_ids: Vec<u64>,
     /// Configured truncation limit.
-    pub selection_limit: u64,
+    selection_limit: u64,
 }
 
 #[derive(Deserialize)]
@@ -502,6 +634,30 @@ impl DriftDepthActionsSelected {
             selected_action_ids,
             selection_limit,
         })
+    }
+
+    /// Zero-based DRIFT loop depth.
+    #[must_use]
+    pub const fn depth_index(&self) -> u32 {
+        self.depth_index
+    }
+
+    /// Incomplete IDs before the real shuffle.
+    #[must_use]
+    pub fn candidate_action_ids(&self) -> &[u64] {
+        &self.candidate_action_ids
+    }
+
+    /// IDs selected by the same real shuffle and truncation.
+    #[must_use]
+    pub fn selected_action_ids(&self) -> &[u64] {
+        &self.selected_action_ids
+    }
+
+    /// Configured truncation limit.
+    #[must_use]
+    pub const fn selection_limit(&self) -> u64 {
+        self.selection_limit
     }
 }
 
@@ -556,35 +712,35 @@ pub struct DriftActionContextBuilt {
 #[non_exhaustive]
 pub struct DriftActionAttemptCompleted {
     /// Zero-based DRIFT loop depth.
-    pub depth_index: u32,
+    depth_index: u32,
     /// Action node ID.
-    pub action_id: u64,
+    action_id: u64,
     /// Whether the parsed response contained `Some(answer)`.
-    pub answer_present: bool,
+    answer_present: bool,
     /// Whether that present answer was not the empty string; whitespace is not trimmed.
-    pub answer_non_empty: bool,
+    answer_non_empty: bool,
     /// Finite parsed action score, absent for `-inf`, `inf`, or NaN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<ExplainabilityScore>,
+    score: Option<ExplainabilityScore>,
     /// Parsed follow-up count.
-    pub follow_up_count: u64,
+    follow_up_count: u64,
     /// Applied target IDs in edge insertion order; duplicates are preserved.
     #[serde(default, with = "super::validation::action_ids")]
-    pub target_action_ids: Vec<u64>,
+    target_action_ids: Vec<u64>,
     /// Parsed answer when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_string"
     )]
-    pub answer: Option<String>,
+    answer: Option<String>,
     /// Parsed follow-up query strings when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_strings"
     )]
-    pub follow_up_queries: Option<Vec<String>>,
+    follow_up_queries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -658,6 +814,60 @@ impl DriftActionAttemptCompleted {
             follow_up_queries,
         })
     }
+
+    /// Zero-based DRIFT loop depth.
+    #[must_use]
+    pub const fn depth_index(&self) -> u32 {
+        self.depth_index
+    }
+
+    /// Action node ID.
+    #[must_use]
+    pub const fn action_id(&self) -> u64 {
+        self.action_id
+    }
+
+    /// Whether the parsed response contained an answer.
+    #[must_use]
+    pub const fn answer_present(&self) -> bool {
+        self.answer_present
+    }
+
+    /// Whether the present answer was not the empty string.
+    #[must_use]
+    pub const fn answer_non_empty(&self) -> bool {
+        self.answer_non_empty
+    }
+
+    /// Finite parsed score, if one was available.
+    #[must_use]
+    pub const fn score(&self) -> Option<ExplainabilityScore> {
+        self.score
+    }
+
+    /// Parsed follow-up count.
+    #[must_use]
+    pub const fn follow_up_count(&self) -> u64 {
+        self.follow_up_count
+    }
+
+    /// Applied target IDs, including duplicate edges.
+    #[must_use]
+    pub fn target_action_ids(&self) -> &[u64] {
+        &self.target_action_ids
+    }
+
+    /// Captured parsed answer, when available.
+    #[must_use]
+    pub fn answer(&self) -> Option<&str> {
+        self.answer.as_deref()
+    }
+
+    /// Captured parsed follow-up queries, when available.
+    #[must_use]
+    pub fn follow_up_queries(&self) -> Option<&[String]> {
+        self.follow_up_queries.as_deref()
+    }
 }
 
 impl TryFrom<DriftActionAttemptCompletedWire> for DriftActionAttemptCompleted {
@@ -684,28 +894,28 @@ impl TryFrom<DriftActionAttemptCompletedWire> for DriftActionAttemptCompleted {
 #[non_exhaustive]
 pub struct DriftReduceContextBuilt {
     /// Number of query-identity action nodes.
-    pub node_count: u64,
+    node_count: u64,
     /// Number of multigraph edges, including duplicates.
-    pub edge_count: u64,
+    edge_count: u64,
     /// Number of answers included in Reduce.
-    pub included_answer_count: u64,
+    included_answer_count: u64,
     /// Included action IDs in node insertion order.
     #[serde(default, with = "super::validation::action_ids")]
-    pub included_action_ids: Vec<u64>,
+    included_action_ids: Vec<u64>,
     /// Exact `state.to_json()` output when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_string"
     )]
-    pub state_context: Option<String>,
+    state_context: Option<String>,
     /// Exact `python_list_repr()` output when content capture is enabled.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "super::validation::optional_content_string"
     )]
-    pub reduce_context: Option<String>,
+    reduce_context: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -748,6 +958,42 @@ impl DriftReduceContextBuilt {
             state_context,
             reduce_context,
         })
+    }
+
+    /// Number of query-identity action nodes.
+    #[must_use]
+    pub const fn node_count(&self) -> u64 {
+        self.node_count
+    }
+
+    /// Number of multigraph edges, including duplicates.
+    #[must_use]
+    pub const fn edge_count(&self) -> u64 {
+        self.edge_count
+    }
+
+    /// Number of answers included in Reduce.
+    #[must_use]
+    pub const fn included_answer_count(&self) -> u64 {
+        self.included_answer_count
+    }
+
+    /// Included action IDs in node insertion order.
+    #[must_use]
+    pub fn included_action_ids(&self) -> &[u64] {
+        &self.included_action_ids
+    }
+
+    /// Exact captured state JSON, when available.
+    #[must_use]
+    pub fn state_context(&self) -> Option<&str> {
+        self.state_context.as_deref()
+    }
+
+    /// Exact captured Python-list Reduce context, when available.
+    #[must_use]
+    pub fn reduce_context(&self) -> Option<&str> {
+        self.reduce_context.as_deref()
     }
 }
 
