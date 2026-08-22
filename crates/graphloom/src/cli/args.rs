@@ -180,7 +180,7 @@ pub struct QueryArgs {
     #[arg(
         long = "explain-output",
         value_name = "EXPLAIN_OUTPUT",
-        help = "Write Local, Global, or Basic Query Explainability envelopes as JSONL."
+        help = "Write Query Explainability envelopes as JSONL."
     )]
     pub explain_output: Option<PathBuf>,
     /// Explainability content policy; valid only with `--explain-output` and defaults to metadata.
@@ -245,7 +245,6 @@ where
     let Command::Query(args) = &mut cli.command else {
         return Ok(cli);
     };
-    validate_query_explainability(args)?;
     validate_query_telemetry(args)?;
     args.explain_output = args
         .explain_output
@@ -262,20 +261,6 @@ where
         .map_err(query_path_error)?;
     writable_probe(&args.root).map_err(query_path_error)?;
     Ok(cli)
-}
-
-fn validate_query_explainability(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
-    if args.explain_output.is_some()
-        && !matches!(
-            args.method,
-            SearchMethod::Local | SearchMethod::Global | SearchMethod::Basic
-        )
-    {
-        return Err(query_path_error(
-            "--explain-output currently supports --method local, global, and basic".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_query_telemetry(args: &QueryArgs) -> std::result::Result<(), clap::Error> {
@@ -839,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_accept_explainability_for_basic_and_reject_drift() {
+    fn test_should_accept_explainability_for_basic_and_drift() {
         let fixture = TempDir::new().expect("query fixture");
         let output = fixture.path().join("basic-explainability.jsonl");
         let root = fixture.path().as_os_str();
@@ -864,7 +849,7 @@ mod tests {
         };
         assert_eq!(args.explain_output.as_deref(), Some(output.as_ref()));
 
-        let error = try_parse_cli_from_with_probe(
+        let parsed = try_parse_cli_from_with_probe(
             [
                 std::ffi::OsStr::new("graphloom"),
                 std::ffi::OsStr::new("query"),
@@ -878,13 +863,11 @@ mod tests {
             ],
             |_| Ok(()),
         )
-        .expect_err("DRIFT Explainability must remain deferred");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-        assert!(
-            error
-                .to_string()
-                .contains("--explain-output currently supports --method local, global, and basic")
-        );
+        .expect("DRIFT Explainability must be accepted");
+        let Command::Query(args) = parsed.command else {
+            panic!("expected query command");
+        };
+        assert_eq!(args.explain_output.as_deref(), Some(output.as_ref()));
     }
 
     #[test]

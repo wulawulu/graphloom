@@ -33,13 +33,13 @@ const DELIVERY_ERROR_MESSAGE: &str = "One or more explainability records could n
 const LOCAL_QUERY_ERROR_MESSAGE: &str = "Local query execution failed.";
 const GLOBAL_QUERY_ERROR_MESSAGE: &str = "Global query execution failed.";
 const BASIC_QUERY_ERROR_MESSAGE: &str = "Basic query execution failed.";
+const DRIFT_QUERY_ERROR_MESSAGE: &str = "DRIFT query execution failed.";
 
 /// Request-scoped configuration for Query Explainability.
 ///
 /// The caller owns the run identity and sink. This allows a host such as Studio to create a run,
 /// establish subscriptions, and then execute the Query with the same identity. In the current
-/// runtime supports Local, Basic, and static or Dynamic Global Search. DRIFT queries ignore this
-/// option without error until their complete evidence contract is available.
+/// runtime supports Local, Basic, static or Dynamic Global Search, and DRIFT.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct QueryExplainabilityOptions {
@@ -160,6 +160,53 @@ pub(crate) struct BasicExplainabilitySpans {
     llm: ExplainabilitySpanId,
 }
 
+#[derive(Debug)]
+pub(crate) struct DriftExplainabilitySpans {
+    hyde: ExplainabilitySpanId,
+    embedding: ExplainabilitySpanId,
+    ranking: ExplainabilitySpanId,
+    primer: ExplainabilitySpanId,
+    exploration: ExplainabilitySpanId,
+    reduce: ExplainabilitySpanId,
+}
+
+impl DriftExplainabilitySpans {
+    fn generate() -> Self {
+        Self {
+            hyde: ExplainabilitySpanId::generate(),
+            embedding: ExplainabilitySpanId::generate(),
+            ranking: ExplainabilitySpanId::generate(),
+            primer: ExplainabilitySpanId::generate(),
+            exploration: ExplainabilitySpanId::generate(),
+            reduce: ExplainabilitySpanId::generate(),
+        }
+    }
+
+    pub(crate) const fn hyde(&self) -> &ExplainabilitySpanId {
+        &self.hyde
+    }
+
+    pub(crate) const fn embedding(&self) -> &ExplainabilitySpanId {
+        &self.embedding
+    }
+
+    pub(crate) const fn ranking(&self) -> &ExplainabilitySpanId {
+        &self.ranking
+    }
+
+    pub(crate) const fn primer(&self) -> &ExplainabilitySpanId {
+        &self.primer
+    }
+
+    pub(crate) const fn exploration(&self) -> &ExplainabilitySpanId {
+        &self.exploration
+    }
+
+    pub(crate) const fn reduce(&self) -> &ExplainabilitySpanId {
+        &self.reduce
+    }
+}
+
 impl BasicExplainabilitySpans {
     fn generate() -> Self {
         Self {
@@ -242,13 +289,6 @@ impl QueryExplainabilitySession {
     }
 
     pub(crate) async fn start(options: &QueryOptions) -> Option<Arc<Self>> {
-        let supported = matches!(
-            options.method,
-            SearchMethod::Basic | SearchMethod::Local | SearchMethod::Global
-        );
-        if !supported {
-            return None;
-        }
         let session = options
             .explainability
             .as_ref()
@@ -460,9 +500,8 @@ impl QueryExplainabilitySession {
         match self.method {
             ExplainabilityQueryMethod::Global => GLOBAL_QUERY_ERROR_MESSAGE,
             ExplainabilityQueryMethod::Basic => BASIC_QUERY_ERROR_MESSAGE,
-            ExplainabilityQueryMethod::Local | ExplainabilityQueryMethod::Drift => {
-                LOCAL_QUERY_ERROR_MESSAGE
-            }
+            ExplainabilityQueryMethod::Local => LOCAL_QUERY_ERROR_MESSAGE,
+            ExplainabilityQueryMethod::Drift => DRIFT_QUERY_ERROR_MESSAGE,
         }
     }
 }
@@ -589,6 +628,46 @@ impl BasicQueryExplainability {
 }
 
 impl std::ops::Deref for BasicQueryExplainability {
+    type Target = QueryExplainabilitySession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session()
+    }
+}
+
+/// DRIFT method-specific stage spans paired with the shared Query lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) struct DriftQueryExplainability {
+    session: Arc<QueryExplainabilitySession>,
+    spans: Arc<DriftExplainabilitySpans>,
+}
+
+impl DriftQueryExplainability {
+    pub(crate) fn from_session(session: Arc<QueryExplainabilitySession>) -> Self {
+        Self {
+            session,
+            spans: Arc::new(DriftExplainabilitySpans::generate()),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &DriftExplainabilitySpans {
+        self.spans.as_ref()
+    }
+
+    pub(crate) fn session(&self) -> &QueryExplainabilitySession {
+        self.session.as_ref()
+    }
+
+    pub(crate) fn primer_fold_span(&self) -> ExplainabilitySpanId {
+        ExplainabilitySpanId::generate()
+    }
+
+    pub(crate) fn action_attempt_span(&self) -> ExplainabilitySpanId {
+        ExplainabilitySpanId::generate()
+    }
+}
+
+impl std::ops::Deref for DriftQueryExplainability {
     type Target = QueryExplainabilitySession;
 
     fn deref(&self) -> &Self::Target {

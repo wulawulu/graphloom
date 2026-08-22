@@ -83,6 +83,12 @@ pub enum ExplainabilityContractError {
     /// A Dynamic Global selected decision did not pass the configured threshold.
     #[error("Dynamic Global selected rating evidence must have passed the threshold")]
     InvalidDynamicRatingDecision,
+    /// DRIFT event metadata contradicted the real lifecycle or collection shape.
+    #[error("invalid DRIFT explainability metadata: {reason}")]
+    InvalidDriftMetadata {
+        /// Stable validation failure description without captured content.
+        reason: &'static str,
+    },
     /// A persisted envelope used a schema version this reader does not support.
     #[error("unsupported explainability schema version {actual}; expected {expected}")]
     UnsupportedSchemaVersion {

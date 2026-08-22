@@ -21,6 +21,7 @@
 //! enforce these limits.
 
 mod content_mode;
+mod drift;
 mod dto;
 mod event;
 mod jsonl;
@@ -34,6 +35,12 @@ mod store_recorder;
 mod validation;
 
 pub use content_mode::ExplainabilityContentMode;
+pub use drift::{
+    DriftActionAttemptCompleted, DriftActionAttemptStarted, DriftActionContextBuilt,
+    DriftDepthActionsSelected, DriftExplorationStarted, DriftHydeCompleted, DriftHydeStarted,
+    DriftPrimerCompleted, DriftPrimerFoldCompleted, DriftPrimerFoldStarted, DriftPrimerStarted,
+    DriftRankedReportEvidence, DriftReduceContextBuilt, DriftReportsRanked,
+};
 pub use dto::{
     ContextSectionKind, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
     ExplainabilityContextSection, ExplainabilityQueryMethod, ExplainabilityRecordType,

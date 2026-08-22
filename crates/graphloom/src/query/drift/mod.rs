@@ -2,6 +2,7 @@
 
 mod action;
 mod context;
+mod explainability;
 mod parse;
 mod primer;
 mod search;

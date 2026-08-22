@@ -9,8 +9,8 @@ use serde::{
 };
 
 use super::{
-    ContextSectionBudget, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
-    GlobalMapPointDecision, GlobalMapPointEvidence,
+    ContextSectionBudget, DriftRankedReportEvidence, DynamicCommunityRatingEvidence,
+    ExplainabilityCandidate, GlobalMapPointDecision, GlobalMapPointEvidence,
 };
 
 /// Maximum bytes for record IDs, model IDs, codes, titles, and other short metadata.
@@ -29,6 +29,8 @@ pub(crate) const MAX_CONTEXT_SECTIONS: usize = 32;
 pub(crate) const MAX_GLOBAL_MAP_POINTS: usize = 10_000;
 /// Maximum Dynamic Global communities represented by one event.
 pub(crate) const MAX_DYNAMIC_COMMUNITIES: usize = 10_000;
+/// Maximum DRIFT evidence entries in one event.
+pub(crate) const MAX_DRIFT_ITEMS: usize = 10_000;
 
 pub(crate) fn validate_dynamic_id(value: &str, label: &str) -> Result<(), String> {
     validate_string(value, MAX_METADATA_STRING_BYTES, label)?;
@@ -304,6 +306,136 @@ pub(crate) mod record_ids {
     {
         deserialize_vec::<D, BoundedString<MAX_METADATA_STRING_BYTES>, MAX_RECORD_IDS>(deserializer)
             .map(|values| values.into_iter().map(|value| value.0).collect())
+    }
+}
+
+pub(crate) mod action_ids {
+    use serde::{Deserializer, Serializer};
+
+    use super::{MAX_DRIFT_ITEMS, deserialize_vec, serialize_slice};
+
+    pub(crate) fn serialize<S>(value: &[u64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(value, serializer, MAX_DRIFT_ITEMS, "DRIFT action ID array")
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, u64, MAX_DRIFT_ITEMS>(deserializer)
+    }
+}
+
+pub(crate) mod content_strings {
+    use serde::{Deserializer, Serializer, ser::Error as _};
+
+    use super::{BoundedString, MAX_CONTENT_BYTES, MAX_DRIFT_ITEMS, deserialize_vec};
+
+    pub(crate) fn serialize<S>(value: &[String], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.len() > MAX_DRIFT_ITEMS {
+            return Err(S::Error::custom(format!(
+                "DRIFT content array exceeds {MAX_DRIFT_ITEMS} elements"
+            )));
+        }
+        for item in value {
+            super::validate_string(item, MAX_CONTENT_BYTES, "DRIFT content item")
+                .map_err(S::Error::custom)?;
+        }
+        serde::Serialize::serialize(value, serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, BoundedString<MAX_CONTENT_BYTES>, MAX_DRIFT_ITEMS>(deserializer)
+            .map(|items| items.into_iter().map(|item| item.0).collect())
+    }
+}
+
+pub(crate) mod optional_content_strings {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[allow(
+        clippy::ref_option,
+        reason = "serde `with` requires a serializer that borrows the exact Option type"
+    )]
+    pub(crate) fn serialize<S>(
+        value: &Option<Vec<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(items) => serializer.serialize_some(&ValidatedContentStrings(items)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<ContentStrings>::deserialize(deserializer).map(|value| value.map(|item| item.0))
+    }
+
+    struct ValidatedContentStrings<'a>(&'a [String]);
+
+    impl Serialize for ValidatedContentStrings<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            super::content_strings::serialize(self.0, serializer)
+        }
+    }
+
+    struct ContentStrings(Vec<String>);
+
+    impl<'de> Deserialize<'de> for ContentStrings {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            super::content_strings::deserialize(deserializer).map(Self)
+        }
+    }
+}
+
+pub(crate) mod drift_ranked_reports {
+    use serde::{Deserializer, Serializer};
+
+    use super::{DriftRankedReportEvidence, MAX_DRIFT_ITEMS, deserialize_vec, serialize_slice};
+
+    pub(crate) fn serialize<S>(
+        value: &[DriftRankedReportEvidence],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_slice(
+            value,
+            serializer,
+            MAX_DRIFT_ITEMS,
+            "DRIFT ranked report array",
+        )
+    }
+
+    pub(crate) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<DriftRankedReportEvidence>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_vec::<D, DriftRankedReportEvidence, MAX_DRIFT_ITEMS>(deserializer)
     }
 }
 

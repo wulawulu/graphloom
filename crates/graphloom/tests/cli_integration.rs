@@ -1604,26 +1604,8 @@ async fn test_should_write_standardized_local_query_log_fields() {
 }
 
 #[test]
-fn test_should_reject_invalid_query_explainability_cli_combinations() {
+fn test_should_require_explainability_output_for_content_mode() {
     let working = TempDir::new().expect("working directory");
-    let path = working.path().join("drift.jsonl");
-    let output = graphloom_command()
-        .current_dir(working.path())
-        .args([
-            "query",
-            "--method",
-            "drift",
-            "--explain-output",
-            path.to_str().expect("UTF-8 output"),
-            "question",
-        ])
-        .output()
-        .expect("invalid Explainability method");
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(normalize_cli_text(&output.stderr).contains("currently supports"));
-    assert!(!path.exists());
-
     let output = graphloom_command()
         .current_dir(working.path())
         .args(["query", "--explain-content", "debug", "question"])

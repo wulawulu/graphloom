@@ -21,8 +21,8 @@ use tracing::{Instrument, Span};
 use super::{
     QueryError, QueryOptions, QueryResult, Result, SearchMethod,
     explainability::{
-        BasicQueryExplainability, GlobalQueryExplainability, LocalQueryExplainability,
-        QueryExplainabilitySession,
+        BasicQueryExplainability, DriftQueryExplainability, GlobalQueryExplainability,
+        LocalQueryExplainability, QueryExplainabilitySession,
     },
 };
 use crate::{
@@ -316,6 +316,7 @@ enum QueryMethodExplainability {
     Basic(BasicQueryExplainability),
     Local(LocalQueryExplainability),
     Global(GlobalQueryExplainability),
+    Drift(DriftQueryExplainability),
 }
 
 impl QueryMethodExplainability {
@@ -324,6 +325,7 @@ impl QueryMethodExplainability {
             Self::Basic(handle) => handle.session(),
             Self::Local(handle) => handle.session(),
             Self::Global(handle) => handle.session(),
+            Self::Drift(handle) => handle.session(),
         }
     }
 }
@@ -332,7 +334,7 @@ impl QueryInstrumentation {
     /// Start supported observability channels for one Query request.
     ///
     /// Local Search may start tracing and Explainability. Basic plus static and Dynamic Global
-    /// Search may start Explainability only. DRIFT currently starts neither channel.
+    /// Search and DRIFT may start Explainability only.
     /// No request-scoped channel is cached on the runtime.
     pub(crate) async fn start(options: &QueryOptions, streaming: bool) -> Option<Self> {
         let explainability = match options.method {
@@ -348,7 +350,10 @@ impl QueryInstrumentation {
                 .await
                 .map(GlobalQueryExplainability::from_session)
                 .map(QueryMethodExplainability::Global),
-            SearchMethod::Drift => None,
+            SearchMethod::Drift => QueryExplainabilitySession::start(options)
+                .await
+                .map(DriftQueryExplainability::from_session)
+                .map(QueryMethodExplainability::Drift),
         };
         let trace = (options.method == SearchMethod::Local)
             .then(|| QueryTraceSession::start(options, streaming))
@@ -373,6 +378,7 @@ impl QueryInstrumentation {
             Some(QueryMethodExplainability::Local(handle)) => Some(handle),
             Some(QueryMethodExplainability::Basic(_))
             | Some(QueryMethodExplainability::Global(_))
+            | Some(QueryMethodExplainability::Drift(_))
             | None => None,
         }
     }
@@ -383,6 +389,7 @@ impl QueryInstrumentation {
             Some(QueryMethodExplainability::Global(handle)) => Some(handle),
             Some(QueryMethodExplainability::Basic(_))
             | Some(QueryMethodExplainability::Local(_))
+            | Some(QueryMethodExplainability::Drift(_))
             | None => None,
         }
     }
@@ -392,6 +399,18 @@ impl QueryInstrumentation {
         match self.explainability.as_ref() {
             Some(QueryMethodExplainability::Basic(handle)) => Some(handle),
             Some(QueryMethodExplainability::Local(_))
+            | Some(QueryMethodExplainability::Global(_))
+            | Some(QueryMethodExplainability::Drift(_))
+            | None => None,
+        }
+    }
+
+    /// Borrow DRIFT Explainability, when enabled.
+    pub(crate) fn drift_explainability(&self) -> Option<&DriftQueryExplainability> {
+        match self.explainability.as_ref() {
+            Some(QueryMethodExplainability::Drift(handle)) => Some(handle),
+            Some(QueryMethodExplainability::Basic(_))
+            | Some(QueryMethodExplainability::Local(_))
             | Some(QueryMethodExplainability::Global(_))
             | None => None,
         }

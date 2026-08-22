@@ -237,7 +237,13 @@ async fn query_loaded_with_session(
         }
         SearchMethod::Drift => {
             let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;
-            Ok(run_drift(runtime, &options.query, &options.response_type).await?)
+            Ok(run_drift(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
     }
 }
@@ -299,7 +305,13 @@ async fn query_loaded_stream_with_session(
         }
         SearchMethod::Drift => {
             let runtime = crate::query::QueryRuntimeFactory::build_drift(project, options).await?;
-            Ok(run_drift_streaming(runtime, &options.query, &options.response_type).await?)
+            Ok(run_drift_streaming(
+                runtime,
+                &options.query,
+                &options.response_type,
+                instrumentation,
+            )
+            .await?)
         }
     }
 }

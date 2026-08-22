@@ -3179,28 +3179,25 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         SearchMethod::Drift,
     );
     let non_stream_callbacks = Arc::new(RecordingQueryCallbacks::default());
-    let ignored_explainability = Arc::new(RecordingExplainabilitySink::default());
     let mut non_stream_options = options.clone();
     non_stream_options
         .callbacks
         .push(non_stream_callbacks.clone());
-    non_stream_options.explainability = Some(QueryExplainabilityOptions::new(
-        "ignored-drift".parse().expect("DRIFT run id"),
-        ExplainabilityContentMode::Debug,
-        ignored_explainability.clone(),
-    ));
 
     non_stream_options.method = SearchMethod::Basic;
     let result = drift_search(fixture.config.clone(), non_stream_options)
         .await
         .expect("method-specific DRIFT Query");
-    assert!(ignored_explainability.records().is_empty());
-    assert_eq!(
-        ignored_explainability.finish_calls.load(Ordering::SeqCst),
-        0
-    );
     let method_request_bodies = recorded_request_bodies(&server).await;
-    let unified_result = query(fixture.config.clone(), options.clone())
+    let non_stream_explainability = Arc::new(RecordingExplainabilitySink::default());
+    let explained_options = options
+        .clone()
+        .with_explainability(QueryExplainabilityOptions::new(
+            "drift-non-stream".parse().expect("DRIFT run id"),
+            ExplainabilityContentMode::Content,
+            non_stream_explainability.clone(),
+        ));
+    let unified_result = query(fixture.config.clone(), explained_options)
         .await
         .expect("unified DRIFT Query");
     let all_non_stream_request_bodies = recorded_request_bodies(&server).await;
@@ -3216,6 +3213,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         format!("{:?}", unified_result.context),
         format!("{:?}", result.context)
     );
+    assert_complete_drift_explainability(&non_stream_explainability);
 
     assert_eq!(result.response, "DRIFT final.");
     assert_eq!(
@@ -3268,8 +3266,14 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
     assert_ne!(non_stream_payloads[0], *reduce_context);
 
     let callbacks = Arc::new(RecordingQueryCallbacks::default());
+    let stream_explainability = Arc::new(RecordingExplainabilitySink::default());
     let mut stream_options = options;
     stream_options.callbacks.push(callbacks.clone());
+    stream_options.explainability = Some(QueryExplainabilityOptions::new(
+        "drift-stream".parse().expect("DRIFT stream run id"),
+        ExplainabilityContentMode::Content,
+        stream_explainability.clone(),
+    ));
     let mut events = query_stream(fixture.config.clone(), stream_options)
         .await
         .expect("DRIFT stream");
@@ -3300,6 +3304,7 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
         format!("{:?}", completed.context),
         format!("{:?}", result.context)
     );
+    assert_complete_drift_explainability(&stream_explainability);
     {
         let callback_events = callbacks.events.lock().expect("DRIFT callbacks");
         assert_eq!(
@@ -3452,6 +3457,136 @@ async fn test_should_run_drift_api_and_stream_only_final_reduce_tokens_read_only
             .as_str()
             .is_some_and(|content| content.contains(reduce_context))
     }));
+}
+
+fn assert_complete_drift_explainability(sink: &RecordingExplainabilitySink) {
+    let records = sink.records();
+    assert!(matches!(
+        records.first().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunStarted(_))
+    ));
+    assert!(matches!(
+        records.get(1).map(|record| &record.event),
+        Some(ExplainabilityEvent::QueryStarted(event))
+            if event.method == ExplainabilityQueryMethod::Drift
+    ));
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::DriftHydeStarted(_)))
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record.event, ExplainabilityEvent::DriftPrimerCompleted(_)))
+    );
+    assert!(records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DriftDepthActionsSelected(_)
+    )));
+    assert!(records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DriftActionAttemptCompleted(_)
+    )));
+    assert!(records.iter().any(|record| matches!(
+        record.event,
+        ExplainabilityEvent::DriftReduceContextBuilt(_)
+    )));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(ExplainabilityEvent::RunCompleted(_))
+    ));
+    let root_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::QueryStarted(_))
+                .then(|| record.span_id.clone())
+        })
+        .expect("DRIFT root span");
+    let primer_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, ExplainabilityEvent::DriftPrimerStarted(_))
+                .then(|| record.span_id.clone())
+        })
+        .expect("DRIFT Primer span");
+    let exploration_span = records
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.event,
+                ExplainabilityEvent::DriftExplorationStarted(_)
+            )
+            .then(|| record.span_id.clone())
+        })
+        .expect("DRIFT Exploration span");
+    let reduce = records
+        .iter()
+        .find_map(|record| {
+            let ExplainabilityEvent::DriftReduceContextBuilt(event) = &record.event else {
+                return None;
+            };
+            Some((record, event))
+        })
+        .expect("DRIFT Reduce context");
+    assert_eq!(reduce.0.parent_span_id.as_ref(), Some(&root_span));
+    assert_eq!(reduce.1.included_action_ids, [0, 1]);
+    assert_eq!(reduce.1.included_answer_count, 2);
+    assert_eq!(
+        reduce.1.reduce_context.as_deref(),
+        Some("['Primer answer.', 'Action answer.']")
+    );
+    assert!(
+        reduce
+            .1
+            .state_context
+            .as_deref()
+            .is_some_and(|value| value.contains("\"query\":\"What changed?\""))
+    );
+    for record in &records {
+        match &record.event {
+            ExplainabilityEvent::DriftHydeStarted(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&root_span));
+                assert!(!event.template_report_id.is_empty());
+                assert_eq!(event.template_index, 0);
+                assert_eq!(event.report_count, 1);
+            }
+            ExplainabilityEvent::DriftReportsRanked(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&root_span));
+                assert_eq!(event.reports.len(), 1);
+                assert_eq!(event.reports[0].rank, 1);
+                assert!(!event.reports[0].report_id.is_empty());
+            }
+            ExplainabilityEvent::DriftPrimerFoldStarted(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&primer_span));
+                assert_eq!(event.fold_index, 0);
+                assert_eq!(event.fold_count, 1);
+                assert_eq!(event.report_ids.len(), 1);
+            }
+            ExplainabilityEvent::DriftActionAttemptStarted(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&exploration_span));
+                assert_eq!(event.depth_index, 0);
+                assert_eq!(event.query.as_deref(), Some("Who?"));
+            }
+            ExplainabilityEvent::DriftActionContextBuilt(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&exploration_span));
+                assert!(
+                    event
+                        .context
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                );
+            }
+            ExplainabilityEvent::DriftActionAttemptCompleted(event) => {
+                assert_eq!(record.parent_span_id.as_ref(), Some(&exploration_span));
+                assert!(event.answer_present);
+                assert!(event.answer_non_empty);
+                assert_eq!(event.answer.as_deref(), Some("Action answer."));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(sink.finish_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

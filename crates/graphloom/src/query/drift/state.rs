@@ -14,6 +14,12 @@ pub(super) struct DriftEdge {
     pub(super) weight: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DriftStateApplyOutcome {
+    pub(super) action_id: usize,
+    pub(super) target_action_ids: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct DriftQueryState {
     nodes: Vec<DriftAction>,
@@ -28,19 +34,25 @@ impl DriftQueryState {
         answer: String,
         score: f64,
         followups: &[String],
-    ) {
+    ) -> DriftStateApplyOutcome {
         let root = self.add_or_get(query);
         if let Some(action) = self.nodes.get_mut(root) {
             action.answer = Some(answer);
             action.score = score;
         }
+        let mut target_action_ids = Vec::with_capacity(followups.len());
         for followup in followups {
             let target = self.add_or_get(followup.clone());
+            target_action_ids.push(target);
             self.edges.push(DriftEdge {
                 source: root,
                 target,
                 weight: 1.0,
             });
+        }
+        DriftStateApplyOutcome {
+            action_id: root,
+            target_action_ids,
         }
     }
 
@@ -61,7 +73,7 @@ impl DriftQueryState {
         id: usize,
         response: DriftActionResponse,
         metadata: DriftActionMetadata,
-    ) -> Result<()> {
+    ) -> Result<DriftStateApplyOutcome> {
         let action = self
             .nodes
             .get_mut(id)
@@ -73,22 +85,32 @@ impl DriftQueryState {
         action.answer = response.answer;
         action.score = response.score;
         action.metadata = metadata;
+        let mut target_action_ids = Vec::with_capacity(response.follow_up_queries.len());
         for followup in response.follow_up_queries {
             let target = self.add_or_get(followup);
+            target_action_ids.push(target);
             self.edges.push(DriftEdge {
                 source: id,
                 target,
                 weight: 1.0,
             });
         }
-        Ok(())
+        Ok(DriftStateApplyOutcome {
+            action_id: id,
+            target_action_ids,
+        })
     }
 
-    pub(super) fn reduce_answers(&self) -> Vec<&str> {
+    pub(super) fn reduce_entries(&self) -> Vec<(usize, &str)> {
         self.nodes
             .iter()
-            .filter_map(|action| action.answer.as_deref())
-            .filter(|answer| !answer.is_empty())
+            .filter_map(|action| {
+                action
+                    .answer
+                    .as_deref()
+                    .filter(|answer| !answer.is_empty())
+                    .map(|answer| (action.id, answer))
+            })
             .collect()
     }
 
@@ -100,6 +122,10 @@ impl DriftQueryState {
         let mut edges = self.edges.iter().enumerate().collect::<Vec<_>>();
         edges.sort_by_key(|(position, edge)| (edge.source, *position));
         edges.into_iter().map(|(_, edge)| edge).collect()
+    }
+
+    pub(super) const fn edge_count(&self) -> usize {
+        self.edges.len()
     }
 
     pub(super) fn to_json(&self) -> Result<String> {
@@ -154,7 +180,7 @@ mod tests {
     #[test]
     fn test_should_preserve_query_identity_and_multiple_edges() {
         let mut state = DriftQueryState::default();
-        state.add_root(
+        let outcome = state.add_root(
             "root".to_owned(),
             "answer".to_owned(),
             50.0,
@@ -164,6 +190,37 @@ mod tests {
         assert_eq!(state.nodes.len(), 2);
         assert_eq!(state.edges.len(), 2);
         assert_eq!(state.edges[0].target, state.edges[1].target);
+        assert_eq!(outcome.target_action_ids, [1, 1]);
+    }
+
+    #[test]
+    fn test_should_preserve_shared_query_node_with_multiple_parents() {
+        let mut state = DriftQueryState::default();
+        state.add_root(
+            "root".to_owned(),
+            "answer".to_owned(),
+            50.0,
+            &["parent-a".to_owned(), "parent-b".to_owned()],
+        );
+        for id in [1, 2] {
+            let outcome = state
+                .apply(
+                    id,
+                    DriftActionResponse {
+                        answer: Some(format!("answer-{id}")),
+                        score: 40.0,
+                        follow_up_queries: vec!["shared".to_owned()],
+                    },
+                    DriftActionMetadata::default(),
+                )
+                .expect("apply shared follow-up");
+            assert_eq!(outcome.target_action_ids, [3]);
+        }
+
+        assert_eq!(state.nodes.len(), 4);
+        assert_eq!(state.edges[2].source, 1);
+        assert_eq!(state.edges[3].source, 2);
+        assert_eq!(state.edges[2].target, state.edges[3].target);
     }
 
     #[test]
@@ -203,7 +260,7 @@ mod tests {
             .expect("apply empty completed answer");
 
         assert!(state.incomplete_ids().is_empty());
-        assert!(state.reduce_answers().is_empty());
+        assert!(state.reduce_entries().is_empty());
         let value: Value =
             serde_json::from_str(&state.to_json().expect("state JSON")).expect("valid JSON");
         assert_eq!(value["nodes"][0]["answer"], "");
@@ -236,7 +293,12 @@ mod tests {
         }
 
         assert_eq!(state.incomplete_ids(), [none]);
-        assert_eq!(state.reduce_answers(), ["   ", "real answer"]);
+        let answers = state
+            .reduce_entries()
+            .into_iter()
+            .map(|(_, answer)| answer)
+            .collect::<Vec<_>>();
+        assert_eq!(answers, ["   ", "real answer"]);
     }
 
     #[test]

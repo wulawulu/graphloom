@@ -1,15 +1,25 @@
 //! DRIFT primer folds and structured completions.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
 use serde_json::json;
 
 use super::{
     context::{RankedReport, count},
+    explainability::{emit_llm_completed, emit_llm_started},
     parse::{PrimerResponse, parse_primer},
 };
-use crate::query::{QueryError, QueryUsageCategory, Result, SearchMethod};
+use crate::{
+    explainability::{
+        DriftPrimerFoldCompleted, DriftPrimerFoldStarted, DriftPrimerStarted, ExplainabilityEvent,
+        ExplainabilityScore,
+    },
+    query::{
+        QueryError, QueryUsageCategory, Result, SearchMethod,
+        explainability::DriftQueryExplainability,
+    },
+};
 
 // Fixed against GraphRAG 3.1.0:
 // graphrag/prompts/query/drift_search_system_prompt.py::DRIFT_PRIMER_PROMPT.
@@ -65,17 +75,48 @@ pub(super) async fn run_primer(
     query: &str,
     folds: usize,
     resources: PrimerResources<'_>,
+    explainability: Option<DriftQueryExplainability>,
 ) -> Result<PrimerAggregate> {
     let splits = array_split(reports, folds);
+    if let Some(session) = explainability.as_ref() {
+        let values = (
+            session.usize_to_u32(splits.len()),
+            session.usize_to_u32(reports.len()),
+        );
+        if let (Some(fold_count), Some(ranked_report_count)) = values {
+            session
+                .emit_contract(
+                    session.spans().primer(),
+                    Some(session.root_span()),
+                    DriftPrimerStarted::try_new(fold_count, ranked_report_count)
+                        .map(ExplainabilityEvent::DriftPrimerStarted),
+                )
+                .await;
+        }
+    }
+    let fold_count = splits.len();
     let calls = splits.into_iter().enumerate().map(|(index, fold)| {
         let model = Arc::clone(&resources.model);
         let tokenizer = Arc::clone(&resources.tokenizer);
         let model_id = resources.model_id.to_owned();
         let call_args = resources.model_config.call_args.clone();
         let query = query.to_owned();
+        let explainability = explainability.clone();
+        let span = explainability
+            .as_ref()
+            .map(DriftQueryExplainability::primer_fold_span);
         async move {
             run_fold(
-                index, &fold, &query, model, &model_id, &call_args, tokenizer,
+                index,
+                fold_count,
+                &fold,
+                &query,
+                model,
+                &model_id,
+                &call_args,
+                tokenizer,
+                explainability.as_ref(),
+                span.as_ref(),
             )
             .await
         }
@@ -143,15 +184,46 @@ fn array_split<T: Clone>(items: &[T], folds: usize) -> Vec<Vec<T>> {
         .collect()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the existing Primer request inputs remain explicit; the two optional explainability \
+              arguments are a no-op sidecar"
+)]
 async fn run_fold(
-    _index: usize,
+    index: usize,
+    fold_count: usize,
     reports: &[RankedReport],
     query: &str,
     model: Arc<dyn CompletionModel>,
     model_id: &str,
     call_args: &BTreeMap<String, serde_json::Value>,
     tokenizer: Arc<dyn Tokenizer>,
+    explainability: Option<&DriftQueryExplainability>,
+    span: Option<&crate::explainability::ExplainabilitySpanId>,
 ) -> Result<(PrimerResponse, QueryUsageCategory)> {
+    if let (Some(session), Some(span)) = (explainability, span) {
+        let values = (
+            session.usize_to_u32(index),
+            session.usize_to_u32(fold_count),
+        );
+        if let (Some(fold_index), Some(fold_count)) = values {
+            session
+                .emit_contract(
+                    span,
+                    Some(session.spans().primer()),
+                    DriftPrimerFoldStarted::try_new(
+                        fold_index,
+                        fold_count,
+                        reports
+                            .iter()
+                            .map(|report| report.report_id.clone())
+                            .collect(),
+                    )
+                    .map(ExplainabilityEvent::DriftPrimerFoldStarted),
+                )
+                .await;
+        }
+    }
     let report_text = reports
         .iter()
         .map(|report| report.full_content.as_str())
@@ -159,7 +231,7 @@ async fn run_fold(
         .join("\n\n");
     let prompt = render_primer_prompt(query, &report_text)?;
     let prompt_tokens = count(&*tokenizer, &prompt, "count DRIFT primer prompt")?;
-    let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
+    let mut request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
     request
         .apply_call_args(call_args)
         .and_then(|()| {
@@ -172,6 +244,18 @@ async fn run_fold(
             operation: "build DRIFT primer completion request",
             message: source.to_string(),
         })?;
+    if let (Some(session), Some(span)) = (explainability, span) {
+        emit_llm_started(
+            Some(session),
+            span,
+            session.spans().primer(),
+            model_id,
+            prompt_tokens,
+            &prompt,
+        )
+        .await;
+    }
+    let llm_started = Instant::now();
     let response = model
         .complete(request)
         .await
@@ -190,8 +274,50 @@ async fn run_fold(
             source: Box::new(source),
         })?;
     let output_tokens = count(&*tokenizer, content, "count DRIFT primer output")?;
+    if let (Some(session), Some(span)) = (explainability, span) {
+        emit_llm_completed(
+            Some(session),
+            span,
+            session.spans().primer(),
+            model_id,
+            prompt_tokens,
+            output_tokens,
+            llm_started,
+            content,
+        )
+        .await;
+    }
+    let parsed = parse_primer(content)?;
+    if let (Some(session), Some(span)) = (explainability, span) {
+        let values = (
+            session.usize_to_u32(index),
+            session.usize_to_u64(parsed.follow_up_queries.len()),
+        );
+        if let (Some(fold_index), Some(follow_up_count)) = values {
+            let score = ExplainabilityScore::try_from(parsed.score as f64);
+            session
+                .emit_contract(
+                    span,
+                    Some(session.spans().primer()),
+                    score
+                        .and_then(|score| {
+                            DriftPrimerFoldCompleted::try_new(
+                                fold_index,
+                                score,
+                                follow_up_count,
+                                session.content(&parsed.intermediate_answer),
+                                session
+                                    .includes_content()
+                                    .then(|| parsed.follow_up_queries.clone()),
+                            )
+                        })
+                        .map(ExplainabilityEvent::DriftPrimerFoldCompleted),
+                )
+                .await;
+        }
+    }
     Ok((
-        parse_primer(content)?,
+        parsed,
         QueryUsageCategory {
             llm_calls: 1,
             prompt_tokens,
@@ -401,6 +527,7 @@ mod tests {
         let tokenizer: Arc<dyn Tokenizer> =
             Arc::new(TiktokenTokenizer::new("cl100k_base").expect("tokenizer"));
         let reports = vec![super::RankedReport {
+            report_id: "report-0".to_owned(),
             short_id: "0".to_owned(),
             community_id: "0".to_owned(),
             full_content: "report".to_owned(),
@@ -418,6 +545,7 @@ mod tests {
                 model_config: &model_config,
                 tokenizer,
             },
+            None,
         )
         .await
         .expect("primer");

@@ -9,14 +9,23 @@ use serde::Serialize;
 use super::{
     action::{DriftActionMetadata, DriftActionResponse},
     context::{DriftRandom, RankedReport, SystemDriftRandom, count},
+    explainability::{emit_llm_completed, emit_llm_started},
     parse::parse_action,
     primer::{PrimerAggregate, PrimerResources, run_primer},
-    state::DriftQueryState,
+    state::{DriftQueryState, DriftStateApplyOutcome},
 };
-use crate::query::{
-    DriftQueryRuntime, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
-    QueryError, QueryEvent, QueryEventStream, QueryResult, QueryUsage, QueryUsageCategory, Result,
-    SearchMethod, context::ContextTable, result::count_completion_input,
+use crate::{
+    explainability::{
+        DriftActionAttemptCompleted, DriftActionAttemptStarted, DriftActionContextBuilt,
+        DriftDepthActionsSelected, DriftExplorationStarted, DriftPrimerCompleted,
+        DriftReduceContextBuilt, ExplainabilityEvent, ExplainabilityScore, ExplainabilitySpanId,
+    },
+    query::{
+        DriftQueryRuntime, QueryCallbacks, QueryContext, QueryContextRecords, QueryContextText,
+        QueryError, QueryEvent, QueryEventStream, QueryInstrumentation, QueryResult, QueryUsage,
+        QueryUsageCategory, Result, SearchMethod, context::ContextTable,
+        explainability::DriftQueryExplainability, result::count_completion_input,
+    },
 };
 
 #[derive(Debug)]
@@ -45,11 +54,16 @@ pub(crate) async fn drift_search(
     runtime: DriftQueryRuntime,
     query: &str,
     response_type: &str,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryResult> {
     validate_query(query)?;
     let started = Instant::now();
     let mut random = SystemDriftRandom;
-    let prepared = prepare(&runtime, query, &mut random).await?;
+    let explainability = instrumentation
+        .as_ref()
+        .and_then(QueryInstrumentation::drift_explainability)
+        .cloned();
+    let prepared = prepare(&runtime, query, &mut random, explainability.as_ref()).await?;
     let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
@@ -62,9 +76,24 @@ pub(crate) async fn drift_search(
         "count DRIFT reduce completion input tokens",
     )?;
     apply_reduce_request(&runtime, &mut request, false)?;
+    if let Some(session) = explainability.as_ref() {
+        emit_llm_started(
+            Some(session),
+            session.spans().reduce(),
+            session.root_span(),
+            &runtime.context.completion_model_id,
+            prompt_tokens,
+            request
+                .messages
+                .first()
+                .map_or("", |message| message.content.as_str()),
+        )
+        .await;
+    }
     runtime
         .callbacks
         .on_reduce_response_start(&prepared.state_context);
+    let reduce_started = Instant::now();
     let response = runtime
         .context
         .completion_model
@@ -81,6 +110,19 @@ pub(crate) async fn drift_search(
         &answer,
         "count DRIFT reduce output",
     )?;
+    if let Some(session) = explainability.as_ref() {
+        emit_llm_completed(
+            Some(session),
+            session.spans().reduce(),
+            session.root_span(),
+            &runtime.context.completion_model_id,
+            prompt_tokens,
+            output_tokens,
+            reduce_started,
+            &answer,
+        )
+        .await;
+    }
     let mut categories = prepared.usage;
     categories.insert(
         "reduce".to_owned(),
@@ -90,23 +132,32 @@ pub(crate) async fn drift_search(
             output_tokens,
         },
     );
-    Ok(QueryResult {
+    let result = QueryResult {
         response: answer,
         context: prepared.context,
         elapsed: started.elapsed(),
         usage: QueryUsage::from_categories(categories),
-    })
+    };
+    if let Some(instrumentation) = &instrumentation {
+        instrumentation.finish_explainability_success().await;
+    }
+    Ok(result)
 }
 
 pub(crate) async fn drift_search_streaming(
     runtime: DriftQueryRuntime,
     query: &str,
     response_type: &str,
+    instrumentation: Option<QueryInstrumentation>,
 ) -> Result<QueryEventStream> {
     validate_query(query)?;
     let started = Instant::now();
     let mut random = SystemDriftRandom;
-    let prepared = prepare(&runtime, query, &mut random).await?;
+    let explainability = instrumentation
+        .as_ref()
+        .and_then(QueryInstrumentation::drift_explainability)
+        .cloned();
+    let prepared = prepare(&runtime, query, &mut random, explainability.as_ref()).await?;
     let rendered = render_reduce(&runtime, &prepared.reduce_context, response_type)?;
     let mut request = CompletionRequest::new(vec![
         ChatMessage::system(rendered),
@@ -119,6 +170,20 @@ pub(crate) async fn drift_search_streaming(
         "count DRIFT reduce completion input tokens",
     )?;
     apply_reduce_request(&runtime, &mut request, true)?;
+    if let Some(session) = explainability.as_ref() {
+        emit_llm_started(
+            Some(session),
+            session.spans().reduce(),
+            session.root_span(),
+            &runtime.context.completion_model_id,
+            prompt_tokens,
+            request
+                .messages
+                .first()
+                .map_or("", |message| message.content.as_str()),
+        )
+        .await;
+    }
     let state = DriftStreamState {
         model: Arc::clone(&runtime.context.completion_model),
         model_id: runtime.context.completion_model_id.clone(),
@@ -133,6 +198,8 @@ pub(crate) async fn drift_search_streaming(
         tokenizer: Arc::clone(&runtime.context.tokenizer),
         callbacks: runtime.callbacks,
         phase: DriftStreamPhase::Context,
+        instrumentation,
+        reduce_started: Instant::now(),
     };
     Ok(Box::pin(stream::unfold(Some(state), next_stream_event)))
 }
@@ -141,8 +208,12 @@ async fn prepare(
     runtime: &DriftQueryRuntime,
     query: &str,
     random: &mut dyn DriftRandom,
+    explainability: Option<&DriftQueryExplainability>,
 ) -> Result<DriftPrepared> {
-    let (ranked, build_usage) = runtime.context.build_ranked_context(query, random).await?;
+    let (ranked, build_usage) = runtime
+        .context
+        .build_ranked_context(query, random, explainability)
+        .await?;
     let primer = run_primer(
         &ranked,
         query,
@@ -154,18 +225,34 @@ async fn prepare(
             model_config: &runtime.context.completion_config,
             tokenizer: Arc::clone(&runtime.context.tokenizer),
         },
+        explainability.cloned(),
     )
     .await?;
     let mut state = DriftQueryState::default();
-    state.add_root(
+    let root_outcome = state.add_root(
         query.to_owned(),
         primer.answer.clone(),
         primer.score,
         &primer.followups,
     );
-    let action_usage = run_depths(runtime, query, random, &mut state).await?;
+    emit_primer_completed(explainability, &primer, &root_outcome).await;
+    emit_exploration_started(explainability, runtime, root_outcome.action_id).await;
+    let action_usage = run_depths(runtime, query, random, &mut state, explainability).await?;
     let state_context = state.to_json()?;
-    let reduce_context = python_list_repr(&state.reduce_answers());
+    let reduce_entries = state.reduce_entries();
+    let reduce_answers = reduce_entries
+        .iter()
+        .map(|(_, answer)| *answer)
+        .collect::<Vec<_>>();
+    let reduce_context = python_list_repr(&reduce_answers);
+    emit_reduce_context(
+        explainability,
+        &state,
+        &reduce_entries,
+        &state_context,
+        &reduce_context,
+    )
+    .await;
     let context = build_query_context(&ranked, &primer, &state, &state_context, &reduce_context)?;
     Ok(DriftPrepared {
         context,
@@ -184,19 +271,28 @@ async fn run_depths(
     original_query: &str,
     random: &mut dyn DriftRandom,
     state: &mut DriftQueryState,
+    explainability: Option<&DriftQueryExplainability>,
 ) -> Result<QueryUsageCategory> {
     let mut total = QueryUsageCategory::default();
-    for _ in 0..runtime.context.config.n_depth {
-        let selected = select_actions(state, random, runtime.context.config.drift_k_followups)?;
-        if selected.is_empty() {
+    for depth_index in 0..runtime.context.config.n_depth {
+        let selection = select_actions(state, random, runtime.context.config.drift_k_followups)?;
+        emit_depth_selection(explainability, depth_index, &selection, runtime).await;
+        if selection.selected.is_empty() {
             break;
         }
-        let queries = selected
+        let attempts = selection
+            .selected
             .iter()
             .map(|id| {
                 state
                     .query(*id)
-                    .map(str::to_owned)
+                    .map(|query| {
+                        (
+                            *id,
+                            query.to_owned(),
+                            explainability.map(DriftQueryExplainability::action_attempt_span),
+                        )
+                    })
                     .ok_or_else(|| QueryError::QueryContext {
                         method: SearchMethod::Drift,
                         operation: "select DRIFT incomplete actions",
@@ -204,38 +300,108 @@ async fn run_depths(
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let calls = queries
+        let calls = attempts
+            .clone()
             .into_iter()
-            .map(|query| async move { run_action(runtime, original_query, query).await });
+            .map(|(action_id, query, span)| {
+                run_action(
+                    runtime,
+                    original_query,
+                    depth_index,
+                    action_id,
+                    query,
+                    explainability.cloned(),
+                    span,
+                )
+            });
         let results = crate::query::concurrency::try_buffered_ordered(
             calls,
             runtime.context.config.concurrency,
         )
         .await?;
-        for (id, (response, metadata)) in selected.into_iter().zip(results) {
+        for ((id, _, span), (response, metadata)) in attempts.into_iter().zip(results) {
             total += metadata.usage;
-            state.apply(id, response, metadata)?;
+            let answer_present = response.answer.is_some();
+            let answer_non_empty = response
+                .answer
+                .as_deref()
+                .is_some_and(|answer| !answer.is_empty());
+            let score = ExplainabilityScore::try_from(response.score).ok();
+            let follow_up_count = response.follow_up_queries.len();
+            let answer = explainability
+                .filter(|session| session.includes_content())
+                .and_then(|_| response.answer.clone());
+            let follow_up_queries = explainability
+                .filter(|session| session.includes_content())
+                .map(|_| response.follow_up_queries.clone());
+            let outcome = state.apply(id, response, metadata)?;
+            emit_action_completed(
+                explainability,
+                span.as_ref(),
+                depth_index,
+                answer_present,
+                answer_non_empty,
+                score,
+                follow_up_count,
+                answer,
+                follow_up_queries,
+                &outcome,
+            )
+            .await;
         }
     }
     Ok(total)
+}
+
+#[derive(Debug)]
+struct ActionSelection {
+    candidates: Vec<usize>,
+    selected: Vec<usize>,
 }
 
 fn select_actions(
     state: &DriftQueryState,
     random: &mut dyn DriftRandom,
     limit: usize,
-) -> Result<Vec<usize>> {
-    let mut selected = state.incomplete_ids();
+) -> Result<ActionSelection> {
+    let candidates = state.incomplete_ids();
+    let mut selected = candidates.clone();
     random.shuffle_actions(&mut selected)?;
     selected.truncate(limit);
-    Ok(selected)
+    Ok(ActionSelection {
+        candidates,
+        selected,
+    })
 }
 
 async fn run_action(
     runtime: &DriftQueryRuntime,
     original_query: &str,
+    depth_index: usize,
+    action_id: usize,
     query: String,
+    explainability: Option<DriftQueryExplainability>,
+    span: Option<ExplainabilitySpanId>,
 ) -> Result<(DriftActionResponse, DriftActionMetadata)> {
+    if let (Some(session), Some(span)) = (explainability.as_ref(), span.as_ref()) {
+        let values = (
+            session.usize_to_u32(depth_index),
+            session.usize_to_u64(action_id),
+        );
+        if let (Some(depth_index), Some(action_id)) = values {
+            session
+                .emit(
+                    span,
+                    Some(session.spans().exploration()),
+                    ExplainabilityEvent::DriftActionAttemptStarted(DriftActionAttemptStarted {
+                        depth_index,
+                        action_id,
+                        query: session.content(&query),
+                    }),
+                )
+                .await;
+        }
+    }
     let built = runtime.context.local.build(&query, None).await?;
     let context_text = match &built.context.text {
         QueryContextText::Text(value) => value,
@@ -247,6 +413,20 @@ async fn run_action(
             });
         }
     };
+    if let (Some(session), Some(span)) = (explainability.as_ref(), span.as_ref())
+        && let Some(action_id) = session.usize_to_u64(action_id)
+    {
+        session
+            .emit(
+                span,
+                Some(session.spans().exploration()),
+                ExplainabilityEvent::DriftActionContextBuilt(DriftActionContextBuilt {
+                    action_id,
+                    context: session.content(context_text),
+                }),
+            )
+            .await;
+    }
     let rendered = runtime
         .local_prompt
         .bind(&DriftLocalPrompt {
@@ -298,6 +478,21 @@ async fn run_action(
             operation: "build DRIFT Local completion request",
             message: source.to_string(),
         })?;
+    if let (Some(session), Some(span)) = (explainability.as_ref(), span.as_ref()) {
+        emit_llm_started(
+            Some(session),
+            span,
+            session.spans().exploration(),
+            &runtime.context.completion_model_id,
+            prompt_tokens,
+            request
+                .messages
+                .first()
+                .map_or("", |message| message.content.as_str()),
+        )
+        .await;
+    }
+    let llm_started = Instant::now();
     let mut provider = runtime
         .context
         .completion_model
@@ -327,6 +522,19 @@ async fn run_action(
         &raw,
         "count DRIFT Local output",
     )?;
+    if let (Some(session), Some(span)) = (explainability.as_ref(), span.as_ref()) {
+        emit_llm_completed(
+            Some(session),
+            span,
+            session.spans().exploration(),
+            &runtime.context.completion_model_id,
+            prompt_tokens,
+            output_tokens,
+            llm_started,
+            &raw,
+        )
+        .await;
+    }
     let mut usage = built.usage;
     usage += QueryUsageCategory {
         llm_calls: 1,
@@ -340,6 +548,207 @@ async fn run_action(
             context: Some(built.context),
         },
     ))
+}
+
+async fn emit_primer_completed(
+    explainability: Option<&DriftQueryExplainability>,
+    primer: &PrimerAggregate,
+    outcome: &DriftStateApplyOutcome,
+) {
+    let Some(session) = explainability else {
+        return;
+    };
+    let values = (
+        ExplainabilityScore::try_from(primer.score),
+        session.usize_to_u64(outcome.action_id),
+        session.usize_to_u64(primer.followups.len()),
+        action_ids_to_u64(session, &outcome.target_action_ids),
+    );
+    let (Ok(score), Some(root_action_id), Some(follow_up_count), Some(target_ids)) = values else {
+        return;
+    };
+    session
+        .emit_contract(
+            session.spans().primer(),
+            Some(session.root_span()),
+            DriftPrimerCompleted::try_new(
+                score,
+                root_action_id,
+                follow_up_count,
+                target_ids,
+                session.content(&primer.answer),
+                session.includes_content().then(|| primer.followups.clone()),
+            )
+            .map(ExplainabilityEvent::DriftPrimerCompleted),
+        )
+        .await;
+}
+
+async fn emit_exploration_started(
+    explainability: Option<&DriftQueryExplainability>,
+    runtime: &DriftQueryRuntime,
+    root_action_id: usize,
+) {
+    let Some(session) = explainability else {
+        return;
+    };
+    let values = (
+        session.usize_to_u32(runtime.context.config.n_depth),
+        session.usize_to_u64(runtime.context.config.drift_k_followups),
+        session.usize_to_u64(root_action_id),
+    );
+    if let (Some(max_depth), Some(selection_limit), Some(root_action_id)) = values {
+        session
+            .emit(
+                session.spans().exploration(),
+                Some(session.root_span()),
+                ExplainabilityEvent::DriftExplorationStarted(DriftExplorationStarted {
+                    max_depth,
+                    selection_limit,
+                    root_action_id,
+                }),
+            )
+            .await;
+    }
+}
+
+async fn emit_depth_selection(
+    explainability: Option<&DriftQueryExplainability>,
+    depth_index: usize,
+    selection: &ActionSelection,
+    runtime: &DriftQueryRuntime,
+) {
+    let Some(session) = explainability else {
+        return;
+    };
+    let values = (
+        session.usize_to_u32(depth_index),
+        action_ids_to_u64(session, &selection.candidates),
+        action_ids_to_u64(session, &selection.selected),
+        session.usize_to_u64(runtime.context.config.drift_k_followups),
+    );
+    let (
+        Some(depth_index),
+        Some(candidate_action_ids),
+        Some(selected_action_ids),
+        Some(selection_limit),
+    ) = values
+    else {
+        return;
+    };
+    session
+        .emit_contract(
+            session.spans().exploration(),
+            Some(session.root_span()),
+            DriftDepthActionsSelected::try_new(
+                depth_index,
+                candidate_action_ids,
+                selected_action_ids,
+                selection_limit,
+            )
+            .map(ExplainabilityEvent::DriftDepthActionsSelected),
+        )
+        .await;
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the arguments are the exact parsed/applied DRIFT attempt facts and avoid a second \
+              DTO"
+)]
+async fn emit_action_completed(
+    explainability: Option<&DriftQueryExplainability>,
+    span: Option<&ExplainabilitySpanId>,
+    depth_index: usize,
+    answer_present: bool,
+    answer_non_empty: bool,
+    score: Option<ExplainabilityScore>,
+    follow_up_count: usize,
+    answer: Option<String>,
+    follow_up_queries: Option<Vec<String>>,
+    outcome: &DriftStateApplyOutcome,
+) {
+    let (Some(session), Some(span)) = (explainability, span) else {
+        return;
+    };
+    let values = (
+        session.usize_to_u32(depth_index),
+        session.usize_to_u64(outcome.action_id),
+        session.usize_to_u64(follow_up_count),
+        action_ids_to_u64(session, &outcome.target_action_ids),
+    );
+    let (Some(depth_index), Some(action_id), Some(follow_up_count), Some(target_action_ids)) =
+        values
+    else {
+        return;
+    };
+    session
+        .emit_contract(
+            span,
+            Some(session.spans().exploration()),
+            DriftActionAttemptCompleted::try_new(
+                depth_index,
+                action_id,
+                answer_present,
+                answer_non_empty,
+                score,
+                follow_up_count,
+                target_action_ids,
+                answer,
+                follow_up_queries,
+            )
+            .map(ExplainabilityEvent::DriftActionAttemptCompleted),
+        )
+        .await;
+}
+
+async fn emit_reduce_context(
+    explainability: Option<&DriftQueryExplainability>,
+    state: &DriftQueryState,
+    reduce_entries: &[(usize, &str)],
+    state_context: &str,
+    reduce_context: &str,
+) {
+    let Some(session) = explainability else {
+        return;
+    };
+    let included = reduce_entries
+        .iter()
+        .map(|(action_id, _)| *action_id)
+        .collect::<Vec<_>>();
+    let values = (
+        session.usize_to_u64(state.nodes().len()),
+        session.usize_to_u64(state.edge_count()),
+        session.usize_to_u64(reduce_entries.len()),
+        action_ids_to_u64(session, &included),
+    );
+    let (Some(node_count), Some(edge_count), Some(included_answer_count), Some(included_ids)) =
+        values
+    else {
+        return;
+    };
+    session
+        .emit_contract(
+            session.spans().reduce(),
+            Some(session.root_span()),
+            DriftReduceContextBuilt::try_new(
+                node_count,
+                edge_count,
+                included_answer_count,
+                included_ids,
+                session.content(state_context),
+                session.content(reduce_context),
+            )
+            .map(ExplainabilityEvent::DriftReduceContextBuilt),
+        )
+        .await;
+}
+
+fn action_ids_to_u64(session: &DriftQueryExplainability, action_ids: &[usize]) -> Option<Vec<u64>> {
+    action_ids
+        .iter()
+        .map(|action_id| session.usize_to_u64(*action_id))
+        .collect()
 }
 
 fn build_query_context(
@@ -606,6 +1015,8 @@ struct DriftStreamState {
     tokenizer: Arc<dyn Tokenizer>,
     callbacks: Arc<dyn QueryCallbacks>,
     phase: DriftStreamPhase,
+    instrumentation: Option<QueryInstrumentation>,
+    reduce_started: Instant,
 }
 
 async fn next_stream_event(
@@ -623,7 +1034,9 @@ async fn next_stream_event(
                     .callbacks
                     .on_reduce_response_start(&state.state_context);
                 let Some(request) = state.request.take() else {
-                    return Some((Err(stream_error(&state, "missing reduce request")), None));
+                    let error = stream_error(&state, "missing reduce request");
+                    finish_drift_stream_error(state.instrumentation.clone(), &error).await;
+                    return Some((Err(error), None));
                 };
                 match state.model.stream(request).await {
                     Ok(provider) => {
@@ -631,21 +1044,22 @@ async fn next_stream_event(
                         state.phase = DriftStreamPhase::Tokens;
                     }
                     Err(source) => {
-                        return Some((
-                            Err(QueryError::QueryCompletion {
-                                method: SearchMethod::Drift,
-                                operation: "start DRIFT reduce stream",
-                                model: state.model_id,
-                                source: Box::new(source),
-                            }),
-                            None,
-                        ));
+                        let error = QueryError::QueryCompletion {
+                            method: SearchMethod::Drift,
+                            operation: "start DRIFT reduce stream",
+                            model: state.model_id.clone(),
+                            source: Box::new(source),
+                        };
+                        finish_drift_stream_error(state.instrumentation.clone(), &error).await;
+                        return Some((Err(error), None));
                     }
                 }
             }
             DriftStreamPhase::Tokens => loop {
                 let Some(provider) = state.provider.as_mut() else {
-                    return Some((Err(stream_error(&state, "missing reduce stream")), None));
+                    let error = stream_error(&state, "missing reduce stream");
+                    finish_drift_stream_error(state.instrumentation.clone(), &error).await;
+                    return Some((Err(error), None));
                 };
                 match provider.next().await {
                     Some(Ok(chunk)) => {
@@ -662,15 +1076,14 @@ async fn next_stream_event(
                         return Some((Ok(QueryEvent::Token(content.to_owned())), Some(state)));
                     }
                     Some(Err(source)) => {
-                        return Some((
-                            Err(QueryError::QueryCompletion {
-                                method: SearchMethod::Drift,
-                                operation: "consume DRIFT reduce stream",
-                                model: state.model_id,
-                                source: Box::new(source),
-                            }),
-                            None,
-                        ));
+                        let error = QueryError::QueryCompletion {
+                            method: SearchMethod::Drift,
+                            operation: "consume DRIFT reduce stream",
+                            model: state.model_id.clone(),
+                            source: Box::new(source),
+                        };
+                        finish_drift_stream_error(state.instrumentation.clone(), &error).await;
+                        return Some((Err(error), None));
                     }
                     None => {
                         state.callbacks.on_reduce_response_end(&state.response);
@@ -680,7 +1093,11 @@ async fn next_stream_event(
                             "count DRIFT reduce output",
                         ) {
                             Ok(value) => value,
-                            Err(error) => return Some((Err(error), None)),
+                            Err(error) => {
+                                finish_drift_stream_error(state.instrumentation.clone(), &error)
+                                    .await;
+                                return Some((Err(error), None));
+                            }
                         };
                         state.usage.insert(
                             "reduce".to_owned(),
@@ -690,17 +1107,46 @@ async fn next_stream_event(
                                 output_tokens,
                             },
                         );
+                        if let Some(session) = state
+                            .instrumentation
+                            .as_ref()
+                            .and_then(QueryInstrumentation::drift_explainability)
+                        {
+                            emit_llm_completed(
+                                Some(session),
+                                session.spans().reduce(),
+                                session.root_span(),
+                                &state.model_id,
+                                state.prompt_tokens,
+                                output_tokens,
+                                state.reduce_started,
+                                &state.response,
+                            )
+                            .await;
+                        }
                         let result = QueryResult {
                             response: state.response,
                             context: state.context,
                             elapsed: state.started.elapsed(),
                             usage: QueryUsage::from_categories(state.usage),
                         };
+                        if let Some(instrumentation) = &state.instrumentation {
+                            instrumentation.finish_explainability_success().await;
+                        }
                         return Some((Ok(QueryEvent::Completed(result)), None));
                     }
                 }
             },
         }
+    }
+}
+
+async fn finish_drift_stream_error(
+    instrumentation: Option<QueryInstrumentation>,
+    error: &QueryError,
+) {
+    if let Some(instrumentation) = instrumentation {
+        instrumentation.finish_query_error(error).await;
     }
 }
 
@@ -767,14 +1213,12 @@ mod tests {
         );
         let mut random = ScriptedDriftRandom::new([], [vec![2, 1, 0], vec![2, 1, 0]]);
 
-        assert_eq!(
-            select_actions(&state, &mut random, 2).expect("first scripted selection"),
-            [3, 2]
-        );
-        assert_eq!(
-            select_actions(&state, &mut random, 2).expect("second scripted selection"),
-            [3, 2]
-        );
+        let first = select_actions(&state, &mut random, 2).expect("first scripted selection");
+        assert_eq!(first.candidates, [1, 2, 3]);
+        assert_eq!(first.selected, [3, 2]);
+        let second = select_actions(&state, &mut random, 2).expect("second scripted selection");
+        assert_eq!(second.candidates, [1, 2, 3]);
+        assert_eq!(second.selected, [3, 2]);
     }
 
     #[test]
@@ -789,7 +1233,9 @@ mod tests {
         let incomplete = state.incomplete_ids();
         let mut random = ScriptedDriftRandom::new([], [vec![1, 2, 0]]);
 
-        let selected = select_actions(&state, &mut random, 2).expect("scripted selection");
+        let selected = select_actions(&state, &mut random, 2)
+            .expect("scripted selection")
+            .selected;
 
         assert_eq!(selected.len(), incomplete.len().min(2));
         assert!(selected.iter().all(|id| incomplete.contains(id)));
@@ -811,7 +1257,9 @@ mod tests {
         );
 
         for expected in &trajectory.expected_selected_queries {
-            let selected = select_actions(&state, &mut random, 2).expect("depth selection");
+            let selected = select_actions(&state, &mut random, 2)
+                .expect("depth selection")
+                .selected;
             let selected_queries = selected
                 .iter()
                 .filter_map(|id| state.query(*id))
@@ -855,8 +1303,9 @@ mod tests {
             .map(|node| node.query.clone())
             .collect::<Vec<_>>();
         let reduce_answers = state
-            .reduce_answers()
+            .reduce_entries()
             .into_iter()
+            .map(|(_, answer)| answer)
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(node_queries, trajectory.expected_node_queries);
@@ -939,8 +1388,9 @@ mod tests {
                 &["one".to_owned(), "two".to_owned()],
             );
             let mut random = ScriptedDriftRandom::new([], [vec![1, 0]]);
-            let selected =
-                select_actions(&state, &mut random, 1).expect("scripted graph selection");
+            let selected = select_actions(&state, &mut random, 1)
+                .expect("scripted graph selection")
+                .selected;
             let selected_id = selected
                 .first()
                 .copied()
@@ -974,7 +1424,8 @@ mod tests {
         let mut random = ScriptedDriftRandom::new([], [vec![0]]);
 
         let selected = select_actions(&state, &mut random, 20)
-            .expect("duplicate query selection must follow GraphRAG identity");
+            .expect("duplicate query selection must follow GraphRAG identity")
+            .selected;
 
         assert_eq!(selected, [1]);
         assert_eq!(state.edges_in_graph_order().len(), 2);

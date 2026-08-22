@@ -186,7 +186,13 @@ impl QueryEngine {
             SearchMethod::Drift => {
                 self.validate_project_root(options).await?;
                 let runtime = self.drift_runtime(options).await?;
-                Ok(drift_search(runtime, &options.query, &options.response_type).await?)
+                Ok(drift_search(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
+                )
+                .await?)
             }
         }
     }
@@ -260,7 +266,13 @@ impl QueryEngine {
             SearchMethod::Drift => {
                 self.validate_project_root(options).await?;
                 let runtime = self.drift_runtime(options).await?;
-                Ok(drift_search_streaming(runtime, &options.query, &options.response_type).await?)
+                Ok(drift_search_streaming(
+                    runtime,
+                    &options.query,
+                    &options.response_type,
+                    instrumentation,
+                )
+                .await?)
             }
         }
     }

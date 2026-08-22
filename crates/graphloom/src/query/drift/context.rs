@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use graphloom_llm::{
     ChatMessage, CompletionModel, CompletionRequest, EmbeddingModel, EmbeddingRequest, ModelConfig,
@@ -11,11 +11,17 @@ use graphloom_llm::{
 use graphloom_vectors::{VectorError, VectorIndexSchema, VectorStore};
 use rand::{Rng, seq::SliceRandom};
 
+use super::explainability::{emit_llm_completed, emit_llm_started};
 use crate::{
     DriftSearchConfig,
+    explainability::{
+        DriftHydeCompleted, DriftHydeStarted, DriftRankedReportEvidence, DriftReportsRanked,
+        EmbeddingCompleted, EmbeddingStarted, ExplainabilityEvent, ExplainabilityScore,
+    },
     query::{
         CommunityReport, QueryError, QueryUsageCategory, Result, SearchMethod,
-        local::LocalContextBuilder, result::resolve_embedding_prompt_tokens,
+        explainability::DriftQueryExplainability, local::LocalContextBuilder,
+        result::resolve_embedding_prompt_tokens,
     },
 };
 
@@ -120,6 +126,7 @@ fn scripted_random_error(message: &str) -> QueryError {
 
 #[derive(Debug, Clone)]
 pub(super) struct RankedReport {
+    pub(super) report_id: String,
     pub(super) short_id: String,
     pub(super) community_id: String,
     pub(super) full_content: String,
@@ -213,6 +220,7 @@ impl DriftContextBuilder {
         &self,
         query: &str,
         random: &mut dyn DriftRandom,
+        explainability: Option<&DriftQueryExplainability>,
     ) -> Result<(Vec<RankedReport>, QueryUsageCategory)> {
         if self.reports.is_empty() {
             return Err(QueryError::QueryContext {
@@ -233,9 +241,31 @@ impl DriftContextBuilder {
                     self.reports.len()
                 ),
             })?;
+        if let Some(session) = explainability {
+            let values = (
+                session.usize_to_u32(chosen),
+                session.usize_to_u32(self.reports.len()),
+            );
+            if let (Some(template_index), Some(report_count)) = values {
+                session
+                    .emit_contract(
+                        session.spans().hyde(),
+                        Some(session.root_span()),
+                        DriftHydeStarted::try_new(
+                            template.id.clone(),
+                            template.short_id.clone(),
+                            template.community_id.clone(),
+                            template_index,
+                            report_count,
+                        )
+                        .map(ExplainabilityEvent::DriftHydeStarted),
+                    )
+                    .await;
+            }
+        }
         let prompt = hyde_prompt(query, &template.full_content);
         let prompt_tokens = count(&*self.tokenizer, &prompt, "count DRIFT HyDE prompt")?;
-        let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
         request
             .apply_call_args(&self.completion_config.call_args)
             .and_then(|()| {
@@ -248,6 +278,18 @@ impl DriftContextBuilder {
                 operation: "build DRIFT HyDE completion request",
                 message: source.to_string(),
             })?;
+        if let Some(session) = explainability {
+            emit_llm_started(
+                Some(session),
+                session.spans().hyde(),
+                session.root_span(),
+                &self.completion_model_id,
+                prompt_tokens,
+                &prompt,
+            )
+            .await;
+        }
+        let hyde_started = Instant::now();
         let response = self
             .completion_model
             .complete(request)
@@ -276,12 +318,45 @@ impl DriftContextBuilder {
             expanded,
             "count DRIFT HyDE expansion output",
         )?;
+        if let Some(session) = explainability {
+            emit_llm_completed(
+                Some(session),
+                session.spans().hyde(),
+                session.root_span(),
+                &self.completion_model_id,
+                prompt_tokens,
+                output_tokens,
+                hyde_started,
+                expanded,
+            )
+            .await;
+        }
         let expanded_query = if expanded.is_empty() {
             tracing::warn!(method = %SearchMethod::Drift, "DRIFT HyDE expansion was empty");
             query
         } else {
             expanded
         };
+        if let Some(session) = explainability {
+            session
+                .emit(
+                    session.spans().hyde(),
+                    Some(session.root_span()),
+                    ExplainabilityEvent::DriftHydeCompleted(DriftHydeCompleted {
+                        used_original_query: expanded.is_empty(),
+                    }),
+                )
+                .await;
+            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
+            event.input = session.content(expanded_query);
+            session
+                .emit(
+                    session.spans().embedding(),
+                    Some(session.root_span()),
+                    ExplainabilityEvent::EmbeddingStarted(event),
+                )
+                .await;
+        }
         let embedding_response = self
             .embedding_model
             .embed(EmbeddingRequest::new(vec![expanded_query.to_owned()]))
@@ -314,12 +389,32 @@ impl DriftContextBuilder {
                     message: "provider returned no embedding".to_owned(),
                 }),
             })?;
+        if let Some(session) = explainability {
+            let values = (
+                session.usize_to_u64(embedding_tokens),
+                session.usize_to_u32(embedding.len()),
+            );
+            if let (Some(prompt_tokens), Some(dimensions)) = values {
+                session
+                    .emit(
+                        session.spans().embedding(),
+                        Some(session.root_span()),
+                        ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
+                            self.embedding_model_id.clone(),
+                            prompt_tokens,
+                            dimensions,
+                        )),
+                    )
+                    .await;
+            }
+        }
         let ranked = rank_reports(
             &embedding,
             &self.reports,
             self.config.drift_k_followups,
             &self.community_schema.index_name,
         )?;
+        emit_ranked_reports(explainability, &ranked).await;
         let mut usage = QueryUsageCategory {
             llm_calls: 1,
             prompt_tokens,
@@ -332,6 +427,39 @@ impl DriftContextBuilder {
         };
         Ok((ranked, usage))
     }
+}
+
+async fn emit_ranked_reports(
+    explainability: Option<&DriftQueryExplainability>,
+    ranked: &[RankedReport],
+) {
+    let Some(session) = explainability else {
+        return;
+    };
+    let mut reports = Vec::with_capacity(ranked.len());
+    for (index, report) in ranked.iter().enumerate() {
+        let Some(rank) = session.usize_to_u32(index.saturating_add(1)) else {
+            return;
+        };
+        let Ok(similarity) = ExplainabilityScore::try_from(report.similarity) else {
+            session.mark_sidecar_failure("non_finite_score");
+            return;
+        };
+        reports.push(DriftRankedReportEvidence {
+            report_id: report.report_id.clone(),
+            short_id: report.short_id.clone(),
+            community_id: report.community_id.clone(),
+            similarity,
+            rank,
+        });
+    }
+    session
+        .emit_contract(
+            session.spans().ranking(),
+            Some(session.root_span()),
+            DriftReportsRanked::try_new(reports).map(ExplainabilityEvent::DriftReportsRanked),
+        )
+        .await;
 }
 
 /// Exact GraphRAG 3.1.0 `PrimerQueryProcessor.expand_query` prompt.
@@ -378,6 +506,7 @@ fn rank_reports(
             Ok((
                 order,
                 RankedReport {
+                    report_id: report.id.clone(),
                     short_id: report.short_id.clone(),
                     community_id: report.community_id.clone(),
                     full_content: report.full_content.clone(),

@@ -8,10 +8,14 @@ use serde::{
 };
 
 use super::{
-    ContextSectionKind, DynamicCommunityRatingEvidence, ExplainabilityCandidate,
-    ExplainabilityContentMode, ExplainabilityContextSection, ExplainabilityContractError,
-    ExplainabilityQueryMethod, ExplainabilityRecordType, ExplainabilityRunKind,
-    GlobalMapPointDecision, GlobalMapPointDecisionReason, GlobalMapPointEvidence,
+    ContextSectionKind, DriftActionAttemptCompleted, DriftActionAttemptStarted,
+    DriftActionContextBuilt, DriftDepthActionsSelected, DriftExplorationStarted,
+    DriftHydeCompleted, DriftHydeStarted, DriftPrimerCompleted, DriftPrimerFoldCompleted,
+    DriftPrimerFoldStarted, DriftPrimerStarted, DriftReduceContextBuilt, DriftReportsRanked,
+    DynamicCommunityRatingEvidence, ExplainabilityCandidate, ExplainabilityContentMode,
+    ExplainabilityContextSection, ExplainabilityContractError, ExplainabilityQueryMethod,
+    ExplainabilityRecordType, ExplainabilityRunKind, GlobalMapPointDecision,
+    GlobalMapPointDecisionReason, GlobalMapPointEvidence,
 };
 
 struct ValidatedRecordIds<'a>(&'a [String]);
@@ -1473,7 +1477,7 @@ pub struct LlmRequestStarted {
     pub model_id: String,
     /// Counted request input tokens.
     pub prompt_tokens: u64,
-    /// Rendered system prompt when the content mode permits it.
+    /// Rendered prompt content captured for this request stage when the content mode permits it.
     ///
     /// This is not the provider's complete request object and never includes headers or secrets.
     #[serde(
@@ -1626,6 +1630,32 @@ pub enum ExplainabilityEvent {
     GlobalReduceContextBuilt(GlobalReduceContextBuilt),
     /// Global Reduce was skipped.
     GlobalReduceSkipped(GlobalReduceSkipped),
+    /// DRIFT selected its real random HyDE template.
+    DriftHydeStarted(DriftHydeStarted),
+    /// DRIFT chose the effective post-HyDE query.
+    DriftHydeCompleted(DriftHydeCompleted),
+    /// DRIFT produced its real truncated report ranking.
+    DriftReportsRanked(DriftReportsRanked),
+    /// DRIFT Primer fan-out began.
+    DriftPrimerStarted(DriftPrimerStarted),
+    /// One DRIFT Primer fold began.
+    DriftPrimerFoldStarted(DriftPrimerFoldStarted),
+    /// One parsed DRIFT Primer fold completed.
+    DriftPrimerFoldCompleted(DriftPrimerFoldCompleted),
+    /// DRIFT aggregated Primer and applied the root action.
+    DriftPrimerCompleted(DriftPrimerCompleted),
+    /// DRIFT exploration began.
+    DriftExplorationStarted(DriftExplorationStarted),
+    /// One DRIFT depth made its real random action selection.
+    DriftDepthActionsSelected(DriftDepthActionsSelected),
+    /// One DRIFT action attempt began.
+    DriftActionAttemptStarted(DriftActionAttemptStarted),
+    /// One DRIFT action built its exact Local context.
+    DriftActionContextBuilt(DriftActionContextBuilt),
+    /// One parsed DRIFT action attempt was applied.
+    DriftActionAttemptCompleted(DriftActionAttemptCompleted),
+    /// DRIFT built its exact final state and Reduce inputs.
+    DriftReduceContextBuilt(DriftReduceContextBuilt),
     /// Completion-model request started.
     LlmRequestStarted(LlmRequestStarted),
     /// Completion-model request completed.
