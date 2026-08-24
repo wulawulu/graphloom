@@ -21,8 +21,15 @@ describe("Studio API client", () => {
       .mockResolvedValueOnce(response(410, "gone"))
     vi.stubGlobal("fetch", fetchMock)
 
-    const accepted = await startQuery({ query: "fixture", method: "local", content_mode: "metadata", response_type: "Multiple Paragraphs" })
+    const accepted = await startQuery({ query: "fixture", method: "local", dynamic_community_selection: false, content_mode: "metadata", response_type: "Multiple Paragraphs" })
     expect(accepted.run_id).toBe("run-1")
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      query: "fixture",
+      method: "local",
+      dynamic_community_selection: false,
+      content_mode: "metadata",
+      response_type: "Multiple Paragraphs",
+    })
     expect((await getQueryResult("run-1")).state).toBe("ready")
     expect((await getQueryResult("run-1")).state).toBe("waiting")
     expect((await getQueryResult("run-1")).state).toBe("failed")

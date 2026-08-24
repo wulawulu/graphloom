@@ -1,10 +1,12 @@
 export type RunStatus = string
 export type QueryMethod = string
 export type ContentMode = "metadata" | "content" | "debug"
+export type StartQueryMethod = "basic" | "local" | "global" | "drift"
 
 export interface StartQueryRequest {
   query: string
-  method: "local"
+  method: StartQueryMethod
+  dynamic_community_selection: boolean
   content_mode: ContentMode
   response_type: string
 }

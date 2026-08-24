@@ -42,6 +42,7 @@ enum RunnerOutcome {
 struct ObservedQuery {
     query: String,
     method: SearchMethod,
+    dynamic_community_selection: bool,
     content_mode: ExplainabilityContentMode,
     response_type: String,
 }
@@ -332,6 +333,7 @@ impl QueryRunner for ControlledRunner {
             .send(ObservedQuery {
                 query: options.query.clone(),
                 method: options.method,
+                dynamic_community_selection: options.dynamic_community_selection,
                 content_mode: explainability.content_mode(),
                 response_type: options.response_type.clone(),
             })
@@ -358,7 +360,7 @@ impl QueryRunner for ControlledRunner {
             )),
         )
         .await?;
-        let mut started = QueryStarted::new(ExplainabilityQueryMethod::Local);
+        let mut started = QueryStarted::new(options.method.into());
         started.query = explainability
             .content_mode()
             .includes_content()
@@ -601,7 +603,7 @@ async fn drain_closed(
 }
 
 #[tokio::test]
-async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query() {
+async fn test_should_accept_default_local_after_run_is_live_and_not_wait_for_query() {
     let mut harness = harness(RunnerOutcome::Success, 4);
     let response = post(&harness.router, json!({"query":"Who is Alice?"})).await;
     let location = response.headers().get(header::LOCATION).cloned();
@@ -622,6 +624,7 @@ async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query(
     let observed = harness.observations.recv().await.expect("runner entered");
     assert_eq!(observed.query, "Who is Alice?");
     assert_eq!(observed.method, SearchMethod::Local);
+    assert!(!observed.dynamic_community_selection);
     assert_eq!(observed.content_mode, ExplainabilityContentMode::Metadata);
     assert_eq!(observed.response_type, "Multiple Paragraphs");
     let running = harness
@@ -631,6 +634,7 @@ async fn test_should_accept_local_only_after_run_is_live_and_not_wait_for_query(
         .expect("store read")
         .expect("run");
     assert_eq!(running.status, ExplainabilityRunStatus::Running);
+    assert_eq!(running.query_method, Some(ExplainabilityQueryMethod::Local));
     assert!(running.query.is_none());
     assert_eq!(
         get_result(&harness.router, &accepted.run_id).await.status(),
@@ -766,7 +770,7 @@ async fn test_should_leave_run_running_when_result_materialization_fails() {
 }
 
 #[tokio::test]
-async fn test_should_reject_invalid_unsupported_and_excess_queries_without_ghost_runs() {
+async fn test_should_reject_invalid_and_excess_queries_without_ghost_runs() {
     let mut harness = harness(RunnerOutcome::Success, 1);
     for body in [
         json!({"query":""}),
@@ -792,13 +796,21 @@ async fn test_should_reject_invalid_unsupported_and_excess_queries_without_ghost
         .await
         .expect("response");
     assert_eq!(invalid_json.status(), StatusCode::BAD_REQUEST);
-    for method in ["basic", "global", "drift"] {
-        assert_eq!(
-            post(&harness.router, json!({"query":"q","method":method}))
-                .await
-                .status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+    for method in ["basic", "local", "drift"] {
+        assert_status_and_body(
+            post(
+                &harness.router,
+                json!({
+                    "query":"q",
+                    "method":method,
+                    "dynamic_community_selection":true
+                }),
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            b"dynamic community selection is only valid for Global queries",
+        )
+        .await;
     }
     let first = accepted(post(&harness.router, json!({"query":"first"})).await).await;
     let _observed = harness.observations.recv().await.expect("runner entered");
@@ -830,6 +842,82 @@ async fn test_should_reject_invalid_unsupported_and_excess_queries_without_ghost
     let _observed = harness.observations.recv().await.expect("runner entered");
     harness.release.add_permits(1);
     drain_closed(&mut third_live).await;
+}
+
+#[tokio::test]
+async fn test_should_map_every_studio_query_mode_to_existing_query_options() {
+    let cases = [
+        (
+            "local",
+            false,
+            SearchMethod::Local,
+            ExplainabilityQueryMethod::Local,
+        ),
+        (
+            "basic",
+            false,
+            SearchMethod::Basic,
+            ExplainabilityQueryMethod::Basic,
+        ),
+        (
+            "global",
+            false,
+            SearchMethod::Global,
+            ExplainabilityQueryMethod::Global,
+        ),
+        (
+            "global",
+            true,
+            SearchMethod::Global,
+            ExplainabilityQueryMethod::Global,
+        ),
+        (
+            "drift",
+            false,
+            SearchMethod::Drift,
+            ExplainabilityQueryMethod::Drift,
+        ),
+    ];
+
+    for (method, dynamic, expected_method, expected_run_method) in cases {
+        let mut harness = harness(RunnerOutcome::Success, 1);
+        let accepted = accepted(
+            post(
+                &harness.router,
+                json!({
+                    "query":"mode contract",
+                    "method":method,
+                    "dynamic_community_selection":dynamic
+                }),
+            )
+            .await,
+        )
+        .await;
+        let observed = harness.observations.recv().await.expect("runner entered");
+        assert_eq!(observed.method, expected_method);
+        assert_eq!(observed.dynamic_community_selection, dynamic);
+        let run = harness
+            .store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run");
+        assert_eq!(run.query_method, Some(expected_run_method));
+        let mut live = harness.hub.subscribe(&accepted.run_id).expect("live run");
+        harness.release.add_permits(1);
+        drain_closed(&mut live).await;
+        harness.store.wait_for_completion().await;
+        let events = harness
+            .store
+            .load_events(&accepted.run_id, &EventQuery::new())
+            .await
+            .expect("events");
+        assert!(events.iter().any(|envelope| matches!(
+            &envelope.record.event,
+            ExplainabilityEvent::QueryStarted(started)
+                if started.method == expected_run_method
+        )));
+    }
 }
 
 #[tokio::test]

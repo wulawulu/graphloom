@@ -1,4 +1,4 @@
-//! Local Query admission and detached lifecycle orchestration.
+//! Query admission and detached lifecycle orchestration.
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
@@ -33,7 +33,9 @@ const MAX_RESPONSE_TYPE_BYTES: usize = 256;
 const DEFAULT_RESPONSE_TYPE: &str = "Multiple Paragraphs";
 
 const INVALID_QUERY_BODY: &str = "invalid Studio query request";
-const UNSUPPORTED_METHOD_BODY: &str = "query method is not yet supported by Studio explainability";
+const INVALID_DYNAMIC_SELECTION_BODY: &str =
+    "dynamic community selection is only valid for Global queries";
+const UNSUPPORTED_METHOD_BODY: &str = "query method is not supported by Studio explainability";
 const TOO_MANY_QUERIES_BODY: &str = "too many active Studio queries";
 const QUERY_UNAVAILABLE_BODY: &str = "Studio query service unavailable";
 
@@ -43,6 +45,8 @@ pub(super) struct StartQueryRequest {
     query: String,
     #[serde(default = "default_query_method")]
     method: ExplainabilityQueryMethod,
+    #[serde(default)]
+    dynamic_community_selection: bool,
     #[serde(default)]
     content_mode: ExplainabilityContentMode,
     #[serde(default = "default_response_type")]
@@ -114,9 +118,18 @@ pub(super) async fn start_query(
     if !valid_request(&request) {
         return fixed_error(StatusCode::BAD_REQUEST, INVALID_QUERY_BODY);
     }
-    if !matches!(request.method, ExplainabilityQueryMethod::Local) {
-        return fixed_error(StatusCode::UNPROCESSABLE_ENTITY, UNSUPPORTED_METHOD_BODY);
-    }
+    let method = match request_search_method(&request) {
+        Ok(method) => method,
+        Err(RequestMethodError::InvalidDynamicSelection) => {
+            return fixed_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                INVALID_DYNAMIC_SELECTION_BODY,
+            );
+        }
+        Err(RequestMethodError::UnsupportedMethod) => {
+            return fixed_error(StatusCode::UNPROCESSABLE_ENTITY, UNSUPPORTED_METHOD_BODY);
+        }
+    };
     let Ok(permit) = Arc::clone(&state.query_permits).try_acquire_owned() else {
         return fixed_error(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_QUERIES_BODY);
     };
@@ -131,6 +144,7 @@ pub(super) async fn start_query(
         query_runner: Arc::clone(&state.query_runner),
         query_results: Arc::clone(&state.query_results),
         request,
+        method,
         run_id: run_id.clone(),
         run,
         permit,
@@ -156,12 +170,33 @@ fn valid_request(request: &StartQueryRequest) -> bool {
 fn make_run(run_id: &ExplainabilityRunId, request: &StartQueryRequest) -> ExplainabilityRun {
     let mut run = ExplainabilityRun::new(run_id.clone(), ExplainabilityRunKind::Query, Utc::now());
     run.status = ExplainabilityRunStatus::Running;
-    run.query_method = Some(ExplainabilityQueryMethod::Local);
+    run.query_method = Some(request.method);
     run.query = request
         .content_mode
         .includes_content()
         .then(|| request.query.clone());
     run
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestMethodError {
+    InvalidDynamicSelection,
+    UnsupportedMethod,
+}
+
+fn request_search_method(request: &StartQueryRequest) -> Result<SearchMethod, RequestMethodError> {
+    if request.dynamic_community_selection
+        && !matches!(request.method, ExplainabilityQueryMethod::Global)
+    {
+        return Err(RequestMethodError::InvalidDynamicSelection);
+    }
+    match request.method {
+        ExplainabilityQueryMethod::Basic => Ok(SearchMethod::Basic),
+        ExplainabilityQueryMethod::Local => Ok(SearchMethod::Local),
+        ExplainabilityQueryMethod::Global => Ok(SearchMethod::Global),
+        ExplainabilityQueryMethod::Drift => Ok(SearchMethod::Drift),
+        _ => Err(RequestMethodError::UnsupportedMethod),
+    }
 }
 
 fn accepted_response(run_id: ExplainabilityRunId) -> Response {
@@ -204,6 +239,7 @@ struct QueryExecution {
     query_runner: Arc<dyn QueryRunner>,
     query_results: Arc<QueryResultRegistry>,
     request: StartQueryRequest,
+    method: SearchMethod,
     run_id: ExplainabilityRunId,
     run: ExplainabilityRun,
     permit: OwnedSemaphorePermit,
@@ -223,6 +259,7 @@ async fn execute_query(execution: QueryExecution) {
         query_runner,
         query_results,
         request,
+        method,
         run_id,
         run,
         permit: _permit,
@@ -243,7 +280,8 @@ async fn execute_query(execution: QueryExecution) {
     }
 
     let _send_result = ready_sender.send(Ok(()));
-    let mut options = QueryOptions::new(project_root, request.query, SearchMethod::Local);
+    let mut options = QueryOptions::new(project_root, request.query, method);
+    options.dynamic_community_selection = request.dynamic_community_selection;
     options.response_type = request.response_type;
     options = options.with_explainability(QueryExplainabilityOptions::new(
         run_id.clone(),

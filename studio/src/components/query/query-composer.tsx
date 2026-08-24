@@ -3,7 +3,7 @@ import { LoaderCircle, Play, SlidersHorizontal } from "lucide-react"
 import { toast } from "sonner"
 
 import { ApiError, startQuery } from "@/api/client"
-import type { ContentMode, StartQueryResponse } from "@/api/types"
+import type { ContentMode, StartQueryMethod, StartQueryResponse } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -22,8 +22,27 @@ const modeHelp: Record<ContentMode, string> = {
   debug: "Uses the most verbose supported explainability mode.",
 }
 
+type StudioQueryMode = "basic" | "local" | "global" | "dynamic-global" | "drift"
+
+interface QueryModeMetadata {
+  label: string
+  method: StartQueryMethod
+  dynamicCommunitySelection: boolean
+}
+
+const queryModes: Record<StudioQueryMode, QueryModeMetadata> = {
+  basic: { label: "Basic", method: "basic", dynamicCommunitySelection: false },
+  local: { label: "Local", method: "local", dynamicCommunitySelection: false },
+  global: { label: "Global", method: "global", dynamicCommunitySelection: false },
+  "dynamic-global": { label: "Dynamic Global", method: "global", dynamicCommunitySelection: true },
+  drift: { label: "DRIFT", method: "drift", dynamicCommunitySelection: false },
+}
+
+const queryModeOptions = Object.entries(queryModes) as Array<[StudioQueryMode, QueryModeMetadata]>
+
 export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps): React.ReactElement {
   const [query, setQuery] = useState("")
+  const [queryMode, setQueryMode] = useState<StudioQueryMode>("local")
   const [contentMode, setContentMode] = useState<ContentMode>("metadata")
   const [responseType, setResponseType] = useState("Multiple Paragraphs")
   const [submitting, setSubmitting] = useState(false)
@@ -35,14 +54,16 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
     if (query.length === 0 || submitting) return
     setSubmitting(true)
     try {
+      const mode = queryModes[queryMode]
       const response = await startQuery({
         query,
-        method: "local",
+        method: mode.method,
+        dynamic_community_selection: mode.dynamicCommunitySelection,
         content_mode: contentMode,
         response_type: responseType,
       })
       onAccepted(response, query)
-      toast.success("Local Query accepted")
+      toast.success(`${mode.label} Query accepted`)
     } catch (error) {
       const message = error instanceof ApiError && error.status === 429
         ? "Studio is at its active Query limit. Try again after a Run finishes."
@@ -52,6 +73,8 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
       setSubmitting(false)
     }
   }
+
+  const mode = queryModes[queryMode]
 
   return (
     <form className="rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
@@ -82,10 +105,22 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
           </div>
         </CollapsibleContent>
         <div className="flex items-center justify-between border-t px-2 py-1.5">
-          <div className="flex items-center gap-1"><Badge variant="outline">Local</Badge><Badge variant="outline">{contentMode[0]?.toUpperCase()}{contentMode.slice(1)}</Badge></div>
+          <div className="flex items-center gap-1">
+            <Select disabled={submitting} value={queryMode} onValueChange={(value) => setQueryMode(value as StudioQueryMode)}>
+              <SelectTrigger aria-label="Query method" className="h-6 w-auto gap-1 px-2 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {queryModeOptions.map(([value, metadata]) => (
+                  <SelectItem key={value} value={value}>{metadata.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Badge variant="outline">{contentMode[0]?.toUpperCase()}{contentMode.slice(1)}</Badge>
+          </div>
           <div className="flex items-center gap-1">
             <CollapsibleTrigger asChild><Button type="button" variant="ghost" size="icon" aria-label="Query settings"><SlidersHorizontal /></Button></CollapsibleTrigger>
-            <Button size="icon" disabled={query.length === 0 || submitting} type="submit" aria-label={submitting ? "Submitting Local Query" : "Run Local Query"}>{submitting ? <LoaderCircle className="animate-spin" /> : <Play />}</Button>
+            <Button size="icon" disabled={query.length === 0 || submitting} type="submit" aria-label={submitting ? `Submitting ${mode.label} Query` : `Run ${mode.label} Query`}>{submitting ? <LoaderCircle className="animate-spin" /> : <Play />}</Button>
           </div>
         </div>
       </Collapsible>
