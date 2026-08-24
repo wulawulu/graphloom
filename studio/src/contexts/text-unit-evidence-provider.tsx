@@ -17,9 +17,12 @@ export function TextUnitEvidenceProvider({ children }: { children: React.ReactNo
   const failed = useRef(new Set<string>())
   const pending = useRef(new Set<string>())
   const requests = useRef(new Set<AbortController>())
+  const requestQueue = useRef(Promise.resolve())
+  const disposed = useRef(false)
   const [snapshot, setSnapshot] = useState<EvidenceSnapshot>({ refs: new Map(), statuses: new Map() })
 
   useEffect(() => () => {
+    disposed.current = true
     requests.current.forEach((controller) => controller.abort())
     requests.current.clear()
   }, [])
@@ -49,24 +52,24 @@ export function TextUnitEvidenceProvider({ children }: { children: React.ReactNo
     publish()
     for (let offset = 0; offset < unresolved.length; offset += RESOLVE_BATCH_LIMIT) {
       const batch = unresolved.slice(offset, offset + RESOLVE_BATCH_LIMIT)
-      const controller = new AbortController()
-      requests.current.add(controller)
-      void resolveTextUnits(batch, controller.signal)
-        .then((response) => {
-          if (controller.signal.aborted) return
-          response.resolved.forEach((reference) => cache.current.set(reference.id, reference))
-          response.missing_ids.forEach((id) => missing.current.add(id))
-        })
-        .catch((reason: unknown) => {
-          if (!(reason instanceof DOMException && reason.name === "AbortError")) {
-            batch.forEach((id) => failed.current.add(id))
+      requestQueue.current = requestQueue.current.then(async () => {
+        if (disposed.current) return
+        const controller = new AbortController()
+        requests.current.add(controller)
+        try {
+          const response = await resolveTextUnits(batch, controller.signal)
+          if (!controller.signal.aborted) {
+            response.resolved.forEach((reference) => cache.current.set(reference.id, reference))
+            response.missing_ids.forEach((id) => missing.current.add(id))
           }
-        })
-        .finally(() => {
+        } catch (reason: unknown) {
+          if (!(reason instanceof DOMException && reason.name === "AbortError")) batch.forEach((id) => failed.current.add(id))
+        } finally {
           requests.current.delete(controller)
           batch.forEach((id) => pending.current.delete(id))
           if (!controller.signal.aborted) publish()
-        })
+        }
+      })
     }
   }, [publish])
 

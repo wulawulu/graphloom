@@ -76,6 +76,10 @@ export function AnswerPanel({ runId, result, loading, envelopes = [], onCitation
 function SourceEvidenceViewer({ viewer, onClose }: { viewer: { group: CitationGroup; target: Extract<CitationTarget, { kind: "sources" }> }; onClose: () => void }): React.ReactElement {
   const { t } = useTranslation()
   const evidence = useTextUnitEvidence()
+  const loadingSourceIds = new Set(viewer.target.textUnitIds.filter((id) => {
+    const status = evidence.status(id)
+    return status === "idle" || status === "loading"
+  }))
   return (
     <Sheet open onOpenChange={(open) => { if (!open) onClose() }}>
       <SheetContent className="min-w-0 overflow-y-auto">
@@ -85,7 +89,7 @@ function SourceEvidenceViewer({ viewer, onClose }: { viewer: { group: CitationGr
         </SheetHeader>
         {viewer.group.hasMore ? <p className="rounded-md border bg-muted/20 p-2 text-xs text-muted-foreground">{t("answer.sources.additionalSourcesOmitted")}</p> : null}
         {viewer.target.unresolvedCount === 0 ? null : <p className="rounded-md border border-warning/30 bg-warning/5 p-2 text-xs text-muted-foreground">{t("answer.sources.unresolvedCount", { count: viewer.target.unresolvedCount })}</p>}
-        <GraphSourceEvidence sourceIds={viewer.target.textUnitIds} sources={viewer.target.textUnitIds.flatMap((id) => { const reference = evidence.refs.get(id); return reference === undefined ? [] : [reference] })} />
+        <GraphSourceEvidence sourceIds={viewer.target.textUnitIds} sources={viewer.target.textUnitIds.flatMap((id) => { const reference = evidence.refs.get(id); return reference === undefined ? [] : [reference] })} loadingSourceIds={loadingSourceIds} />
       </SheetContent>
     </Sheet>
   )

@@ -9,20 +9,22 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 
 const INITIAL_SOURCE_COUNT = 5
+const NO_LOADING_SOURCES: ReadonlySet<string> = new Set()
 
 interface GraphSourceEvidenceProps {
   sourceIds: string[]
   sources: GraphTextUnitRef[]
+  loadingSourceIds?: ReadonlySet<string>
 }
 
-type SourceItem = { id: string; reference: GraphTextUnitRef | null }
+type SourceItem = { id: string; reference: GraphTextUnitRef | null; loading: boolean }
 
-function sourceItems(sourceIds: string[], sources: GraphTextUnitRef[]): SourceItem[] {
+function sourceItems(sourceIds: string[], sources: GraphTextUnitRef[], loadingSourceIds: ReadonlySet<string>): SourceItem[] {
   const references = new Map(sources.map((source) => [source.id, source]))
   const seen = new Set<string>()
   return sourceIds
     .filter((id) => !seen.has(id) && seen.add(id))
-    .map((id) => ({ id, reference: references.get(id) ?? null }))
+    .map((id) => ({ id, reference: references.get(id) ?? null, loading: loadingSourceIds.has(id) }))
 }
 
 function shortStableId(id: string): string {
@@ -34,7 +36,7 @@ function isAbort(reason: unknown): boolean {
   return reason instanceof DOMException && reason.name === "AbortError"
 }
 
-export function GraphSourceEvidence({ sourceIds, sources }: GraphSourceEvidenceProps): React.ReactElement {
+export function GraphSourceEvidence({ sourceIds, sources, loadingSourceIds = NO_LOADING_SOURCES }: GraphSourceEvidenceProps): React.ReactElement {
   const { t } = useTranslation()
   const [showAll, setShowAll] = useState(false)
   const [selected, setSelected] = useState<GraphTextUnitRef | null>(null)
@@ -43,7 +45,7 @@ export function GraphSourceEvidence({ sourceIds, sources }: GraphSourceEvidenceP
   const [error, setError] = useState(false)
   const [copied, setCopied] = useState(false)
   const request = useRef<AbortController | null>(null)
-  const items = sourceItems(sourceIds, sources)
+  const items = sourceItems(sourceIds, sources, loadingSourceIds)
   const visible = showAll ? items : items.slice(0, INITIAL_SOURCE_COUNT)
 
   useEffect(() => () => request.current?.abort(), [])
@@ -92,7 +94,7 @@ export function GraphSourceEvidence({ sourceIds, sources }: GraphSourceEvidenceP
       <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{t("graph.sources.sourceEvidenceCount", { count: items.length })}</h3>
       <div className="space-y-2">
         {visible.map((item) => item.reference === null
-          ? <UnavailableSource key={item.id} id={item.id} />
+          ? item.loading ? <LoadingSource key={item.id} /> : <UnavailableSource key={item.id} id={item.id} />
           : <SourceCard key={item.id} source={item.reference} onOpen={open} />)}
         {items.length === 0 ? <p className="text-sm text-muted-foreground">{t("graph.sources.noSourceEvidence")}</p> : null}
         {items.length > INITIAL_SOURCE_COUNT ? <Button variant="ghost" size="sm" onClick={() => setShowAll((current) => !current)}>{t(showAll ? "graph.sources.showFewer" : "graph.sources.showAll")}</Button> : null}
@@ -125,6 +127,11 @@ export function GraphSourceEvidence({ sourceIds, sources }: GraphSourceEvidenceP
       </Sheet>
     </section>
   )
+}
+
+function LoadingSource(): React.ReactElement {
+  const { t } = useTranslation()
+  return <div className="min-w-0 rounded-md border border-dashed px-3 py-4 text-center text-sm text-muted-foreground" role="status">{t("graph.sources.loadingSource")}</div>
 }
 
 function SourceCard({ onOpen, source }: { onOpen: (source: GraphTextUnitRef) => void; source: GraphTextUnitRef }): React.ReactElement {

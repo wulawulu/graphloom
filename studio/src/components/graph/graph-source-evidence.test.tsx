@@ -36,6 +36,13 @@ describe("GraphSourceEvidence", () => {
     expect(screen.getByRole("region", { name: "Source evidence · 3" })).toBeInTheDocument()
   })
 
+  it("shows unresolved enrichment as loading instead of falsely unavailable", () => {
+    render(<GraphSourceEvidence sourceIds={[sourceA.id]} sources={[]} loadingSourceIds={new Set([sourceA.id])} />)
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading source…")
+    expect(screen.queryByText("Source unavailable")).not.toBeInTheDocument()
+  })
+
   it("pluralizes English token counts", () => {
     render(<GraphSourceEvidence
       sourceIds={["one", "two"]}

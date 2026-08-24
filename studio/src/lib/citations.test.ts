@@ -12,8 +12,8 @@ import {
   resolveCitationTarget,
 } from "@/lib/citations"
 
-function envelope(sequence: number, event: ExplainabilityEventPayload): ExplainabilityEnvelope {
-  return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event } }
+function envelope(sequence: number, event: ExplainabilityEventPayload, spanId = "span", parentSpanId?: string): ExplainabilityEnvelope {
+  return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: spanId, ...(parentSpanId === undefined ? {} : { parent_span_id: parentSpanId }), event } }
 }
 
 function contextSection(sequence: number, section: "entities" | "relationships" | "sources", selectedRecordIds: string[]): ExplainabilityEnvelope {
@@ -29,6 +29,17 @@ function contextSection(sequence: number, section: "entities" | "relationships" 
       selected_record_ids: selectedRecordIds,
     },
   })
+}
+
+function basicSourceEvents(candidates: Array<{ id: string; short_id: string; record_type: "text_unit"; selected: boolean }>, selectedRecordIds: string[]): ExplainabilityEnvelope[] {
+  return [
+    envelope(1, { type: "query_started", method: "basic" }, "basic-root"),
+    envelope(2, { type: "candidates_retrieved", record_type: "text_unit", candidates }, "retrieval", "basic-root"),
+    envelope(3, { type: "candidates_filtered", record_type: "text_unit", candidates }, "retrieval", "basic-root"),
+    envelope(4, { type: "context_budget_allocated", total_token_budget: 1_000, sections: [{ section: "sources", token_budget: 1_000 }] }, "context", "basic-root"),
+    envelope(5, { type: "context_section_built", section: { section: "sources", token_budget: 1_000, tokens_used: 100, candidate_count: candidates.length, selected_count: selectedRecordIds.length, truncated: false, selected_record_ids: selectedRecordIds } }, "context", "basic-root"),
+    envelope(6, { type: "context_completed", tokens_used: 100 }, "context", "basic-root"),
+  ]
 }
 
 describe("GraphRAG data citations", () => {
@@ -142,38 +153,60 @@ describe("GraphRAG data citations", () => {
   })
 
   it("resolves Sources through unique candidate identity and final Sources context provenance", () => {
-    const index = buildCitationEvidenceIndex([
-      envelope(1, { type: "candidates_retrieved", record_type: "text_unit", candidates: [
-        { id: "text-a", short_id: "184", record_type: "text_unit", selected: false },
-        { id: "text-b", short_id: "206", record_type: "text_unit", selected: false },
-      ] }),
-      contextSection(2, "sources", ["text-a", "text-b"]),
-    ])
+    const index = buildCitationEvidenceIndex(basicSourceEvents([
+      { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+      { id: "text-b", short_id: "206", record_type: "text_unit", selected: true },
+    ], ["text-a", "text-b"]))
 
     expect(resolveCitationTarget({ dataset: "Sources", recordIds: ["184", "206"], hasMore: false }, index)).toEqual({ kind: "sources", textUnitIds: ["text-a", "text-b"], unresolvedCount: 0 })
   })
 
   it("excludes Sources outside final context and reports unknown short IDs", () => {
-    const index = buildCitationEvidenceIndex([
-      envelope(1, { type: "candidates_filtered", record_type: "text_unit", candidates: [
-        { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
-        { id: "text-b", short_id: "206", record_type: "text_unit", selected: false },
-      ] }),
-      contextSection(2, "sources", ["text-a"]),
-    ])
+    const index = buildCitationEvidenceIndex(basicSourceEvents([
+      { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+      { id: "text-b", short_id: "206", record_type: "text_unit", selected: false },
+    ], ["text-a"]))
 
     expect(resolveCitationTarget({ dataset: "sources", recordIds: ["184", "206", "999"], hasMore: true }, index)).toEqual({ kind: "sources", textUnitIds: ["text-a"], unresolvedCount: 2 })
   })
 
   it("rejects ambiguous Source short IDs rather than choosing a stable ID", () => {
-    const index = buildCitationEvidenceIndex([
-      envelope(1, { type: "candidates_retrieved", record_type: "text_unit", candidates: [
-        { id: "text-a", short_id: "184", record_type: "text_unit", selected: false },
-        { id: "text-b", short_id: "184", record_type: "text_unit", selected: false },
-      ] }),
-      contextSection(2, "sources", ["text-a", "text-b"]),
-    ])
+    const index = buildCitationEvidenceIndex(basicSourceEvents([
+      { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+      { id: "text-b", short_id: "184", record_type: "text_unit", selected: true },
+    ], ["text-a", "text-b"]))
 
     expect(resolveCitationTarget({ dataset: "Sources", recordIds: ["184"], hasMore: false }, index)).toBeNull()
+  })
+
+  it("ignores Source provenance rejected by the Basic semantic lifecycle", () => {
+    const events = basicSourceEvents([
+      { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+    ], ["text-a"])
+    events.push(
+      envelope(7, { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: "wrong", short_id: "999", record_type: "text_unit", selected: true }] }, "retrieval", "basic-root"),
+      envelope(8, { type: "context_budget_allocated", total_token_budget: 999, sections: [{ section: "sources", token_budget: 999 }] }, "late-context", "basic-root"),
+      envelope(9, { type: "context_section_built", section: { section: "sources", token_budget: 999, tokens_used: 1, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["wrong"] } }, "late-context", "basic-root"),
+      envelope(10, { type: "context_completed", tokens_used: 1 }, "late-context", "basic-root"),
+    )
+
+    const index = buildCitationEvidenceIndex(events)
+    expect(index.sources).toEqual(new Map([["184", "text-a"]]))
+    expect(resolveCitationTarget({ dataset: "Sources", recordIds: ["184", "999"], hasMore: false }, index)).toEqual({ kind: "sources", textUnitIds: ["text-a"], unresolvedCount: 1 })
+  })
+
+  it("trusts only the final coherent Basic context rebuild", () => {
+    const events = basicSourceEvents([
+      { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+    ], ["text-a"])
+    events.push(
+      envelope(7, { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: "text-b", short_id: "206", record_type: "text_unit", selected: true }] }, "retrieval-2", "basic-root"),
+      envelope(8, { type: "candidates_filtered", record_type: "text_unit", candidates: [{ id: "text-b", short_id: "206", record_type: "text_unit", selected: true }] }, "retrieval-2", "basic-root"),
+      envelope(9, { type: "context_budget_allocated", total_token_budget: 20, sections: [{ section: "sources", token_budget: 20 }] }, "context-2", "basic-root"),
+      envelope(10, { type: "context_section_built", section: { section: "sources", token_budget: 20, tokens_used: 10, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["text-b"] } }, "context-2", "basic-root"),
+      envelope(11, { type: "context_completed", tokens_used: 10 }, "context-2", "basic-root"),
+    )
+
+    expect(buildCitationEvidenceIndex(events).sources).toEqual(new Map([["206", "text-b"]]))
   })
 })

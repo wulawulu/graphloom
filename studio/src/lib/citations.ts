@@ -1,4 +1,5 @@
 import type { ExplainabilityCandidate, ExplainabilityEnvelope } from "@/api/types"
+import { buildBasicSemanticTimeline } from "@/lib/semantic-basic"
 
 export interface CitationGroup {
   dataset: string
@@ -71,6 +72,11 @@ export function buildCitationGraphIndex(envelopes: readonly ExplainabilityEnvelo
 }
 
 export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnvelope[]): CitationEvidenceIndex {
+  const isBasic = envelopes.some((envelope) => envelope.record.parent_span_id === undefined
+    && envelope.record.event.type === "query_started"
+    && envelope.record.event.method === "basic")
+  const claimedSourceSequences = new Set((isBasic ? buildBasicSemanticTimeline(envelopes).steps.flatMap((step) => step.rawEvents) : envelopes)
+    .map((envelope) => envelope.sequence))
   const entityIdentities = new Map<string, string | null>()
   const relationshipIdentities = new Map<string, string | null>()
   const sourceIdentities = new Map<string, string | null>()
@@ -82,9 +88,11 @@ export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnv
     const event = envelope.record.event
     if (event.type === "entities_selected") addCandidates(entityIdentities, event.entities)
     if (event.type === "relationships_selected") addCandidates(relationshipIdentities, event.relationships)
-    if ((event.type === "candidates_retrieved" || event.type === "candidates_filtered") && event.record_type === "text_unit") addCandidateIdentities(sourceIdentities, event.candidates)
-    if (event.type === "text_units_selected") addCandidateIdentities(sourceIdentities, event.text_units)
-    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds, finalSourceIds)
+    if (claimedSourceSequences.has(envelope.sequence)) {
+      if ((event.type === "candidates_retrieved" || event.type === "candidates_filtered") && event.record_type === "text_unit") addCandidateIdentities(sourceIdentities, event.candidates)
+      if (event.type === "text_units_selected") addCandidateIdentities(sourceIdentities, event.text_units)
+    }
+    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds, claimedSourceSequences.has(envelope.sequence) ? finalSourceIds : undefined)
   }
 
   return {
@@ -94,7 +102,7 @@ export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnv
   }
 }
 
-function addContextMembership(value: unknown, entityIds: Set<string>, relationshipIds: Set<string>, sourceIds: Set<string>): void {
+function addContextMembership(value: unknown, entityIds: Set<string>, relationshipIds: Set<string>, sourceIds?: Set<string>): void {
   if (typeof value !== "object" || value === null) return
   const section = value as { section?: unknown; selected_record_ids?: unknown }
   if (!Array.isArray(section.selected_record_ids) || !section.selected_record_ids.every((id) => typeof id === "string")) return
@@ -102,7 +110,7 @@ function addContextMembership(value: unknown, entityIds: Set<string>, relationsh
     ? entityIds
     : section.section === "relationships"
       ? relationshipIds
-      : section.section === "sources"
+      : section.section === "sources" && sourceIds !== undefined
         ? sourceIds
         : null
   if (target === null) return

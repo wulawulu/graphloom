@@ -11,7 +11,6 @@ interface CapturedContentViewerProps {
   buttonLabel: StudioTranslationKey
   title: string
   content: string | null
-  unavailableMessage: StudioTranslationKey
   testId: string
   preview?: boolean
   exactTabLabel?: StudioTranslationKey

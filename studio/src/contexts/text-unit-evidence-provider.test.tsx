@@ -20,6 +20,12 @@ function EvidenceConsumer({ id }: { id: string }): React.ReactElement {
   return <span>{refs.get(id)?.preview ?? status(id)}</span>
 }
 
+function BatchConsumer({ ids }: { ids: string[] }): React.ReactElement {
+  const { resolve } = useTextUnitEvidence()
+  useEffect(() => resolve(ids), [resolve, ids])
+  return <span>batch</span>
+}
+
 describe("TextUnitEvidenceProvider", () => {
   it("deduplicates concurrent consumers through one Run-scoped batch", async () => {
     vi.mocked(resolveTextUnits).mockResolvedValue({ resolved: [{ id: "text-a", short_id: "184", preview: "shared preview", n_tokens: 12 }], missing_ids: [] })
@@ -47,5 +53,20 @@ describe("TextUnitEvidenceProvider", () => {
     expect(runASignal?.aborted).toBe(true)
     await act(async () => resolveRunA?.({ resolved: [{ id: "run-a", short_id: "1", preview: "late Run A preview", n_tokens: null }], missing_ids: [] }))
     expect(screen.queryByText("late Run A preview")).not.toBeInTheDocument()
+  })
+
+  it("serializes oversized enrichment into bounded backend batches", async () => {
+    let releaseFirst: ((value: GraphTextUnitResolveResponse) => void) | undefined
+    vi.mocked(resolveTextUnits)
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve }))
+      .mockResolvedValue({ resolved: [], missing_ids: [] })
+    const ids = Array.from({ length: 201 }, (_, index) => `text-${index}`)
+    render(<TextUnitEvidenceProvider><BatchConsumer ids={ids} /></TextUnitEvidenceProvider>)
+
+    await waitFor(() => expect(resolveTextUnits).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(resolveTextUnits).mock.calls[0]?.[0]).toHaveLength(100)
+    await act(async () => releaseFirst?.({ resolved: [], missing_ids: [] }))
+    await waitFor(() => expect(resolveTextUnits).toHaveBeenCalledTimes(3))
+    expect(vi.mocked(resolveTextUnits).mock.calls.map(([batch]) => batch.length)).toEqual([100, 100, 1])
   })
 })
