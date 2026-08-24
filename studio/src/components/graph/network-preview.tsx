@@ -36,9 +36,10 @@ interface NetworkPreviewProps {
 
 function focusCollection(cy: Core, projection: GraphProjection, mode: GraphViewMode, visualMode: GraphVisualMode, focusCore: GraphHighlight | null): void {
   const focused = mode !== "overview" && visualMode === "focus"
-  const ids = new Set(focused && focusCore !== null
-    ? [...focusCore.entityIds, ...focusCore.relationshipIds]
-    : projectionFocusIds(projection, focused))
+  const hierarchy = focused && focusCore !== null ? deriveGraphFocusHierarchy(projection, focusCore) : null
+  const ids = new Set(hierarchy === null
+    ? projectionFocusIds(projection, focused)
+    : [...hierarchy.coreEntityIds, ...hierarchy.relationshipEndpointEntityIds, ...hierarchy.coreRelationshipIds])
   const targets = cy.elements().filter((element) => ids.has(element.id()))
   if (targets.length === 0) return
   if (focused) {
@@ -60,7 +61,7 @@ function runLayout(cy: Core, projection: GraphProjection, mode: GraphViewMode, v
   layout.run()
 }
 
-const FOCUS_CLASSES = "focus-core focus-neighbor focus-relationship focus-connection focus-boundary focus-neighbor-edge focus-full"
+const FOCUS_CLASSES = "focus-core focus-relationship-endpoint focus-neighbor focus-relationship focus-connection focus-boundary focus-neighbor-edge focus-full"
 const CITATION_CLASSES = "citation-target citation-secondary citation-dimmed citation-connecting"
 
 function collectionForIds(cy: Core, ids: readonly string[]) {
@@ -83,6 +84,7 @@ function applyFocusHierarchy(
 
   const hierarchy = deriveGraphFocusHierarchy(projection, focusCore)
   collectionForIds(cy, hierarchy.coreEntityIds).addClass("focus-core")
+  collectionForIds(cy, hierarchy.relationshipEndpointEntityIds).addClass("focus-relationship-endpoint")
   collectionForIds(cy, hierarchy.neighborEntityIds).addClass("focus-neighbor")
   collectionForIds(cy, hierarchy.coreRelationshipIds).addClass("focus-relationship")
   collectionForIds(cy, hierarchy.coreConnectionIds).addClass("focus-connection")
@@ -224,6 +226,7 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
           { selector: "edge", style: { width: 1.2, opacity: 0.48, "line-color": theme.border, "target-arrow-color": theme.border, "target-arrow-shape": "triangle", "arrow-scale": 0.58, "curve-style": "bezier" } },
           { selector: "edge.seed-relationship", style: { width: 3.5, opacity: 0.95, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.9, "z-index": 8 } },
           { selector: "node.focus-core", style: { opacity: 1, "text-opacity": 1, "font-size": 11, "border-color": theme.seed, "border-width": 4, "z-index": 20 } },
+          { selector: "node.focus-relationship-endpoint", style: { opacity: 1, "text-opacity": 1, "font-size": 10, "border-color": theme.seed, "border-width": 3, "z-index": 16 } },
           { selector: "node.focus-neighbor", style: { opacity: 0.26, "text-opacity": 0, "border-color": theme.background, "border-width": 2, "z-index": 4 } },
           { selector: "edge.focus-relationship", style: { width: 4, opacity: 1, "line-color": theme.seed, "target-arrow-color": theme.seed, "arrow-scale": 0.95, "z-index": 18 } },
           { selector: "edge.focus-connection", style: { width: 2.4, opacity: 0.58, "line-color": theme.foreground, "target-arrow-color": theme.foreground, "arrow-scale": 0.72, "z-index": 12 } },

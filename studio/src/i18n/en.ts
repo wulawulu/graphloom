@@ -785,6 +785,22 @@ export const en = {
       "reloadGraphDataFromTheBackend": "Reload graph data from the backend",
       "reloadGraphData": "Reload graph data"
     },
+    "navigation": {
+      "back": "Back",
+      "relatedCommunities": "Related communities",
+      "parentCommunity": "Parent community",
+      "childCommunities": "Child communities",
+      "rootCommunity": "Root community · no parent",
+      "noChildCommunities": "No child communities",
+      "unresolvedCommunity": "Unknown community · {{id}}",
+      "unresolvedEntity": "Unable to uniquely resolve entity",
+      "sourceEntity": "Source entity",
+      "targetEntity": "Target entity",
+      "openCommunity": "Open community {{title}}",
+      "openEntity": "Open entity {{title}}",
+      "showAllChildren": "Show all children",
+      "showFewerChildren": "Show fewer children"
+    },
     "counts": {
       "countSourceTextUnit": "{{count}} source text unit",
       "countSourceTextUnit_other": "{{count}} source text units",

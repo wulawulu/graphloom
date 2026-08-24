@@ -1,9 +1,10 @@
 import { useState } from "react"
-import { ArrowDown, Building2, Check, Copy, GitBranch, Network, UsersRound, X } from "lucide-react"
+import { ArrowDown, ArrowLeft, Building2, Check, Copy, GitBranch, Network, UsersRound, X } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import type { GraphCommunity, GraphCommunityReportDetail, GraphEntityDetail, GraphRelationshipDetail } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
+import { GraphReferenceCard, UnresolvedGraphReference } from "@/components/graph/graph-reference-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -22,6 +23,10 @@ interface GraphInspectorProps {
   loading: boolean
   error: boolean
   onClear: () => void
+  canGoBack: boolean
+  onBack: () => void
+  onOpenEntity: (id: string) => void
+  onOpenCommunity: (id: string) => void
   onFocusEntity: (id: string) => void
   onFocusRelationship: (id: string) => void
 }
@@ -37,17 +42,20 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
   return (
     <section className="flex size-full min-h-0 flex-col" aria-label={t("graph.labels.graphInspector")} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") props.onClear() }}>
       <header className="flex h-11 shrink-0 items-center justify-between border-b px-3">
-        <div className="min-w-0"><h2 className="truncate text-sm font-semibold">{props.loading ? t("graph.actions.loadingGraphDetail") : title}</h2><p className="text-[10px] text-muted-foreground">{detail === null ? t("graph.actions.inspector") : t(graphKindKey(detail.kind))}</p></div>
-        {detail !== null || props.loading || props.error ? <Button variant="ghost" size="icon" className="size-8" aria-label={t("graph.actions.clearGraphSelection")} onClick={props.onClear}><X /></Button> : null}
+        <div className="flex min-w-0 items-center gap-1">
+          {props.canGoBack ? <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label={t("graph.navigation.back")} onClick={props.onBack}><ArrowLeft /></Button> : null}
+          <div className="min-w-0"><h2 className="truncate text-sm font-semibold">{props.loading ? t("graph.actions.loadingGraphDetail") : title}</h2><p className="text-[10px] text-muted-foreground">{detail === null ? t("graph.actions.inspector") : t(graphKindKey(detail.kind))}</p></div>
+        </div>
+        {detail !== null || props.loading || props.error ? <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label={t("graph.actions.clearGraphSelection")} onClick={props.onClear}><X /></Button> : null}
       </header>
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-3">
           {detail === null && !props.loading && !props.error ? <div className="flex min-h-64 flex-col items-center justify-center px-5 text-center"><Network className="mb-3 size-8 text-muted-foreground/40" /><p className="text-sm font-medium">{t("graph.actions.selectAGraphObject")}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("graph.messages.selectANodeRelationshipOrCommunityToInspectIt")}</p></div> : null}
           {props.loading ? <p className="py-10 text-center text-sm text-muted-foreground">{t("graph.messages.loadingStructuredDetail")}</p> : null}
           {props.error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-red-300">{t("graph.messages.graphDetailIsUnavailable")}</p> : null}
-          {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} /> : null}
-          {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} /> : null}
-          {detail?.kind === "community" ? <CommunityDetail value={detail.value} report={detail.report} /> : null}
+          {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} onOpenCommunity={props.onOpenCommunity} /> : null}
+          {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} onOpenEntity={props.onOpenEntity} /> : null}
+          {detail?.kind === "community" ? <CommunityDetail value={detail.value} report={detail.report} onOpenCommunity={props.onOpenCommunity} /> : null}
           {detail !== null && props.decision !== undefined && props.decision !== null ? <DecisionDetail value={props.decision} /> : null}
           {detail !== null ? <RawData value={detail} /> : null}
         </div>
@@ -140,8 +148,10 @@ function SourceIds({ values }: { values: string[] }): React.ReactElement {
   )
 }
 
-function EntityDetail({ value, onFocus }: { value: GraphEntityDetail; onFocus: (id: string) => void }): React.ReactElement {
+function EntityDetail({ value, onFocus, onOpenCommunity }: { value: GraphEntityDetail; onFocus: (id: string) => void; onOpenCommunity: (id: string) => void }): React.ReactElement {
   const { t } = useTranslation()
+  const resolvedIds = new Set(value.communities.map((community) => community.short_id))
+  const unresolvedIds = [...new Set(value.community_ids)].filter((id) => !resolvedIds.has(id))
   return (
     <div className="space-y-5 pb-5">
       <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
@@ -150,19 +160,29 @@ function EntityDetail({ value, onFocus }: { value: GraphEntityDetail; onFocus: (
       </div>
       <Section title="graph.labels.description"><p className="whitespace-pre-wrap text-sm leading-6">{value.description ?? t("graph.labels.noDescription")}</p></Section>
       <Separator />
-      <Section title="graph.labels.communities"><IdBadges values={value.community_ids} /></Section>
+      <Section title="graph.navigation.relatedCommunities">
+        <div className="space-y-2">
+          {value.communities.map((community) => <GraphReferenceCard key={community.id} reference={{ kind: "community", value: community }} onOpen={onOpenCommunity} />)}
+          {unresolvedIds.map((id) => <UnresolvedGraphReference key={id} value={id} label={t("graph.navigation.unresolvedCommunity", { id })} />)}
+          {value.communities.length === 0 && unresolvedIds.length === 0 ? <span className="text-sm text-muted-foreground">{t("graph.labels.none")}</span> : null}
+        </div>
+      </Section>
       <Section title="graph.labels.sources"><SourceIds values={value.text_unit_ids} /></Section>
       <Metadata id={value.id} shortId={value.short_id} />
     </div>
   )
 }
 
-function RelationshipDetail({ value, onFocus }: { value: GraphRelationshipDetail; onFocus: (id: string) => void }): React.ReactElement {
+function RelationshipDetail({ value, onFocus, onOpenEntity }: { value: GraphRelationshipDetail; onFocus: (id: string) => void; onOpenEntity: (id: string) => void }): React.ReactElement {
   const { t } = useTranslation()
   return (
     <div className="space-y-5 pb-5">
-      <div className="rounded-lg border bg-card p-4 text-center">
-        <div className="font-semibold">{value.source}</div><ArrowDown className="mx-auto my-2 size-5 text-primary" /><div className="font-semibold">{value.target}</div>
+      <div className="rounded-lg border bg-card p-4">
+        <p className="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{t("graph.navigation.sourceEntity")}</p>
+        {value.source_entity === null ? <UnresolvedGraphReference value={value.source} label={t("graph.navigation.unresolvedEntity")} /> : <GraphReferenceCard reference={{ kind: "entity", value: value.source_entity }} onOpen={onOpenEntity} />}
+        <ArrowDown className="mx-auto my-2 size-5 text-primary" />
+        <p className="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{t("graph.navigation.targetEntity")}</p>
+        {value.target_entity === null ? <UnresolvedGraphReference value={value.target} label={t("graph.navigation.unresolvedEntity")} /> : <GraphReferenceCard reference={{ kind: "entity", value: value.target_entity }} onOpen={onOpenEntity} />}
         <div className="mt-3 flex justify-center gap-1"><Badge variant="outline">{t("graph.labels.weightValue", { value: value.weight ?? "—" })}</Badge><Badge variant="outline">{t("graph.labels.rankValue", { value: value.rank ?? "—" })}</Badge></div>
       </div>
       <Button className="w-full" onClick={() => onFocus(value.id)}><GitBranch /> {t("graph.actions.focusRelationship")}</Button>
@@ -173,13 +193,24 @@ function RelationshipDetail({ value, onFocus }: { value: GraphRelationshipDetail
   )
 }
 
-function CommunityDetail({ value, report }: { value: GraphCommunity; report: GraphCommunityReportDetail | null }): React.ReactElement {
+const INITIAL_CHILD_COUNT = 10
+
+function CommunityDetail({ value, report, onOpenCommunity }: { value: GraphCommunity; report: GraphCommunityReportDetail | null; onOpenCommunity: (id: string) => void }): React.ReactElement {
   const { t } = useTranslation()
+  const [showAllChildren, setShowAllChildren] = useState(false)
+  const childReferences = new Map(value.child_communities.map((community) => [community.short_id, community]))
+  const childItems = [...new Set(value.children)].map((id) => ({ id, reference: childReferences.get(String(id)) ?? null }))
+  const visibleChildren = showAllChildren ? childItems : childItems.slice(0, INITIAL_CHILD_COUNT)
   return (
     <div className="space-y-5 pb-5">
       <div className="flex gap-3 rounded-lg border bg-card p-4"><div className="rounded-full bg-primary/10 p-2 text-primary"><UsersRound className="size-5" /></div><div><h3 className="font-semibold">{value.title}</h3><div className="mt-1 flex flex-wrap gap-1"><Badge variant="outline">{t("graph.labels.levelValue", { value: value.level })}</Badge><Badge variant="outline">{t("graph.labels.shortIdValue", { value: value.short_id })}</Badge></div></div></div>
       <Section title="graph.labels.summary"><p className="whitespace-pre-wrap text-sm leading-6">{value.report?.summary ?? t("graph.labels.noReportSummary")}</p></Section>
-      <Section title="graph.labels.hierarchy"><p className="text-sm"><span className="text-muted-foreground">{t("graph.labels.parent")}:</span> {value.parent}</p><p className="text-sm"><span className="text-muted-foreground">{t("graph.labels.children")}:</span> {value.children.join(", ") || t("graph.labels.none")}</p></Section>
+      <Section title="graph.labels.hierarchy">
+        <div className="space-y-3">
+          <div className="space-y-2"><p className="text-[11px] font-medium text-muted-foreground">{t("graph.navigation.parentCommunity")}</p>{value.parent < 0 ? <p className="text-sm text-muted-foreground">{t("graph.navigation.rootCommunity")}</p> : value.parent_community === null ? <UnresolvedGraphReference value={String(value.parent)} label={t("graph.navigation.unresolvedCommunity", { id: value.parent })} /> : <GraphReferenceCard reference={{ kind: "community", value: value.parent_community }} onOpen={onOpenCommunity} />}</div>
+          <div className="space-y-2"><p className="text-[11px] font-medium text-muted-foreground">{t("graph.navigation.childCommunities")}</p>{visibleChildren.map((child) => child.reference === null ? <UnresolvedGraphReference key={child.id} value={String(child.id)} label={t("graph.navigation.unresolvedCommunity", { id: child.id })} /> : <GraphReferenceCard key={child.reference.id} reference={{ kind: "community", value: child.reference }} onOpen={onOpenCommunity} />)}{value.children.length === 0 ? <p className="text-sm text-muted-foreground">{t("graph.navigation.noChildCommunities")}</p> : null}{childItems.length > INITIAL_CHILD_COUNT ? <Button variant="ghost" size="sm" onClick={() => setShowAllChildren((current) => !current)}>{t(showAllChildren ? "graph.navigation.showFewerChildren" : "graph.navigation.showAllChildren")}</Button> : null}</div>
+        </div>
+      </Section>
       {report !== null ? <Section title="graph.labels.report"><div className="mb-2 flex items-center gap-2"><GitBranch className="size-4 text-primary" /><span className="font-medium">{report.title}</span>{report.rank !== null ? <Badge variant="outline">{t("graph.labels.rankValue", { value: report.rank })}</Badge> : null}</div><SafeMarkdown>{report.full_content}</SafeMarkdown></Section> : null}
       <Metadata id={value.id} shortId={value.short_id} />
     </div>

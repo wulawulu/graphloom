@@ -33,6 +33,13 @@ export type GraphFocusKind = "final-context" | "focus-target"
 export type GraphFocusIntent = GraphSubgraphRequest & { revision: number; focusKind?: GraphFocusKind }
 export type GraphInspectIntent = { candidate: ExplainabilityRecordView; revision: number }
 
+type GraphDetailIdentity =
+  | { kind: "entity"; id: string; decision: ExplainabilityRecordView | null }
+  | { kind: "relationship"; id: string; decision: ExplainabilityRecordView | null }
+  | { kind: "community"; id: string; decision: null }
+
+type DetailNavigationKind = "root" | "internal" | "back"
+
 interface GraphExplorerProps {
   runId: string | null
   focusIntent: GraphFocusIntent | null
@@ -73,6 +80,26 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
   }
 }
 
+async function fetchGraphDetail(identity: GraphDetailIdentity, signal: AbortSignal): Promise<GraphDetail> {
+  if (identity.kind === "entity") return { kind: "entity", value: await getEntity(identity.id, signal) }
+  if (identity.kind === "relationship") return { kind: "relationship", value: await getRelationship(identity.id, signal) }
+  const [value, report] = await Promise.all([
+    getCommunity(identity.id, signal),
+    getCommunityReport(identity.id, signal).catch((reason: unknown) => {
+      if (isAbort(reason)) throw reason
+      if (reason instanceof ApiError && reason.status === 404) return null
+      throw reason
+    }),
+  ])
+  return { kind: "community", value, report }
+}
+
+function detailIdentity(detail: GraphDetail, decision: ExplainabilityRecordView | null): GraphDetailIdentity {
+  if (detail.kind === "entity") return { kind: "entity", id: detail.value.id, decision }
+  if (detail.kind === "relationship") return { kind: "relationship", id: detail.value.id, decision }
+  return { kind: "community", id: detail.value.id, decision: null }
+}
+
 export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectIntent = null, navigationResetRevision = 0, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
   const { t } = useTranslation()
   const desktop = useDesktopLayout()
@@ -90,6 +117,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
   const [decision, setDecision] = useState<ExplainabilityRecordView | null>(null)
+  const [detailHistory, setDetailHistory] = useState<GraphDetailIdentity[]>([])
   const [explorerOrigin, setExplorerOrigin] = useState<ExplorerOrigin | null>(null)
   const [focusCore, setFocusCore] = useState<GraphHighlight | null>(null)
   const [focusKind, setFocusKind] = useState<GraphFocusKind>("focus-target")
@@ -299,7 +327,6 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     const controller = new AbortController()
     detailRequest.current = controller
     setDetailLoading(true)
-    setDetail(null)
     setDetailError(false)
     return controller
   }, [])
@@ -318,39 +345,48 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     detailRequest.current?.abort()
     detailRequest.current = null
     setDetail(null)
+    setDetailHistory([])
     setDecision(null)
     setDetailLoading(false)
     setDetailError(false)
   }, [])
 
-  const openEntityDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
+  const openDetail = useCallback((identity: GraphDetailIdentity, navigation: DetailNavigationKind): void => {
     setInspectorTab("inspect")
     setMobileView("detail")
-    candidateInspectionActive.current = candidate !== null
-    setDecision(candidate)
     if (desktop) inspectorPanelRef.current?.expand()
+    if (navigation === "root") {
+      if (identity.decision !== null) candidateInspectionActive.current = true
+      setDetailHistory([])
+    }
+    const previous = detail === null ? null : detailIdentity(detail, decision)
     const controller = beginDetailRequest()
-    void getEntity(id, controller.signal)
-      .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "entity", value }) })
-      .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
+    void fetchGraphDetail(identity, controller.signal)
+      .then((value) => {
+        if (detailRequest.current !== controller || controller.signal.aborted) return
+        if (navigation === "internal" && previous !== null) setDetailHistory((history) => [...history, previous])
+        if (navigation === "back") setDetailHistory((history) => history.slice(0, -1))
+        candidateInspectionActive.current = identity.decision !== null
+        setDecision(identity.decision)
+        setDetail(value)
+      })
+      .catch((reason: unknown) => {
+        if (detailRequest.current !== controller || isAbort(reason)) return
+        candidateInspectionActive.current = decision !== null
+        setDetailError(true)
+      })
       .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
+  }, [beginDetailRequest, decision, desktop, detail, finishDetailRequest, inspectorPanelRef])
 
-  const openRelationshipDetail = useCallback((id: string, candidate: ExplainabilityRecordView | null) => {
-    setInspectorTab("inspect")
-    setMobileView("detail")
-    candidateInspectionActive.current = candidate !== null
-    setDecision(candidate)
-    if (desktop) inspectorPanelRef.current?.expand()
-    const controller = beginDetailRequest()
-    void getRelationship(id, controller.signal)
-      .then((value) => { if (!controller.signal.aborted) setDetail({ kind: "relationship", value }) })
-      .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
-      .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
-
-  const openEntity = useCallback((id: string) => openEntityDetail(id, null), [openEntityDetail])
-  const openRelationship = useCallback((id: string) => openRelationshipDetail(id, null), [openRelationshipDetail])
+  const openEntity = useCallback((id: string) => openDetail({ kind: "entity", id, decision: null }, "root"), [openDetail])
+  const openRelationship = useCallback((id: string) => openDetail({ kind: "relationship", id, decision: null }, "root"), [openDetail])
+  const openCommunity = useCallback((id: string) => openDetail({ kind: "community", id, decision: null }, "root"), [openDetail])
+  const navigateEntity = useCallback((id: string) => openDetail({ kind: "entity", id, decision: null }, "internal"), [openDetail])
+  const navigateCommunity = useCallback((id: string) => openDetail({ kind: "community", id, decision: null }, "internal"), [openDetail])
+  const backFromDetail = useCallback(() => {
+    const target = detailHistory.at(-1)
+    if (target !== undefined) openDetail(target, "back")
+  }, [detailHistory, openDetail])
 
   useEffect(() => {
     const runChanged = inspectionRunId.current !== runId
@@ -365,35 +401,16 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
     }
     if (previousInspectRevision.current === inspectIntent.revision) return
     previousInspectRevision.current = inspectIntent.revision
-    if (inspectIntent.candidate.recordType === "entity") openEntityDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
-    if (inspectIntent.candidate.recordType === "relationship") openRelationshipDetail(inspectIntent.candidate.stableId, inspectIntent.candidate)
-  }, [inspectIntent, openEntityDetail, openRelationshipDetail, resetCandidateInspection, runId])
-
-  const openCommunity = useCallback((id: string) => {
-    setInspectorTab("inspect")
-    setMobileView("detail")
-    candidateInspectionActive.current = false
-    setDecision(null)
-    if (desktop) inspectorPanelRef.current?.expand()
-    const controller = beginDetailRequest()
-    void Promise.all([
-      getCommunity(id, controller.signal),
-      getCommunityReport(id, controller.signal).catch((reason: unknown) => {
-        if (isAbort(reason)) throw reason
-        if (reason instanceof ApiError && reason.status === 404) return null
-        throw reason
-      }),
-    ])
-      .then(([value, report]) => { if (!controller.signal.aborted) setDetail({ kind: "community", value, report }) })
-      .catch(() => { if (!controller.signal.aborted) setDetailError(true) })
-      .finally(() => finishDetailRequest(controller))
-  }, [beginDetailRequest, desktop, finishDetailRequest, inspectorPanelRef])
+    if (inspectIntent.candidate.recordType === "entity") openDetail({ kind: "entity", id: inspectIntent.candidate.stableId, decision: inspectIntent.candidate }, "root")
+    if (inspectIntent.candidate.recordType === "relationship") openDetail({ kind: "relationship", id: inspectIntent.candidate.stableId, decision: inspectIntent.candidate }, "root")
+  }, [inspectIntent, openDetail, resetCandidateInspection, runId])
 
   const closeDetail = (): void => {
     candidateInspectionActive.current = false
     detailRequest.current?.abort()
     detailRequest.current = null
     setDetail(null)
+    setDetailHistory([])
     setDetailLoading(false)
     setDetailError(false)
     setDecision(null)
@@ -414,7 +431,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const inspector = (
     <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
       <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">{t("graph.actions.inspect")}</TabsTrigger><TabsTrigger value="entities">{t("graph.labels.entities")}</TabsTrigger><TabsTrigger value="relationships">{t("graph.labels.relations")}</TabsTrigger><TabsTrigger value="communities">{t("graph.labels.groups")}</TabsTrigger></TabsList>
-      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadExplorerFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })} onFocusRelationship={(id) => loadExplorerFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 })} /></TabsContent>
+      <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} canGoBack={detailHistory.length > 0} onBack={backFromDetail} onClear={closeDetail} onOpenEntity={navigateEntity} onOpenCommunity={navigateCommunity} onFocusEntity={(id) => loadExplorerFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })} onFocusRelationship={(id) => loadExplorerFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 })} /></TabsContent>
       <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
       <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
       <TabsContent value="communities" className="min-h-0 flex-1"><CommunityList onSelect={openCommunity} /></TabsContent>

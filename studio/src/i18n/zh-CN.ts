@@ -787,6 +787,22 @@ export const zhCN = {
       "reloadGraphDataFromTheBackend": "从后端重新加载图谱数据",
       "reloadGraphData": "重新加载图谱数据"
     },
+    "navigation": {
+      "back": "返回",
+      "relatedCommunities": "相关社区",
+      "parentCommunity": "父社区",
+      "childCommunities": "子社区",
+      "rootCommunity": "根社区 · 无父社区",
+      "noChildCommunities": "无子社区",
+      "unresolvedCommunity": "未知社区 · {{id}}",
+      "unresolvedEntity": "无法唯一解析对应实体",
+      "sourceEntity": "源实体",
+      "targetEntity": "目标实体",
+      "openCommunity": "打开社区 {{title}}",
+      "openEntity": "打开实体 {{title}}",
+      "showAllChildren": "显示所有子社区",
+      "showFewerChildren": "收起子社区"
+    },
     "counts": {
       "countSourceTextUnit": "{{count}} 个来源文本单元",
       "countSourceTextUnit_other": "{{count}} 个来源文本单元",

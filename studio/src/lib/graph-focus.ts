@@ -3,6 +3,7 @@ import type { GraphHighlight } from "@/lib/explainability"
 
 export interface GraphFocusHierarchy {
   coreEntityIds: string[]
+  relationshipEndpointEntityIds: string[]
   neighborEntityIds: string[]
   coreRelationshipIds: string[]
   coreConnectionIds: string[]
@@ -16,8 +17,15 @@ export function deriveGraphFocusHierarchy(
 ): GraphFocusHierarchy {
   const coreEntities = new Set(core.entityIds)
   const coreRelationships = new Set(core.relationshipIds)
+  const relationshipEndpoints = new Set<string>()
+  for (const relationship of projection.relationships) {
+    if (!coreRelationships.has(relationship.id)) continue
+    if (!coreEntities.has(relationship.source_entity_id)) relationshipEndpoints.add(relationship.source_entity_id)
+    if (!coreEntities.has(relationship.target_entity_id)) relationshipEndpoints.add(relationship.target_entity_id)
+  }
   const hierarchy: GraphFocusHierarchy = {
     coreEntityIds: [],
+    relationshipEndpointEntityIds: [],
     neighborEntityIds: [],
     coreRelationshipIds: [],
     coreConnectionIds: [],
@@ -26,7 +34,9 @@ export function deriveGraphFocusHierarchy(
   }
 
   for (const entity of projection.entities) {
-    (coreEntities.has(entity.id) ? hierarchy.coreEntityIds : hierarchy.neighborEntityIds).push(entity.id)
+    if (coreEntities.has(entity.id)) hierarchy.coreEntityIds.push(entity.id)
+    else if (relationshipEndpoints.has(entity.id)) hierarchy.relationshipEndpointEntityIds.push(entity.id)
+    else hierarchy.neighborEntityIds.push(entity.id)
   }
   for (const relationship of projection.relationships) {
     if (coreRelationships.has(relationship.id)) {

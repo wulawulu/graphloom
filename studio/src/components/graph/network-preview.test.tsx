@@ -284,11 +284,32 @@ describe("NetworkPreview focus labels", () => {
     await waitFor(() => expect(graphMock.elements).toHaveLength(7))
 
     expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("focus-core")
-    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("focus-neighbor")
+    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("focus-relationship-endpoint")
     expect(graphMock.elements.find((element) => element.id() === "relationship-context")?.classes).toContain("focus-relationship")
     expect(graphMock.elements.find((element) => element.id() === "relationship-core")?.classes).toContain("focus-connection")
     expect(graphMock.elements.find((element) => element.id() === "relationship-boundary")?.classes).toContain("focus-boundary")
     expect(graphMock.elements.find((element) => element.id() === "relationship-neighbor")?.classes).toContain("focus-neighbor-edge")
+  })
+
+  it("keeps both endpoints visible for relationship-only focus", async () => {
+    const relationshipProjection: GraphProjection = {
+      ...projection,
+      entities: [
+        projection.entities[0]!,
+        { id: "entity-2", title: "Bob", entity_type: "PERSON", degree: 2, rank: 2 },
+        { id: "entity-3", title: "Carol", entity_type: "PERSON", degree: 1, rank: 1 },
+      ],
+      relationships: [
+        { id: "relationship-1", source_entity_id: "entity-1", target_entity_id: "entity-2", source: "Alice", target: "Bob", weight: 1, rank: 1 },
+      ],
+    }
+    render(<NetworkPreview {...callbacks} projection={relationshipProjection} focusCore={{ entityIds: [], relationshipIds: ["relationship-1"] }} summary={null} summaryError={false} mode="explorer-focus" loading={false} error={null} />)
+    await waitFor(() => expect(graphMock.elements).toHaveLength(4))
+
+    expect(graphMock.elements.find((element) => element.id() === "relationship-1")?.classes).toContain("focus-relationship")
+    expect(graphMock.elements.find((element) => element.id() === "entity-1")?.classes).toContain("focus-relationship-endpoint")
+    expect(graphMock.elements.find((element) => element.id() === "entity-2")?.classes).toContain("focus-relationship-endpoint")
+    expect(graphMock.elements.find((element) => element.id() === "entity-3")?.classes).toContain("focus-neighbor")
   })
 
   it("switches Focus and Full as visual-only modes while retaining citation evidence", async () => {

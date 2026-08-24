@@ -103,6 +103,28 @@ pub struct GraphEntity {
     pub community_ids: Vec<String>,
 }
 
+/// Compact entity reference used for Inspector navigation and preview.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphEntityRef {
+    /// Stable entity UUID used by detail endpoints.
+    pub id: String,
+    /// Optional human-readable id.
+    pub short_id: Option<String>,
+    /// Entity title.
+    pub title: String,
+    /// Optional semantic entity type.
+    pub entity_type: Option<String>,
+    /// Optional entity description suitable for a compact preview.
+    pub description: Option<String>,
+}
+
+impl fmt::Debug for GraphEntityRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GraphEntityRef { .. }")
+    }
+}
+
 /// Full entity detail, excluding embedding data.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -123,6 +145,8 @@ pub struct GraphEntityDetail {
     pub rank: Option<i64>,
     /// Query-visible community memberships.
     pub community_ids: Vec<String>,
+    /// Resolved lightweight community references for Inspector navigation.
+    pub communities: Vec<GraphCommunityRef>,
     /// Referenced text-unit ids.
     pub text_unit_ids: Vec<String>,
 }
@@ -146,6 +170,7 @@ impl GraphEntityDetail {
             degree: None,
             rank: None,
             community_ids: Vec::new(),
+            communities: Vec::new(),
             text_unit_ids: Vec::new(),
         }
     }
@@ -230,6 +255,10 @@ pub struct GraphRelationshipDetail {
     pub source: String,
     /// Target entity title.
     pub target: String,
+    /// Uniquely resolved source entity, when available.
+    pub source_entity: Option<GraphEntityRef>,
+    /// Uniquely resolved target entity, when available.
+    pub target_entity: Option<GraphEntityRef>,
     /// Optional description.
     pub description: Option<String>,
     /// Optional weight.
@@ -255,6 +284,8 @@ impl GraphRelationshipDetail {
             short_id: None,
             source,
             target,
+            source_entity: None,
+            target_entity: None,
             description: None,
             weight: None,
             rank: None,
@@ -314,6 +345,10 @@ pub struct GraphCommunity {
     pub parent: i64,
     /// Child community ids.
     pub children: Vec<i64>,
+    /// Resolved parent community for Inspector navigation.
+    pub parent_community: Option<GraphCommunityRef>,
+    /// Resolved child communities for Inspector navigation.
+    pub child_communities: Vec<GraphCommunityRef>,
     /// Query-readable report summary, when one is present.
     pub report: Option<GraphCommunityReportSummary>,
 }
@@ -329,6 +364,8 @@ impl GraphCommunity {
             level: 0,
             parent: -1,
             children: Vec::new(),
+            parent_community: None,
+            child_communities: Vec::new(),
             report: None,
         }
     }
@@ -340,6 +377,28 @@ impl GraphCommunity {
         self.parent = parent;
         self.children = children;
         self
+    }
+}
+
+/// Compact community reference used for Inspector navigation and preview.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphCommunityRef {
+    /// Stable community UUID used by detail endpoints.
+    pub id: String,
+    /// Decimal community id used by `GraphRAG` hierarchy and memberships.
+    pub short_id: String,
+    /// Community title.
+    pub title: String,
+    /// Hierarchy level.
+    pub level: i64,
+    /// Query-readable report summary, when one is present.
+    pub summary: Option<String>,
+}
+
+impl fmt::Debug for GraphCommunityRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GraphCommunityRef { .. }")
     }
 }
 
@@ -454,6 +513,7 @@ impl From<&Entity> for GraphEntityDetail {
             degree: entity.rank,
             rank: entity.rank,
             community_ids: entity.community_ids.clone(),
+            communities: Vec::new(),
             text_unit_ids: entity.text_unit_ids.clone(),
         }
     }
@@ -493,6 +553,8 @@ impl From<&Relationship> for GraphRelationshipDetail {
             short_id: relationship.short_id.clone(),
             source: relationship.source.clone(),
             target: relationship.target.clone(),
+            source_entity: None,
+            target_entity: None,
             description: relationship.description.clone(),
             weight: relationship.weight,
             rank: relationship.rank,
@@ -523,6 +585,8 @@ impl From<&Community> for GraphCommunity {
             level: community.level,
             parent: community.parent,
             children: community.children.clone(),
+            parent_community: None,
+            child_communities: Vec::new(),
             report: None,
         }
     }

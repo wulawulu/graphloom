@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use super::StudioApiState;
 use crate::graph::{
-    GraphCommunity, GraphDataSnapshot, GraphEntity, GraphProjectionError, GraphRelationship,
-    GraphSummary, overview, subgraph as project_subgraph,
+    GraphCommunity, GraphDataSnapshot, GraphEntity, GraphProjectionError, GraphReferenceIndex,
+    GraphRelationship, GraphSummary, overview, subgraph as project_subgraph,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -238,13 +238,14 @@ pub(super) async fn get_entity(
     let Ok(snapshot) = load_snapshot(&state).await else {
         return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
     };
+    let references = GraphReferenceIndex::new(&snapshot);
     snapshot
         .entities
         .iter()
         .find(|entity| entity.id == id)
         .map_or_else(
             || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
-            |entity| Json(entity.clone()).into_response(),
+            |entity| Json(references.enrich_entity(entity)).into_response(),
         )
 }
 
@@ -297,13 +298,14 @@ pub(super) async fn get_relationship(
     let Ok(snapshot) = load_snapshot(&state).await else {
         return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
     };
+    let references = GraphReferenceIndex::new(&snapshot);
     snapshot
         .relationships
         .iter()
         .find(|relationship| relationship.id == id)
         .map_or_else(
             || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
-            |relationship| Json(relationship.clone()).into_response(),
+            |relationship| Json(references.enrich_relationship(relationship)).into_response(),
         )
 }
 
@@ -354,22 +356,14 @@ pub(super) async fn get_community(
     let Ok(snapshot) = load_snapshot(&state).await else {
         return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
     };
+    let references = GraphReferenceIndex::new(&snapshot);
     snapshot
         .communities
         .iter()
         .find(|community| community.id == id)
         .map_or_else(
             || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
-            |community| {
-                Json(GraphCommunity::with_report(
-                    community,
-                    snapshot
-                        .community_reports
-                        .iter()
-                        .find(|report| report.community_id == community.short_id),
-                ))
-                .into_response()
-            },
+            |community| Json(references.enrich_community(community)).into_response(),
         )
 }
 

@@ -8,12 +8,14 @@ mod data_source;
 mod dto;
 mod parquet;
 mod projection;
+mod resolver;
 
 pub use data_source::{GraphDataSnapshot, GraphDataSource, GraphDataSourceError};
 pub use dto::{
-    GraphCommunity, GraphCommunityReportDetail, GraphCommunityReportSummary, GraphEntity,
-    GraphEntityDetail, GraphProjection, GraphProjectionEntity, GraphProjectionRelationship,
-    GraphRelationship, GraphRelationshipDetail, GraphSummary,
+    GraphCommunity, GraphCommunityRef, GraphCommunityReportDetail, GraphCommunityReportSummary,
+    GraphEntity, GraphEntityDetail, GraphEntityRef, GraphProjection, GraphProjectionEntity,
+    GraphProjectionRelationship, GraphRelationship, GraphRelationshipDetail, GraphSummary,
 };
 pub use parquet::ParquetGraphDataSource;
 pub(crate) use projection::{GraphProjectionError, overview, subgraph};
+pub(crate) use resolver::GraphReferenceIndex;

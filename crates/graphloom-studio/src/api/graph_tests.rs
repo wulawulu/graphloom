@@ -564,6 +564,16 @@ async fn test_should_return_graph_details_without_exposing_embeddings() -> TestR
     assert_eq!(report["full_content"], "GRAPH_REPORT_SECRET_SENTINEL");
     let (_, entity) = get_json(&router, "/api/graph/entities/entity-a").await?;
     assert_eq!(entity["degree"], entity["rank"]);
+    assert_eq!(entity["community_ids"], json!(["5"]));
+    assert_eq!(entity["communities"][0]["id"], "community-a");
+    assert_eq!(entity["communities"][0]["short_id"], "5");
+    assert_eq!(entity["communities"][0]["summary"], "Summary 5");
+    let (_, relationship) = get_json(&router, "/api/graph/relationships/relationship-a").await?;
+    assert_eq!(relationship["source_entity"]["id"], "entity-a");
+    assert_eq!(relationship["target_entity"]["id"], "entity-b");
+    let (_, community) = get_json(&router, "/api/graph/communities/community-a").await?;
+    assert_eq!(community["parent"], 3);
+    assert!(community["parent_community"].is_null());
     Ok(())
 }
 

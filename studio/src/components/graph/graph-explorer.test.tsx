@@ -13,7 +13,7 @@ import {
   getGraphSummary,
   getRelationship,
 } from "@/api/client"
-import type { GraphEntityDetail, GraphProjection, GraphSummary } from "@/api/types"
+import type { GraphCommunity, GraphEntityDetail, GraphProjection, GraphSummary } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent, type GraphInspectIntent } from "@/components/graph/graph-explorer"
 import { highlightFromEvent, type GraphHighlight } from "@/lib/explainability"
 import type { StudioTranslationKey } from "@/i18n/types"
@@ -41,7 +41,7 @@ vi.mock("@/components/graph/network-preview", () => ({
       networkLifecycle.mounts += 1
       return () => { networkLifecycle.unmounts += 1 }
     }, [])
-    return <div><span>{mode}</span><span>Core {focusCore === null ? "none" : `${focusCore.entityIds.join(",")}/${focusCore.relationshipIds.join(",")}`}</span><span>Focus kind {focusKind}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{t(error)}</span>}{mode !== "overview" ? <><span>{t(backLabel)}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
+    return <div><span>{mode}</span><span>Core {focusCore === null ? "none" : `${focusCore.entityIds.join(",")}/${focusCore.relationshipIds.join(",")}`}</span><span>Focus kind {focusKind}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{t(error)}</span>}{mode !== "overview" ? <><span>{t(backLabel)}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onEntity("entity-root")}>Open entity B test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
   },
 }))
 
@@ -97,7 +97,7 @@ describe("GraphExplorer focus flow", () => {
   it("opens candidate detail without changing the projection or requesting a subgraph", async () => {
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "150", title: "Alice", entity_type: "PERSON", degree: 2, rank: 1,
-      description: "Candidate detail", community_ids: [], text_unit_ids: [],
+      description: "Candidate detail", community_ids: [], communities: [], text_unit_ids: [],
     })
     const inspectIntent: GraphInspectIntent = {
       revision: 1,
@@ -119,7 +119,7 @@ describe("GraphExplorer focus flow", () => {
   it("opens relationship candidates with the same inspect-only semantics", async () => {
     vi.mocked(getRelationship).mockResolvedValue({
       id: "relationship-1", short_id: "23", source: "Alice", target: "Bob", weight: 0.8, rank: 2,
-      description: "Candidate relationship", text_unit_ids: [],
+      source_entity: null, target_entity: null, description: "Candidate relationship", text_unit_ids: [],
     })
     const inspectIntent: GraphInspectIntent = {
       revision: 1,
@@ -135,10 +135,105 @@ describe("GraphExplorer focus flow", () => {
     expect(getGraphSubgraph).not.toHaveBeenCalled()
   })
 
+  it("keeps Inspector history independent from graph focus and restores candidate decisions", async () => {
+    const entity = (id: string, title: string, communities: GraphEntityDetail["communities"] = []): GraphEntityDetail => ({
+      id, short_id: null, title, entity_type: "PERSON", degree: 1, rank: 1,
+      description: `${title} detail`, community_ids: communities.map((community) => community.short_id), communities, text_unit_ids: [],
+    })
+    const community = (id: string, shortId: string, title: string, parent: GraphCommunity["parent_community"]): GraphCommunity => ({
+      id, short_id: shortId, title, level: 1, parent: parent === null ? -1 : Number(parent.short_id), children: [],
+      parent_community: parent, child_communities: [], report: { id: `report-${id}`, short_id: shortId, community_id: shortId, title: "Report", summary: title === "Community C" ? "Community summary" : "Parent summary", rank: null },
+    })
+    const parentRef = { id: "community-parent", short_id: "1", title: "Parent P", level: 2, summary: "Parent summary" }
+    const relatedRef = { id: "community-related", short_id: "2", title: "Community C", level: 1, summary: "Community summary" }
+    vi.mocked(getEntity).mockImplementation((id) => Promise.resolve(id === "entity-root" ? entity(id, "Entity B") : entity(id, "Candidate A", [relatedRef])))
+    vi.mocked(getCommunity).mockImplementation((id) => Promise.resolve(id === "community-parent" ? community(id, "1", "Parent P", null) : community(id, "2", "Community C", parentRef)))
+    vi.mocked(getCommunityReport).mockImplementation((id) => Promise.resolve({ id: `report-${id}`, short_id: id, community_id: id, title: "Report", summary: "Summary", full_content: "Full", rank: null }))
+    const inspectIntent: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-1", title: "Candidate A", recordType: "entity", score: 0.9, selected: true, selectionStatus: "selected", finalContext: "included" },
+    }
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} inspectIntent={inspectIntent} />)
+
+    expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Query decision" })).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open community Community C" }))
+    expect(await screen.findByText("Community summary")).toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open community Parent P" }))
+    expect((await screen.findAllByText("Parent P")).length).toBeGreaterThan(0)
+
+    await user.click(screen.getByRole("button", { name: "Back" }))
+    expect((await screen.findAllByText("Community C")).length).toBeGreaterThan(0)
+    await user.click(screen.getByRole("button", { name: "Back" }))
+    expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Query decision" })).toBeInTheDocument()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Open entity B test" }))
+    expect(await screen.findByText("Entity B detail")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument()
+  })
+
+  it("aborts stale cross-navigation and commits history only after a successful detail load", async () => {
+    let resolveStale: ((value: GraphCommunity) => void) | undefined
+    const communityRef = (id: string, title: string) => ({ id, short_id: id, title, level: 1, summary: null })
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: null, title: "Entity A", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Entity A detail", community_ids: ["community-c", "community-d"],
+      communities: [communityRef("community-c", "Community C"), communityRef("community-d", "Community D")], text_unit_ids: [],
+    })
+    vi.mocked(getCommunity).mockImplementation((id) => {
+      if (id === "community-c") return new Promise((resolve) => { resolveStale = resolve })
+      return Promise.resolve({ id, short_id: id, title: "Community D", level: 1, parent: -1, children: [], parent_community: null, child_communities: [], report: null })
+    })
+    vi.mocked(getCommunityReport).mockResolvedValue({ id: "report", short_id: "1", community_id: "1", title: "Report", summary: "Summary", full_content: "Full", rank: null })
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
+    await user.click(await screen.findByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Entity A detail")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Open community Community C" }))
+    const staleSignal = vi.mocked(getCommunity).mock.calls[0]?.[1]
+    await user.click(screen.getByRole("button", { name: "Open community Community D" }))
+    expect(staleSignal?.aborted).toBe(true)
+    expect((await screen.findAllByText("Community D")).length).toBeGreaterThan(0)
+    await act(async () => {
+      resolveStale?.({ id: "community-c", short_id: "community-c", title: "STALE C", level: 1, parent: -1, children: [], parent_community: null, child_communities: [], report: null })
+      await Promise.resolve()
+    })
+    expect(screen.queryByText("STALE C")).not.toBeInTheDocument()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Back" }))
+    expect(await screen.findByText("Entity A detail")).toBeInTheDocument()
+  })
+
+  it("keeps the current detail when internal navigation fails", async () => {
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-1", short_id: null, title: "Entity A", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Recoverable Entity A", community_ids: ["missing"],
+      communities: [{ id: "missing-community", short_id: "missing", title: "Missing Community", level: 1, summary: null }], text_unit_ids: [],
+    })
+    vi.mocked(getCommunity).mockRejectedValue(new Error("unavailable"))
+    vi.mocked(getCommunityReport).mockRejectedValue(new Error("unavailable"))
+    const user = userEvent.setup()
+    render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
+    await user.click(await screen.findByRole("button", { name: "Open entity test" }))
+    expect(await screen.findByText("Recoverable Entity A")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Open community Missing Community" }))
+    expect(await screen.findByText("Graph detail is unavailable.")).toBeInTheDocument()
+    expect(screen.getByText("Recoverable Entity A")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+  })
+
   it("clears candidate-owned detail on Run switch and accepts a reused revision", async () => {
     const detail = (id: string, title: string): GraphEntityDetail => ({
       id, short_id: null, title, entity_type: "PERSON", degree: 1, rank: 1,
-      description: `${title} detail`, community_ids: [], text_unit_ids: [],
+      description: `${title} detail`, community_ids: [], communities: [], text_unit_ids: [],
     })
     vi.mocked(getEntity)
       .mockResolvedValueOnce(detail("entity-a", "Candidate A"))
@@ -184,7 +279,7 @@ describe("GraphExplorer focus flow", () => {
     await act(async () => {
       resolveCandidate?.({
         id: "entity-a", short_id: null, title: "Stale candidate A", entity_type: "PERSON", degree: 1, rank: 1,
-        description: "Stale detail", community_ids: [], text_unit_ids: [],
+        description: "Stale detail", community_ids: [], communities: [], text_unit_ids: [],
       })
       await Promise.resolve()
     })
@@ -197,7 +292,7 @@ describe("GraphExplorer focus flow", () => {
   it("preserves ordinary graph inspection while clearing only Run-owned decisions", async () => {
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: null, title: "Graph selection", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Ordinary graph detail", community_ids: [], text_unit_ids: [],
+      description: "Ordinary graph detail", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
@@ -388,6 +483,7 @@ describe("GraphExplorer focus flow", () => {
       rank: 1,
       description: "Alice description",
       community_ids: [],
+      communities: [],
       text_unit_ids: [],
     })
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("manual-focus", true))
@@ -423,6 +519,7 @@ describe("GraphExplorer focus flow", () => {
       rank: 1,
       description: null,
       community_ids: [],
+      communities: [],
       text_unit_ids: [],
     })
     vi.mocked(getGraphSubgraph).mockReturnValue(new Promise((resolve) => { resolveFocus = resolve }))
@@ -450,6 +547,8 @@ describe("GraphExplorer focus flow", () => {
       short_id: "R1",
       source: "Alice",
       target: "Acme",
+      source_entity: null,
+      target_entity: null,
       weight: 1,
       rank: 2,
       description: "works at",
@@ -483,6 +582,8 @@ describe("GraphExplorer focus flow", () => {
       short_id: "R1",
       source: "Alice",
       target: "Acme",
+      source_entity: null,
+      target_entity: null,
       weight: 1,
       rank: 2,
       description: "works at",
@@ -512,7 +613,7 @@ describe("GraphExplorer focus flow", () => {
       .mockResolvedValueOnce(projection("query-restored", true))
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Query entity", community_ids: [], text_unit_ids: [],
+      description: "Query entity", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={queryIntent} />)
@@ -541,7 +642,7 @@ describe("GraphExplorer focus flow", () => {
     vi.mocked(getGraphOverview).mockResolvedValue(projection("run-b-overview"))
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Query entity", community_ids: [], text_unit_ids: [],
+      description: "Query entity", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={queryIntent} onClearFocus={defaultExplorerProps.onClearFocus} />)
@@ -573,7 +674,7 @@ describe("GraphExplorer focus flow", () => {
       .mockReturnValueOnce(restore)
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Query entity", community_ids: [], text_unit_ids: [],
+      description: "Query entity", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     const { rerender } = render(<GraphExplorer {...defaultExplorerProps} focusIntent={queryIntent} navigationResetRevision={0} />)
@@ -598,7 +699,7 @@ describe("GraphExplorer focus flow", () => {
   it("keeps Inspector selection mounted while the right panel is collapsed", async () => {
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Selected entity", community_ids: [], text_unit_ids: [],
+      description: "Selected entity", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)
@@ -618,7 +719,7 @@ describe("GraphExplorer focus flow", () => {
     vi.mocked(getGraphSubgraph).mockResolvedValue(projection("focused", true))
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Mobile detail", community_ids: [], text_unit_ids: [],
+      description: "Mobile detail", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     const intent: GraphFocusIntent = { entity_ids: ["entity-1"], relationship_ids: [], revision: 1 }
@@ -638,7 +739,7 @@ describe("GraphExplorer focus flow", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => media))
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Persistent Inspector detail", community_ids: [], text_unit_ids: [],
+      description: "Persistent Inspector detail", community_ids: [], communities: [], text_unit_ids: [],
     })
     const user = userEvent.setup()
     render(<GraphExplorer {...defaultExplorerProps} focusIntent={null} />)

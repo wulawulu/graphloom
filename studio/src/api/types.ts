@@ -509,7 +509,16 @@ export interface GraphEntity {
 
 export interface GraphEntityDetail extends GraphEntity {
   description: string | null
+  communities: GraphCommunityRef[]
   text_unit_ids: string[]
+}
+
+export interface GraphEntityRef {
+  id: string
+  short_id: string | null
+  title: string
+  entity_type: string | null
+  description: string | null
 }
 
 export interface GraphRelationship {
@@ -522,8 +531,18 @@ export interface GraphRelationship {
 }
 
 export interface GraphRelationshipDetail extends GraphRelationship {
+  source_entity: GraphEntityRef | null
+  target_entity: GraphEntityRef | null
   description: string | null
   text_unit_ids: string[]
+}
+
+export interface GraphCommunityRef {
+  id: string
+  short_id: string
+  title: string
+  level: number
+  summary: string | null
 }
 
 export interface GraphCommunityReportSummary {
@@ -546,6 +565,8 @@ export interface GraphCommunity {
   level: number
   parent: number
   children: number[]
+  parent_community: GraphCommunityRef | null
+  child_communities: GraphCommunityRef[]
   report: GraphCommunityReportSummary | null
 }
 

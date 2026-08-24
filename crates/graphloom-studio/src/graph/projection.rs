@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use super::{
     GraphDataSnapshot, GraphEntityDetail, GraphProjection, GraphProjectionEntity,
-    GraphProjectionRelationship, GraphRelationshipDetail,
+    GraphProjectionRelationship, GraphReferenceIndex, GraphRelationshipDetail,
 };
 
 /// Projection construction failure caused by seed-preservation limits.
@@ -58,25 +58,11 @@ impl<'a> ResolutionIndex<'a> {
             .iter()
             .map(|relationship| (relationship.id.as_str(), relationship))
             .collect::<BTreeMap<_, _>>();
-        let mut entities_by_title = BTreeMap::<&str, Vec<&GraphEntityDetail>>::new();
-        for entity in &snapshot.entities {
-            entities_by_title
-                .entry(entity.title.as_str())
-                .or_default()
-                .push(entity);
-        }
+        let reference_index = GraphReferenceIndex::new(snapshot);
 
         let mut resolved_relationships = Vec::with_capacity(snapshot.relationships.len());
         for relationship in &snapshot.relationships {
-            let Some([source]) = entities_by_title
-                .get(relationship.source.as_str())
-                .map(Vec::as_slice)
-            else {
-                continue;
-            };
-            let Some([target]) = entities_by_title
-                .get(relationship.target.as_str())
-                .map(Vec::as_slice)
+            let Some((source, target)) = reference_index.relationship_endpoints(relationship)
             else {
                 continue;
             };
