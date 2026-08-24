@@ -57,16 +57,13 @@ function renderGlobal(events = globalEvents(), runId = "global-run"): ReturnType
 }
 
 describe("Global Timeline", () => {
-  it("renders exactly four Global semantic steps and keeps lifecycle events in Diagnostics", async () => {
-    const user = userEvent.setup()
+  it("renders exactly four Global semantic steps and hides lifecycle noise outside Debug", () => {
     renderGlobal()
 
     expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter(Boolean)).toEqual(["Community Context", "Map Analysis", "Evidence Reduction", "Answer Generation"])
     expect(screen.queryByText("Global context built")).not.toBeInTheDocument()
-    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
-    expect(screen.getByText("Run started")).toBeInTheDocument()
-    expect(screen.getByText("Query started")).toBeInTheDocument()
-    expect(screen.getByText("Run completed")).toBeInTheDocument()
+    expect(screen.queryByText(/Developer events/)).not.toBeInTheDocument()
+    expect(screen.queryByText("Run started")).not.toBeInTheDocument()
   })
 
   it("renders Dynamic Global as five steps with waves, three decision states, and coherent attempts", async () => {
@@ -266,9 +263,10 @@ describe("Global Timeline", () => {
 
   it("keeps span topology visible inside Technical details", async () => {
     const user = userEvent.setup()
-    renderGlobal()
+    const debug = globalEvents().map((item) => item.record.event.type === "run_started" ? { ...item, record: { ...item.record, event: { ...item.record.event, content_mode: "debug" } } } : item)
+    renderGlobal(debug)
     const map = screen.getByRole("article", { name: "Map Analysis" })
-    await user.click(within(map).getByRole("button", { name: /Technical details/ }))
+    await user.click(within(map).getByRole("button", { name: /Developer details/ }))
     expect(within(map).getAllByText(/span batch-0 · parent map/).length).toBeGreaterThan(0)
   })
 

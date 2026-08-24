@@ -16,6 +16,7 @@ interface SemanticStepCardProps {
   step: LocalSemanticStep
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
   onInspectCandidate: (candidate: ExplainabilityRecordView) => void
+  showDeveloperDetails: boolean
 }
 
 const RECORD_LABELS: Readonly<Record<string, StudioTranslationKey>> = {
@@ -33,7 +34,7 @@ const RECORD_TYPE_LABELS: Readonly<Record<string, StudioTranslationKey>> = {
   covariate: "explainability.labels.covariates",
 }
 
-export function SemanticStepCard({ step, onFocusGraph, onInspectCandidate }: SemanticStepCardProps): React.ReactElement {
+export function SemanticStepCard({ step, onFocusGraph, onInspectCandidate, showDeveloperDetails }: SemanticStepCardProps): React.ReactElement {
   const { t } = useTranslation()
   const focusEnvelope = step.focusEnvelope
   const title = semanticStepTitle(t, step.kind)
@@ -47,7 +48,7 @@ export function SemanticStepCard({ step, onFocusGraph, onInspectCandidate }: Sem
         {focusEnvelope === null ? null : <Button variant="outline" size="sm" onClick={() => onFocusGraph(focusEnvelope)}>{t("runs.actions.focusInGraph")}</Button>}
       </div>
       <StepContent step={step} onInspectCandidate={onInspectCandidate} />
-      <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
+      <TechnicalDetails visible={showDeveloperDetails} rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
     </article>
   )
 }

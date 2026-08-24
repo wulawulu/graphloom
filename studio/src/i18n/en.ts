@@ -20,7 +20,8 @@ export const en = {
     },
     "composer": {
       "label": "Ask about the graph",
-      "placeholder": "Ask a question about the indexed graph…"
+      "placeholder": "Ask a question about the indexed graph…",
+      "enterToSend": "Enter to send · Shift+Enter for newline"
     },
     "method": {
       "label": "Query method"
@@ -263,6 +264,8 @@ export const en = {
       "budgetedTokens": "Budgeted tokens",
       "waitingForProviderResponse": "Waiting for provider response",
       "textUnitId": "Text Unit {{id}}",
+      "textUnit": "Text Unit",
+      "shortStableId": "ID: {{id}}",
       "notIncludedAfterTokenBudgetStop": "Not included after token-budget stop",
       "annRankValue": "ANN rank {{value}}",
       "basicContext": "Basic Context",
@@ -552,8 +555,10 @@ export const en = {
       "actionFollowUpsNotCaptured": "Generated follow-up text was not captured. Run with Detailed or Debug."
     },
     "counts": {
-      "technicalDetailsCountRawEvent": "Technical details · {{count}} raw event",
-      "technicalDetailsCountRawEvent_other": "Technical details · {{count}} raw events",
+      "developerDetailsCountRawEvent": "Developer details · {{count}} raw event",
+      "developerDetailsCountRawEvent_other": "Developer details · {{count}} raw events",
+      "developerEventsCount": "Developer events · {{count}}",
+      "warningsCount": "Warnings · {{count}}",
       "countSelectedRecordCouldNotBeRepresentedInTheGraph_other": "{{count}} selected records could not be represented in the graph.",
       "countFinalContextRecord": "{{count}} final context record",
       "countFinalContextRecord_other": "{{count}} final context records",

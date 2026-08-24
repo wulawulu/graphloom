@@ -12,8 +12,9 @@ function envelope(sequence: number, event: ExplainabilityEventPayload, spanId = 
 }
 
 const events = [
-  envelope(1, { type: "query_started", method: "local" }),
-  envelope(2, { type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: true }] }),
+  envelope(1, { type: "run_started", content_mode: "debug" }),
+  envelope(2, { type: "query_started", method: "local" }),
+  envelope(3, { type: "entities_selected", entities: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: true }] }),
 ]
 
 function props() {
@@ -74,11 +75,11 @@ describe("QaWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "Inspect entity Alice" }))
     expect(values.onInspectCandidate).toHaveBeenCalledWith(expect.objectContaining({ stableId: "entity-1" }))
     expect(values.onFocusGraph).not.toHaveBeenCalled()
-    await user.click(screen.getByRole("button", { name: /Technical details/ }))
+    await user.click(screen.getByRole("button", { name: /Developer details/ }))
     await user.click(within(screen.getByRole("article", { name: "Entity Mapping" })).getByRole("button", { name: "Details" }))
     expect(screen.getByText("Selected 1 / Candidates 1")).toBeInTheDocument()
     await user.click(within(screen.getByRole("article", { name: "Entity Mapping" })).getAllByRole("button", { name: "Focus in graph" })[0]!)
-    expect(values.onFocusGraph).toHaveBeenCalledWith(events[1])
+    expect(values.onFocusGraph).toHaveBeenCalledWith(events[2])
   })
 
   it("retains streamed envelopes while Analysis is collapsed", async () => {

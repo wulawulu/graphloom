@@ -18,10 +18,38 @@ function renderTimeline(events: ExplainabilityEventPayload[], onInspectCandidate
 
 async function openTechnicalDetails(user: ReturnType<typeof userEvent.setup>, stepName: string): Promise<void> {
   const step = screen.getByRole("article", { name: stepName })
-  await user.click(within(step).getByRole("button", { name: /Technical details/ }))
+  await user.click(within(step).getByRole("button", { name: /Developer details/ }))
 }
 
 describe("Timeline", () => {
+  it("hides raw events in Metadata and Content, but keeps captured content available", async () => {
+    const user = userEvent.setup()
+    const events = [
+      { type: "run_started", content_mode: "content" },
+      { type: "query_started", method: "local" },
+      { type: "context_completed", tokens_used: 1, context: "captured context" },
+    ]
+    renderTimeline(events)
+    expect(screen.queryByRole("button", { name: /Developer details/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Developer events/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "View LLM Context" }))
+    expect(screen.getByTestId("exact-llm-context")).toHaveTextContent("captured context")
+  })
+
+  it("shows real warnings without labeling normal lifecycle events as diagnostics", async () => {
+    const user = userEvent.setup()
+    renderTimeline([
+      { type: "run_started", content_mode: "metadata" },
+      { type: "query_started", method: "local" },
+      { type: "warning", code: "stale_reference", message: "A safe warning" },
+      { type: "run_completed", elapsed_ms: 1 },
+    ])
+    expect(screen.queryByText(/Diagnostics/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Developer events/)).not.toBeInTheDocument()
+    await user.click(screen.getByText("Warnings · 1"))
+    expect(screen.getByRole("alert")).toHaveTextContent("stale_reference · A safe warning")
+  })
+
   it("localizes semantic presentation without changing domain content", async () => {
     await act(() => setStudioLocale("zh-CN", false))
     renderTimeline([
@@ -42,17 +70,19 @@ describe("Timeline", () => {
     expect(screen.queryByText("标准")).not.toBeInTheDocument()
   })
 
-  it("renders the empty state and keeps forward-compatible events in diagnostics", async () => {
+  it("renders the empty state and keeps forward-compatible events in Debug developer events", async () => {
     const user = userEvent.setup()
     const { rerender } = render(<Timeline runId={null} envelopes={[]} streamStatus="idle" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
     expect(screen.getByText("No Run selected")).toBeInTheDocument()
     expect(screen.getByText("Choose a historical Run or submit a new Query.")).toBeInTheDocument()
     expect(screen.queryByText(/Local Query/)).not.toBeInTheDocument()
-    rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} envelopes={[envelope({ type: "future_graphloom_event", foo: "bar" })]} />)
-    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
+    rerender(<Timeline runId="run" streamStatus="open" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} envelopes={[envelope({ type: "run_started", content_mode: "debug" }, 1), envelope({ type: "future_graphloom_event", foo: "bar" })]} />)
+    await user.click(screen.getByText(/Developer events/))
     expect(screen.getByText("future graphloom event")).toBeInTheDocument()
     expect(screen.getByText("#4")).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Details" }))
+    const futureEvent = screen.getByText("future graphloom event").closest("article")
+    expect(futureEvent).not.toBeNull()
+    await user.click(within(futureEvent as HTMLElement).getByRole("button", { name: "Details" }))
     expect(screen.getByText("Event details")).toBeInTheDocument()
     expect(screen.getByText("Developer data")).toBeInTheDocument()
   })
@@ -60,7 +90,7 @@ describe("Timeline", () => {
   it("presents four semantic decisions and moves lifecycle events behind disclosures", async () => {
     const user = userEvent.setup()
     renderTimeline([
-      { type: "run_started" },
+      { type: "run_started", content_mode: "debug" },
       { type: "query_started" },
       { type: "embedding_started", model_id: "bge-m3" },
       { type: "embedding_completed", model_id: "bge-m3", prompt_tokens: 5, dimensions: 1024 },
@@ -79,7 +109,7 @@ describe("Timeline", () => {
     expect(screen.getByText("Embedding started")).toBeInTheDocument()
     expect(screen.getByText("Embedding completed")).toBeInTheDocument()
     expect(screen.getByText("Run started")).not.toBeVisible()
-    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
+    await user.click(screen.getByText(/Developer events/))
     expect(screen.getByText("Run started")).toBeInTheDocument()
     expect(screen.getByText("Run completed")).toBeInTheDocument()
   })
@@ -132,12 +162,12 @@ describe("Timeline", () => {
   it("preserves typed candidate details and bounded raw tables", async () => {
     const user = userEvent.setup()
     const candidates = Array.from({ length: 101 }, (_, index) => ({ id: `entity-${index + 1}`, title: `Candidate ${index + 1}`, record_type: "entity", selected: false }))
-    renderTimeline([{ type: "candidates_retrieved", record_type: "entity", candidates }])
+    renderTimeline([{ type: "run_started", content_mode: "debug" }, { type: "candidates_retrieved", record_type: "entity", candidates }])
     expect(screen.queryByText("Candidate 101")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Show all 101 records" }))
     expect(screen.getByText("Candidate 101")).toBeInTheDocument()
     await openTechnicalDetails(user, "Entity Mapping")
-    await user.click(screen.getByRole("button", { name: "Details" }))
+    await user.click(within(screen.getByRole("article", { name: "Entity Mapping" })).getByRole("button", { name: "Details" }))
     expect(screen.getByText("Showing 100 of 101")).toBeInTheDocument()
     expect(screen.getByText("Developer data")).toBeInTheDocument()
   })
@@ -145,6 +175,7 @@ describe("Timeline", () => {
   it("preserves context and LLM technical details", async () => {
     const user = userEvent.setup()
     renderTimeline([
+      { type: "run_started", content_mode: "debug" },
       { type: "context_budget_allocated", total_token_budget: 1000, sections: [{ section: "entities", token_budget: 400 }] },
       { type: "context_completed", tokens_used: 700 },
       { type: "llm_request_completed", model_id: "model-x", input_tokens: 700, output_tokens: 40, elapsed_ms: 25, response: "Explainability response" },

@@ -95,7 +95,23 @@
 }
 
 .markdown-answer {
-  @apply space-y-3 text-sm leading-7 text-foreground;
+  @apply min-w-0 max-w-full space-y-3 text-sm leading-7 text-foreground;
+  overflow-wrap: anywhere;
+}
+
+.markdown-answer p,
+.markdown-answer li,
+.markdown-answer blockquote,
+.markdown-answer strong,
+.markdown-answer em,
+.markdown-answer .markdown-link {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.markdown-answer .markdown-link,
+.markdown-answer :not(pre) > code {
+  word-break: break-word;
 }
 
 .markdown-answer h1,
@@ -122,5 +138,21 @@
 }
 
 .markdown-answer pre {
-  @apply overflow-auto rounded-md border bg-muted p-3;
+  @apply max-w-full overflow-x-auto rounded-md border bg-muted p-3;
+  white-space: pre;
+}
+
+.markdown-answer pre code {
+  white-space: inherit;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.markdown-answer .markdown-table-scroll {
+  @apply max-w-full overflow-x-auto;
+}
+
+.markdown-answer table {
+  width: max-content;
+  min-width: 100%;
 }

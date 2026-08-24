@@ -31,8 +31,8 @@ export function AnswerPanel({ runId, result, loading, envelopes = [], onCitation
   }
 
   return (
-    <section aria-label={t("answer.title")}>
-        <div className="px-3 pb-3">
+    <section className="min-w-0 max-w-full overflow-x-hidden" aria-label={t("answer.title")}>
+        <div className="min-w-0 max-w-full px-3 pb-3">
           {loading ? <><Skeleton className="mb-3 h-4 w-1/3" /><Skeleton className="h-20" /></> : null}
           {!loading && runId === null ? <AnswerState title={t("answer.labels.noResultYet")} detail={t("answer.messages.selectOrSubmitAQueryRun")} /> : null}
           {!loading && result.state === "waiting" && runId !== null ? <AnswerState title={t("answer.labels.queryIsRunning")} detail={t("answer.messages.theFinalBusinessResultWillAppearHereWhenTheRunCompletes")} /> : null}
@@ -41,7 +41,7 @@ export function AnswerPanel({ runId, result, loading, envelopes = [], onCitation
           {!loading && result.state === "missing" ? <AnswerState title={t("answer.labels.resultUnavailable")} detail={t("answer.messages.theQueryRunDoesNotExistInThisStoreNamespace")} /> : null}
           {!loading && result.state === "ready" ? (
             <div className="grid gap-4">
-              <article className="min-w-0"><SafeMarkdown renderCitation={renderCitation}>{result.result.response}</SafeMarkdown></article>
+              <article className="min-w-0 max-w-full overflow-x-hidden"><SafeMarkdown renderCitation={renderCitation}>{result.result.response}</SafeMarkdown></article>
               <aside className="space-y-3">
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="outline"><Clock3 /> {result.result.elapsed_ms} ms</Badge>

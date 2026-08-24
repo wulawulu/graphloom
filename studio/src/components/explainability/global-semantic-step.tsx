@@ -25,6 +25,7 @@ import type { StudioTranslationKey } from "@/i18n/types"
 interface GlobalSemanticStepCardProps {
   step: GlobalSemanticStep
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
+  showDeveloperDetails: boolean
 }
 
 const INITIAL_BATCHES = 6
@@ -33,7 +34,7 @@ const INITIAL_COMMUNITIES = 20
 const INITIAL_WAVES = 5
 const WAVE_ID_PAGE_SIZE = 20
 
-export function GlobalSemanticStepCard({ step, onFocusGraph }: GlobalSemanticStepCardProps): React.ReactElement {
+export function GlobalSemanticStepCard({ step, onFocusGraph, showDeveloperDetails }: GlobalSemanticStepCardProps): React.ReactElement {
   const { t } = useTranslation()
   const title = semanticStepTitle(t, step.kind)
   return (
@@ -43,7 +44,7 @@ export function GlobalSemanticStepCard({ step, onFocusGraph }: GlobalSemanticSte
         <div className="min-w-0"><h3 className="text-sm font-semibold">{title}</h3><GlobalStepSummary step={step} /></div>
       </div>
       <GlobalStepContent step={step} />
-      <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
+      <TechnicalDetails visible={showDeveloperDetails} rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
     </article>
   )
 }

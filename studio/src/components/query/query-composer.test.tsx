@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -45,6 +45,52 @@ async function submitQuestion(user: ReturnType<typeof userEvent.setup>, question
 }
 
 describe("QueryComposer", () => {
+  it("submits the exact query on Enter through the form pipeline", async () => {
+    const user = userEvent.setup()
+    vi.mocked(startQuery).mockResolvedValue(accepted)
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    const input = screen.getByLabelText("Ask about the graph")
+    await user.type(input, "王婆在其中起什么作用？")
+    await user.keyboard("{Enter}")
+    await waitFor(() => expect(startQuery).toHaveBeenCalledTimes(1))
+    expect(startQuery).toHaveBeenCalledWith(expect.objectContaining({ query: "王婆在其中起什么作用？" }))
+  })
+
+  it("inserts a newline on Shift+Enter without submitting", async () => {
+    const user = userEvent.setup()
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    const input = screen.getByLabelText("Ask about the graph")
+    await user.type(input, "first")
+    await user.keyboard("{Shift>}{Enter}{/Shift}")
+    expect(input).toHaveValue("first\n")
+    expect(startQuery).not.toHaveBeenCalled()
+  })
+
+  it("does not submit the Enter used to confirm an IME composition", async () => {
+    vi.mocked(startQuery).mockResolvedValue(accepted)
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    const input = screen.getByLabelText("Ask about the graph")
+    fireEvent.change(input, { target: { value: "王婆" } })
+    fireEvent.compositionStart(input)
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: true })
+    expect(startQuery).not.toHaveBeenCalled()
+    fireEvent.compositionEnd(input)
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 })
+    await waitFor(() => expect(startQuery).toHaveBeenCalledTimes(1))
+  })
+
+  it("uses bounded auto-growing textarea styles and resets its height", async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    const input = screen.getByLabelText("Ask about the graph")
+    expect(input).toHaveClass("min-h-14", "max-h-48", "overflow-y-hidden")
+    expect(input).toHaveStyle({ height: "56px", overflowY: "hidden" })
+    await user.type(input, "line one{shift>}{enter}{/shift}line two")
+    rerender(<QueryComposer onAccepted={vi.fn()} resetRevision={1} />)
+    expect(input).toHaveValue("")
+    expect(input).toHaveStyle({ height: "56px", overflowY: "hidden" })
+  })
+
   it("presents safe defaults while keeping settings collapsed", async () => {
     const user = userEvent.setup()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)

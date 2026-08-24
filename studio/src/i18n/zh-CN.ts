@@ -22,7 +22,8 @@ export const zhCN = {
     },
     "composer": {
       "label": "向图谱提问",
-      "placeholder": "询问已建立索引的图谱…"
+      "placeholder": "询问已建立索引的图谱…",
+      "enterToSend": "Enter 发送 · Shift+Enter 换行"
     },
     "method": {
       "label": "查询方式"
@@ -265,6 +266,8 @@ export const zhCN = {
       "budgetedTokens": "预算内 Token",
       "waitingForProviderResponse": "等待模型服务响应",
       "textUnitId": "文本单元 {{id}}",
+      "textUnit": "文本单元",
+      "shortStableId": "ID：{{id}}",
       "notIncludedAfterTokenBudgetStop": "Token 预算停止后未纳入",
       "annRankValue": "ANN 排名 {{value}}",
       "basicContext": "基础检索 Context",
@@ -554,8 +557,10 @@ export const zhCN = {
       "actionFollowUpsNotCaptured": "未记录生成的后续查询。请使用详细或调试模式运行。"
     },
     "counts": {
-      "technicalDetailsCountRawEvent": "技术详情 · {{count}} 个原始事件",
-      "technicalDetailsCountRawEvent_other": "技术详情 · {{count}} 个原始事件",
+      "developerDetailsCountRawEvent": "开发者详情 · {{count}} 个原始事件",
+      "developerDetailsCountRawEvent_other": "开发者详情 · {{count}} 个原始事件",
+      "developerEventsCount": "开发者事件 · {{count}}",
+      "warningsCount": "警告 · {{count}}",
       "countSelectedRecordCouldNotBeRepresentedInTheGraph_other": "{{count}} 条已选择记录无法在图谱中呈现。",
       "countFinalContextRecord": "{{count}} 条最终 Context 记录",
       "countFinalContextRecord_other": "{{count}} 条最终 Context 记录",

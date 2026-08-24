@@ -24,6 +24,17 @@ describe("AnswerPanel", () => {
     expect(screen.getByText("1 call")).toBeInTheDocument()
   })
 
+  it("keeps long prose, URLs, UUIDs, inline code, code blocks, and tables inside the answer boundary", () => {
+    const response = `中文长段落王婆如何影响人物关系。\n\nlongEnglishTokenWithoutAnyWhitespaceAAAAAAAAAAAAAAAAAAAAAAAA\n\nhttps://example.com/${"a".repeat(80)}\n\n71d89c81-1234-5678-90ab-12345678e942 and \`${"x".repeat(80)}\`\n\n\`\`\`text\n${"code".repeat(40)}\n\`\`\`\n\n| ${"wide".repeat(20)} | B |\n| --- | --- |\n| value | value |`
+    render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response, elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
+    const answer = document.querySelector(".markdown-answer")
+    expect(answer).toHaveClass("min-w-0", "max-w-full")
+    expect(screen.getByRole("link")).toHaveClass("markdown-link")
+    expect(answer?.querySelector("pre")).toBeInTheDocument()
+    expect(answer?.querySelector(".markdown-table-scroll")).toHaveClass("overflow-x-auto", "max-w-full")
+    expect(screen.getByRole("region", { name: "Final answer" })).toHaveClass("min-w-0", "max-w-full", "overflow-x-hidden")
+  })
+
   it("does not load remote images embedded in model Markdown", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "![tracker](https://example.invalid/track.png)", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.queryByRole("img", { name: "tracker" })).not.toBeInTheDocument()

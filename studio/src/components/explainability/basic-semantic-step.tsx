@@ -14,11 +14,12 @@ import type { StudioTranslationKey } from "@/i18n/types"
 interface BasicSemanticStepCardProps {
   step: BasicSemanticStep
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
+  showDeveloperDetails: boolean
 }
 
 const INITIAL_CANDIDATES = 20
 
-export function BasicSemanticStepCard({ step, onFocusGraph }: BasicSemanticStepCardProps): React.ReactElement {
+export function BasicSemanticStepCard({ step, onFocusGraph, showDeveloperDetails }: BasicSemanticStepCardProps): React.ReactElement {
   const { t } = useTranslation()
   const title = semanticStepTitle(t, step.kind)
   return (
@@ -28,7 +29,7 @@ export function BasicSemanticStepCard({ step, onFocusGraph }: BasicSemanticStepC
         <div className="min-w-0"><h3 className="text-sm font-semibold">{title}</h3><StepSummary step={step} /></div>
       </div>
       <StepContent step={step} />
-      <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
+      <TechnicalDetails visible={showDeveloperDetails} rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
     </article>
   )
 }
@@ -105,16 +106,22 @@ function CandidateList({ candidates, mode }: { candidates: ExplainabilityCandida
 
 function CandidateRow({ candidate, mode }: { candidate: ExplainabilityCandidate; mode: "retrieved" | "decision" }): React.ReactElement {
   const { t } = useTranslation()
-  const label = candidate.short_id === undefined ? candidate.id : t("explainability.labels.textUnitId", { id: candidate.short_id })
+  const label = candidate.short_id === undefined ? t("explainability.labels.textUnit") : t("explainability.labels.textUnitId", { id: candidate.short_id })
+  const fallbackId = candidate.short_id === undefined ? compactStableId(candidate.id) : null
   const decision = t(candidate.selected ? "graph.labels.included" : candidate.reason === "token_budget" ? "explainability.labels.notIncludedAfterTokenBudgetStop" : "graph.labels.notIncluded")
   return (
     <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 gap-y-1 overflow-hidden px-2 py-2 text-xs">
       <span className="row-span-2 pt-0.5">{mode === "retrieved" || !candidate.selected ? <Circle className="size-3.5 text-muted-foreground" aria-label={mode === "retrieved" ? t("graph.labels.retrieved") : decision} /> : <Check className="size-3.5 text-success" aria-label={t("graph.labels.included")} />}</span>
-      <div className="min-w-0"><p className="truncate font-medium" title={label}>{label}</p><p className="truncate font-mono text-[10px] text-muted-foreground" title={candidate.id}>{candidate.id}</p></div>
+      <div className="min-w-0"><p className="break-words font-medium">{label}</p>{fallbackId === null ? null : <p className="break-all font-mono text-[10px] text-muted-foreground">{t("explainability.labels.shortStableId", { id: fallbackId })}</p>}</div>
       <Badge variant="outline" className="max-w-48 shrink-0 truncate" title={mode === "retrieved" ? t("graph.labels.retrieved") : decision}>{mode === "retrieved" ? t("graph.labels.retrieved") : decision}</Badge>
       <div className="col-span-2 col-start-2 flex min-w-0 gap-3 text-[10px] text-muted-foreground">{candidate.rank === undefined ? null : <span>{t("explainability.labels.annRankValue", { value: candidate.rank })}</span>}{candidate.score === undefined ? null : <span>{t("explainability.labels.scoreValue", { value: candidate.score.toFixed(4) })}</span>}</div>
     </div>
   )
+}
+
+function compactStableId(id: string): string {
+  if (id.length <= 16) return id
+  return `${id.slice(0, 8)}…${id.slice(-8)}`
 }
 
 function Metric({ label, value }: { label: StudioTranslationKey; value: string | number }): React.ReactElement {

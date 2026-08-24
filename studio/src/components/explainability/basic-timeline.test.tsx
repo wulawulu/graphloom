@@ -37,6 +37,43 @@ function renderBasic(events = basicEvents()): ReturnType<typeof render> {
 }
 
 describe("Basic Timeline", () => {
+  it("uses short IDs in retrieval and context while keeping stable UUIDs out of normal presentation", () => {
+    const stableId = "71d89c81-1234-5678-90ab-12345678e942"
+    const item = { id: stableId, short_id: "184", record_type: "text_unit", score: 0.8123, rank: 1, selected: true }
+    renderBasic([
+      envelope(1, "root", { type: "query_started", method: "basic" }),
+      envelope(2, "retrieval", { type: "candidates_retrieved", record_type: "text_unit", candidates: [item] }, "root"),
+      envelope(3, "retrieval", { type: "candidates_filtered", record_type: "text_unit", candidates: [item] }, "root"),
+      envelope(4, "context", { type: "context_budget_allocated", total_token_budget: 20, sections: [{ section: "sources", token_budget: 20 }] }, "root"),
+      envelope(5, "context", { type: "context_section_built", section: { section: "sources", token_budget: 20, tokens_used: 10, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: [stableId] } }, "root"),
+    ])
+    expect(screen.getAllByText("Text Unit 184")).toHaveLength(2)
+    expect(screen.queryByText(stableId)).not.toBeInTheDocument()
+    expect(screen.getAllByText("ANN rank 1")).toHaveLength(2)
+  })
+
+  it("uses a compact stable-ID fallback when a text unit has no short ID", () => {
+    const stableId = "71d89c81-1234-5678-90ab-12345678e942"
+    renderBasic([
+      envelope(1, "root", { type: "query_started", method: "basic" }),
+      envelope(2, "retrieval", { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: stableId, record_type: "text_unit", selected: false }] }, "root"),
+    ])
+    expect(screen.getByText("Text Unit")).toBeInTheDocument()
+    expect(screen.getByText("ID: 71d89c81…5678e942")).toHaveClass("break-all")
+    expect(screen.queryByText(stableId)).not.toBeInTheDocument()
+  })
+
+  it("prefers effective model names and falls back for historical events", () => {
+    const { rerender } = renderBasic([
+      envelope(1, "root", { type: "query_started", method: "basic" }),
+      envelope(2, "llm", { type: "llm_request_started", model_id: "default_completion_model", model_name: "deepseek-v4-flash", provider: "deepseek", prompt_tokens: 1 }, "root"),
+    ])
+    expect(screen.getAllByText("deepseek-v4-flash").length).toBeGreaterThan(0)
+    expect(screen.queryByText("default_completion_model")).not.toBeInTheDocument()
+    rerender(<Timeline runId="basic-run" envelopes={[envelope(1, "root", { type: "query_started", method: "basic" }), envelope(2, "llm", { type: "llm_request_started", model_id: "default_completion_model", prompt_tokens: 1 }, "root")]} streamStatus="closed" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
+    expect(screen.getAllByText("default_completion_model").length).toBeGreaterThan(0)
+  })
+
   it("renders three semantic steps with ANN and effective orders kept distinct", () => {
     renderBasic()
     expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter(Boolean)).toEqual(["Text Retrieval", "Context Assembly", "Answer Generation"])
@@ -123,13 +160,13 @@ describe("Basic Timeline", () => {
     expect(within(retrieval).queryByText("Text Unit id-20")).not.toBeInTheDocument()
   })
 
-  it("keeps raw lifecycle events available in Diagnostics and technical details", async () => {
+  it("keeps raw events available only in Debug developer details", async () => {
     const user = userEvent.setup()
-    renderBasic()
+    renderBasic([envelope(0, "root", { type: "run_started", content_mode: "debug" }), ...basicEvents()])
     const retrieval = screen.getByRole("article", { name: "Text Retrieval" })
-    await user.click(within(retrieval).getByRole("button", { name: /Technical details/ }))
+    await user.click(within(retrieval).getByRole("button", { name: /Developer details/ }))
     expect(within(retrieval).getByText("Embedding started")).toBeInTheDocument()
-    await user.click(screen.getByText(/Diagnostics \/ Raw events/))
+    await user.click(screen.getByText(/Developer events/))
     expect(screen.getByText("Query started")).toBeInTheDocument()
     expect(screen.getByText("Run completed")).toBeInTheDocument()
   })

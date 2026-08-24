@@ -1,4 +1,4 @@
-import { useEffect, useState, type SyntheticEvent } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type SyntheticEvent } from "react"
 import { LoaderCircle, Play, SlidersHorizontal } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -42,6 +42,8 @@ const queryModes: Record<StudioQueryMode, QueryModeMetadata> = {
 }
 
 const queryModeOptions = Object.entries(queryModes) as Array<[StudioQueryMode, QueryModeMetadata]>
+const QUERY_MIN_HEIGHT_PX = 56
+const QUERY_MAX_HEIGHT_PX = 192
 
 export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps): React.ReactElement {
   const { t } = useTranslation()
@@ -51,8 +53,24 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
   const [responseStyle, setResponseStyle] = useState<ResponseStyle>("standard")
   const [customResponse, setCustomResponse] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const formRef = useRef<HTMLFormElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => setQuery(""), [resetRevision])
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (textarea === null) return
+    textarea.style.height = "auto"
+    const height = Math.min(Math.max(textarea.scrollHeight, QUERY_MIN_HEIGHT_PX), QUERY_MAX_HEIGHT_PX)
+    textarea.style.height = `${height}px`
+    textarea.style.overflowY = textarea.scrollHeight > QUERY_MAX_HEIGHT_PX ? "auto" : "hidden"
+  }, [query, resetRevision])
+
+  const handleQueryKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+    event.preventDefault()
+    if (!submitting) formRef.current?.requestSubmit()
+  }
 
   const submit = async (event: SyntheticEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
@@ -89,16 +107,18 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
       : null
 
   return (
-    <form className="rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
+    <form ref={formRef} className="rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
       <div className="p-2 pb-0">
         <label htmlFor="studio-query" className="sr-only">{t("query.composer.label")}</label>
         <Textarea
           id="studio-query"
-          className="min-h-20 resize-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
+          ref={textareaRef}
+          className="min-h-14 max-h-48 resize-none overflow-y-hidden border-0 bg-transparent px-2 py-2.5 leading-6 shadow-none focus-visible:ring-0"
           value={query}
           maxLength={1024 * 1024}
           placeholder={t("query.composer.placeholder")}
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={handleQueryKeyDown}
         />
       </div>
       <Collapsible>
@@ -136,6 +156,7 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
         </CollapsibleContent>
         <div className="flex items-center justify-between border-t px-2 py-1.5">
           <div className="flex items-center gap-1">
+            <span className="hidden text-[10px] text-muted-foreground sm:inline">{t("query.composer.enterToSend")}</span>
             <Select disabled={submitting} value={queryMode} onValueChange={(value) => setQueryMode(value as StudioQueryMode)}>
               <SelectTrigger aria-label={t("query.method.label")} className="h-6 w-auto gap-1 px-2 text-xs">
                 <SelectValue />

@@ -15,13 +15,14 @@ import type { StudioTranslationKey } from "@/i18n/types"
 interface DriftSemanticStepCardProps {
   step: DriftSemanticStep
   onFocusGraph: (envelope: ExplainabilityEnvelope) => void
+  showDeveloperDetails: boolean
 }
 
 const INITIAL_ACTIONS = 20
 const INITIAL_EDGES = 30
 const INITIAL_FOLDS = 12
 
-export function DriftSemanticStepCard({ step, onFocusGraph }: DriftSemanticStepCardProps): React.ReactElement {
+export function DriftSemanticStepCard({ step, onFocusGraph, showDeveloperDetails }: DriftSemanticStepCardProps): React.ReactElement {
   const { t } = useTranslation()
   const title = semanticStepTitle(t, step.kind)
   return (
@@ -31,7 +32,7 @@ export function DriftSemanticStepCard({ step, onFocusGraph }: DriftSemanticStepC
         <div className="min-w-0"><h3 className="text-sm font-semibold">{title}</h3><StepSummary step={step} /></div>
       </div>
       <StepContent step={step} />
-      <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
+      <TechnicalDetails visible={showDeveloperDetails} rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
     </article>
   )
 }
