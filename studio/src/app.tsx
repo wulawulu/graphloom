@@ -138,7 +138,7 @@ export function App(): React.ReactElement {
     ? null
     : activeSubmittedRunId === displayedRunId && submittedQuestion !== null
       ? submittedQuestion
-      : displayedRun?.query ?? t("Query hidden (metadata mode)")
+      : displayedRun?.query ?? t("query.labels.queryHiddenMetadataMode")
 
   const queryWorkspace = (
     <QaWorkspace
@@ -146,7 +146,7 @@ export function App(): React.ReactElement {
       runStatus={displayedRun?.status}
       question={displayedQuestion}
       composer={<QueryComposer onAccepted={onAccepted} resetRevision={composerRevision} />}
-      answer={<Suspense fallback={<PanelLoading label={t("Loading Final Answer")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
+      answer={<Suspense fallback={<PanelLoading label={t("answer.loading")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
       envelopes={displayedEnvelopes}
       streamStatus={stream.status}
       runs={history.runs}
@@ -166,7 +166,7 @@ export function App(): React.ReactElement {
     <TooltipProvider delayDuration={250}>
       <StudioShell
         queryWorkspace={queryWorkspace}
-        graph={<Suspense fallback={<PanelLoading label={t("Loading Graph Explorer")} />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} navigationResetRevision={graphNavigationRevision} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label={t("answer.actions.loadingGraphExplorer")} />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} navigationResetRevision={graphNavigationRevision} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
       />

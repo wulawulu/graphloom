@@ -6,6 +6,7 @@ import { LanguageSelector } from "@/components/layout/language-selector"
 import { en } from "@/i18n/en"
 import {
   activeStudioLocale,
+  i18n,
   resolveStudioLocale,
   setStudioLocale,
   STUDIO_LOCALE_STORAGE_KEY,
@@ -18,9 +19,17 @@ afterEach(() => {
 })
 
 describe("Studio locale resolution", () => {
-  it("provides Simplified Chinese for every non-plural English UI key", () => {
-    const missing = Object.keys(en).filter((key) => !key.endsWith("_other") && !(key in zhCN))
-    expect(missing).toEqual([])
+  it("keeps identical nested semantic key trees for English and Simplified Chinese", () => {
+    expect(flattenKeys(zhCN)).toEqual(flattenKeys(en))
+  })
+
+  it("uses semantic namespaces and resolves nested keys through dot separators", async () => {
+    expect(Object.keys(en).sort()).toEqual(["answer", "common", "errors", "explainability", "graph", "languages", "navigation", "query", "runs", "settings"])
+    expect(Object.keys(en)).not.toContain("Copy")
+    await setStudioLocale("en", false)
+    expect(i18n.t("common.copy")).toBe("Copy")
+    await setStudioLocale("zh-CN", false)
+    expect(i18n.t("common.copy")).toBe("复制")
   })
 
   it.each([
@@ -44,6 +53,13 @@ describe("Studio locale resolution", () => {
     expect(resolveStudioLocale(localStorage.getItem(STUDIO_LOCALE_STORAGE_KEY), ["en-US"])).toBe("zh-CN")
   })
 })
+
+function flattenKeys(value: object, prefix = ""): string[] {
+  return Object.entries(value).flatMap(([key, child]) => {
+    const path = prefix.length === 0 ? key : `${prefix}.${key}`
+    return typeof child === "string" ? [path] : flattenKeys(child as object, path)
+  }).sort()
+}
 
 describe("LanguageSelector", () => {
   it("switches immediately, persists the choice, and updates html lang", async () => {

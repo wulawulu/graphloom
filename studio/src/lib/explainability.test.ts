@@ -47,7 +47,7 @@ describe("Explainability presentation helpers", () => {
   })
 
   it("renders future events through the generic fallback", () => {
-    expect(describeEvent({ type: "future_graphloom_event", foo: "bar" })).toEqual({ label: "future graphloom event", category: "Lifecycle" })
+    expect(describeEvent({ type: "future_graphloom_event", foo: "bar" })).toEqual({ labelKey: null, rawLabel: "future graphloom event", category: "lifecycle" })
   })
 
   it("extracts graph highlights only from supported graph events", () => {

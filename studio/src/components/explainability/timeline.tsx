@@ -6,6 +6,7 @@ import type { ExplainabilityEnvelope } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { StreamStatus } from "@/hooks/use-explainability-stream"
+import type { StudioTranslationKey } from "@/i18n/types"
 import { buildSemanticTimeline, type ExplainabilityRecordView } from "@/lib/semantic-timeline"
 import { isBasicSemanticStep } from "@/lib/semantic-basic"
 import { isGlobalSemanticStep } from "@/lib/semantic-global"
@@ -30,8 +31,8 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
   const model = useMemo(() => buildSemanticTimeline(envelopes), [envelopes])
   const content = (
     <div className="space-y-2 p-3">
-      {runId === null ? <EmptyTimeline title={t("No Run selected")} detail={t("Choose a historical Run or submit a new Query.")} /> : null}
-      {runId !== null && envelopes.length === 0 ? <EmptyTimeline title={t("Waiting for explainability")} detail={streamStatus === "reconnecting" ? t("The live connection is reconnecting. Persisted history will be replayed.") : t("The Run has not emitted any events yet.")} /> : null}
+      {runId === null ? <EmptyTimeline title={t("runs.labels.noRunSelected")} detail={t("runs.messages.chooseAHistoricalRunOrSubmitANewQuery")} /> : null}
+      {runId !== null && envelopes.length === 0 ? <EmptyTimeline title={t("runs.labels.waitingForExplainability")} detail={streamStatus === "reconnecting" ? t("runs.messages.replayOnReconnect") : t("explainability.empty.noEvents")} /> : null}
       {model.steps.map((step) => isGlobalSemanticStep(step)
         ? <GlobalSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : isDriftSemanticStep(step)
@@ -39,16 +40,16 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
         : isBasicSemanticStep(step)
           ? <BasicSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : <SemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} onInspectCandidate={onInspectCandidate} />)}
-      {model.diagnosticEvents.length > 0 ? <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">{t("Diagnostics / Raw events · {{count}}", { count: model.diagnosticEvents.length })}</summary><div className="mt-3 space-y-2">{model.diagnosticEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}</div></details> : null}
+      {model.diagnosticEvents.length > 0 ? <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">{t("runs.counts.diagnosticsRawEventsCount", { count: model.diagnosticEvents.length })}</summary><div className="mt-3 space-y-2">{model.diagnosticEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}</div></details> : null}
     </div>
   )
-  if (embedded) return <section aria-label={t("Analysis process")}>{content}</section>
+  if (embedded) return <section aria-label={t("runs.labels.analysisProcess")}>{content}</section>
   return (
-    <section className="flex size-full min-h-0 flex-col" aria-label={t("Decision timeline")}>
+    <section className="flex size-full min-h-0 flex-col" aria-label={t("explainability.labels.decisionTimeline")}>
       <header className="flex h-10 shrink-0 items-center justify-between border-b px-3">
-        <div className="flex items-center gap-2"><Activity className="size-4 text-primary" /><h2 className="text-xs font-semibold">{t("Decision Timeline")}</h2></div>
+        <div className="flex items-center gap-2"><Activity className="size-4 text-primary" /><h2 className="text-xs font-semibold">{t("explainability.labels.decisionTimelineHeading")}</h2></div>
         <Badge variant={streamStatus === "open" ? "success" : streamStatus === "reconnecting" ? "warning" : "outline"}>
-          <Radio className={streamStatus === "open" ? "animate-pulse" : ""} /> {t(streamStatus)}
+          <Radio className={streamStatus === "open" ? "animate-pulse" : ""} /> {t(streamStatusKey(streamStatus))}
         </Badge>
       </header>
       <ScrollArea className="min-h-0 flex-1">
@@ -56,6 +57,10 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
       </ScrollArea>
     </section>
   )
+}
+
+function streamStatusKey(status: StreamStatus): StudioTranslationKey {
+  return `answer.status.${status}`
 }
 
 function EmptyTimeline({ title, detail }: { title: string; detail: string }): React.ReactElement {

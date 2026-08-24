@@ -24,9 +24,9 @@ export class AppErrorBoundary extends Component<Props, State> {
       <main className="flex min-h-screen items-center justify-center bg-background p-6">
         <section className="max-w-md space-y-4 rounded-lg border bg-card p-6 text-center">
           <TriangleAlert className="mx-auto size-8 text-warning" aria-hidden="true" />
-          <h1 className="text-lg font-semibold">{i18n.t("Studio could not render this view")}</h1>
-          <p className="text-sm text-muted-foreground">{i18n.t("Reload the application to recover. No query or graph data was sent anywhere.")}</p>
-          <Button onClick={() => { globalThis.location.reload() }}>{i18n.t("Reload Studio")}</Button>
+          <h1 className="text-lg font-semibold">{i18n.t("errors.labels.studioCouldNotRenderThisView")}</h1>
+          <p className="text-sm text-muted-foreground">{i18n.t("errors.messages.recoveryHint")}</p>
+          <Button onClick={() => { globalThis.location.reload() }}>{i18n.t("errors.actions.reloadStudio")}</Button>
         </section>
       </main>
     )

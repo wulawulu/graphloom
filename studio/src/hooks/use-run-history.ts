@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import { listRuns } from "@/api/client"
 import type { ExplainabilityRun, RunHistoryCursor } from "@/api/types"
+import type { StudioTranslationKey } from "@/i18n/types"
 
 interface RunHistoryState {
   runs: ExplainabilityRun[]
   cursor: RunHistoryCursor | null
   loading: boolean
-  error: string | null
+  error: StudioTranslationKey | null
 }
 
 export function useRunHistory(): RunHistoryState & { refresh: () => void; loadMore: () => void } {
@@ -33,7 +34,7 @@ export function useRunHistory(): RunHistoryState & { refresh: () => void; loadMo
       .catch(() => {
         if (activeRequest.current !== controller || controller.signal.aborted) return
         activeRequest.current = null
-        setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." }))
+        setState((current) => ({ ...current, loading: false, error: "runs.messages.runHistoryIsUnavailable" }))
       })
   }, [beginRequest])
 
@@ -64,7 +65,7 @@ export function useRunHistory(): RunHistoryState & { refresh: () => void; loadMo
       .catch(() => {
         if (activeRequest.current !== controller || controller.signal.aborted) return
         activeRequest.current = null
-        setState((current) => ({ ...current, loading: false, error: "Run history is unavailable." }))
+        setState((current) => ({ ...current, loading: false, error: "runs.messages.runHistoryIsUnavailable" }))
       })
   }, [beginRequest, state.cursor, state.loading])
 

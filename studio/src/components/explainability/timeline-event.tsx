@@ -7,7 +7,17 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { EventDetail } from "@/components/explainability/details/event-detail"
 import { localizedEventSummary } from "@/i18n/presentation"
+import type { StudioTranslationKey } from "@/i18n/types"
 import { describeEvent, highlightFromEvent, type TimelineCategory } from "@/lib/explainability"
+
+const CATEGORY_KEYS: Readonly<Record<TimelineCategory, StudioTranslationKey>> = {
+  lifecycle: "explainability.labels.lifecycle",
+  retrieval: "explainability.labels.retrieval",
+  graph: "explainability.labels.graph",
+  context: "explainability.labels.context",
+  llm: "explainability.labels.llm",
+  warning: "explainability.labels.warning",
+}
 
 interface TimelineEventProps {
   envelope: ExplainabilityEnvelope
@@ -16,11 +26,11 @@ interface TimelineEventProps {
 
 function CategoryIcon({ category }: { category: TimelineCategory }): React.ReactElement {
   const className = "size-4"
-  if (category === "Retrieval") return <DatabaseZap className={className} />
-  if (category === "Graph") return <GitBranch className={className} />
-  if (category === "Context") return <Braces className={className} />
-  if (category === "LLM") return <Sparkles className={className} />
-  if (category === "Warning") return <CircleAlert className={className} />
+  if (category === "retrieval") return <DatabaseZap className={className} />
+  if (category === "graph") return <GitBranch className={className} />
+  if (category === "context") return <Braces className={className} />
+  if (category === "llm") return <Sparkles className={className} />
+  if (category === "warning") return <CircleAlert className={className} />
   return <LifeBuoy className={className} />
 }
 
@@ -40,17 +50,17 @@ export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): R
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium capitalize">{t(descriptor.label)}</span>
-                <Badge variant="outline">{t(descriptor.category)}</Badge>
+                <span className="text-sm font-medium capitalize">{descriptor.labelKey === null ? descriptor.rawLabel : t(descriptor.labelKey)}</span>
+                <Badge variant="outline">{t(CATEGORY_KEYS[descriptor.category])}</Badge>
                 <span className="font-mono text-[10px] text-muted-foreground">#{envelope.sequence}</span>
               </div>
               {summary.length > 0 ? <p className="mt-1 text-xs text-muted-foreground">{summary}</p> : null}
-              <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{t("span")} {envelope.record.span_id}{envelope.record.parent_span_id === undefined ? "" : ` · ${t("parent")} ${envelope.record.parent_span_id}`}</p>
+              <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{t("explainability.status.span")} {envelope.record.span_id}{envelope.record.parent_span_id === undefined ? "" : ` · ${t("explainability.status.parent")} ${envelope.record.parent_span_id}`}</p>
               <time className="mt-1 block text-[10px] text-muted-foreground">{new Date(envelope.record.timestamp).toLocaleTimeString()}</time>
             </div>
             <div className="flex shrink-0 gap-1">
-              {highlight !== null ? <Button variant="outline" size="sm" onClick={() => onFocusGraph(envelope)}>{t("Focus in graph")}</Button> : null}
-              <CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t("Details")}</Button></CollapsibleTrigger>
+              {highlight !== null ? <Button variant="outline" size="sm" onClick={() => onFocusGraph(envelope)}>{t("runs.actions.focusInGraph")}</Button> : null}
+              <CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t("explainability.labels.details")}</Button></CollapsibleTrigger>
             </div>
           </div>
           <CollapsibleContent className="mt-3 space-y-3 border-t pt-3">

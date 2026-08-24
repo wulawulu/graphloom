@@ -18,7 +18,7 @@ function SheetContent({ className, children, ...props }: React.ComponentProps<ty
         {...props}
       >
         {children}
-        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring" aria-label={t("Close detail panel")}>
+        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring" aria-label={t("runs.labels.closeDetailPanel")}>
           <X className="size-4" />
         </SheetPrimitive.Close>
       </SheetPrimitive.Content>

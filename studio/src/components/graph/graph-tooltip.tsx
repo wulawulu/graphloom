@@ -32,11 +32,11 @@ export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): Reac
       role="tooltip"
     >
       {content.kind === "entity" ? (
-        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? t("Untyped")}</p><p className="mt-1 text-xs text-muted-foreground">{t("Degree {{value}}", { value: content.value.degree ?? "—" })} · {t("Rank {{value}}", { value: content.value.rank ?? "—" })}</p></>
+        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? t("graph.labels.untyped")}</p><p className="mt-1 text-xs text-muted-foreground">{t("graph.labels.degreeValue", { value: content.value.degree ?? "—" })} · {t("graph.labels.rankValue", { value: content.value.rank ?? "—" })}</p></>
       ) : (
-        <><p className="font-semibold">{content.value.source} → {content.value.target}</p><p className="mt-0.5 text-xs text-muted-foreground">{t("Weight {{value}}", { value: content.value.weight ?? "—" })} · {t("Rank {{value}}", { value: content.value.rank ?? "—" })}</p></>
+        <><p className="font-semibold">{content.value.source} → {content.value.target}</p><p className="mt-0.5 text-xs text-muted-foreground">{t("graph.labels.weightValue", { value: content.value.weight ?? "—" })} · {t("graph.labels.rankValue", { value: content.value.rank ?? "—" })}</p></>
       )}
-      <p className="mt-1.5 text-[10px] text-muted-foreground">{t("Click for details")}</p>
+      <p className="mt-1.5 text-[10px] text-muted-foreground">{t("graph.labels.clickForDetails")}</p>
     </div>
   )
 }

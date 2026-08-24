@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { useTranslation } from "react-i18next"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -15,6 +16,7 @@ import {
 import type { GraphEntityDetail, GraphProjection, GraphSummary } from "@/api/types"
 import { GraphExplorer, type GraphFocusIntent, type GraphInspectIntent } from "@/components/graph/graph-explorer"
 import { highlightFromEvent, type GraphHighlight } from "@/lib/explainability"
+import type { StudioTranslationKey } from "@/i18n/types"
 
 vi.mock("@/api/client", () => ({
   ApiError: class extends Error { status = 500 },
@@ -33,12 +35,13 @@ vi.mock("@/api/client", () => ({
 const networkLifecycle = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }))
 
 vi.mock("@/components/graph/network-preview", () => ({
-  NetworkPreview: ({ projection, summary, summaryError, mode, focusCore, focusKind, error, onBack, backLabel, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; focusCore: GraphHighlight | null; focusKind: string; error: string | null; onBack: () => void; backLabel: string; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
+  NetworkPreview: ({ projection, summary, summaryError, mode, focusCore, focusKind, error, onBack, backLabel, onEntity, onRelationship, onReload }: { projection: GraphProjection; summary: GraphSummary | null; summaryError: boolean; mode: string; focusCore: GraphHighlight | null; focusKind: string; error: StudioTranslationKey | null; onBack: () => void; backLabel: StudioTranslationKey; onEntity: (id: string) => void; onRelationship: (id: string) => void; onReload: () => void }) => {
+    const { t } = useTranslation()
     useEffect(() => {
       networkLifecycle.mounts += 1
       return () => { networkLifecycle.unmounts += 1 }
     }, [])
-    return <div><span>{mode}</span><span>Core {focusCore === null ? "none" : `${focusCore.entityIds.join(",")}/${focusCore.relationshipIds.join(",")}`}</span><span>Focus kind {focusKind}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{error}</span>}{mode !== "overview" ? <><span>{backLabel}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
+    return <div><span>{mode}</span><span>Core {focusCore === null ? "none" : `${focusCore.entityIds.join(",")}/${focusCore.relationshipIds.join(",")}`}</span><span>Focus kind {focusKind}</span>{projection.entities.map((entity) => <span key={entity.id}>{entity.title}</span>)}{summary === null ? null : <span>{summary.entity_count}</span>}{summaryError ? <span>Graph summary is unavailable. The bounded visualization is still available.</span> : null}{error === null ? null : <span>{t(error)}</span>}{mode !== "overview" ? <><span>{t(backLabel)}</span><button onClick={onBack}>Back test</button></> : null}<button onClick={() => onEntity("entity-1")}>Open entity test</button><button onClick={() => onRelationship("relationship-1")}>Open relationship test</button><button onClick={onReload}>Reload test</button></div>
   },
 }))
 

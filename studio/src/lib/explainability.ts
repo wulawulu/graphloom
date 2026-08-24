@@ -1,47 +1,54 @@
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
+import type { StudioTranslationKey } from "@/i18n/types"
 import { latestContextSections } from "@/lib/context-evidence"
 
-export type TimelineCategory = "Lifecycle" | "Retrieval" | "Graph" | "Context" | "LLM" | "Warning"
+export type TimelineCategory = "lifecycle" | "retrieval" | "graph" | "context" | "llm" | "warning"
 
 export interface TimelineDescriptor {
-  label: string
+  labelKey: StudioTranslationKey | null
+  rawLabel: string | null
   category: TimelineCategory
 }
 
 const knownEvents: Record<string, TimelineDescriptor> = {
-  run_started: { label: "Run started", category: "Lifecycle" },
-  run_completed: { label: "Run completed", category: "Lifecycle" },
-  run_failed: { label: "Run failed", category: "Lifecycle" },
-  query_started: { label: "Query started", category: "Lifecycle" },
-  mapping_query_built: { label: "Mapping query built", category: "Retrieval" },
-  embedding_started: { label: "Embedding started", category: "Retrieval" },
-  embedding_completed: { label: "Embedding completed", category: "Retrieval" },
-  candidates_retrieved: { label: "Candidates retrieved", category: "Retrieval" },
-  candidates_filtered: { label: "Candidates filtered", category: "Retrieval" },
-  entities_selected: { label: "Entities selected", category: "Graph" },
-  graph_expansion_started: { label: "Graph expansion", category: "Graph" },
-  relationships_selected: { label: "Relationships selected", category: "Graph" },
-  community_reports_selected: { label: "Community reports selected", category: "Graph" },
-  covariates_selected: { label: "Covariates selected", category: "Graph" },
-  text_units_selected: { label: "Text units selected", category: "Context" },
-  context_budget_allocated: { label: "Context budget allocated", category: "Context" },
-  context_section_built: { label: "Context section built", category: "Context" },
-  context_completed: { label: "Context completed", category: "Context" },
-  global_context_built: { label: "Global context built", category: "Context" },
-  global_map_started: { label: "Global Map started", category: "LLM" },
-  global_map_batch_built: { label: "Global Map batch built", category: "Context" },
-  global_map_points_produced: { label: "Global Map points produced", category: "LLM" },
-  global_reduce_context_built: { label: "Global Reduce context built", category: "Context" },
-  global_reduce_skipped: { label: "Global Reduce skipped", category: "LLM" },
-  llm_request_started: { label: "LLM request started", category: "LLM" },
-  llm_request_completed: { label: "LLM request completed", category: "LLM" },
-  warning: { label: "Warning", category: "Warning" },
+  run_started: knownEvent("explainability.actions.runStarted", "lifecycle"),
+  run_completed: knownEvent("explainability.actions.runCompleted", "lifecycle"),
+  run_failed: knownEvent("explainability.actions.runFailed", "lifecycle"),
+  query_started: knownEvent("explainability.labels.queryStarted", "lifecycle"),
+  mapping_query_built: knownEvent("explainability.labels.mappingQueryBuilt", "retrieval"),
+  embedding_started: knownEvent("explainability.labels.embeddingStarted", "retrieval"),
+  embedding_completed: knownEvent("explainability.labels.embeddingCompleted", "retrieval"),
+  candidates_retrieved: knownEvent("explainability.labels.candidatesRetrieved", "retrieval"),
+  candidates_filtered: knownEvent("explainability.labels.candidatesFiltered", "retrieval"),
+  entities_selected: knownEvent("explainability.labels.entitiesSelected", "graph"),
+  graph_expansion_started: knownEvent("explainability.labels.graphExpansion", "graph"),
+  relationships_selected: knownEvent("explainability.labels.relationshipsSelected", "graph"),
+  community_reports_selected: knownEvent("explainability.labels.communityReportsSelected", "graph"),
+  covariates_selected: knownEvent("explainability.labels.covariatesSelected", "graph"),
+  text_units_selected: knownEvent("explainability.labels.textUnitsSelected", "context"),
+  context_budget_allocated: knownEvent("explainability.labels.contextBudgetAllocated", "context"),
+  context_section_built: knownEvent("explainability.labels.contextSectionBuilt", "context"),
+  context_completed: knownEvent("explainability.labels.contextCompleted", "context"),
+  global_context_built: knownEvent("explainability.labels.globalContextBuilt", "context"),
+  global_map_started: knownEvent("explainability.labels.globalMapStarted", "llm"),
+  global_map_batch_built: knownEvent("explainability.labels.globalMapBatchBuilt", "context"),
+  global_map_points_produced: knownEvent("explainability.labels.globalMapPointsProduced", "llm"),
+  global_reduce_context_built: knownEvent("explainability.labels.globalReduceContextBuilt", "context"),
+  global_reduce_skipped: knownEvent("explainability.labels.globalReduceSkipped", "llm"),
+  llm_request_started: knownEvent("explainability.labels.llmRequestStarted", "llm"),
+  llm_request_completed: knownEvent("explainability.labels.llmRequestCompleted", "llm"),
+  warning: knownEvent("explainability.labels.warning", "warning"),
+}
+
+function knownEvent(labelKey: StudioTranslationKey, category: TimelineCategory): TimelineDescriptor {
+  return { labelKey, rawLabel: null, category }
 }
 
 export function describeEvent(event: ExplainabilityEventPayload): TimelineDescriptor {
   return knownEvents[event.type] ?? {
-    label: event.type.replaceAll("_", " "),
-    category: "Lifecycle",
+    labelKey: null,
+    rawLabel: event.type.replaceAll("_", " "),
+    category: "lifecycle",
   }
 }
 

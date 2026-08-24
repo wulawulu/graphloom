@@ -1,9 +1,10 @@
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ExplainabilityCandidate, ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
+import { setStudioLocale } from "@/i18n"
 
 afterEach(cleanup)
 
@@ -58,6 +59,28 @@ describe("Basic Timeline", () => {
     expect(screen.getByTestId("exact-basic-prompt").textContent).toBe("BASIC PROMPT\n  exact")
     await user.click(screen.getByRole("button", { name: "View Raw Basic Response" }))
     expect(screen.getByTestId("raw-basic-response").textContent).toBe("RAW BASIC RESPONSE")
+  })
+
+  it("preserves Prompt, Context, and response content that collides with UI vocabulary", async () => {
+    const user = userEvent.setup()
+    await act(() => setStudioLocale("zh-CN", false))
+    const events = basicEvents().map((item) => {
+      if (item.record.event.type === "context_completed") return { ...item, record: { ...item.record, event: { ...item.record.event, context: "Relationships" } } }
+      if (item.record.event.type === "llm_request_started") return { ...item, record: { ...item.record, event: { ...item.record.event, prompt: "Standard" } } }
+      if (item.record.event.type === "llm_request_completed") return { ...item, record: { ...item.record, event: { ...item.record.event, response: "Detailed" } } }
+      return item
+    })
+    renderBasic(events)
+
+    await user.click(screen.getByRole("button", { name: "查看基础检索 Context" }))
+    expect(screen.getByTestId("exact-basic-context")).toHaveTextContent("Relationships")
+    await user.click(screen.getByRole("button", { name: "查看基础检索 Prompt" }))
+    expect(screen.getByTestId("exact-basic-prompt")).toHaveTextContent("Standard")
+    await user.click(screen.getByRole("button", { name: "查看基础检索原始响应" }))
+    expect(screen.getByTestId("raw-basic-response")).toHaveTextContent("Detailed")
+    expect(screen.queryByText("关系")).not.toBeInTheDocument()
+    expect(screen.queryByText("标准")).not.toBeInTheDocument()
+    expect(screen.queryByText("详细")).not.toBeInTheDocument()
   })
 
   it("shows metadata content as not captured rather than empty", async () => {

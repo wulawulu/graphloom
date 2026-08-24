@@ -9,13 +9,13 @@ export function LanguageSelector(): React.ReactElement {
   const locale = activeStudioLocale()
   return (
     <Select value={locale} onValueChange={(value) => void setStudioLocale(value as StudioLocale)}>
-      <SelectTrigger aria-label={t("Language")} className="h-8 w-auto min-w-0 gap-1.5 px-2 text-xs">
+      <SelectTrigger aria-label={t("settings.language")} className="h-8 w-auto min-w-0 gap-1.5 px-2 text-xs">
         <Globe className="size-3.5 shrink-0" />
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="en">{t("English")}</SelectItem>
-        <SelectItem value="zh-CN">{t("Simplified Chinese")}</SelectItem>
+        <SelectItem value="en">{t("languages.english")}</SelectItem>
+        <SelectItem value="zh-CN">{t("languages.simplifiedChinese")}</SelectItem>
       </SelectContent>
     </Select>
   )
