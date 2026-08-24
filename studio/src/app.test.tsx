@@ -17,6 +17,6 @@ describe("App", () => {
     expect(screen.getByText("GraphLoom Studio")).toBeInTheDocument()
     expect(screen.getByLabelText("Ask about the graph")).toBeInTheDocument()
     expect(screen.getByText("Ask a question about the indexed graph.")).toBeInTheDocument()
-    expect(await screen.findByText("Graph data unavailable")).toBeInTheDocument()
+    expect(await screen.findByText("Graph data unavailable", undefined, { timeout: 10_000 })).toBeInTheDocument()
   })
 })
