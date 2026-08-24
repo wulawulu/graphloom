@@ -18,13 +18,14 @@ export function TextUnitEvidenceProvider({ children }: { children: React.ReactNo
   const pending = useRef(new Set<string>())
   const requests = useRef(new Set<AbortController>())
   const requestQueue = useRef(Promise.resolve())
-  const disposed = useRef(false)
+  const lifecycleGeneration = useRef(0)
   const [snapshot, setSnapshot] = useState<EvidenceSnapshot>({ refs: new Map(), statuses: new Map() })
 
   useEffect(() => () => {
-    disposed.current = true
+    lifecycleGeneration.current += 1
     requests.current.forEach((controller) => controller.abort())
     requests.current.clear()
+    pending.current.clear()
   }, [])
 
   const publish = useCallback((): void => {
@@ -52,8 +53,9 @@ export function TextUnitEvidenceProvider({ children }: { children: React.ReactNo
     publish()
     for (let offset = 0; offset < unresolved.length; offset += RESOLVE_BATCH_LIMIT) {
       const batch = unresolved.slice(offset, offset + RESOLVE_BATCH_LIMIT)
+      const generation = lifecycleGeneration.current
       requestQueue.current = requestQueue.current.then(async () => {
-        if (disposed.current) return
+        if (generation !== lifecycleGeneration.current) return
         const controller = new AbortController()
         requests.current.add(controller)
         try {
@@ -66,8 +68,10 @@ export function TextUnitEvidenceProvider({ children }: { children: React.ReactNo
           if (!(reason instanceof DOMException && reason.name === "AbortError")) batch.forEach((id) => failed.current.add(id))
         } finally {
           requests.current.delete(controller)
-          batch.forEach((id) => pending.current.delete(id))
-          if (!controller.signal.aborted) publish()
+          if (generation === lifecycleGeneration.current) {
+            batch.forEach((id) => pending.current.delete(id))
+            if (!controller.signal.aborted) publish()
+          }
         }
       })
     }

@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
-import { useEffect } from "react"
+import { StrictMode, useEffect } from "react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { resolveTextUnits } from "@/api/client"
@@ -68,5 +68,14 @@ describe("TextUnitEvidenceProvider", () => {
     await act(async () => releaseFirst?.({ resolved: [], missing_ids: [] }))
     await waitFor(() => expect(resolveTextUnits).toHaveBeenCalledTimes(3))
     expect(vi.mocked(resolveTextUnits).mock.calls.map(([batch]) => batch.length)).toEqual([100, 100, 1])
+  })
+
+  it("resolves evidence after the StrictMode effect cleanup probe", async () => {
+    vi.mocked(resolveTextUnits).mockResolvedValue({ resolved: [{ id: "strict", short_id: "1", preview: "StrictMode preview", n_tokens: null }], missing_ids: [] })
+
+    render(<StrictMode><TextUnitEvidenceProvider><EvidenceConsumer id="strict" /></TextUnitEvidenceProvider></StrictMode>)
+
+    await waitFor(() => expect(screen.getByText("StrictMode preview")).toBeInTheDocument())
+    expect(resolveTextUnits).toHaveBeenCalledTimes(1)
   })
 })
