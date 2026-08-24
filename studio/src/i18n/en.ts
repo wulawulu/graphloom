@@ -674,6 +674,10 @@ export const en = {
       "none": "none",
       "communityHierarchy": "short {{shortId}} · parent {{parent}} · children {{children}}"
     },
+    "community": {
+      "communityNumber": "Community {{shortId}}",
+      "referenceMetadata": "Community {{shortId}} · L{{level}}"
+    },
     "labels": {
       "graphDataUnavailable": "Graph data unavailable",
       "entities": "Entities",

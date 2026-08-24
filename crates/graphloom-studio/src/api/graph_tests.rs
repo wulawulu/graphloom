@@ -544,8 +544,14 @@ async fn test_should_sort_relationships_before_pagination_with_stable_ties() -> 
 
 #[tokio::test]
 async fn test_should_return_graph_details_without_exposing_embeddings() -> TestResult {
+    let mut data = snapshot().await?;
+    data.communities
+        .iter_mut()
+        .find(|community| community.id == "community-a")
+        .ok_or("community fixture")?
+        .title = "Community 5".to_owned();
     let (_, router) = router(Arc::new(FakeGraphDataSource {
-        snapshot: Some(snapshot().await?),
+        snapshot: Some(data),
     }));
     for (uri, expected_id) in [
         ("/api/graph/entities/entity-a", "entity-a"),
@@ -567,11 +573,14 @@ async fn test_should_return_graph_details_without_exposing_embeddings() -> TestR
     assert_eq!(entity["community_ids"], json!(["5"]));
     assert_eq!(entity["communities"][0]["id"], "community-a");
     assert_eq!(entity["communities"][0]["short_id"], "5");
+    assert_eq!(entity["communities"][0]["report_title"], "Shared");
     assert_eq!(entity["communities"][0]["summary"], "Summary 5");
     let (_, relationship) = get_json(&router, "/api/graph/relationships/relationship-a").await?;
     assert_eq!(relationship["source_entity"]["id"], "entity-a");
     assert_eq!(relationship["target_entity"]["id"], "entity-b");
     let (_, community) = get_json(&router, "/api/graph/communities/community-a").await?;
+    assert_eq!(community["title"], "Community 5");
+    assert_eq!(community["report"]["title"], "Shared");
     assert_eq!(community["parent"], 3);
     assert!(community["parent_community"].is_null());
     Ok(())

@@ -676,6 +676,10 @@ export const zhCN = {
       "none": "无",
       "communityHierarchy": "短 ID {{shortId}} · 父级 {{parent}} · 子级 {{children}}"
     },
+    "community": {
+      "communityNumber": "Community {{shortId}}",
+      "referenceMetadata": "Community {{shortId}} · L{{level}}"
+    },
     "labels": {
       "graphDataUnavailable": "图谱数据不可用",
       "entities": "实体",

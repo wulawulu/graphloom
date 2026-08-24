@@ -1,11 +1,21 @@
 import type { CoseLayoutOptions, ElementDefinition } from "cytoscape"
 
-import type { GraphProjection, GraphProjectionEntity } from "@/api/types"
+import type { GraphCommunity, GraphCommunityRef, GraphProjection, GraphProjectionEntity } from "@/api/types"
 
 export const MIN_GRAPH_NODE_WIDTH = 58
 export const MAX_GRAPH_NODE_WIDTH = 100
 export const MIN_GRAPH_NODE_HEIGHT = MIN_GRAPH_NODE_WIDTH
 export const MAX_GRAPH_NODE_HEIGHT = MAX_GRAPH_NODE_WIDTH
+
+type CommunityDisplayFields = Pick<GraphCommunityRef, "report_title" | "short_id" | "title">
+  | Pick<GraphCommunity, "report" | "short_id" | "title">
+
+export function communityDisplayTitle(community: CommunityDisplayFields, fallback: string): string {
+  const reportTitle = "report_title" in community ? community.report_title : community.report?.title
+  if (reportTitle !== null && reportTitle !== undefined && reportTitle.trim().length > 0) return reportTitle
+  if (community.title.trim().length > 0) return community.title
+  return fallback
+}
 
 export const GRAPH_LAYOUT_OPTIONS = {
   // Cytoscape's compound spring embedder layout name is assembled to keep spellcheck signal clean.

@@ -165,4 +165,22 @@ describe("Graph list filter submission", () => {
     await waitFor(() => expect(listCommunities).toHaveBeenCalledTimes(2))
     expect(vi.mocked(listCommunities).mock.calls[1]?.[0]).toMatchObject({ level: 1, parent: 3, limit: 50 })
   })
+
+  it("uses semantic report titles and compact hierarchy metadata in Community results", async () => {
+    vi.mocked(listCommunities).mockResolvedValue({
+      items: [{
+        id: "community-37", short_id: "37", title: "Community 37", level: 1, parent: 10, children: [38, 39],
+        parent_community: null, child_communities: [],
+        report: { id: "report-37", short_id: "37", community_id: "37", title: "蔡太师、杨提督与西门庆行贿网络", summary: "围绕行贿关系形成的社区。", rank: null },
+      }],
+      next_cursor: null,
+    })
+    render(<CommunityList onSelect={vi.fn()} />)
+
+    expect(await screen.findByText("蔡太师、杨提督与西门庆行贿网络")).toBeInTheDocument()
+    expect(screen.getByText("Community 37 · L1")).toBeInTheDocument()
+    expect(screen.getByText("围绕行贿关系形成的社区。")).toBeInTheDocument()
+    expect(screen.queryByText(/children 38, 39/i)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Open community 蔡太师、杨提督与西门庆行贿网络" })).toBeInTheDocument()
+  })
 })

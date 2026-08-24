@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import type { ExplainabilityRecordView } from "@/lib/semantic-timeline"
 import type { StudioTranslationKey } from "@/i18n/types"
+import { communityDisplayTitle } from "@/lib/graph"
 
 export type GraphDetail =
   | { kind: "entity"; value: GraphEntityDetail }
@@ -38,7 +39,9 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
     ? t("graph.labels.graphItem")
     : detail.kind === "relationship"
       ? t("graph.labels.relationship")
-      : detail.value.title
+      : detail.kind === "community"
+        ? communityDisplayTitle(detail.value, t("graph.community.communityNumber", { shortId: detail.value.short_id }))
+        : detail.value.title
   return (
     <section className="flex size-full min-h-0 flex-col" aria-label={t("graph.labels.graphInspector")} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") props.onClear() }}>
       <header className="flex h-11 shrink-0 items-center justify-between border-b px-3">
@@ -198,12 +201,13 @@ const INITIAL_CHILD_COUNT = 10
 function CommunityDetail({ value, report, onOpenCommunity }: { value: GraphCommunity; report: GraphCommunityReportDetail | null; onOpenCommunity: (id: string) => void }): React.ReactElement {
   const { t } = useTranslation()
   const [showAllChildren, setShowAllChildren] = useState(false)
+  const title = communityDisplayTitle(value, t("graph.community.communityNumber", { shortId: value.short_id }))
   const childReferences = new Map(value.child_communities.map((community) => [community.short_id, community]))
   const childItems = [...new Set(value.children)].map((id) => ({ id, reference: childReferences.get(String(id)) ?? null }))
   const visibleChildren = showAllChildren ? childItems : childItems.slice(0, INITIAL_CHILD_COUNT)
   return (
     <div className="space-y-5 pb-5">
-      <div className="flex gap-3 rounded-lg border bg-card p-4"><div className="rounded-full bg-primary/10 p-2 text-primary"><UsersRound className="size-5" /></div><div><h3 className="font-semibold">{value.title}</h3><div className="mt-1 flex flex-wrap gap-1"><Badge variant="outline">{t("graph.labels.levelValue", { value: value.level })}</Badge><Badge variant="outline">{t("graph.labels.shortIdValue", { value: value.short_id })}</Badge></div></div></div>
+      <div className="flex gap-3 rounded-lg border bg-card p-4"><div className="rounded-full bg-primary/10 p-2 text-primary"><UsersRound className="size-5" /></div><div className="min-w-0"><h3 className="break-words font-semibold">{title}</h3><div className="mt-1 flex flex-wrap gap-1"><Badge variant="outline">{t("graph.community.communityNumber", { shortId: value.short_id })}</Badge><Badge variant="outline">L{value.level}</Badge></div></div></div>
       <Section title="graph.labels.summary"><p className="whitespace-pre-wrap text-sm leading-6">{value.report?.summary ?? t("graph.labels.noReportSummary")}</p></Section>
       <Section title="graph.labels.hierarchy">
         <div className="space-y-3">

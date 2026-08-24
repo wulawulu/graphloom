@@ -541,6 +541,7 @@ export interface GraphCommunityRef {
   id: string
   short_id: string
   title: string
+  report_title: string | null
   level: number
   summary: string | null
 }

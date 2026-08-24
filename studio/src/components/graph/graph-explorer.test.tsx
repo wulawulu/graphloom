@@ -142,10 +142,10 @@ describe("GraphExplorer focus flow", () => {
     })
     const community = (id: string, shortId: string, title: string, parent: GraphCommunity["parent_community"]): GraphCommunity => ({
       id, short_id: shortId, title, level: 1, parent: parent === null ? -1 : Number(parent.short_id), children: [],
-      parent_community: parent, child_communities: [], report: { id: `report-${id}`, short_id: shortId, community_id: shortId, title: "Report", summary: title === "Community C" ? "Community summary" : "Parent summary", rank: null },
+      parent_community: parent, child_communities: [], report: { id: `report-${id}`, short_id: shortId, community_id: shortId, title: `${title} semantic`, summary: title === "Community C" ? "Community summary" : "Parent summary", rank: null },
     })
-    const parentRef = { id: "community-parent", short_id: "1", title: "Parent P", level: 2, summary: "Parent summary" }
-    const relatedRef = { id: "community-related", short_id: "2", title: "Community C", level: 1, summary: "Community summary" }
+    const parentRef = { id: "community-parent", short_id: "1", title: "Parent P", report_title: "Parent P semantic", level: 2, summary: "Parent summary" }
+    const relatedRef = { id: "community-related", short_id: "2", title: "Community C", report_title: "Community C semantic", level: 1, summary: "Community summary" }
     vi.mocked(getEntity).mockImplementation((id) => Promise.resolve(id === "entity-root" ? entity(id, "Entity B") : entity(id, "Candidate A", [relatedRef])))
     vi.mocked(getCommunity).mockImplementation((id) => Promise.resolve(id === "community-parent" ? community(id, "1", "Parent P", null) : community(id, "2", "Community C", parentRef)))
     vi.mocked(getCommunityReport).mockImplementation((id) => Promise.resolve({ id: `report-${id}`, short_id: id, community_id: id, title: "Report", summary: "Summary", full_content: "Full", rank: null }))
@@ -158,14 +158,14 @@ describe("GraphExplorer focus flow", () => {
 
     expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
     expect(screen.getByRole("region", { name: "Query decision" })).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Open community Community C" }))
+    await user.click(screen.getByRole("button", { name: "Open community Community C semantic" }))
     expect(await screen.findByText("Community summary")).toBeInTheDocument()
     expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Open community Parent P" }))
-    expect((await screen.findAllByText("Parent P")).length).toBeGreaterThan(0)
+    await user.click(screen.getByRole("button", { name: "Open community Parent P semantic" }))
+    expect((await screen.findAllByText("Parent P semantic")).length).toBeGreaterThan(0)
 
     await user.click(screen.getByRole("button", { name: "Back" }))
-    expect((await screen.findAllByText("Community C")).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText("Community C semantic")).length).toBeGreaterThan(0)
     await user.click(screen.getByRole("button", { name: "Back" }))
     expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
     expect(screen.getByRole("region", { name: "Query decision" })).toBeInTheDocument()
@@ -178,7 +178,7 @@ describe("GraphExplorer focus flow", () => {
 
   it("aborts stale cross-navigation and commits history only after a successful detail load", async () => {
     let resolveStale: ((value: GraphCommunity) => void) | undefined
-    const communityRef = (id: string, title: string) => ({ id, short_id: id, title, level: 1, summary: null })
+    const communityRef = (id: string, title: string) => ({ id, short_id: id, title, report_title: null, level: 1, summary: null })
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: null, title: "Entity A", entity_type: "PERSON", degree: 1, rank: 1,
       description: "Entity A detail", community_ids: ["community-c", "community-d"],
@@ -214,7 +214,7 @@ describe("GraphExplorer focus flow", () => {
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-1", short_id: null, title: "Entity A", entity_type: "PERSON", degree: 1, rank: 1,
       description: "Recoverable Entity A", community_ids: ["missing"],
-      communities: [{ id: "missing-community", short_id: "missing", title: "Missing Community", level: 1, summary: null }], text_unit_ids: [],
+      communities: [{ id: "missing-community", short_id: "missing", title: "Missing Community", report_title: null, level: 1, summary: null }], text_unit_ids: [],
     })
     vi.mocked(getCommunity).mockRejectedValue(new Error("unavailable"))
     vi.mocked(getCommunityReport).mockRejectedValue(new Error("unavailable"))
@@ -264,7 +264,7 @@ describe("GraphExplorer focus flow", () => {
   it("clears a candidate-owned navigation chain when the Run changes", async () => {
     vi.mocked(getEntity).mockResolvedValue({
       id: "entity-a", short_id: null, title: "Candidate A", entity_type: "PERSON", degree: 1, rank: 1,
-      description: "Candidate A detail", community_ids: ["2"], communities: [{ id: "community-c", short_id: "2", title: "Community C", level: 1, summary: "Community C summary" }], text_unit_ids: [],
+      description: "Candidate A detail", community_ids: ["2"], communities: [{ id: "community-c", short_id: "2", title: "Community C", report_title: null, level: 1, summary: "Community C summary" }], text_unit_ids: [],
     })
     vi.mocked(getCommunity).mockResolvedValue({ id: "community-c", short_id: "2", title: "Community C", level: 1, parent: -1, children: [], parent_community: null, child_communities: [], report: { id: "report-c", short_id: "2", community_id: "2", title: "Community C report", summary: "Community C summary", rank: null } })
     vi.mocked(getCommunityReport).mockResolvedValue({ id: "report-c", short_id: "2", community_id: "2", title: "Community C report", summary: "Community C summary", full_content: "Community C report content", rank: null })

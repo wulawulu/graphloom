@@ -13,14 +13,14 @@ describe("GraphInspector", () => {
   it("renders structured entity detail, collapses long sources, and focuses explicitly", async () => {
     const user = userEvent.setup()
     const onFocusEntity = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12, description: "Alice description", community_ids: ["5"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", level: 1, summary: "People connected to Alice" }], text_unit_ids: Array.from({ length: 25 }, (_, index) => `text-${index + 1}`) }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12, description: "Alice description", community_ids: ["5"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "People connected to Alice" }], text_unit_ids: Array.from({ length: 25 }, (_, index) => `text-${index + 1}`) }
     render(<GraphInspector {...common} onFocusEntity={onFocusEntity} detail={{ kind: "entity", value: entity }} />)
 
     expect(screen.getByText("PERSON")).toBeInTheDocument()
     expect(screen.getByText("Degree 12")).toBeInTheDocument()
     expect(screen.getByText("Rank 12")).toBeInTheDocument()
     expect(screen.getByText("Alice description")).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Open community Alice network" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Open community Alice semantic network" })).toBeInTheDocument()
     expect(screen.getByText("Developer · Raw JSON")).toBeInTheDocument()
     expect(screen.getByText("25 source text units")).toBeInTheDocument()
     expect(screen.queryByText("text-25")).not.toBeInTheDocument()
@@ -63,21 +63,22 @@ describe("GraphInspector", () => {
   })
 
   it("renders community hierarchy and a safe formatted report", () => {
-    const community: GraphCommunity = { id: "community-1", short_id: "5", title: "Alice network", level: 1, parent: 0, children: [6], parent_community: { id: "community-0", short_id: "0", title: "Root network", level: 2, summary: "Root summary" }, child_communities: [{ id: "community-6", short_id: "6", title: "Child network", level: 0, summary: null }], report: { id: "report-1", short_id: "5", community_id: "5", title: "Network report", summary: "A useful summary", rank: 3 } }
+    const community: GraphCommunity = { id: "community-1", short_id: "5", title: "Alice network", level: 1, parent: 0, children: [6], parent_community: { id: "community-0", short_id: "0", title: "Root network", report_title: "Root semantic network", level: 2, summary: "Root summary" }, child_communities: [{ id: "community-6", short_id: "6", title: "Child network", report_title: "Child semantic network", level: 0, summary: null }], report: { id: "report-1", short_id: "5", community_id: "5", title: "Network report", summary: "A useful summary", rank: 3 } }
     const report: GraphCommunityReportDetail = { ...community.report!, full_content: "## Report heading\n\n- first point\n\n![remote](https://example.com/image.png)" }
     render(<GraphInspector {...common} detail={{ kind: "community", value: community, report }} />)
 
-    expect(screen.getByText("Level 1")).toBeInTheDocument()
+    expect(screen.getByText("L1")).toBeInTheDocument()
     expect(screen.getByText("A useful summary")).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Open community Root network" })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Open community Child network" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { level: 2, name: "Network report" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Open community Root semantic network" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Open community Child semantic network" })).toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "Report heading" })).toBeInTheDocument()
     expect(screen.getByText("[Remote image omitted: remote]")).toBeInTheDocument()
   })
 
   it("renders root and leaf states and progressively reveals large child hierarchies", async () => {
     const user = userEvent.setup()
-    const children = Array.from({ length: 11 }, (_, index) => ({ id: `community-${index}`, short_id: String(index), title: `Child ${index}`, level: 0, summary: null }))
+    const children = Array.from({ length: 11 }, (_, index) => ({ id: `community-${index}`, short_id: String(index), title: `Child ${index}`, report_title: null, level: 0, summary: null }))
     const community: GraphCommunity = { id: "root", short_id: "99", title: "Root", level: 1, parent: -1, children: children.map((child) => Number(child.short_id)), parent_community: null, child_communities: children, report: null }
     render(<GraphInspector {...common} detail={{ kind: "community", value: community, report: null }} />)
 
@@ -92,7 +93,7 @@ describe("GraphInspector", () => {
   it("resets child expansion when navigating to another community", async () => {
     const user = userEvent.setup()
     const community = (id: string, prefix: string): GraphCommunity => {
-      const children = Array.from({ length: 11 }, (_, index) => ({ id: `${id}-child-${index}`, short_id: String(index), title: `${prefix} Child ${index}`, level: 0, summary: null }))
+      const children = Array.from({ length: 11 }, (_, index) => ({ id: `${id}-child-${index}`, short_id: String(index), title: `${prefix} Child ${index}`, report_title: null, level: 0, summary: null }))
       return { id, short_id: id, title: prefix, level: 1, parent: -1, children: children.map((child) => Number(child.short_id)), parent_community: null, child_communities: children, report: null }
     }
     const first = community("first", "First")
@@ -110,6 +111,7 @@ describe("GraphInspector", () => {
   it("renders a leaf community without navigation requests", () => {
     const community: GraphCommunity = { id: "leaf", short_id: "7", title: "Leaf", level: 0, parent: -1, children: [], parent_community: null, child_communities: [], report: null }
     render(<GraphInspector {...common} detail={{ kind: "community", value: community, report: null }} />)
+    expect(screen.getByRole("heading", { level: 2, name: "Leaf" })).toBeInTheDocument()
     expect(screen.getByText("No child communities")).toBeInTheDocument()
   })
 
@@ -128,10 +130,10 @@ describe("GraphInspector", () => {
     const user = userEvent.setup()
     const onOpenCommunity = vi.fn()
     const onFocusEntity = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: ["5", "missing"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", level: 1, summary: "Preview summary" }], text_unit_ids: [] }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: ["5", "missing"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "Preview summary" }], text_unit_ids: [] }
     render(<GraphInspector {...common} onOpenCommunity={onOpenCommunity} onFocusEntity={onFocusEntity} detail={{ kind: "entity", value: entity }} />)
 
-    const community = screen.getByRole("button", { name: "Open community Alice network" })
+    const community = screen.getByRole("button", { name: "Open community Alice semantic network" })
     await user.hover(community)
     expect(await screen.findByText("Preview summary")).toBeInTheDocument()
     await user.click(community)

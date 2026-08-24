@@ -111,15 +111,16 @@ impl<'a> GraphReferenceIndex<'a> {
     }
 
     fn community_reference(&self, community: &GraphCommunity) -> GraphCommunityRef {
+        let report = self
+            .reports_by_community_id
+            .get(community.short_id.as_str());
         GraphCommunityRef {
             id: community.id.clone(),
             short_id: community.short_id.clone(),
             title: community.title.clone(),
+            report_title: report.map(|report| report.title.clone()),
             level: community.level,
-            summary: self
-                .reports_by_community_id
-                .get(community.short_id.as_str())
-                .map(|report| report.summary.clone()),
+            summary: report.map(|report| report.summary.clone()),
         }
     }
 
@@ -348,6 +349,11 @@ mod tests {
             detail.communities[0].summary.as_deref(),
             Some("Summary two")
         );
+        assert_eq!(
+            detail.communities[0].report_title.as_deref(),
+            Some("Report two")
+        );
+        assert!(detail.communities[1].report_title.is_none());
         assert!(detail.communities[1].summary.is_none());
         Ok(())
     }

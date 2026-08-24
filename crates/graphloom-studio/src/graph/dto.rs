@@ -390,6 +390,8 @@ pub struct GraphCommunityRef {
     pub short_id: String,
     /// Community title.
     pub title: String,
+    /// Query-readable semantic report title, when one is present.
+    pub report_title: Option<String>,
     /// Hierarchy level.
     pub level: i64,
     /// Query-readable report summary, when one is present.

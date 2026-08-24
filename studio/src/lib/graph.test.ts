@@ -6,6 +6,7 @@ import {
   MAX_GRAPH_NODE_WIDTH,
   MIN_GRAPH_NODE_HEIGHT,
   buildProjectionElements,
+  communityDisplayTitle,
   graphNodeDimensions,
   graphViewportAction,
   projectionFocusIds,
@@ -35,6 +36,14 @@ const projection: GraphProjection = {
 }
 
 describe("graph projection transformation", () => {
+  it("uses report title, artifact title, and semantic fallback without mutating raw fields", () => {
+    const reportBacked = { short_id: "37", title: "Community 37", report_title: "蔡太师、杨提督与西门庆行贿网络" }
+    expect(communityDisplayTitle(reportBacked, "Community 37")).toBe("蔡太师、杨提督与西门庆行贿网络")
+    expect(communityDisplayTitle({ ...reportBacked, report_title: "  " }, "Community 37")).toBe("Community 37")
+    expect(communityDisplayTitle({ ...reportBacked, report_title: null, title: "" }, "Community 37")).toBe("Community 37")
+    expect(reportBacked.title).toBe("Community 37")
+  })
+
   it("uses a stable monotonic logarithmic degree scale with clamps", () => {
     const dimensions = (degree: number | null) => graphNodeDimensions({ title: "Hub", degree })
 
