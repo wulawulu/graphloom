@@ -261,6 +261,32 @@ describe("GraphExplorer focus flow", () => {
     expect(screen.getByText("overview")).toBeInTheDocument()
   })
 
+  it("clears a candidate-owned navigation chain when the Run changes", async () => {
+    vi.mocked(getEntity).mockResolvedValue({
+      id: "entity-a", short_id: null, title: "Candidate A", entity_type: "PERSON", degree: 1, rank: 1,
+      description: "Candidate A detail", community_ids: ["2"], communities: [{ id: "community-c", short_id: "2", title: "Community C", level: 1, summary: "Community C summary" }], text_unit_ids: [],
+    })
+    vi.mocked(getCommunity).mockResolvedValue({ id: "community-c", short_id: "2", title: "Community C", level: 1, parent: -1, children: [], parent_community: null, child_communities: [], report: { id: "report-c", short_id: "2", community_id: "2", title: "Community C report", summary: "Community C summary", rank: null } })
+    vi.mocked(getCommunityReport).mockResolvedValue({ id: "report-c", short_id: "2", community_id: "2", title: "Community C report", summary: "Community C summary", full_content: "Community C report content", rank: null })
+    const inspectIntent: GraphInspectIntent = {
+      revision: 1,
+      candidate: { stableId: "entity-a", title: "Candidate A", recordType: "entity", selected: true, selectionStatus: "selected", finalContext: "included" },
+    }
+    const user = userEvent.setup()
+    const { rerender } = render(<GraphExplorer runId="run-a" focusIntent={null} inspectIntent={inspectIntent} onClearFocus={defaultExplorerProps.onClearFocus} />)
+    expect(await screen.findByText("Candidate A detail")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Open community Community C" }))
+    expect(await screen.findByText("Community C summary")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument()
+
+    rerender(<GraphExplorer runId="run-b" focusIntent={null} inspectIntent={null} onClearFocus={defaultExplorerProps.onClearFocus} />)
+
+    await waitFor(() => expect(screen.queryByText("Community C summary")).not.toBeInTheDocument())
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Query decision" })).not.toBeInTheDocument()
+    expect(getGraphSubgraph).not.toHaveBeenCalled()
+  })
+
   it("aborts and ignores a pending candidate detail when the Run changes", async () => {
     let resolveCandidate: ((value: GraphEntityDetail) => void) | undefined
     vi.mocked(getEntity).mockReturnValue(new Promise((resolve) => { resolveCandidate = resolve }))

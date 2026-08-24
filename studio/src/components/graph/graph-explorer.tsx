@@ -366,13 +366,12 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
         if (detailRequest.current !== controller || controller.signal.aborted) return
         if (navigation === "internal" && previous !== null) setDetailHistory((history) => [...history, previous])
         if (navigation === "back") setDetailHistory((history) => history.slice(0, -1))
-        candidateInspectionActive.current = identity.decision !== null
+        if (navigation === "root") candidateInspectionActive.current = identity.decision !== null
         setDecision(identity.decision)
         setDetail(value)
       })
       .catch((reason: unknown) => {
         if (detailRequest.current !== controller || isAbort(reason)) return
-        candidateInspectionActive.current = decision !== null
         setDetailError(true)
       })
       .finally(() => finishDetailRequest(controller))

@@ -55,7 +55,7 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
           {props.error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-red-300">{t("graph.messages.graphDetailIsUnavailable")}</p> : null}
           {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} onOpenCommunity={props.onOpenCommunity} /> : null}
           {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} onOpenEntity={props.onOpenEntity} /> : null}
-          {detail?.kind === "community" ? <CommunityDetail value={detail.value} report={detail.report} onOpenCommunity={props.onOpenCommunity} /> : null}
+          {detail?.kind === "community" ? <CommunityDetail key={detail.value.id} value={detail.value} report={detail.report} onOpenCommunity={props.onOpenCommunity} /> : null}
           {detail !== null && props.decision !== undefined && props.decision !== null ? <DecisionDetail value={props.decision} /> : null}
           {detail !== null ? <RawData value={detail} /> : null}
         </div>

@@ -89,6 +89,24 @@ describe("GraphInspector", () => {
     expect(screen.queryByRole("button", { name: "Open community Child 10" })).not.toBeInTheDocument()
   })
 
+  it("resets child expansion when navigating to another community", async () => {
+    const user = userEvent.setup()
+    const community = (id: string, prefix: string): GraphCommunity => {
+      const children = Array.from({ length: 11 }, (_, index) => ({ id: `${id}-child-${index}`, short_id: String(index), title: `${prefix} Child ${index}`, level: 0, summary: null }))
+      return { id, short_id: id, title: prefix, level: 1, parent: -1, children: children.map((child) => Number(child.short_id)), parent_community: null, child_communities: children, report: null }
+    }
+    const first = community("first", "First")
+    const second = community("second", "Second")
+    const { rerender } = render(<GraphInspector {...common} detail={{ kind: "community", value: first, report: null }} />)
+    await user.click(screen.getByRole("button", { name: "Show all children" }))
+    expect(screen.getByRole("button", { name: "Open community First Child 10" })).toBeInTheDocument()
+
+    rerender(<GraphInspector {...common} detail={{ kind: "community", value: second, report: null }} />)
+
+    expect(screen.queryByRole("button", { name: "Open community Second Child 10" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Show all children" })).toBeInTheDocument()
+  })
+
   it("renders a leaf community without navigation requests", () => {
     const community: GraphCommunity = { id: "leaf", short_id: "7", title: "Leaf", level: 0, parent: -1, children: [], parent_community: null, child_communities: [], report: null }
     render(<GraphInspector {...common} detail={{ kind: "community", value: community, report: null }} />)
