@@ -36,6 +36,19 @@ describe("GraphSourceEvidence", () => {
     expect(screen.getByRole("region", { name: "Source evidence · 3" })).toBeInTheDocument()
   })
 
+  it("pluralizes English token counts", () => {
+    render(<GraphSourceEvidence
+      sourceIds={["one", "two"]}
+      sources={[
+        { id: "one", short_id: "1", preview: "One token", n_tokens: 1 },
+        { id: "two", short_id: "2", preview: "Two tokens", n_tokens: 2 },
+      ]}
+    />)
+
+    expect(screen.getByText("1 Token")).toBeInTheDocument()
+    expect(screen.getByText("2 Tokens")).toBeInTheDocument()
+  })
+
   it("localizes Studio chrome without translating source content", async () => {
     await setStudioLocale("zh-CN", false)
     render(<GraphSourceEvidence sourceIds={[sourceA.id]} sources={[sourceA]} />)
