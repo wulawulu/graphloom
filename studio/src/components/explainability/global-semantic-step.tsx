@@ -215,7 +215,7 @@ function MapPointList({ points }: { points: GlobalMapPointView[] }): React.React
   if (points.length === 0) return <p className="mt-2 text-xs text-muted-foreground">{t("explainability.messages.noParsedPointsAvailableYet")}</p>
   return (
     <div className="mt-2 space-y-2">
-      <div className="divide-y rounded border bg-muted/10">{visible.map((point) => <div key={point.identity} className="min-w-0 px-2 py-2 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{t("explainability.labels.pointValue", { value: point.point_index })}</span><Badge variant="outline">{t("explainability.labels.scoreValue", { value: point.score })}</Badge></div><p className="mt-1 min-w-0 whitespace-pre-wrap break-words text-muted-foreground">{point.answer ?? t("explainability.messages.mapPointAnswerNotCaptured")}</p></div>)}</div>
+      <div className="divide-y rounded border bg-muted/10">{visible.map((point) => <div key={point.identity} className="min-w-0 px-2 py-2 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{t("explainability.labels.pointValue", { value: point.point_index })}</span><Badge variant="outline">{t("explainability.labels.scoreValue", { value: point.score })}</Badge></div>{point.answer === null ? null : <p className="mt-1 min-w-0 whitespace-pre-wrap break-words text-muted-foreground">{point.answer}</p>}</div>)}</div>
       {points.length > INITIAL_POINTS ? <Button variant="ghost" size="sm" onClick={() => setShowAll((value) => !value)}>{showAll ? t("explainability.actions.showFewerPoints") : t("explainability.counts.showAllCountPoints", { count: points.length })}</Button> : null}
     </div>
   )
@@ -242,7 +242,7 @@ function ReduceDecisionRow({ decision }: { decision: GlobalReduceDecisionView })
   return (
     <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-2 overflow-hidden px-2 py-2 text-xs">
       <span className="pt-0.5"><ReduceDecisionIcon decision={decision} /></span>
-      <div className="min-w-0"><p className="font-medium">{t("explainability.labels.reducePoint", { batch: decision.batch_index + 1, point: decision.point_index, score: decision.score })}</p><p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{decision.answer ?? t("explainability.messages.mapPointAnswerNotCaptured")}</p></div>
+      <div className="min-w-0"><p className="font-medium">{t("explainability.labels.reducePoint", { batch: decision.batch_index + 1, point: decision.point_index, score: decision.score })}</p>{decision.answer === null ? null : <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{decision.answer}</p>}</div>
       <Badge variant="outline" className="shrink-0">{t(reduceDecisionLabel(decision))}</Badge>
     </div>
   )

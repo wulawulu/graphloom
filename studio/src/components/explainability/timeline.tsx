@@ -37,6 +37,7 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
     <div className="space-y-2 p-3">
       {runId === null ? <EmptyTimeline title={t("runs.labels.noRunSelected")} detail={t("runs.messages.chooseAHistoricalRunOrSubmitANewQuery")} /> : null}
       {runId !== null && envelopes.length === 0 ? <EmptyTimeline title={t("runs.labels.waitingForExplainability")} detail={streamStatus === "reconnecting" ? t("runs.messages.replayOnReconnect") : t("explainability.empty.noEvents")} /> : null}
+      {runId !== null && contentMode === "metadata" ? <p className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground" role="note">{t("query.messages.metadataOnlyRun")}</p> : null}
       {model.steps.map((step) => isGlobalSemanticStep(step)
         ? <GlobalSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} showDeveloperDetails={showDeveloperDetails} />
         : isDriftSemanticStep(step)

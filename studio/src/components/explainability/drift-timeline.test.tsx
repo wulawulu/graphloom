@@ -108,13 +108,10 @@ describe("DRIFT Timeline", () => {
     expect(within(reduceSelection).getByText("#2")).toBeInTheDocument()
   })
 
-  it("shows content as not captured in Metadata mode", async () => {
-    const user = userEvent.setup()
+  it("hides unavailable content actions in Metadata mode", () => {
     renderDrift(driftEvents(false))
-    await user.click(screen.getByRole("button", { name: "View HyDE Prompt" }))
-    expect(screen.getByText(/HyDE prompt was not captured/)).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "View DRIFT State" }))
-    expect(screen.getByText(/DRIFT state content was not captured/)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "View HyDE Prompt" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "View DRIFT State" })).not.toBeInTheDocument()
   })
 
   it("never offers Knowledge Graph focus from DRIFT semantic evidence", () => {

@@ -244,12 +244,10 @@ describe("Timeline", () => {
     expect(screen.getByTestId("exact-llm-context").textContent).toBe(exact)
   })
 
-  it("does not fabricate LLM context for metadata-only runs", async () => {
-    const user = userEvent.setup()
-    renderTimeline([{ type: "context_completed", tokens_used: 1 }])
-    await user.click(screen.getByRole("button", { name: "View LLM Context" }))
-
-    expect(screen.getByText(/LLM context content was not captured/)).toBeInTheDocument()
+  it("does not fabricate LLM context for metadata-only runs", () => {
+    renderTimeline([{ type: "run_started", content_mode: "metadata" }, { type: "context_completed", tokens_used: 1 }])
+    expect(screen.queryByRole("button", { name: "View LLM Context" })).not.toBeInTheDocument()
+    expect(screen.getAllByText("This Run recorded metadata only. Prompt, Context and model content are unavailable.")).toHaveLength(1)
     expect(screen.queryByTestId("exact-llm-context")).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Copy exact LLM context" })).not.toBeInTheDocument()
   })

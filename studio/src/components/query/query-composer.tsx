@@ -4,20 +4,20 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { ApiError, startQuery } from "@/api/client"
-import type { ContentMode, StartQueryMethod, StartQueryResponse } from "@/api/types"
-import { Badge } from "@/components/ui/badge"
+import type { StartQueryMethod, StartQueryResponse } from "@/api/types"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import {
-  explainabilityDetailOptions,
   MAX_RESPONSE_TYPE_BYTES,
+  readDeveloperMode,
   responseStyleOptions,
   responseTypeForStyle,
   type ResponseStyle,
   utf8ByteLength,
+  writeDeveloperMode,
 } from "@/components/query/query-settings"
 import type { StudioTranslationKey } from "@/i18n/types"
 
@@ -49,7 +49,7 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
   const { t } = useTranslation()
   const [query, setQuery] = useState("")
   const [queryMode, setQueryMode] = useState<StudioQueryMode>("local")
-  const [contentMode, setContentMode] = useState<ContentMode>("metadata")
+  const [developerMode, setDeveloperMode] = useState(readDeveloperMode)
   const [responseStyle, setResponseStyle] = useState<ResponseStyle>("standard")
   const [customResponse, setCustomResponse] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -57,6 +57,7 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => setQuery(""), [resetRevision])
+  useEffect(() => writeDeveloperMode(developerMode), [developerMode])
   useLayoutEffect(() => {
     const textarea = textareaRef.current
     if (textarea === null) return
@@ -79,14 +80,17 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
     setSubmitting(true)
     try {
       const mode = queryModes[queryMode]
+      const submittedQuery = query
       const response = await startQuery({
-        query,
+        query: submittedQuery,
         method: mode.method,
         dynamic_community_selection: mode.dynamicCommunitySelection,
-        content_mode: contentMode,
+        content_mode: developerMode ? "debug" : "content",
         response_type: responseType,
       })
-      onAccepted(response, query)
+      onAccepted(response, submittedQuery)
+      setQuery("")
+      textareaRef.current?.focus()
       toast.success(t("query.toast.accepted", { method: t(queryModeLabelKey(queryMode)) }))
     } catch (error) {
       const message = error instanceof ApiError && error.status === 429
@@ -107,7 +111,7 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
       : null
 
   return (
-    <form ref={formRef} className="rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
+    <form ref={formRef} className="group rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
       <div className="p-2 pb-0">
         <label htmlFor="studio-query" className="sr-only">{t("query.composer.label")}</label>
         <Textarea
@@ -123,13 +127,9 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
       </div>
       <Collapsible>
         <CollapsibleContent className="space-y-3 border-t px-3 py-3">
-          <div className="space-y-1.5">
-            <label htmlFor="content-mode" className="text-xs font-medium text-muted-foreground">{t("query.explainability.title")}</label>
-            <Select value={contentMode} onValueChange={(value) => setContentMode(value as ContentMode)}>
-              <SelectTrigger id="content-mode"><SelectValue /></SelectTrigger>
-              <SelectContent>{explainabilityDetailOptions.map((value) => <SelectItem key={value} value={value}>{t(explainabilityLabelKey(value))}</SelectItem>)}</SelectContent>
-            </Select>
-            <p className="text-[11px] leading-4 text-muted-foreground">{t(explainabilityDescriptionKey(contentMode))}</p>
+          <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+            <div className="min-w-0"><p className="text-xs font-medium">{t("query.developerMode.title")}</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">{t("query.developerMode.description")}</p></div>
+            <Button type="button" variant={developerMode ? "secondary" : "outline"} size="sm" role="switch" aria-checked={developerMode} aria-label={t("query.developerMode.title")} onClick={() => setDeveloperMode((value) => !value)}>{t(developerMode ? "query.developerMode.on" : "query.developerMode.off")}</Button>
           </div>
           <div className="space-y-1.5">
             <label htmlFor="response-style" className="text-xs font-medium text-muted-foreground">{t("query.responseStyle.title")}</label>
@@ -156,7 +156,6 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
         </CollapsibleContent>
         <div className="flex items-center justify-between border-t px-2 py-1.5">
           <div className="flex items-center gap-1">
-            <span className="hidden text-[10px] text-muted-foreground sm:inline">{t("query.composer.enterToSend")}</span>
             <Select disabled={submitting} value={queryMode} onValueChange={(value) => setQueryMode(value as StudioQueryMode)}>
               <SelectTrigger aria-label={t("query.method.label")} className="h-6 w-auto gap-1 px-2 text-xs">
                 <SelectValue />
@@ -167,10 +166,10 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
                 ))}
               </SelectContent>
             </Select>
-            <Badge variant="outline">{t(explainabilityLabelKey(contentMode))}</Badge>
+            <span className="hidden text-[10px] text-muted-foreground opacity-60 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 sm:inline">{t("query.composer.enterToSend")}</span>
           </div>
           <div className="flex items-center gap-1">
-            <CollapsibleTrigger asChild><Button type="button" variant="ghost" size="icon" aria-label={t("query.settings.title")}><SlidersHorizontal /></Button></CollapsibleTrigger>
+            <CollapsibleTrigger asChild><Button type="button" variant="ghost" size="icon" className="opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 md:opacity-40 md:group-focus-within:opacity-100 md:group-hover:opacity-100" aria-label={t("query.settings.title")}><SlidersHorizontal /></Button></CollapsibleTrigger>
             <Button size="icon" disabled={query.length === 0 || submitting || customResponseError !== null} type="submit" aria-label={submitting ? t("query.actions.submitting", { method: modeLabel }) : t("query.actions.run", { method: modeLabel })}>{submitting ? <LoaderCircle className="animate-spin" /> : <Play />}</Button>
           </div>
         </div>
@@ -185,18 +184,6 @@ function queryModeLabelKey(mode: StudioQueryMode): StudioTranslationKey {
   if (mode === "global") return "query.methods.global"
   if (mode === "dynamic-global") return "query.methods.dynamicGlobal"
   return "query.methods.drift"
-}
-
-function explainabilityLabelKey(mode: ContentMode): StudioTranslationKey {
-  if (mode === "metadata") return "query.explainability.standard.label"
-  if (mode === "content") return "query.explainability.detailed.label"
-  return "query.explainability.debug.label"
-}
-
-function explainabilityDescriptionKey(mode: ContentMode): StudioTranslationKey {
-  if (mode === "metadata") return "query.explainability.standard.description"
-  if (mode === "content") return "query.explainability.detailed.description"
-  return "query.explainability.debug.description"
 }
 
 function responseStyleLabelKey(style: ResponseStyle): StudioTranslationKey {

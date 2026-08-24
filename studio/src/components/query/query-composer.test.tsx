@@ -12,6 +12,7 @@ vi.mock("@/api/client", () => ({
 }))
 
 beforeEach(() => {
+  localStorage.clear()
   HTMLElement.prototype.hasPointerCapture = () => false
   HTMLElement.prototype.setPointerCapture = () => undefined
   HTMLElement.prototype.releasePointerCapture = () => undefined
@@ -95,33 +96,50 @@ describe("QueryComposer", () => {
     const user = userEvent.setup()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     expect(screen.getByRole("combobox", { name: "Query method" })).toHaveTextContent("Local")
-    expect(screen.getByText("Standard")).toBeInTheDocument()
+    expect(screen.queryByText("Standard")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Explainability detail")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Response style")).not.toBeInTheDocument()
     await openSettings(user)
-    expect(screen.getByLabelText("Explainability detail")).toHaveTextContent("Standard")
+    expect(screen.getByRole("switch", { name: "Developer Mode" })).toHaveAttribute("aria-checked", "false")
     expect(screen.getByLabelText("Response style")).toHaveTextContent("Standard")
-    expect(screen.getByText(/without storing full query, Context, Prompt or model content/)).toBeInTheDocument()
+    expect(screen.queryByLabelText("Explainability detail")).not.toBeInTheDocument()
   })
 
-  it("submits the unchanged Local defaults", async () => {
+  it("submits content mode by default, then clears and refocuses the accepted query", async () => {
     const user = userEvent.setup()
     vi.mocked(startQuery).mockResolvedValue(accepted)
     const onAccepted = vi.fn()
     render(<QueryComposer onAccepted={onAccepted} resetRevision={0} />)
     await submitQuestion(user)
-    expect(startQuery).toHaveBeenCalledWith({ query: "Alice?", method: "local", dynamic_community_selection: false, content_mode: "metadata", response_type: "Multiple Paragraphs" })
+    const input = screen.getByLabelText("Ask about the graph")
+    expect(startQuery).toHaveBeenCalledWith({ query: "Alice?", method: "local", dynamic_community_selection: false, content_mode: "content", response_type: "Multiple Paragraphs" })
     expect(onAccepted).toHaveBeenCalledWith(accepted, "Alice?")
+    await waitFor(() => expect(input).toHaveValue(""))
+    expect(input).toHaveFocus()
+    expect(input).toHaveStyle({ height: "56px", overflowY: "hidden" })
   })
 
-  it.each([["Detailed", "content"], ["Debug", "debug"]] as const)("maps %s explainability detail to %s", async (label, contentMode) => {
+  it("uses and persists Developer Mode only for debug Runs", async () => {
     const user = userEvent.setup()
     vi.mocked(startQuery).mockResolvedValue(accepted)
+    const view = render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    await openSettings(user)
+    await user.click(screen.getByRole("switch", { name: "Developer Mode" }))
+    await submitQuestion(user)
+    expect(startQuery).toHaveBeenCalledWith(expect.objectContaining({ content_mode: "debug" }))
+    expect(localStorage.getItem("graphloom.studio.developerMode")).toBe("true")
+    view.unmount()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     await openSettings(user)
-    await chooseSetting(user, "Explainability detail", label)
-    await submitQuestion(user)
-    expect(startQuery).toHaveBeenCalledWith(expect.objectContaining({ content_mode: contentMode }))
+    expect(screen.getByRole("switch", { name: "Developer Mode" })).toHaveAttribute("aria-checked", "true")
+  })
+
+  it("preserves the query after an acceptance failure", async () => {
+    const user = userEvent.setup()
+    vi.mocked(startQuery).mockRejectedValue(new Error("unavailable"))
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    await submitQuestion(user, "retry exactly")
+    await waitFor(() => expect(screen.getByLabelText("Ask about the graph")).toHaveValue("retry exactly"))
   })
 
   it.each([["Concise", "Single Paragraph"], ["Detailed", "A detailed answer with sections and multiple paragraphs"]] as const)("maps %s response style to its stable prompt value", async (label, responseType) => {
@@ -185,7 +203,7 @@ describe("QueryComposer", () => {
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     await chooseQueryMethod(user, label)
     await submitQuestion(user, "same question")
-    expect(startQuery).toHaveBeenCalledWith({ query: "same question", method, dynamic_community_selection: dynamicCommunitySelection, content_mode: "metadata", response_type: "Multiple Paragraphs" })
+    expect(startQuery).toHaveBeenCalledWith({ query: "same question", method, dynamic_community_selection: dynamicCommunitySelection, content_mode: "content", response_type: "Multiple Paragraphs" })
   })
 
   it("uses the current mode in the submitting state", async () => {
@@ -198,18 +216,19 @@ describe("QueryComposer", () => {
     expect(screen.getByRole("button", { name: "Submitting DRIFT Query" })).toBeDisabled()
     expect(screen.getByRole("combobox", { name: "Query method" })).toBeDisabled()
     resolveStart?.(accepted)
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run DRIFT Query" })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run DRIFT Query" })).toBeDisabled())
+    expect(screen.getByLabelText("Ask about the graph")).toHaveValue("")
   })
 
   it("preserves all settings and the custom draft while switching Query modes", async () => {
     const user = userEvent.setup()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     await openSettings(user)
-    await chooseSetting(user, "Explainability detail", "Detailed")
+    await user.click(screen.getByRole("switch", { name: "Developer Mode" }))
     await chooseSetting(user, "Response style", "Custom")
     await user.type(screen.getByLabelText("Custom response instructions"), "Single Sentence")
     await chooseQueryMethod(user, "Dynamic Global")
-    expect(screen.getByLabelText("Explainability detail")).toHaveTextContent("Detailed")
+    expect(screen.getByRole("switch", { name: "Developer Mode" })).toHaveAttribute("aria-checked", "true")
     expect(screen.getByLabelText("Response style")).toHaveTextContent("Custom")
     expect(screen.getByLabelText("Custom response instructions")).toHaveValue("Single Sentence")
   })
@@ -221,13 +240,13 @@ describe("QueryComposer", () => {
     await user.type(input, "draft")
     await chooseQueryMethod(user, "Global")
     await openSettings(user)
-    await chooseSetting(user, "Explainability detail", "Debug")
+    await user.click(screen.getByRole("switch", { name: "Developer Mode" }))
     await chooseSetting(user, "Response style", "Custom")
     await user.type(screen.getByLabelText("Custom response instructions"), "Five bullets")
     rerender(<QueryComposer onAccepted={vi.fn()} resetRevision={1} />)
     expect(input).toHaveValue("")
     expect(screen.getByRole("combobox", { name: "Query method" })).toHaveTextContent("Global")
-    expect(screen.getByLabelText("Explainability detail")).toHaveTextContent("Debug")
+    expect(screen.getByRole("switch", { name: "Developer Mode" })).toHaveAttribute("aria-checked", "true")
     expect(screen.getByLabelText("Response style")).toHaveTextContent("Custom")
     expect(screen.getByLabelText("Custom response instructions")).toHaveValue("Five bullets")
   })
@@ -238,15 +257,10 @@ describe("QueryComposer", () => {
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
 
     expect(screen.getByRole("combobox", { name: "查询方式" })).toHaveTextContent("局部搜索")
-    expect(screen.getByText("标准")).toBeInTheDocument()
+    expect(screen.queryByText("标准")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "查询设置" }))
-    expect(screen.getByLabelText("解释详情")).toHaveTextContent("标准")
+    expect(screen.getByRole("switch", { name: "开发者模式" })).toHaveAttribute("aria-checked", "false")
     expect(screen.getByLabelText("回答风格")).toHaveTextContent("标准")
-
-    await user.click(screen.getByLabelText("解释详情"))
-    expect(screen.getByRole("option", { name: "详细" })).toBeInTheDocument()
-    expect(screen.getByRole("option", { name: "调试" })).toBeInTheDocument()
-    await user.keyboard("{Escape}")
     await user.click(screen.getByLabelText("回答风格"))
     expect(screen.getByRole("option", { name: "自定义" })).toBeInTheDocument()
   })
@@ -264,8 +278,6 @@ describe("QueryComposer", () => {
     const englishUser = userEvent.setup()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     await chooseQueryMethod(englishUser, "Dynamic Global")
-    await openSettings(englishUser)
-    await chooseSetting(englishUser, "Explainability detail", "Detailed")
     await submitQuestion(englishUser, "same question")
     expect(startQuery).toHaveBeenLastCalledWith(expectedRequest)
 
@@ -274,8 +286,6 @@ describe("QueryComposer", () => {
     const chineseUser = userEvent.setup()
     render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
     await chooseQueryMethodLocalized(chineseUser, "查询方式", "动态全局搜索")
-    await openSettingsLocalized(chineseUser, "查询设置")
-    await chooseSetting(chineseUser, "解释详情", "详细")
     await submitQuestionLocalized(chineseUser, "same question")
     expect(startQuery).toHaveBeenLastCalledWith(expectedRequest)
   })
@@ -286,7 +296,7 @@ describe("QueryComposer", () => {
     await user.type(screen.getByLabelText("Ask about the graph"), "draft query")
     await chooseQueryMethod(user, "DRIFT")
     await openSettings(user)
-    await chooseSetting(user, "Explainability detail", "Debug")
+    await user.click(screen.getByRole("switch", { name: "Developer Mode" }))
     await chooseSetting(user, "Response style", "Custom")
     await user.type(screen.getByLabelText("Custom response instructions"), "Answer in exactly 5 bullet points.")
 
@@ -294,7 +304,7 @@ describe("QueryComposer", () => {
 
     expect(screen.getByLabelText("向图谱提问")).toHaveValue("draft query")
     expect(screen.getByRole("combobox", { name: "查询方式" })).toHaveTextContent("DRIFT 探索搜索")
-    expect(screen.getByLabelText("解释详情")).toHaveTextContent("调试")
+    expect(screen.getByRole("switch", { name: "开发者模式" })).toHaveAttribute("aria-checked", "true")
     expect(screen.getByLabelText("回答风格")).toHaveTextContent("自定义")
     expect(screen.getByLabelText("自定义回答要求")).toHaveValue("Answer in exactly 5 bullet points.")
     expect(startQuery).not.toHaveBeenCalled()
@@ -304,10 +314,6 @@ describe("QueryComposer", () => {
 async function chooseQueryMethodLocalized(user: ReturnType<typeof userEvent.setup>, setting: string, label: string): Promise<void> {
   await user.click(screen.getByRole("combobox", { name: setting }))
   await user.click(screen.getByRole("option", { name: label }))
-}
-
-async function openSettingsLocalized(user: ReturnType<typeof userEvent.setup>, label: string): Promise<void> {
-  await user.click(screen.getByRole("button", { name: label }))
 }
 
 async function submitQuestionLocalized(user: ReturnType<typeof userEvent.setup>, question: string): Promise<void> {

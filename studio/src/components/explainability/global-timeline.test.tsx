@@ -92,15 +92,13 @@ describe("Global Timeline", () => {
     expect(screen.getByRole("article", { name: "Community Context" })).toHaveTextContent("0 community reports")
   })
 
-  it("shows rating content as not captured in Metadata mode", async () => {
+  it("hides unavailable rating content actions in Metadata mode", async () => {
     const user = userEvent.setup()
     renderGlobal(dynamicEvents(false))
     const selection = screen.getByRole("article", { name: "Community Selection" })
     await user.click(within(selection).getByRole("button", { name: "Expand rating details for community A" }))
-    await user.click(within(selection).getByRole("button", { name: "View Rating Prompt" }))
-    expect(within(selection).getByText(/Rating prompt content was not captured/)).toBeInTheDocument()
-    await user.click(within(selection).getByRole("button", { name: "View Raw Rating Response" }))
-    expect(within(selection).getByText(/Raw rating response content was not captured/)).toBeInTheDocument()
+    expect(within(selection).queryByRole("button", { name: "View Rating Prompt" })).not.toBeInTheDocument()
+    expect(within(selection).queryByRole("button", { name: "View Raw Rating Response" })).not.toBeInTheDocument()
   })
 
   it("bounds large Dynamic community lists with Show all and Show fewer", async () => {
@@ -175,31 +173,26 @@ describe("Global Timeline", () => {
     expect(screen.getByTestId("exact-reduce-context").textContent).toBe("REDUCE CONTEXT\n  exact\n")
   })
 
-  it("renders explicit unavailable states for metadata content", async () => {
+  it("hides unavailable content actions for metadata content", async () => {
     const user = userEvent.setup()
     renderGlobal(globalEvents(false))
     const community = screen.getByRole("article", { name: "Community Context" })
     await user.click(within(community).getByRole("button", { name: "Expand Map batch 1" }))
-    await user.click(within(community).getByRole("button", { name: "View Map Context" }))
-    expect(within(community).getByText(/Map context content was not captured/)).toBeInTheDocument()
+    expect(within(community).queryByRole("button", { name: "View Map Context" })).not.toBeInTheDocument()
 
     const map = screen.getByRole("article", { name: "Map Analysis" })
     await user.click(within(map).getByRole("button", { name: "Expand Map analysis batch 1" }))
-    expect(within(map).getAllByText(/Point answer was not captured/)).toHaveLength(2)
-    await user.click(within(map).getByRole("button", { name: "View Map Prompt" }))
-    expect(within(map).getByText(/Map prompt content was not captured/)).toBeInTheDocument()
-    await user.click(within(map).getByRole("button", { name: "View Raw Map Response" }))
-    expect(within(map).getByText(/Raw Map response content was not captured/)).toBeInTheDocument()
+    expect(within(map).queryByText(/Point answer was not captured/)).not.toBeInTheDocument()
+    expect(within(map).queryByRole("button", { name: "View Map Prompt" })).not.toBeInTheDocument()
+    expect(within(map).queryByRole("button", { name: "View Raw Map Response" })).not.toBeInTheDocument()
 
     const reduce = screen.getByRole("article", { name: "Evidence Reduction" })
-    await user.click(within(reduce).getByRole("button", { name: "View Reduce Context" }))
-    expect(within(reduce).getByText(/Reduce context content was not captured/)).toBeInTheDocument()
+    expect(within(reduce).queryByRole("button", { name: "View Reduce Context" })).not.toBeInTheDocument()
+    expect(within(reduce).queryByText(/Point answer was not captured/)).not.toBeInTheDocument()
 
     const answer = screen.getByRole("article", { name: "Answer Generation" })
-    await user.click(within(answer).getByRole("button", { name: "View Reduce Prompt" }))
-    expect(within(answer).getByText(/Reduce prompt content was not captured/)).toBeInTheDocument()
-    await user.click(within(answer).getByRole("button", { name: "View Raw Reduce Response" }))
-    expect(within(answer).getByText(/Raw Reduce response content was not captured/)).toBeInTheDocument()
+    expect(within(answer).queryByRole("button", { name: "View Reduce Prompt" })).not.toBeInTheDocument()
+    expect(within(answer).queryByRole("button", { name: "View Raw Reduce Response" })).not.toBeInTheDocument()
   })
 
   it("bounds large batch and point lists with Show all and Show fewer controls", async () => {
@@ -280,8 +273,7 @@ describe("Global Timeline", () => {
     expect(screen.queryByText(/Reduce context content was not captured/)).not.toBeInTheDocument()
   })
 
-  it("renders factual zero Reduce counts only after Reduce Context is built", async () => {
-    const user = userEvent.setup()
+  it("renders factual zero Reduce counts only after Reduce Context is built", () => {
     renderGlobal([
       envelope(1, "root", { type: "query_started", method: "global" }),
       envelope(2, "reduce", { type: "global_reduce_context_built", candidate_point_count: 0, positive_point_count: 0, selected_point_count: 0, token_budget: 100, tokens_used: 0, truncated: false, points: [] }, "root"),
@@ -289,8 +281,7 @@ describe("Global Timeline", () => {
 
     const reduce = screen.getByRole("article", { name: "Evidence Reduction" })
     expect(within(reduce).getByText(/0 candidates · 0 positive · 0 included/)).toBeInTheDocument()
-    await user.click(within(reduce).getByRole("button", { name: "View Reduce Context" }))
-    expect(within(reduce).getByText(/Reduce context content was not captured/)).toBeInTheDocument()
+    expect(within(reduce).queryByRole("button", { name: "View Reduce Context" })).not.toBeInTheDocument()
   })
 
   it("resets run-specific expanded batch state when switching methods and Runs", async () => {
