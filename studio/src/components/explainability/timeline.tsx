@@ -44,7 +44,7 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
         : isBasicSemanticStep(step)
           ? <BasicSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} showDeveloperDetails={showDeveloperDetails} />
           : <SemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} onInspectCandidate={onInspectCandidate} showDeveloperDetails={showDeveloperDetails} />)}
-      {residual.warnings.length > 0 ? <details className="rounded-md border border-warning/40 bg-warning/5 p-3" role="alert"><summary className="cursor-pointer text-xs font-medium">{t("explainability.counts.warningsCount", { count: residual.warnings.length })}</summary><div className="mt-3 space-y-2">{residual.warnings.map((envelope) => <div key={envelope.sequence} className="space-y-2"><WarningSummary envelope={envelope} /><TimelineEvent envelope={envelope} onFocusGraph={onFocusGraph} /></div>)}</div></details> : null}
+      {residual.warnings.length > 0 ? <details className="rounded-md border border-warning/40 bg-warning/5 p-3" role="alert"><summary className="cursor-pointer text-xs font-medium">{t("explainability.counts.warningsCount", { count: residual.warnings.length })}</summary><div className="mt-3 space-y-2">{residual.warnings.map((envelope) => <div key={envelope.sequence} className="space-y-2"><WarningSummary envelope={envelope} />{showDeveloperDetails ? <TimelineEvent envelope={envelope} onFocusGraph={onFocusGraph} /> : null}</div>)}</div></details> : null}
       {showDeveloperDetails && residual.developerEvents.length > 0 ? <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">{t("explainability.counts.developerEventsCount", { count: residual.developerEvents.length })}</summary><div className="mt-3 space-y-2">{residual.developerEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}</div></details> : null}
     </div>
   )
@@ -64,11 +64,11 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
   )
 }
 
-function WarningSummary({ envelope }: { envelope: ExplainabilityEnvelope }): React.ReactElement | null {
+function WarningSummary({ envelope }: { envelope: ExplainabilityEnvelope }): React.ReactElement {
+  const { t } = useTranslation()
   const event = envelope.record.event
-  const code = typeof event.code === "string" ? event.code : typeof event.error_kind === "string" ? event.error_kind : null
-  const message = typeof event.message === "string" ? event.message : null
-  if (code === null && message === null) return null
+  const code = typeof event.code === "string" ? event.code : typeof event.error_kind === "string" ? event.error_kind : "unclassified_semantic_event"
+  const message = typeof event.message === "string" ? event.message : t("explainability.messages.unclassifiedSemanticEvent", { type: event.type })
   return <p className="break-words text-xs"><span className="font-mono font-medium">{code}</span>{code === null || message === null ? "" : " · "}{message}</p>
 }
 

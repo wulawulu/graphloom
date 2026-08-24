@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
 import { setStudioLocale } from "@/i18n"
+import { classifyTimelineResidualEvents } from "@/lib/timeline-presentation"
 
 afterEach(cleanup)
 
@@ -48,6 +49,34 @@ describe("Timeline", () => {
     expect(screen.queryByText(/Developer events/)).not.toBeInTheDocument()
     await user.click(screen.getByText("Warnings · 1"))
     expect(screen.getByRole("alert")).toHaveTextContent("stale_reference · A safe warning")
+    expect(screen.queryByText("#3")).not.toBeInTheDocument()
+    expect(screen.queryByText("Developer data")).not.toBeInTheDocument()
+  })
+
+  it("classifies unclaimed semantic events as contract warnings without mislabeling lifecycle events", () => {
+    const residual = classifyTimelineResidualEvents([
+      envelope({ type: "run_started", content_mode: "metadata" }, 1),
+      envelope({ type: "embedding_started", model_id: "embed" }, 2),
+      envelope({ type: "future_graphloom_event" }, 3),
+    ])
+
+    expect(residual.warnings.map((item) => item.sequence)).toEqual([2])
+    expect(residual.developerEvents.map((item) => item.sequence)).toEqual([1, 3])
+  })
+
+  it("presents a safe semantic warning without raw event metadata outside Debug", async () => {
+    const user = userEvent.setup()
+    renderTimeline([
+      { type: "run_started", content_mode: "metadata" },
+      { type: "query_started", method: "basic" },
+      { type: "global_map_started" },
+    ])
+
+    await user.click(screen.getByText("Warnings · 1"))
+    expect(screen.getByRole("alert")).toHaveTextContent("unclassified_semantic_event")
+    expect(screen.getByRole("alert")).toHaveTextContent("global_map_started explainability event could not be placed")
+    expect(screen.queryByText("#3")).not.toBeInTheDocument()
+    expect(screen.queryByText("Developer data")).not.toBeInTheDocument()
   })
 
   it("localizes semantic presentation without changing domain content", async () => {
@@ -178,7 +207,7 @@ describe("Timeline", () => {
       { type: "run_started", content_mode: "debug" },
       { type: "context_budget_allocated", total_token_budget: 1000, sections: [{ section: "entities", token_budget: 400 }] },
       { type: "context_completed", tokens_used: 700 },
-      { type: "llm_request_completed", model_id: "model-x", input_tokens: 700, output_tokens: 40, elapsed_ms: 25, response: "Explainability response" },
+      { type: "llm_request_completed", model_id: "default_completion_model", model_name: "deepseek-v4-flash", provider: "deepseek", input_tokens: 700, output_tokens: 40, elapsed_ms: 25, response: "Explainability response" },
     ])
     await openTechnicalDetails(user, "Context Assembly")
     const contextDetails = screen.getAllByRole("button", { name: "Details" })
@@ -189,6 +218,9 @@ describe("Timeline", () => {
     await openTechnicalDetails(user, "Answer Generation")
     await user.click(screen.getAllByRole("button", { name: "Details" })[2]!)
     expect(screen.getByText("Explainability response")).toBeInTheDocument()
+    expect(screen.getByText("Model config ID").nextElementSibling).toHaveTextContent("default_completion_model")
+    expect(screen.getAllByText("Model").some((label) => label.nextElementSibling?.textContent === "deepseek-v4-flash")).toBe(true)
+    expect(screen.getByText("Provider").nextElementSibling).toHaveTextContent("deepseek")
   })
 
   it("shows, previews, and copies the exact captured LLM context without changing whitespace", async () => {

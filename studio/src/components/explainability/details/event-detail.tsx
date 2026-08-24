@@ -89,9 +89,9 @@ function eventContent(t: TFunction, event: ExplainabilityEventPayload, onFocusGr
     case "mapping_query_built":
       return <ContentDetail label="explainability.labels.mappingQuery" metadata={[["explainability.labels.conversationTurns", numberValue(event, "conversation_turn_count")]]} content={stringValue(event, "mapping_query")} />
     case "embedding_started":
-      return <ContentDetail label="explainability.labels.embeddingInput" metadata={[["explainability.labels.model", stringValue(event, "model_id")]]} content={stringValue(event, "input")} />
+      return <ContentDetail label="explainability.labels.embeddingInput" metadata={modelIdentityMetadata(event)} content={stringValue(event, "input")} />
     case "embedding_completed":
-      return <KeyValues values={[["explainability.labels.model", stringValue(event, "model_id")], ["explainability.labels.inputTokens", numberValue(event, "prompt_tokens")], ["explainability.labels.dimensions", numberValue(event, "dimensions")]]} />
+      return <KeyValues values={[...modelIdentityMetadata(event), ["explainability.labels.inputTokens", numberValue(event, "prompt_tokens")], ["explainability.labels.dimensions", numberValue(event, "dimensions")]]} />
     case "warning":
       return <KeyValues values={[["explainability.labels.code", stringValue(event, "code")], ["explainability.labels.message", stringValue(event, "message")], ["explainability.labels.record", stringValue(event, "record_id")]]} />
     default:
@@ -128,7 +128,15 @@ function LlmDetail({ event }: { event: ExplainabilityEventPayload }): React.Reac
   const { t } = useTranslation()
   const prompt = stringValue(event, "prompt")
   const response = stringValue(event, "response")
-  return <div className="space-y-3"><KeyValues values={[["explainability.labels.model", stringValue(event, "model_id")], ["explainability.labels.promptTokens", numberValue(event, "prompt_tokens")], ["explainability.labels.inputTokens", numberValue(event, "input_tokens")], ["explainability.labels.outputTokens", numberValue(event, "output_tokens")], ["explainability.labels.latency", withUnit(numberValue(event, "elapsed_ms"), "ms")]]} />{prompt !== null ? <ContentBlock label="explainability.labels.prompt" value={prompt} /> : null}{response !== null ? <ContentBlock label="explainability.labels.response" value={response} /> : null}{prompt === null && response === null ? <p className="text-xs text-muted-foreground">{t("explainability.messages.contentHiddenByExplainabilityMode")}</p> : null}</div>
+  return <div className="space-y-3"><KeyValues values={[...modelIdentityMetadata(event), ["explainability.labels.promptTokens", numberValue(event, "prompt_tokens")], ["explainability.labels.inputTokens", numberValue(event, "input_tokens")], ["explainability.labels.outputTokens", numberValue(event, "output_tokens")], ["explainability.labels.latency", withUnit(numberValue(event, "elapsed_ms"), "ms")]]} />{prompt !== null ? <ContentBlock label="explainability.labels.prompt" value={prompt} /> : null}{response !== null ? <ContentBlock label="explainability.labels.response" value={response} /> : null}{prompt === null && response === null ? <p className="text-xs text-muted-foreground">{t("explainability.messages.contentHiddenByExplainabilityMode")}</p> : null}</div>
+}
+
+function modelIdentityMetadata(event: ExplainabilityEventPayload): Array<[StudioTranslationKey, unknown]> {
+  return [
+    ["explainability.labels.modelConfigId", stringValue(event, "model_id")],
+    ["explainability.labels.modelName", stringValue(event, "model_name") ?? stringValue(event, "model_id")],
+    ["explainability.labels.provider", stringValue(event, "provider")],
+  ]
 }
 
 function ContentDetail({ label, metadata, content }: { label: StudioTranslationKey; metadata: Array<[StudioTranslationKey, unknown]>; content: string | null }): React.ReactElement {
