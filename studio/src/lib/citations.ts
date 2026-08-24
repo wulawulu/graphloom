@@ -75,8 +75,6 @@ export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnv
   const isBasic = envelopes.some((envelope) => envelope.record.parent_span_id === undefined
     && envelope.record.event.type === "query_started"
     && envelope.record.event.method === "basic")
-  const claimedSourceSequences = new Set((isBasic ? buildBasicSemanticTimeline(envelopes).steps.flatMap((step) => step.rawEvents) : envelopes)
-    .map((envelope) => envelope.sequence))
   const entityIdentities = new Map<string, string | null>()
   const relationshipIdentities = new Map<string, string | null>()
   const sourceIdentities = new Map<string, string | null>()
@@ -84,15 +82,22 @@ export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnv
   const finalRelationshipIds = new Set<string>()
   const finalSourceIds = new Set<string>()
 
+  if (isBasic) {
+    for (const step of buildBasicSemanticTimeline(envelopes).steps) {
+      if (step.kind === "text-retrieval" || step.kind === "basic-context-assembly") addCandidateIdentities(sourceIdentities, step.summary.candidates)
+      if (step.kind === "basic-context-assembly") step.summary.selectedRecordIds.forEach((id) => finalSourceIds.add(id))
+    }
+  }
+
   for (const envelope of envelopes) {
     const event = envelope.record.event
     if (event.type === "entities_selected") addCandidates(entityIdentities, event.entities)
     if (event.type === "relationships_selected") addCandidates(relationshipIdentities, event.relationships)
-    if (claimedSourceSequences.has(envelope.sequence)) {
+    if (!isBasic) {
       if ((event.type === "candidates_retrieved" || event.type === "candidates_filtered") && event.record_type === "text_unit") addCandidateIdentities(sourceIdentities, event.candidates)
       if (event.type === "text_units_selected") addCandidateIdentities(sourceIdentities, event.text_units)
     }
-    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds, claimedSourceSequences.has(envelope.sequence) ? finalSourceIds : undefined)
+    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds, isBasic ? undefined : finalSourceIds)
   }
 
   return {
