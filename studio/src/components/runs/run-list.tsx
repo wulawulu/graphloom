@@ -1,3 +1,4 @@
+import type { VariantProps } from "class-variance-authority"
 import { Clock3, RefreshCw } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -6,9 +7,8 @@ import { Badge, type badgeVariants } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
-import { cn } from "@/lib/utils"
 import { activeStudioLocale } from "@/i18n"
-import type { VariantProps } from "class-variance-authority"
+import { cn } from "@/lib/utils"
 
 interface RunListProps {
   runs: ExplainabilityRun[]

@@ -16,10 +16,22 @@ export function normalizeStudioLocale(locale: string | null | undefined): Studio
   return null
 }
 
+function isExplicitTraditionalChinese(locale: string | null | undefined): boolean {
+  if (locale === null || locale === undefined) return false
+  const normalized = locale.trim().replaceAll("_", "-").toLowerCase()
+  return normalized === "zh-tw"
+    || normalized === "zh-hk"
+    || normalized === "zh-mo"
+    || normalized === "zh-hant"
+    || normalized.startsWith("zh-hant-")
+}
+
 export function resolveStudioLocale(storedLocale: string | null, browserLanguages: readonly string[]): StudioLocale {
   const stored = normalizeStudioLocale(storedLocale)
   if (stored !== null) return stored
+  if (isExplicitTraditionalChinese(storedLocale)) return "en"
   for (const language of browserLanguages) {
+    if (isExplicitTraditionalChinese(language)) return "en"
     const locale = normalizeStudioLocale(language)
     if (locale !== null) return locale
   }

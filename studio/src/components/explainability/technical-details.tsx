@@ -1,5 +1,6 @@
-import type { ExplainabilityEnvelope } from "@/api/types"
 import { useTranslation } from "react-i18next"
+
+import type { ExplainabilityEnvelope } from "@/api/types"
 import { TimelineEvent } from "@/components/explainability/timeline-event"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"

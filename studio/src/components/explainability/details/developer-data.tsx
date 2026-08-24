@@ -1,5 +1,6 @@
-import type { ExplainabilityEventPayload } from "@/api/types"
 import { useTranslation } from "react-i18next"
+
+import type { ExplainabilityEventPayload } from "@/api/types"
 
 export function DeveloperData({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {
   const { t } = useTranslation()

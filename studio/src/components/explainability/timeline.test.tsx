@@ -28,12 +28,15 @@ describe("Timeline", () => {
       { type: "query_started", query: "Who is Alice?" },
       { type: "candidates_retrieved", candidates: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: false }] },
       { type: "relationships_selected", relationships: [] },
+      { type: "context_section_built", section: { section: "covariates", name: "Summary", token_budget: 10, tokens_used: 2, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["claim-1"] } },
       { type: "context_completed", tokens_used: 2, context: "Alice raw Context" },
       { type: "llm_request_started", model_id: "model-x" },
     ])
 
     expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter((label) => label !== null)).toEqual(["实体映射", "图谱扩展", "Context 构建", "答案生成"])
     expect(screen.getByText("Alice")).toBeInTheDocument()
+    expect(screen.getByText("Summary")).toBeInTheDocument()
+    expect(screen.queryByText("摘要")).not.toBeInTheDocument()
   })
 
   it("renders the empty state and keeps forward-compatible events in diagnostics", async () => {

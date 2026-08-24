@@ -32,6 +32,9 @@ describe("Studio locale resolution", () => {
     [null, ["zh-Hans-CN"], "zh-CN"],
     [null, ["zh-TW"], "en"],
     [null, ["zh-Hant"], "en"],
+    [null, ["zh-TW", "zh", "en-US"], "en"],
+    [null, ["zh-Hant-HK", "zh-CN"], "en"],
+    ["zh-HK", ["zh-CN"], "en"],
   ] as const)("resolves stored %s and browser %s to %s", (stored, languages, expected) => {
     expect(resolveStudioLocale(stored, languages)).toBe(expected)
   })

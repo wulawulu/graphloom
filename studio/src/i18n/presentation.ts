@@ -23,6 +23,18 @@ export function semanticStepTitle(t: TFunction, kind: string): string {
   return t(titles[kind] ?? kind)
 }
 
+export function contextSectionTitle(t: TFunction, section: string, name?: string): string {
+  if (name !== undefined) return name
+  const titles: Record<string, string> = {
+    entities: "Entities",
+    relationships: "Relationships",
+    community_reports: "Community reports",
+    covariates: "Covariates",
+    text_units: "Text units",
+  }
+  return t(titles[section] ?? section.replaceAll("_", " "))
+}
+
 export function localizedEventSummary(t: TFunction, event: ExplainabilityEventPayload): string {
   const numberValue = (field: string, label: string): string | null =>
     typeof event[field] === "number" ? `${t(label)}: ${String(event[field])}` : null

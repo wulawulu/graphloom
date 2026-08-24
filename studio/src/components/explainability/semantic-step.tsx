@@ -8,7 +8,7 @@ import { TechnicalDetails } from "@/components/explainability/technical-details"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import type { ExplainabilityRecordView, LocalSemanticStep } from "@/lib/semantic-timeline"
-import { semanticStepTitle } from "@/i18n/presentation"
+import { contextSectionTitle, semanticStepTitle } from "@/i18n/presentation"
 
 interface SemanticStepCardProps {
   step: LocalSemanticStep
@@ -135,12 +135,13 @@ function compactStableId(id: string): string {
 
 function ContextSectionRow({ section }: { section: ExplainabilityContextSection }): React.ReactElement {
   const { t } = useTranslation()
+  const title = contextSectionTitle(t, section.section, section.name)
   const emptySection = section.selected_count === 0 && section.tokens_used > 0
   const tokenExplanation = emptySection ? t("Tokens measure the literal final section text, including empty placeholders such as [].") : undefined
   return (
     <div className="min-w-0 overflow-hidden rounded border bg-muted/20 px-2 py-2 text-xs">
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-        <span className="truncate font-medium capitalize" title={section.name ?? section.section}>{t(section.name ?? section.section.replaceAll("_", " "))}</span>
+        <span className="truncate font-medium capitalize" title={title}>{title}</span>
         <span className="shrink-0">{t("{{selected}} / {{candidates}} included", { selected: section.selected_count, candidates: section.candidate_count })}</span>
       </div>
       <p className="mt-1 min-w-0 break-words text-[11px] text-muted-foreground" title={tokenExplanation}>
