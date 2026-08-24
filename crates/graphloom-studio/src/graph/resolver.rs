@@ -4,8 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     GraphCommunity, GraphCommunityRef, GraphCommunityReportDetail, GraphDataSnapshot,
-    GraphEntityDetail, GraphEntityRef, GraphRelationshipDetail,
+    GraphEntityDetail, GraphEntityRef, GraphRelationshipDetail, GraphTextUnitDetail,
+    GraphTextUnitRef,
 };
+
+const TEXT_UNIT_PREVIEW_CHAR_LIMIT: usize = 240;
 
 /// Snapshot-local resolver shared by projections and Inspector detail enrichment.
 #[derive(Debug)]
@@ -151,6 +154,63 @@ impl From<&GraphEntityDetail> for GraphEntityRef {
     }
 }
 
+/// Stable-id resolver for a single batch of text-unit evidence.
+#[derive(Debug)]
+pub(crate) struct GraphTextUnitIndex<'a> {
+    by_id: BTreeMap<&'a str, Vec<&'a GraphTextUnitDetail>>,
+}
+
+impl<'a> GraphTextUnitIndex<'a> {
+    pub(crate) fn new(text_units: &'a [GraphTextUnitDetail]) -> Self {
+        let mut by_id = BTreeMap::<&str, Vec<&GraphTextUnitDetail>>::new();
+        for text_unit in text_units {
+            by_id
+                .entry(text_unit.id.as_str())
+                .or_default()
+                .push(text_unit);
+        }
+        Self { by_id }
+    }
+
+    pub(crate) fn references(&self, ids: &[String]) -> Vec<GraphTextUnitRef> {
+        let mut seen = BTreeSet::new();
+        ids.iter()
+            .filter(|id| seen.insert(id.as_str()))
+            .filter_map(|id| self.unique(id))
+            .map(|text_unit| GraphTextUnitRef {
+                id: text_unit.id.clone(),
+                short_id: text_unit.short_id.clone(),
+                preview: text_unit_preview(&text_unit.text),
+                n_tokens: text_unit.n_tokens,
+            })
+            .collect()
+    }
+
+    pub(crate) fn detail(&self, id: &str) -> Option<GraphTextUnitDetail> {
+        self.unique(id).cloned()
+    }
+
+    fn unique(&self, id: &str) -> Option<&'a GraphTextUnitDetail> {
+        let [text_unit] = self.by_id.get(id)?.as_slice() else {
+            return None;
+        };
+        Some(*text_unit)
+    }
+}
+
+fn text_unit_preview(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let mut preview = chars
+        .by_ref()
+        .take(TEXT_UNIT_PREVIEW_CHAR_LIMIT)
+        .collect::<String>();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -178,6 +238,12 @@ mod tests {
             format!("Community {short_id}"),
         )
         .with_hierarchy(level, -1, Vec::new())
+    }
+
+    fn text_unit(id: &str, short_id: &str, text: &str) -> GraphTextUnitDetail {
+        GraphTextUnitDetail::new(id.to_owned(), short_id.to_owned(), text.to_owned())
+            .with_n_tokens(42)
+            .with_document_id(format!("document-{id}"))
     }
 
     fn snapshot(
@@ -396,5 +462,44 @@ mod tests {
         assert!(orphan_detail.parent_community.is_none());
         assert_eq!(orphan_detail.parent, 88);
         Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_text_units_in_first_seen_artifact_order() {
+        let units = vec![
+            text_unit("text-1", "1", "First source"),
+            text_unit("text-2", "2", "Second source"),
+        ];
+        let index = GraphTextUnitIndex::new(&units);
+        let ids = ["text-2", "missing", "text-1", "text-2"].map(str::to_owned);
+
+        let references = index.references(&ids);
+
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.id.as_str())
+                .collect::<Vec<_>>(),
+            ["text-2", "text-1"]
+        );
+        assert_eq!(index.detail("text-1"), Some(units[0].clone()));
+        assert!(index.detail("missing").is_none());
+    }
+
+    #[test]
+    fn test_should_build_unicode_safe_deterministic_previews_without_changing_detail_text() {
+        let exact = format!("  西门庆\n\n通过杨提督   行贿。{}", "证".repeat(260));
+        let unit = text_unit("text-1", "1", &exact);
+        let references =
+            GraphTextUnitIndex::new(std::slice::from_ref(&unit)).references(&["text-1".to_owned()]);
+        let preview = &references[0].preview;
+
+        assert!(preview.starts_with("西门庆 通过杨提督 行贿。"));
+        assert!(preview.ends_with('…'));
+        assert_eq!(preview.chars().count(), TEXT_UNIT_PREVIEW_CHAR_LIMIT + 1);
+        assert!(!preview.contains(char::REPLACEMENT_CHARACTER));
+        assert_eq!(unit.text, exact);
+        assert_eq!(format!("{unit:?}"), "GraphTextUnitDetail { .. }");
+        assert!(!format!("{:?}", references[0]).contains("西门庆"));
     }
 }

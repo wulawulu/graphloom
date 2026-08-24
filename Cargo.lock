@@ -2890,6 +2890,7 @@ dependencies = [
  "clap",
  "futures-util",
  "graphloom",
+ "polars-core",
  "serde",
  "serde_json",
  "tempfile",

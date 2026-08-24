@@ -680,6 +680,21 @@ export const zhCN = {
       "communityNumber": "Community {{shortId}}",
       "referenceMetadata": "Community {{shortId}} · L{{level}}"
     },
+    "sources": {
+      "sourceEvidence": "来源证据",
+      "sourceEvidenceCount": "来源证据 · {{count}}",
+      "noSourceEvidence": "无来源证据",
+      "textUnitNumber": "Text Unit {{shortId}}",
+      "tokenCount": "{{count}} Tokens",
+      "viewSource": "查看原文",
+      "viewTextUnit": "查看 Text Unit {{shortId}}",
+      "sourceUnavailable": "来源不可用",
+      "loadingSource": "正在加载来源…",
+      "exactSourceText": "完整原文",
+      "documentId": "文档 ID",
+      "showAll": "显示所有来源",
+      "showFewer": "收起来源"
+    },
     "labels": {
       "graphDataUnavailable": "图谱数据不可用",
       "entities": "实体",

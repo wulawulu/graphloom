@@ -33,6 +33,7 @@ path = "src/main.rs"
 required-features = ["server"]
 
 [dev-dependencies]
+polars-core.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

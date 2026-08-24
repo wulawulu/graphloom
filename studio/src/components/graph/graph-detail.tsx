@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next"
 import type { GraphCommunity, GraphCommunityReportDetail, GraphEntityDetail, GraphRelationshipDetail } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { GraphReferenceCard, UnresolvedGraphReference } from "@/components/graph/graph-reference-card"
+import { GraphSourceEvidence } from "@/components/graph/graph-source-evidence"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -56,8 +57,8 @@ export function GraphInspector(props: GraphInspectorProps): React.ReactElement {
           {detail === null && !props.loading && !props.error ? <div className="flex min-h-64 flex-col items-center justify-center px-5 text-center"><Network className="mb-3 size-8 text-muted-foreground/40" /><p className="text-sm font-medium">{t("graph.actions.selectAGraphObject")}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("graph.messages.selectANodeRelationshipOrCommunityToInspectIt")}</p></div> : null}
           {props.loading ? <p className="py-10 text-center text-sm text-muted-foreground">{t("graph.messages.loadingStructuredDetail")}</p> : null}
           {props.error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-red-300">{t("graph.messages.graphDetailIsUnavailable")}</p> : null}
-          {detail?.kind === "entity" ? <EntityDetail value={detail.value} onFocus={props.onFocusEntity} onOpenCommunity={props.onOpenCommunity} /> : null}
-          {detail?.kind === "relationship" ? <RelationshipDetail value={detail.value} onFocus={props.onFocusRelationship} onOpenEntity={props.onOpenEntity} /> : null}
+          {detail?.kind === "entity" ? <EntityDetail key={detail.value.id} value={detail.value} onFocus={props.onFocusEntity} onOpenCommunity={props.onOpenCommunity} /> : null}
+          {detail?.kind === "relationship" ? <RelationshipDetail key={detail.value.id} value={detail.value} onFocus={props.onFocusRelationship} onOpenEntity={props.onOpenEntity} /> : null}
           {detail?.kind === "community" ? <CommunityDetail key={detail.value.id} value={detail.value} report={detail.report} onOpenCommunity={props.onOpenCommunity} /> : null}
           {detail !== null && props.decision !== undefined && props.decision !== null ? <DecisionDetail value={props.decision} /> : null}
           {detail !== null ? <RawData value={detail} /> : null}
@@ -114,11 +115,6 @@ function Section({ title, children }: { title: StudioTranslationKey; children: R
   return <section className="space-y-2"><h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{t(title)}</h3>{children}</section>
 }
 
-function IdBadges({ values }: { values: string[] }): React.ReactElement {
-  const { t } = useTranslation()
-  return <div className="flex flex-wrap gap-1">{values.length === 0 ? <span className="text-sm text-muted-foreground">{t("graph.labels.none")}</span> : values.map((value) => <Badge key={value} variant="outline">{value}</Badge>)}</div>
-}
-
 function Metadata({ id, shortId }: { id: string; shortId?: string | null }): React.ReactElement {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
@@ -130,22 +126,7 @@ function Metadata({ id, shortId }: { id: string; shortId?: string | null }): Rea
       <summary className="cursor-pointer font-medium text-muted-foreground">{t("graph.labels.metadata")}</summary>
       <div className="mt-3 space-y-2">
         {shortId !== undefined && shortId !== null ? <p><span className="text-muted-foreground">{t("graph.labels.shortId")}:</span> {shortId}</p> : null}
-        <div className="flex items-center gap-2"><code className="min-w-0 flex-1 truncate">{id}</code><Button variant="ghost" size="icon" aria-label={t("graph.actions.copyId")} onClick={copy}>{copied ? <Check /> : <Copy />}</Button></div>
-      </div>
-    </details>
-  )
-}
-
-function SourceIds({ values }: { values: string[] }): React.ReactElement {
-  const { t } = useTranslation()
-  const [showAll, setShowAll] = useState(false)
-  const visible = showAll ? values : values.slice(0, 20)
-  return (
-    <details className="rounded-md border p-3">
-      <summary className="cursor-pointer text-sm font-medium">{t("graph.counts.countSourceTextUnit", { count: values.length })}</summary>
-      <div className="mt-3 space-y-2">
-        <IdBadges values={visible} />
-        {!showAll && values.length > visible.length ? <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>{t("graph.counts.showCountMore", { count: values.length - visible.length })}</Button> : null}
+        <div className="flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 break-all">{id}</code><Button variant="ghost" size="icon" className="shrink-0" aria-label={t("graph.actions.copyId")} onClick={copy}>{copied ? <Check /> : <Copy />}</Button></div>
       </div>
     </details>
   )
@@ -170,7 +151,7 @@ function EntityDetail({ value, onFocus, onOpenCommunity }: { value: GraphEntityD
           {value.communities.length === 0 && unresolvedIds.length === 0 ? <span className="text-sm text-muted-foreground">{t("graph.labels.none")}</span> : null}
         </div>
       </Section>
-      <Section title="graph.labels.sources"><SourceIds values={value.text_unit_ids} /></Section>
+      <GraphSourceEvidence sourceIds={value.text_unit_ids} sources={value.sources} />
       <Metadata id={value.id} shortId={value.short_id} />
     </div>
   )
@@ -190,7 +171,7 @@ function RelationshipDetail({ value, onFocus, onOpenEntity }: { value: GraphRela
       </div>
       <Button className="w-full" onClick={() => onFocus(value.id)}><GitBranch /> {t("graph.actions.focusRelationship")}</Button>
       <Section title="graph.labels.description"><p className="whitespace-pre-wrap text-sm leading-6">{value.description ?? t("graph.labels.noDescription")}</p></Section>
-      <Section title="graph.labels.sources"><SourceIds values={value.text_unit_ids} /></Section>
+      <GraphSourceEvidence sourceIds={value.text_unit_ids} sources={value.sources} />
       <Metadata id={value.id} shortId={value.short_id} />
     </div>
   )

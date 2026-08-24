@@ -510,6 +510,7 @@ export interface GraphEntity {
 export interface GraphEntityDetail extends GraphEntity {
   description: string | null
   communities: GraphCommunityRef[]
+  sources: GraphTextUnitRef[]
   text_unit_ids: string[]
 }
 
@@ -534,7 +535,23 @@ export interface GraphRelationshipDetail extends GraphRelationship {
   source_entity: GraphEntityRef | null
   target_entity: GraphEntityRef | null
   description: string | null
+  sources: GraphTextUnitRef[]
   text_unit_ids: string[]
+}
+
+export interface GraphTextUnitRef {
+  id: string
+  short_id: string
+  preview: string
+  n_tokens: number | null
+}
+
+export interface GraphTextUnitDetail {
+  id: string
+  short_id: string
+  text: string
+  n_tokens: number | null
+  document_id: string | null
 }
 
 export interface GraphCommunityRef {

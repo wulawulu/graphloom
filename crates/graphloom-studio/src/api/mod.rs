@@ -18,7 +18,8 @@ pub use self::query_result::{StudioQueryResult, StudioQueryUsage, StudioQueryUsa
 use self::{
     graph::{
         get_community, get_community_report, get_entity, get_overview, get_relationship,
-        get_subgraph, get_summary, list_communities, list_entities, list_relationships,
+        get_subgraph, get_summary, get_text_unit, list_communities, list_entities,
+        list_relationships,
     },
     query::{GraphLoomQueryRunner, QueryRunner, start_query},
     query_result::{QueryResultRegistry, get_query_result},
@@ -242,6 +243,7 @@ impl StudioApiService {
                 "/api/graph/relationships/{relationship_id}",
                 get(get_relationship),
             )
+            .route("/api/graph/text-units/{text_unit_id}", get(get_text_unit))
             .route("/api/graph/communities", get(list_communities))
             .route("/api/graph/communities/{community_id}", get(get_community))
             .route(

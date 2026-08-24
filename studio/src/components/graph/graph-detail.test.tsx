@@ -13,7 +13,8 @@ describe("GraphInspector", () => {
   it("renders structured entity detail, collapses long sources, and focuses explicitly", async () => {
     const user = userEvent.setup()
     const onFocusEntity = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12, description: "Alice description", community_ids: ["5"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "People connected to Alice" }], text_unit_ids: Array.from({ length: 25 }, (_, index) => `text-${index + 1}`) }
+    const sources = Array.from({ length: 6 }, (_, index) => ({ id: `text-${index + 1}`, short_id: String(index + 1), preview: `Evidence ${index + 1}`, n_tokens: index + 10 }))
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: "E1", title: "Alice", entity_type: "PERSON", degree: 12, rank: 12, description: "Alice description", community_ids: ["5"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "People connected to Alice" }], sources, text_unit_ids: sources.map((source) => source.id) }
     render(<GraphInspector {...common} onFocusEntity={onFocusEntity} detail={{ kind: "entity", value: entity }} />)
 
     expect(screen.getByText("PERSON")).toBeInTheDocument()
@@ -22,24 +23,41 @@ describe("GraphInspector", () => {
     expect(screen.getByText("Alice description")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Open community Alice semantic network" })).toBeInTheDocument()
     expect(screen.getByText("Developer · Raw JSON")).toBeInTheDocument()
-    expect(screen.getByText("25 source text units")).toBeInTheDocument()
-    expect(screen.queryByText("text-25")).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Show 5 more" }))
-    expect(screen.getByText("text-25")).toBeInTheDocument()
+    expect(screen.getByText("Source evidence · 6")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "View Text Unit 6" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Show all sources" }))
+    expect(screen.getByRole("button", { name: "View Text Unit 6" })).toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Focus neighborhood" }))
     expect(onFocusEntity).toHaveBeenCalledWith("entity-1")
+  })
+
+  it("resets source expansion when navigating to another detail", async () => {
+    const user = userEvent.setup()
+    const entity = (id: string, prefix: string): GraphEntityDetail => {
+      const sources = Array.from({ length: 6 }, (_, index) => ({ id: `${id}-text-${index}`, short_id: `${prefix}${index}`, preview: `${prefix} evidence ${index}`, n_tokens: null }))
+      return { id, short_id: null, title: prefix, entity_type: null, degree: 0, rank: 0, description: null, community_ids: [], communities: [], sources, text_unit_ids: sources.map((source) => source.id) }
+    }
+    const { rerender } = render(<GraphInspector {...common} detail={{ kind: "entity", value: entity("a", "A") }} />)
+    await user.click(screen.getByRole("button", { name: "Show all sources" }))
+    expect(screen.getByRole("button", { name: "View Text Unit A5" })).toBeInTheDocument()
+
+    rerender(<GraphInspector {...common} detail={{ kind: "entity", value: entity("b", "B") }} />)
+
+    expect(screen.queryByRole("button", { name: "View Text Unit B5" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Show all sources" })).toBeInTheDocument()
   })
 
   it("renders relationship direction and focus action", async () => {
     const user = userEvent.setup()
     const onFocusRelationship = vi.fn()
     const onOpenEntity = vi.fn()
-    const relationship: GraphRelationshipDetail = { id: "relationship-1", short_id: null, source: "Alice", target: "Acme", source_entity: { id: "entity-alice", short_id: "E1", title: "Alice", entity_type: "PERSON", description: "Alice preview" }, target_entity: { id: "entity-acme", short_id: "E2", title: "Acme", entity_type: "ORGANIZATION", description: null }, weight: 0.8, rank: 4, description: "works at", text_unit_ids: [] }
+    const relationship: GraphRelationshipDetail = { id: "relationship-1", short_id: null, source: "Alice", target: "Acme", source_entity: { id: "entity-alice", short_id: "E1", title: "Alice", entity_type: "PERSON", description: "Alice preview" }, target_entity: { id: "entity-acme", short_id: "E2", title: "Acme", entity_type: "ORGANIZATION", description: null }, weight: 0.8, rank: 4, description: "works at", sources: [{ id: "text-1", short_id: "184", preview: "Relationship evidence", n_tokens: 12 }], text_unit_ids: ["text-1"] }
     render(<GraphInspector {...common} onOpenEntity={onOpenEntity} onFocusRelationship={onFocusRelationship} detail={{ kind: "relationship", value: relationship }} />)
 
     expect(screen.getByRole("button", { name: "Open entity Alice" })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Open entity Acme" })).toBeInTheDocument()
     expect(screen.getByText("Weight 0.8")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "View Text Unit 184" })).toBeInTheDocument()
     await user.hover(screen.getByRole("button", { name: "Open entity Alice" }))
     expect(await screen.findByText("Alice preview")).toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Open entity Alice" }))
@@ -52,7 +70,7 @@ describe("GraphInspector", () => {
   })
 
   it("combines graph detail with the originating query decision", () => {
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: "150", title: "Alice", entity_type: "PERSON", degree: 2, rank: 1, description: null, community_ids: [], communities: [], text_unit_ids: [] }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: "150", title: "Alice", entity_type: "PERSON", degree: 2, rank: 1, description: null, community_ids: [], communities: [], sources: [], text_unit_ids: [] }
     render(<GraphInspector {...common} detail={{ kind: "entity", value: entity }} decision={{ stableId: "entity-1", shortId: "150", title: "Alice", recordType: "entity", score: 0.887, rank: 2, selected: true, reason: "ann_result", selectionStatus: "selected", finalContext: "excluded" }} />)
 
     expect(screen.getByRole("region", { name: "Query decision" })).toHaveTextContent("Retrieval score0.8870")
@@ -118,7 +136,7 @@ describe("GraphInspector", () => {
   it("clears the persistent Inspector selection with Escape", async () => {
     const user = userEvent.setup()
     const onClear = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: [], communities: [], text_unit_ids: [] }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: [], communities: [], sources: [], text_unit_ids: [] }
     render(<GraphInspector {...common} onClear={onClear} detail={{ kind: "entity", value: entity }} />)
 
     await user.click(screen.getByRole("region", { name: "Graph Inspector" }))
@@ -130,7 +148,7 @@ describe("GraphInspector", () => {
     const user = userEvent.setup()
     const onOpenCommunity = vi.fn()
     const onFocusEntity = vi.fn()
-    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: ["5", "missing"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "Preview summary" }], text_unit_ids: [] }
+    const entity: GraphEntityDetail = { id: "entity-1", short_id: null, title: "Alice", entity_type: "PERSON", degree: 1, rank: 1, description: null, community_ids: ["5", "missing"], communities: [{ id: "community-5", short_id: "5", title: "Alice network", report_title: "Alice semantic network", level: 1, summary: "Preview summary" }], sources: [], text_unit_ids: [] }
     render(<GraphInspector {...common} onOpenCommunity={onOpenCommunity} onFocusEntity={onFocusEntity} detail={{ kind: "entity", value: entity }} />)
 
     const community = screen.getByRole("button", { name: "Open community Alice semantic network" })
@@ -145,7 +163,7 @@ describe("GraphInspector", () => {
   it("keeps unresolved relationship endpoints non-clickable and supports Inspector Back", async () => {
     const user = userEvent.setup()
     const onBack = vi.fn()
-    const relationship: GraphRelationshipDetail = { id: "relationship-1", short_id: null, source: "Duplicate", target: "Missing", source_entity: null, target_entity: null, weight: null, rank: null, description: null, text_unit_ids: [] }
+    const relationship: GraphRelationshipDetail = { id: "relationship-1", short_id: null, source: "Duplicate", target: "Missing", source_entity: null, target_entity: null, weight: null, rank: null, description: null, sources: [], text_unit_ids: [] }
     render(<GraphInspector {...common} canGoBack onBack={onBack} detail={{ kind: "relationship", value: relationship }} />)
 
     expect(screen.getAllByText("Unable to uniquely resolve entity")).toHaveLength(2)

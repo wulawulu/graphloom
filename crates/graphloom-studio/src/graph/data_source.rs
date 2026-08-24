@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use super::{
     GraphCommunity, GraphCommunityReportDetail, GraphEntityDetail, GraphRelationshipDetail,
+    GraphTextUnitDetail,
 };
 
 /// A typed, Query-visible graph snapshot.
@@ -121,4 +122,22 @@ pub trait GraphDataSource: Send + Sync + fmt::Debug {
     /// Returns [`GraphDataSourceError::Unavailable`] when required graph data
     /// cannot be loaded or violates snapshot identity invariants.
     async fn load_snapshot(&self) -> Result<GraphDataSnapshot, GraphDataSourceError>;
+
+    /// Load requested text units as one evidence batch.
+    ///
+    /// Implementations may return fewer records when artifact references are
+    /// unresolved. Returned stable identifiers must be unique. The default
+    /// preserves compatibility for topology-only custom datasources.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphDataSourceError::Unavailable`] when evidence storage is
+    /// present but cannot be read or adapted safely.
+    async fn load_text_units(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<GraphTextUnitDetail>, GraphDataSourceError> {
+        let _ = ids;
+        Ok(Vec::new())
+    }
 }

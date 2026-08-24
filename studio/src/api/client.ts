@@ -13,6 +13,7 @@ import type {
   GraphRelationshipDetail,
   GraphSummary,
   GraphSubgraphRequest,
+  GraphTextUnitDetail,
   QueryResultState,
   RelationshipListParameters,
   RunHistoryCursor,
@@ -155,6 +156,10 @@ export function listRelationships(parameters: RelationshipListParameters, signal
 
 export function getRelationship(id: string, signal?: AbortSignal): Promise<GraphRelationshipDetail> {
   return requestJson<GraphRelationshipDetail>(`/api/graph/relationships/${encodeURIComponent(id)}`, { signal })
+}
+
+export function getTextUnit(id: string, signal?: AbortSignal): Promise<GraphTextUnitDetail> {
+  return requestJson<GraphTextUnitDetail>(`/api/graph/text-units/${encodeURIComponent(id)}`, { signal })
 }
 
 export function listCommunities(parameters: CommunityListParameters, signal?: AbortSignal): Promise<GraphListResponse<GraphCommunity>> {

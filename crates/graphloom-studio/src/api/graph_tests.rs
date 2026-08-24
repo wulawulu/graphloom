@@ -20,7 +20,7 @@ use tower::ServiceExt;
 use super::{StudioApiOptions, StudioApiService, resolve_table_root};
 use crate::graph::{
     GraphCommunityReportSummary, GraphDataSnapshot, GraphDataSource, GraphDataSourceError,
-    ParquetGraphDataSource,
+    GraphTextUnitDetail, ParquetGraphDataSource,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -43,6 +43,36 @@ impl GraphDataSource for FakeGraphDataSource {
             .clone()
             .ok_or(GraphDataSourceError::Unavailable)
     }
+
+    async fn load_text_units(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<GraphTextUnitDetail>, GraphDataSourceError> {
+        if self.snapshot.is_none() {
+            return Err(GraphDataSourceError::Unavailable);
+        }
+        let requested = ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        Ok([
+            GraphTextUnitDetail::new(
+                "text-1".to_owned(),
+                "184".to_owned(),
+                "西门庆因蔡京生辰而准备重礼。\nExact second line.".to_owned(),
+            )
+            .with_n_tokens(243)
+            .with_document_id("document-1".to_owned()),
+            GraphTextUnitDetail::new(
+                "text-2".to_owned(),
+                "185".to_owned(),
+                "Second evidence".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .filter(|text_unit| requested.contains(text_unit.id.as_str()))
+        .collect())
+    }
 }
 
 async fn snapshot() -> TestResult<GraphDataSnapshot> {
@@ -55,6 +85,23 @@ async fn snapshot() -> TestResult<GraphDataSnapshot> {
     untyped.entity_type = None;
     untyped.description = Some("GRAPH_ENTITY_SECRET_SENTINEL".to_owned());
     snapshot.entities.push(untyped);
+    snapshot
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == "entity-a")
+        .ok_or("entity-a fixture")?
+        .text_unit_ids = vec![
+        "text-2".to_owned(),
+        "missing-text".to_owned(),
+        "text-1".to_owned(),
+        "text-2".to_owned(),
+    ];
+    snapshot
+        .relationships
+        .iter_mut()
+        .find(|relationship| relationship.id == "relationship-a")
+        .ok_or("relationship-a fixture")?
+        .text_unit_ids = vec!["text-1".to_owned()];
     Ok(snapshot)
 }
 
@@ -575,14 +622,49 @@ async fn test_should_return_graph_details_without_exposing_embeddings() -> TestR
     assert_eq!(entity["communities"][0]["short_id"], "5");
     assert_eq!(entity["communities"][0]["report_title"], "Shared");
     assert_eq!(entity["communities"][0]["summary"], "Summary 5");
+    assert_eq!(
+        entity["text_unit_ids"],
+        json!(["text-2", "missing-text", "text-1", "text-2"])
+    );
+    assert_eq!(entity["sources"][0]["id"], "text-2");
+    assert_eq!(entity["sources"][0]["short_id"], "185");
+    assert_eq!(entity["sources"][1]["id"], "text-1");
+    assert_eq!(entity["sources"][1]["n_tokens"], 243);
+    assert!(entity["sources"][1].get("text").is_none());
     let (_, relationship) = get_json(&router, "/api/graph/relationships/relationship-a").await?;
     assert_eq!(relationship["source_entity"]["id"], "entity-a");
     assert_eq!(relationship["target_entity"]["id"], "entity-b");
+    assert_eq!(relationship["sources"][0]["id"], "text-1");
     let (_, community) = get_json(&router, "/api/graph/communities/community-a").await?;
     assert_eq!(community["title"], "Community 5");
     assert_eq!(community["report"]["title"], "Shared");
     assert_eq!(community["parent"], 3);
     assert!(community["parent_community"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_return_exact_text_unit_detail_by_stable_id() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+
+    let (status, text_unit) = get_json(&router, "/api/graph/text-units/text-1").await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(text_unit["id"], "text-1");
+    assert_eq!(text_unit["short_id"], "184");
+    assert_eq!(
+        text_unit["text"],
+        "西门庆因蔡京生辰而准备重礼。\nExact second line."
+    );
+    assert_eq!(text_unit["n_tokens"], 243);
+    assert_eq!(text_unit["document_id"], "document-1");
+
+    let response = router
+        .oneshot(Request::get("/api/graph/text-units/missing-text").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
 
@@ -596,6 +678,7 @@ async fn test_should_return_safe_graph_errors() -> TestResult {
         "/api/graph/relationships/missing",
         "/api/graph/communities/missing",
         "/api/graph/communities/missing/report",
+        "/api/graph/text-units/missing",
     ] {
         let response = available
             .clone()
@@ -619,6 +702,7 @@ async fn test_should_return_safe_graph_errors() -> TestResult {
         "/api/graph/communities?level=invalid",
         "/api/graph/communities?parent=invalid",
         "/api/graph/entities/%20",
+        "/api/graph/text-units/%20",
     ] {
         let response = available
             .clone()
@@ -632,13 +716,17 @@ async fn test_should_return_safe_graph_errors() -> TestResult {
     }
 
     let (_, unavailable) = router(Arc::new(FakeGraphDataSource { snapshot: None }));
-    let response = unavailable
-        .oneshot(Request::get("/api/graph/summary").body(Body::empty())?)
-        .await?;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = to_bytes(response.into_body(), usize::MAX).await?;
-    assert_eq!(body.as_ref(), b"graph data is unavailable");
-    assert!(!String::from_utf8_lossy(&body).contains("GRAPH_PATH_SECRET_SENTINEL"));
+    for uri in ["/api/graph/summary", "/api/graph/text-units/text-1"] {
+        let response = unavailable
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(body.as_ref(), b"graph data is unavailable");
+        assert!(!String::from_utf8_lossy(&body).contains("GRAPH_PATH_SECRET_SENTINEL"));
+        assert!(!String::from_utf8_lossy(&body).contains("西门庆"));
+    }
     assert_eq!(
         GraphDataSourceError::Unavailable.to_string(),
         "graph data is unavailable"

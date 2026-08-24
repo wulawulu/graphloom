@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use graphloom::query::{Community, CommunityReport, Entity, Relationship};
+use graphloom::query::{Community, CommunityReport, Entity, Relationship, TextUnit};
 use serde::Serialize;
 
 /// Bounded graph overview.
@@ -147,6 +147,8 @@ pub struct GraphEntityDetail {
     pub community_ids: Vec<String>,
     /// Resolved lightweight community references for Inspector navigation.
     pub communities: Vec<GraphCommunityRef>,
+    /// Resolved lightweight text-unit evidence in artifact order.
+    pub sources: Vec<GraphTextUnitRef>,
     /// Referenced text-unit ids.
     pub text_unit_ids: Vec<String>,
 }
@@ -171,6 +173,7 @@ impl GraphEntityDetail {
             rank: None,
             community_ids: Vec::new(),
             communities: Vec::new(),
+            sources: Vec::new(),
             text_unit_ids: Vec::new(),
         }
     }
@@ -265,6 +268,8 @@ pub struct GraphRelationshipDetail {
     pub weight: Option<f64>,
     /// Optional combined-degree rank.
     pub rank: Option<i64>,
+    /// Resolved lightweight text-unit evidence in artifact order.
+    pub sources: Vec<GraphTextUnitRef>,
     /// Referenced text-unit ids.
     pub text_unit_ids: Vec<String>,
 }
@@ -289,6 +294,7 @@ impl GraphRelationshipDetail {
             description: None,
             weight: None,
             rank: None,
+            sources: Vec::new(),
             text_unit_ids: Vec::new(),
         }
     }
@@ -404,6 +410,76 @@ impl fmt::Debug for GraphCommunityRef {
     }
 }
 
+/// Compact text-unit evidence used in Entity and Relationship details.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphTextUnitRef {
+    /// Stable text-unit UUID used by the source detail endpoint.
+    pub id: String,
+    /// Human-readable reset-row identifier.
+    pub short_id: String,
+    /// Deterministic, display-normalized excerpt of the source text.
+    pub preview: String,
+    /// Optional token count from the source artifact.
+    pub n_tokens: Option<i64>,
+}
+
+impl fmt::Debug for GraphTextUnitRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GraphTextUnitRef { .. }")
+    }
+}
+
+/// Exact text-unit provenance returned only by the source detail endpoint.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphTextUnitDetail {
+    /// Stable text-unit UUID.
+    pub id: String,
+    /// Human-readable reset-row identifier.
+    pub short_id: String,
+    /// Exact source text without presentation normalization.
+    pub text: String,
+    /// Optional token count from the source artifact.
+    pub n_tokens: Option<i64>,
+    /// Optional stable source document identifier.
+    pub document_id: Option<String>,
+}
+
+impl fmt::Debug for GraphTextUnitDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GraphTextUnitDetail { .. }")
+    }
+}
+
+impl GraphTextUnitDetail {
+    /// Create exact text-unit provenance without optional metadata.
+    #[must_use]
+    pub fn new(id: String, short_id: String, text: String) -> Self {
+        Self {
+            id,
+            short_id,
+            text,
+            n_tokens: None,
+            document_id: None,
+        }
+    }
+
+    /// Set the artifact token count.
+    #[must_use]
+    pub const fn with_n_tokens(mut self, n_tokens: i64) -> Self {
+        self.n_tokens = Some(n_tokens);
+        self
+    }
+
+    /// Set the stable source document identifier.
+    #[must_use]
+    pub fn with_document_id(mut self, document_id: String) -> Self {
+        self.document_id = Some(document_id);
+        self
+    }
+}
+
 /// Compact community report fields suitable for lists.
 #[derive(Clone, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -516,6 +592,7 @@ impl From<&Entity> for GraphEntityDetail {
             rank: entity.rank,
             community_ids: entity.community_ids.clone(),
             communities: Vec::new(),
+            sources: Vec::new(),
             text_unit_ids: entity.text_unit_ids.clone(),
         }
     }
@@ -560,6 +637,7 @@ impl From<&Relationship> for GraphRelationshipDetail {
             description: relationship.description.clone(),
             weight: relationship.weight,
             rank: relationship.rank,
+            sources: Vec::new(),
             text_unit_ids: relationship.text_unit_ids.clone(),
         }
     }
@@ -641,6 +719,18 @@ impl From<&GraphCommunityReportDetail> for GraphCommunityReportSummary {
             title: report.title.clone(),
             summary: report.summary.clone(),
             rank: report.rank,
+        }
+    }
+}
+
+impl From<&TextUnit> for GraphTextUnitDetail {
+    fn from(text_unit: &TextUnit) -> Self {
+        Self {
+            id: text_unit.id.clone(),
+            short_id: text_unit.short_id.clone(),
+            text: text_unit.text.clone(),
+            n_tokens: text_unit.n_tokens,
+            document_id: text_unit.document_id.clone(),
         }
     }
 }

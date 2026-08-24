@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::StudioApiState;
 use crate::graph::{
     GraphCommunity, GraphDataSnapshot, GraphEntity, GraphProjectionError, GraphReferenceIndex,
-    GraphRelationship, GraphSummary, overview, subgraph as project_subgraph,
+    GraphRelationship, GraphSummary, GraphTextUnitIndex, overview, subgraph as project_subgraph,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -238,15 +238,22 @@ pub(super) async fn get_entity(
     let Ok(snapshot) = load_snapshot(&state).await else {
         return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
     };
-    let references = GraphReferenceIndex::new(&snapshot);
-    snapshot
+    let Some(entity) = snapshot
         .entities
         .iter()
         .find(|entity| entity.id == id)
-        .map_or_else(
-            || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
-            |entity| Json(references.enrich_entity(entity)).into_response(),
-        )
+        .cloned()
+    else {
+        return fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY);
+    };
+    let text_units = state
+        .graph_data_source
+        .load_text_units(&entity.text_unit_ids)
+        .await
+        .unwrap_or_default();
+    let mut detail = GraphReferenceIndex::new(&snapshot).enrich_entity(&entity);
+    detail.sources = GraphTextUnitIndex::new(&text_units).references(&entity.text_unit_ids);
+    Json(detail).into_response()
 }
 
 pub(super) async fn list_relationships(
@@ -298,14 +305,43 @@ pub(super) async fn get_relationship(
     let Ok(snapshot) = load_snapshot(&state).await else {
         return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
     };
-    let references = GraphReferenceIndex::new(&snapshot);
-    snapshot
+    let Some(relationship) = snapshot
         .relationships
         .iter()
         .find(|relationship| relationship.id == id)
+        .cloned()
+    else {
+        return fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY);
+    };
+    let text_units = state
+        .graph_data_source
+        .load_text_units(&relationship.text_unit_ids)
+        .await
+        .unwrap_or_default();
+    let mut detail = GraphReferenceIndex::new(&snapshot).enrich_relationship(&relationship);
+    detail.sources = GraphTextUnitIndex::new(&text_units).references(&relationship.text_unit_ids);
+    Json(detail).into_response()
+}
+
+pub(super) async fn get_text_unit(
+    State(state): State<Arc<StudioApiState>>,
+    path: Result<Path<String>, PathRejection>,
+) -> Response {
+    let Some(id) = valid_path_id(path) else {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    };
+    let Ok(text_units) = state
+        .graph_data_source
+        .load_text_units(std::slice::from_ref(&id))
+        .await
+    else {
+        return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
+    };
+    GraphTextUnitIndex::new(&text_units)
+        .detail(&id)
         .map_or_else(
             || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
-            |relationship| Json(references.enrich_relationship(relationship)).into_response(),
+            |text_unit| Json(text_unit).into_response(),
         )
 }
 

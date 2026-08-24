@@ -678,6 +678,21 @@ export const en = {
       "communityNumber": "Community {{shortId}}",
       "referenceMetadata": "Community {{shortId}} · L{{level}}"
     },
+    "sources": {
+      "sourceEvidence": "Source evidence",
+      "sourceEvidenceCount": "Source evidence · {{count}}",
+      "noSourceEvidence": "No source evidence",
+      "textUnitNumber": "Text Unit {{shortId}}",
+      "tokenCount": "{{count}} Tokens",
+      "viewSource": "View source",
+      "viewTextUnit": "View Text Unit {{shortId}}",
+      "sourceUnavailable": "Source unavailable",
+      "loadingSource": "Loading source…",
+      "exactSourceText": "Exact source text",
+      "documentId": "Document ID",
+      "showAll": "Show all sources",
+      "showFewer": "Show fewer sources"
+    },
     "labels": {
       "graphDataUnavailable": "Graph data unavailable",
       "entities": "Entities",

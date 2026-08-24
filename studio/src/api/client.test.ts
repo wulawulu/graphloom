@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { getGraphOverview, getGraphSubgraph, getGraphSummary, getQueryResult, listRuns, startQuery } from "@/api/client"
+import { getGraphOverview, getGraphSubgraph, getGraphSummary, getQueryResult, getTextUnit, listRuns, startQuery } from "@/api/client"
 
 function response(status: number, body: unknown): Response {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -63,5 +63,13 @@ describe("Studio API client", () => {
     const init = fetchMock.mock.calls[1]?.[1] as RequestInit
     expect(init.method).toBe("POST")
     expect(JSON.parse(String(init.body))).toEqual({ entity_ids: ["entity-1"], relationship_ids: ["relationship-1"], depth: 1, max_entities: 80, max_relationships: 160 })
+  })
+
+  it("loads exact text-unit evidence by stable ID", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(200, { id: "text/unit", short_id: "184", text: "Exact", n_tokens: 3, document_id: null }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(getTextUnit("text/unit")).resolves.toMatchObject({ text: "Exact" })
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/graph/text-units/text%2Funit")
   })
 })
