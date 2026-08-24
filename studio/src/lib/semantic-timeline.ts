@@ -3,6 +3,7 @@ import { latestContextSections } from "@/lib/context-evidence"
 import { buildBasicSemanticTimeline, type BasicSemanticStep } from "@/lib/semantic-basic"
 import { buildGlobalSemanticTimeline, type GlobalSemanticStep } from "@/lib/semantic-global"
 import { buildDriftSemanticTimeline, type DriftSemanticStep } from "@/lib/semantic-drift"
+import { effectiveModelName } from "@/lib/model-identity"
 
 export type SemanticStepKind = "entity-mapping" | "graph-expansion" | "context-assembly" | "answer-generation"
 export type FinalContextStatus = "included" | "excluded" | "unknown"
@@ -174,11 +175,11 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
     }
     if (event.type === "entities_selected" && asCandidates(event.entities).some((candidate) => candidate.selected)) focusEnvelope = envelope
     if (event.type === "embedding_started") {
-      model = stringValue(event.model_id) ?? model
+      model = effectiveModelName(event) ?? model
       embeddingStartedAt = timestamp(envelope) ?? embeddingStartedAt
     }
     if (event.type === "embedding_completed") {
-      model = stringValue(event.model_id) ?? model
+      model = effectiveModelName(event) ?? model
       promptTokens = numberValue(event.prompt_tokens) ?? promptTokens
       dimensions = numberValue(event.dimensions) ?? dimensions
       embeddingCompletedAt = timestamp(envelope) ?? embeddingCompletedAt
@@ -266,7 +267,7 @@ function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): LocalSemant
       outputTokens += numberValue(event.output_tokens) ?? 0
       elapsedMs += numberValue(event.elapsed_ms) ?? 0
     }
-    model = stringValue(event.model_id) ?? model
+    model = effectiveModelName(event) ?? model
   }
   return { id: "answer-generation", kind: "answer-generation", rawEvents, focusEnvelope: null, summary: { calls: Math.max(startedCalls, completedCalls), inputTokens: completedCalls > 0 ? inputTokens : startedInputTokens, outputTokens, elapsedMs, model } }
 }

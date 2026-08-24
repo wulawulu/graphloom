@@ -26,7 +26,7 @@ use crate::{
         QueryInstrumentation, QueryResult, QueryUsage, QueryUsageCategory, Result, SearchMethod,
         concurrency::try_buffered_ordered,
         context::ContextTable,
-        explainability::GlobalQueryExplainability,
+        explainability::{ExplainabilityModelIdentity, GlobalQueryExplainability},
         result::count_completion_input,
         streaming::{CompletionStreamState, completion_event_stream},
     },
@@ -220,10 +220,14 @@ async fn prepare_global_stream(
             message: source.to_string(),
         })?;
     runtime.callbacks.on_reduce_response_start(&report_data);
+    let reduce_identity = ExplainabilityModelIdentity::from_config(
+        &runtime.completion_model_id,
+        &runtime.completion_config,
+    );
     emit_llm_started(
         explainability,
         explainability.map(|value| value.spans().reduce()),
-        runtime.completion_model_id.as_str(),
+        &reduce_identity,
         reduce_prompt_tokens,
         request
             .messages
@@ -267,7 +271,7 @@ async fn prepare_global_stream(
         instrumentation,
         Some(GlobalReduceCompletion {
             started: reduce_started,
-            model_id: reduce_completion_model_id,
+            identity: reduce_identity,
         }),
     ))
 }
@@ -306,6 +310,7 @@ async fn run_map_calls(
             let model = Arc::clone(&model);
             let tokenizer = Arc::clone(&tokenizer);
             let model_id = model_id.to_owned();
+            let identity = ExplainabilityModelIdentity::from_config(&model_id, model_config);
             let call_args = model_config.call_args.clone();
             let prompt = prompt.clone();
             let query = query.to_owned();
@@ -327,7 +332,7 @@ async fn run_map_calls(
                     context,
                     &query,
                     model,
-                    &model_id,
+                    &identity,
                     &call_args,
                     &prompt,
                     tokenizer,
@@ -348,7 +353,7 @@ async fn run_map_call(
     context: String,
     query: &str,
     model: Arc<dyn CompletionModel>,
-    model_id: &str,
+    identity: &ExplainabilityModelIdentity,
     call_args: &BTreeMap<String, serde_json::Value>,
     prompt: &PromptTemplate,
     tokenizer: Arc<dyn Tokenizer>,
@@ -407,7 +412,7 @@ async fn run_map_call(
     emit_llm_started(
         explainability.as_ref(),
         batch_span.as_ref(),
-        model_id,
+        identity,
         prompt_tokens,
         request
             .messages
@@ -422,7 +427,7 @@ async fn run_map_call(
         .map_err(|source| QueryError::QueryCompletion {
             method: SearchMethod::Global,
             operation: "complete Global Search map call",
-            model: model_id.to_owned(),
+            model: identity.model_id.clone(),
             source: Box::new(source),
         })?;
     let raw_response = response
@@ -430,7 +435,7 @@ async fn run_map_call(
         .map_err(|source| QueryError::QueryCompletion {
             method: SearchMethod::Global,
             operation: "read Global Search map response",
-            model: model_id.to_owned(),
+            model: identity.model_id.clone(),
             source: Box::new(source),
         })?
         .to_owned();
@@ -442,7 +447,7 @@ async fn run_map_call(
     emit_llm_completed(
         explainability.as_ref(),
         batch_span.as_ref(),
-        model_id,
+        identity,
         prompt_tokens,
         output_tokens,
         llm_started,
@@ -722,7 +727,7 @@ async fn emit_map_batch_built(
 async fn emit_llm_started(
     explainability: Option<&GlobalQueryExplainability>,
     span: Option<&crate::explainability::ExplainabilitySpanId>,
-    model_id: &str,
+    identity: &ExplainabilityModelIdentity,
     prompt_tokens: usize,
     prompt: Option<&str>,
 ) {
@@ -733,7 +738,8 @@ async fn emit_llm_started(
     ) else {
         return;
     };
-    let mut event = LlmRequestStarted::new(model_id.to_owned(), prompt_tokens);
+    let mut event = LlmRequestStarted::new(identity.model_id.clone(), prompt_tokens)
+        .with_model_identity(identity.model_name.clone(), identity.provider.clone());
     event.prompt = prompt.and_then(|value| explainability.content(value));
     explainability
         .emit(
@@ -747,7 +753,7 @@ async fn emit_llm_started(
 async fn emit_llm_completed(
     explainability: Option<&GlobalQueryExplainability>,
     span: Option<&crate::explainability::ExplainabilitySpanId>,
-    model_id: &str,
+    identity: &ExplainabilityModelIdentity,
     input_tokens: usize,
     output_tokens: usize,
     started: Instant,
@@ -763,8 +769,13 @@ async fn emit_llm_completed(
     ) else {
         return;
     };
-    let mut event =
-        LlmRequestCompleted::new(model_id.to_owned(), input_tokens, output_tokens, elapsed_ms);
+    let mut event = LlmRequestCompleted::new(
+        identity.model_id.clone(),
+        input_tokens,
+        output_tokens,
+        elapsed_ms,
+    )
+    .with_model_identity(identity.model_name.clone(), identity.provider.clone());
     event.response = explainability.content(response);
     explainability
         .emit(
@@ -890,7 +901,7 @@ async fn emit_reduce_context(
 #[derive(Debug)]
 struct GlobalReduceCompletion {
     started: Instant,
-    model_id: String,
+    identity: ExplainabilityModelIdentity,
 }
 
 struct GlobalCompletionState {
@@ -928,7 +939,7 @@ async fn next_global_completion_event(
                     emit_llm_completed(
                         Some(explainability),
                         Some(explainability.spans().reduce()),
-                        &reduce.model_id,
+                        &reduce.identity,
                         usage.prompt_tokens,
                         usage.output_tokens,
                         reduce.started,

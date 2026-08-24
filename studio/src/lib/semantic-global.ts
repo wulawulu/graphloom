@@ -18,6 +18,7 @@ import type {
   LlmRequestCompletedEvent,
   LlmRequestStartedEvent,
 } from "@/api/types"
+import { effectiveModelName } from "@/lib/model-identity"
 
 export type GlobalMapBatchStatus = "ready" | "analyzing" | "response_received" | "completed"
 export type DynamicRatingAttemptStatus = "rating" | "response_received"
@@ -332,7 +333,7 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     generated: reduceCompleted !== undefined,
     noDataPathSelected,
     noDataAnswerReturned,
-    model: reduceCompleted?.record.event.model_id ?? reduceStarted?.record.event.model_id,
+    model: effectiveModelName(reduceCompleted?.record.event ?? reduceStarted?.record.event),
     inputTokens: reduceCompleted?.record.event.input_tokens ?? reduceStarted?.record.event.prompt_tokens,
     outputTokens: reduceCompleted?.record.event.output_tokens,
     elapsedMs: reduceCompleted?.record.event.elapsed_ms,
@@ -541,7 +542,7 @@ function buildDynamicAttemptView(
     repeatIndex: attempt.record.event.repeat_index,
     repeatCount: attempt.record.event.repeat_count,
     status: lifecycle.completed === undefined ? "rating" : "response_received",
-    model: lifecycle.completed?.record.event.model_id ?? lifecycle.started?.record.event.model_id,
+    model: effectiveModelName(lifecycle.completed?.record.event ?? lifecycle.started?.record.event),
     inputTokens: lifecycle.completed?.record.event.input_tokens ?? lifecycle.started?.record.event.prompt_tokens,
     outputTokens: lifecycle.completed?.record.event.output_tokens,
     elapsedMs: lifecycle.completed?.record.event.elapsed_ms,
@@ -576,7 +577,7 @@ function buildBatchView(batch: BatchEvidence): GlobalMapBatchView {
     tokenBudget: event.token_budget,
     exactContext: event.context ?? null,
     status,
-    model: batch.completed?.record.event.model_id ?? batch.started?.record.event.model_id,
+    model: effectiveModelName(batch.completed?.record.event ?? batch.started?.record.event),
     inputTokens: batch.completed?.record.event.input_tokens ?? batch.started?.record.event.prompt_tokens,
     outputTokens: batch.completed?.record.event.output_tokens,
     elapsedMs: batch.completed?.record.event.elapsed_ms,

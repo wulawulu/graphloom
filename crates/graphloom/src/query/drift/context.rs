@@ -143,6 +143,8 @@ pub(crate) struct DriftContextBuilder {
     pub(crate) embedding_model: Arc<dyn EmbeddingModel>,
     pub(crate) completion_model_id: String,
     pub(crate) embedding_model_id: String,
+    pub(crate) embedding_model_name: String,
+    pub(crate) embedding_provider: String,
     pub(crate) completion_config: ModelConfig,
     pub(crate) vector_store: Arc<dyn VectorStore>,
     pub(crate) community_schema: VectorIndexSchema,
@@ -284,6 +286,7 @@ impl DriftContextBuilder {
                 session.spans().hyde(),
                 session.root_span(),
                 &self.completion_model_id,
+                &self.completion_config,
                 prompt_tokens,
                 request
                     .messages
@@ -327,6 +330,7 @@ impl DriftContextBuilder {
                 session.spans().hyde(),
                 session.root_span(),
                 &self.completion_model_id,
+                &self.completion_config,
                 prompt_tokens,
                 output_tokens,
                 hyde_started,
@@ -350,7 +354,11 @@ impl DriftContextBuilder {
                     }),
                 )
                 .await;
-            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
+            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone())
+                .with_model_identity(
+                    self.embedding_model_name.clone(),
+                    self.embedding_provider.clone(),
+                );
             event.input = session.content(expanded_query);
             session
                 .emit(
@@ -402,11 +410,17 @@ impl DriftContextBuilder {
                     .emit(
                         session.spans().embedding(),
                         Some(session.root_span()),
-                        ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
-                            self.embedding_model_id.clone(),
-                            prompt_tokens,
-                            dimensions,
-                        )),
+                        ExplainabilityEvent::EmbeddingCompleted(
+                            EmbeddingCompleted::new(
+                                self.embedding_model_id.clone(),
+                                prompt_tokens,
+                                dimensions,
+                            )
+                            .with_model_identity(
+                                self.embedding_model_name.clone(),
+                                self.embedding_provider.clone(),
+                            ),
+                        ),
                     )
                     .await;
             }

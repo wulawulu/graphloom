@@ -1,6 +1,6 @@
 //! DRIFT primer folds and structured completions.
 
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use graphloom_llm::{ChatMessage, CompletionModel, CompletionRequest, ModelConfig, Tokenizer};
 use serde_json::json;
@@ -99,7 +99,7 @@ pub(super) async fn run_primer(
         let model = Arc::clone(&resources.model);
         let tokenizer = Arc::clone(&resources.tokenizer);
         let model_id = resources.model_id.to_owned();
-        let call_args = resources.model_config.call_args.clone();
+        let model_config = resources.model_config.clone();
         let query = query.to_owned();
         let explainability = explainability.clone();
         let span = explainability
@@ -113,7 +113,7 @@ pub(super) async fn run_primer(
                 &query,
                 model,
                 &model_id,
-                &call_args,
+                &model_config,
                 tokenizer,
                 explainability.as_ref(),
                 span.as_ref(),
@@ -196,7 +196,7 @@ async fn run_fold(
     query: &str,
     model: Arc<dyn CompletionModel>,
     model_id: &str,
-    call_args: &BTreeMap<String, serde_json::Value>,
+    model_config: &ModelConfig,
     tokenizer: Arc<dyn Tokenizer>,
     explainability: Option<&DriftQueryExplainability>,
     span: Option<&crate::explainability::ExplainabilitySpanId>,
@@ -233,7 +233,7 @@ async fn run_fold(
     let prompt_tokens = count(&*tokenizer, &prompt, "count DRIFT primer prompt")?;
     let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)]);
     request
-        .apply_call_args(call_args)
+        .apply_call_args(&model_config.call_args)
         .and_then(|()| {
             request.stream = Some(false);
             request.response_format = Some(primer_response_format());
@@ -250,6 +250,7 @@ async fn run_fold(
             span,
             session.spans().primer(),
             model_id,
+            model_config,
             prompt_tokens,
             request
                 .messages
@@ -283,6 +284,7 @@ async fn run_fold(
             span,
             session.spans().primer(),
             model_id,
+            model_config,
             prompt_tokens,
             output_tokens,
             llm_started,

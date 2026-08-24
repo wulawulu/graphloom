@@ -31,6 +31,8 @@ pub(crate) struct BasicContextBuilder {
     pub(crate) text_units: Vec<TextUnit>,
     pub(crate) embedding_model: Arc<dyn EmbeddingModel>,
     pub(crate) embedding_model_id: String,
+    pub(crate) embedding_model_name: String,
+    pub(crate) embedding_provider: String,
     pub(crate) vector_store: Arc<dyn VectorStore>,
     pub(crate) vector_schema: VectorIndexSchema,
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
@@ -148,7 +150,11 @@ impl BasicContextBuilder {
         explainability: Option<&BasicQueryExplainability>,
     ) -> Result<BasicRetrievalBuild> {
         if let Some(session) = explainability {
-            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
+            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone())
+                .with_model_identity(
+                    self.embedding_model_name.clone(),
+                    self.embedding_provider.clone(),
+                );
             event.input = session.content(query);
             session
                 .emit(
@@ -212,11 +218,17 @@ impl BasicContextBuilder {
                 .emit(
                     session.spans().embedding(),
                     Some(session.root_span()),
-                    ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
-                        self.embedding_model_id.clone(),
-                        prompt_tokens,
-                        dimensions,
-                    )),
+                    ExplainabilityEvent::EmbeddingCompleted(
+                        EmbeddingCompleted::new(
+                            self.embedding_model_id.clone(),
+                            prompt_tokens,
+                            dimensions,
+                        )
+                        .with_model_identity(
+                            self.embedding_model_name.clone(),
+                            self.embedding_provider.clone(),
+                        ),
+                    ),
                 )
                 .await;
         }
@@ -717,6 +729,8 @@ mod tests {
                     inputs: Arc::clone(&embedding_inputs),
                 }),
                 embedding_model_id: "embedding".to_owned(),
+                embedding_model_name: "bge-m3".to_owned(),
+                embedding_provider: "openai".to_owned(),
                 vector_store: Arc::new(RecordingVectorStore {
                     results,
                     calls: Arc::clone(&vector_calls),

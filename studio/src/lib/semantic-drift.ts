@@ -20,6 +20,7 @@ import type {
   LlmRequestCompletedEvent,
   LlmRequestStartedEvent,
 } from "@/api/types"
+import { effectiveModelName } from "@/lib/model-identity"
 
 export type DriftPrimerStatus = "hyde" | "embedding" | "ranking" | "primer" | "ready"
 export type DriftAttemptStatus = "running" | "incomplete" | "completed_empty" | "completed"
@@ -304,7 +305,7 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
       effectiveQuery: embeddingStarted?.record.event.input ?? null,
     },
     embedding: embeddingStarted === undefined ? null : {
-      model: embeddingCompleted?.record.event.model_id ?? embeddingStarted.record.event.model_id,
+      model: effectiveModelName(embeddingCompleted?.record.event ?? embeddingStarted.record.event),
       promptTokens: embeddingCompleted?.record.event.prompt_tokens,
       dimensions: embeddingCompleted?.record.event.dimensions,
       effectiveQuery: embeddingStarted.record.event.input ?? null,
@@ -509,7 +510,7 @@ function stageLlm(
   return {
     started,
     completed,
-    model: completed?.record.event.model_id ?? started?.record.event.model_id,
+    model: effectiveModelName(completed?.record.event ?? started?.record.event),
     inputTokens: completed?.record.event.input_tokens ?? started?.record.event.prompt_tokens,
     outputTokens: completed?.record.event.output_tokens,
     elapsedMs: completed?.record.event.elapsed_ms,

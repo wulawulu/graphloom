@@ -79,12 +79,16 @@ export interface QueryStartedEvent extends GenericExplainabilityEventPayload {
 export interface EmbeddingStartedEvent extends GenericExplainabilityEventPayload {
   type: "embedding_started"
   model_id: string
+  model_name?: string
+  provider?: string
   input?: string
 }
 
 export interface EmbeddingCompletedEvent extends GenericExplainabilityEventPayload {
   type: "embedding_completed"
   model_id: string
+  model_name?: string
+  provider?: string
   prompt_tokens: number
   dimensions: number
 }
@@ -126,6 +130,8 @@ export interface BasicRetrievalSkippedEvent extends GenericExplainabilityEventPa
 export interface LlmRequestStartedEvent extends GenericExplainabilityEventPayload {
   type: "llm_request_started"
   model_id: string
+  model_name?: string
+  provider?: string
   prompt_tokens: number
   prompt?: string
 }
@@ -133,6 +139,8 @@ export interface LlmRequestStartedEvent extends GenericExplainabilityEventPayloa
 export interface LlmRequestCompletedEvent extends GenericExplainabilityEventPayload {
   type: "llm_request_completed"
   model_id: string
+  model_name?: string
+  provider?: string
   input_tokens: number
   output_tokens: number
   elapsed_ms: number

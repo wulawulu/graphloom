@@ -14,6 +14,7 @@ import type {
   LlmRequestCompletedEvent,
   LlmRequestStartedEvent,
 } from "@/api/types"
+import { effectiveModelName } from "@/lib/model-identity"
 
 export type BasicRetrievalStatus = "waiting" | "embedding" | "embedding_ready" | "retrieved" | "skipped"
 export type BasicContextStatus = "waiting" | "assembling" | "completed"
@@ -168,7 +169,7 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
             ? "embedding"
             : "waiting",
     skippedReason: retrievalLifecycle.skipped?.record.event.reason ?? null,
-    model: embeddingEnd?.record.event.model_id ?? embeddingStart?.record.event.model_id,
+    model: effectiveModelName(embeddingEnd?.record.event ?? embeddingStart?.record.event),
     promptTokens: embeddingEnd?.record.event.prompt_tokens,
     dimensions: embeddingEnd?.record.event.dimensions,
     elapsedMs: elapsedBetween(embeddingStart, embeddingEnd),
@@ -199,7 +200,7 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
   const answerSummary: BasicAnswerSummary = {
     status: llmLifecycle.completed !== undefined ? "generated" : llmLifecycle.started !== undefined ? "generating" : "waiting",
     calls: Number(llmLifecycle.started !== undefined || llmLifecycle.completed !== undefined),
-    model: llmLifecycle.completed?.record.event.model_id ?? llmLifecycle.started?.record.event.model_id,
+    model: effectiveModelName(llmLifecycle.completed?.record.event ?? llmLifecycle.started?.record.event),
     inputTokens: llmLifecycle.completed?.record.event.input_tokens ?? llmLifecycle.started?.record.event.prompt_tokens,
     outputTokens: llmLifecycle.completed?.record.event.output_tokens,
     elapsedMs: llmLifecycle.completed?.record.event.elapsed_ms,

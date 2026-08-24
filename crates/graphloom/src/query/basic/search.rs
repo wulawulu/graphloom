@@ -124,7 +124,11 @@ async fn prepare_basic_stream(
     if let Some(session) = explainability
         && let Some(prompt_tokens) = session.usize_to_u64(prompt_tokens)
     {
-        let mut event = LlmRequestStarted::new(runtime.completion_model_id.clone(), prompt_tokens);
+        let mut event = LlmRequestStarted::new(runtime.completion_model_id.clone(), prompt_tokens)
+            .with_model_identity(
+                runtime.completion_config.model.clone(),
+                runtime.completion_config.provider_type().to_owned(),
+            );
         event.prompt = request
             .messages
             .first()
@@ -149,6 +153,8 @@ async fn prepare_basic_stream(
             source: Box::new(source),
         })?;
     let completion_model_id = runtime.completion_model_id.clone();
+    let completion_model_name = runtime.completion_config.model.clone();
+    let completion_provider = runtime.completion_config.provider_type().to_owned();
     let state = CompletionStreamState {
         provider,
         context: built.context,
@@ -170,6 +176,8 @@ async fn prepare_basic_stream(
         instrumentation,
         llm_started,
         completion_model_id,
+        completion_model_name,
+        completion_provider,
     ))
 }
 
@@ -178,6 +186,8 @@ struct BasicCompletionState {
     instrumentation: Option<QueryInstrumentation>,
     llm_started: Instant,
     completion_model_id: String,
+    completion_model_name: String,
+    completion_provider: String,
 }
 
 fn instrument_basic_completion_stream(
@@ -185,6 +195,8 @@ fn instrument_basic_completion_stream(
     instrumentation: Option<QueryInstrumentation>,
     llm_started: Instant,
     completion_model_id: String,
+    completion_model_name: String,
+    completion_provider: String,
 ) -> QueryEventStream {
     Box::pin(futures_util::stream::unfold(
         Some(BasicCompletionState {
@@ -192,6 +204,8 @@ fn instrument_basic_completion_stream(
             instrumentation,
             llm_started,
             completion_model_id,
+            completion_model_name,
+            completion_provider,
         }),
         next_basic_completion_event,
     ))
@@ -208,6 +222,8 @@ async fn next_basic_completion_event(
                     emit_llm_completed(
                         session,
                         &state.completion_model_id,
+                        &state.completion_model_name,
+                        &state.completion_provider,
                         state.llm_started,
                         &result,
                     )
@@ -236,6 +252,8 @@ async fn next_basic_completion_event(
 async fn emit_llm_completed(
     session: &BasicQueryExplainability,
     completion_model_id: &str,
+    completion_model_name: &str,
+    completion_provider: &str,
     llm_started: Instant,
     result: &QueryResult,
 ) {
@@ -256,6 +274,10 @@ async fn emit_llm_completed(
         input_tokens,
         output_tokens,
         elapsed_ms,
+    )
+    .with_model_identity(
+        completion_model_name.to_owned(),
+        completion_provider.to_owned(),
     );
     event.response = session.content(&result.response);
     session
@@ -495,6 +517,8 @@ mod tests {
                 text_units: vec![text_unit("A", "0", "first"), text_unit("B", "1", "second")],
                 embedding_model,
                 embedding_model_id: "embedding".to_owned(),
+                embedding_model_name: "bge-m3".to_owned(),
+                embedding_provider: "openai".to_owned(),
                 vector_store,
                 vector_schema: schema,
                 tokenizer,
@@ -614,6 +638,8 @@ mod tests {
             Some(instrumentation),
             Instant::now(),
             "completion".to_owned(),
+            "deepseek-v4-flash".to_owned(),
+            "deepseek".to_owned(),
         );
 
         assert!(events.next().await.is_none());

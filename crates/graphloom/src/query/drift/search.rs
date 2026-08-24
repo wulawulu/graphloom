@@ -82,6 +82,7 @@ pub(crate) async fn drift_search(
             session.spans().reduce(),
             session.root_span(),
             &runtime.context.completion_model_id,
+            &runtime.context.completion_config,
             prompt_tokens,
             request
                 .messages
@@ -116,6 +117,7 @@ pub(crate) async fn drift_search(
             session.spans().reduce(),
             session.root_span(),
             &runtime.context.completion_model_id,
+            &runtime.context.completion_config,
             prompt_tokens,
             output_tokens,
             reduce_started,
@@ -176,6 +178,7 @@ pub(crate) async fn drift_search_streaming(
             session.spans().reduce(),
             session.root_span(),
             &runtime.context.completion_model_id,
+            &runtime.context.completion_config,
             prompt_tokens,
             request
                 .messages
@@ -187,6 +190,7 @@ pub(crate) async fn drift_search_streaming(
     let state = DriftStreamState {
         model: Arc::clone(&runtime.context.completion_model),
         model_id: runtime.context.completion_model_id.clone(),
+        model_config: runtime.context.completion_config.clone(),
         request: Some(request),
         provider: None,
         context: prepared.context,
@@ -486,6 +490,7 @@ async fn run_action(
             span,
             session.spans().exploration(),
             &runtime.context.completion_model_id,
+            &runtime.context.completion_config,
             prompt_tokens,
             request
                 .messages
@@ -530,6 +535,7 @@ async fn run_action(
             span,
             session.spans().exploration(),
             &runtime.context.completion_model_id,
+            &runtime.context.completion_config,
             prompt_tokens,
             output_tokens,
             llm_started,
@@ -1006,6 +1012,7 @@ enum DriftStreamPhase {
 struct DriftStreamState {
     model: Arc<dyn CompletionModel>,
     model_id: String,
+    model_config: graphloom_llm::ModelConfig,
     request: Option<CompletionRequest>,
     provider: Option<CompletionStream>,
     context: QueryContext,
@@ -1120,6 +1127,7 @@ async fn next_stream_event(
                                 session.spans().reduce(),
                                 session.root_span(),
                                 &state.model_id,
+                                &state.model_config,
                                 state.prompt_tokens,
                                 output_tokens,
                                 state.reduce_started,

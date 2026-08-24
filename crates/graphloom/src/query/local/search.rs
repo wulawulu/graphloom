@@ -21,6 +21,7 @@ use super::super::{
 use crate::{
     explainability::{ExplainabilityEvent, LlmRequestCompleted, LlmRequestStarted},
     observability::{field_name, operation, span_name, status},
+    query::explainability::ExplainabilityModelIdentity,
 };
 
 #[derive(Debug, Serialize)]
@@ -117,6 +118,8 @@ async fn prepare_local_stream(
     runtime.callbacks.on_context(&built.context);
     let (provider, llm_latch, llm_started, completion_model_id) =
         prepare_llm_stage(&runtime, request, prompt_tokens, explainability, trace).await?;
+    let completion_identity =
+        ExplainabilityModelIdentity::from_config(&completion_model_id, &runtime.completion_config);
     let state = CompletionStreamState {
         provider,
         context: built.context,
@@ -139,7 +142,7 @@ async fn prepare_local_stream(
         instrumentation,
         llm_latch,
         llm_started,
-        completion_model_id,
+        completion_identity,
         built.context_tokens,
     ))
 }
@@ -239,7 +242,11 @@ async fn prepare_llm_stage(
             .usize_to_u64(prompt_tokens)
             .map(|tokens| (session, tokens))
     }) {
-        let mut event = LlmRequestStarted::new(runtime.completion_model_id.clone(), prompt_tokens);
+        let mut event = LlmRequestStarted::new(runtime.completion_model_id.clone(), prompt_tokens)
+            .with_model_identity(
+                runtime.completion_config.model.clone(),
+                runtime.completion_config.provider_type().to_owned(),
+            );
         event.prompt = explainability_prompt;
         session
             .emit(
@@ -311,7 +318,7 @@ struct LocalCompletionState {
     llm: LlmSpanLatch,
     instrumentation: Option<QueryInstrumentation>,
     llm_started: Instant,
-    completion_model_id: String,
+    completion_identity: ExplainabilityModelIdentity,
     context_tokens: Option<u64>,
 }
 
@@ -320,7 +327,7 @@ fn instrument_local_completion_stream(
     instrumentation: Option<QueryInstrumentation>,
     llm: LlmSpanLatch,
     llm_started: Instant,
-    completion_model_id: String,
+    completion_identity: ExplainabilityModelIdentity,
     context_tokens: usize,
 ) -> QueryEventStream {
     let state = LocalCompletionState {
@@ -328,7 +335,7 @@ fn instrument_local_completion_stream(
         llm,
         instrumentation,
         llm_started,
-        completion_model_id,
+        completion_identity,
         context_tokens: usize_to_u64(context_tokens),
     };
     Box::pin(futures_util::stream::unfold(
@@ -354,7 +361,7 @@ async fn next_local_completion_event(
                 if let Some(session) = instrumentation.local_explainability() {
                     emit_llm_completed(
                         session,
-                        &state.completion_model_id,
+                        &state.completion_identity,
                         state.llm_started,
                         &result,
                     )
@@ -384,7 +391,7 @@ async fn next_local_completion_event(
 
 async fn emit_llm_completed(
     session: &super::super::explainability::LocalQueryExplainability,
-    completion_model_id: &str,
+    identity: &ExplainabilityModelIdentity,
     llm_started: Instant,
     result: &QueryResult,
 ) {
@@ -402,11 +409,12 @@ async fn emit_llm_completed(
         return;
     };
     let mut event = LlmRequestCompleted::new(
-        completion_model_id.to_owned(),
+        identity.model_id.clone(),
         input_tokens,
         output_tokens,
         elapsed_ms,
-    );
+    )
+    .with_model_identity(identity.model_name.clone(), identity.provider.clone());
     event.response = session.content(&result.response);
     session
         .emit(
@@ -426,7 +434,10 @@ mod tests {
 
     use futures_util::stream;
 
-    use super::{LlmSpanLatch, LocalCompletionState, next_local_completion_event};
+    use super::{
+        ExplainabilityModelIdentity, LlmSpanLatch, LocalCompletionState,
+        next_local_completion_event,
+    };
     use crate::{
         observability::span_name,
         query::{QueryError, QueryEvent, QueryEventStream},
@@ -471,7 +482,11 @@ mod tests {
             llm: llm_latch,
             instrumentation: None,
             llm_started: Instant::now(),
-            completion_model_id: "test-model".to_owned(),
+            completion_identity: ExplainabilityModelIdentity {
+                model_id: "test-model".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                provider: "deepseek".to_owned(),
+            },
             context_tokens: None,
         };
 

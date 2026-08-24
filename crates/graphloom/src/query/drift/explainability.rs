@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use graphloom_llm::ModelConfig;
+
 use crate::{
     explainability::{
         ExplainabilityEvent, ExplainabilitySpanId, LlmRequestCompleted, LlmRequestStarted,
@@ -14,6 +16,7 @@ pub(super) async fn emit_llm_started(
     span: &ExplainabilitySpanId,
     parent: &ExplainabilitySpanId,
     model_id: &str,
+    model_config: &ModelConfig,
     prompt_tokens: usize,
     prompt: &str,
 ) {
@@ -23,7 +26,10 @@ pub(super) async fn emit_llm_started(
     let Some(prompt_tokens) = session.usize_to_u64(prompt_tokens) else {
         return;
     };
-    let mut event = LlmRequestStarted::new(model_id.to_owned(), prompt_tokens);
+    let mut event = LlmRequestStarted::new(model_id.to_owned(), prompt_tokens).with_model_identity(
+        model_config.model.clone(),
+        model_config.provider_type().to_owned(),
+    );
     event.prompt = session.content(prompt);
     session
         .emit(
@@ -44,6 +50,7 @@ pub(super) async fn emit_llm_completed(
     span: &ExplainabilitySpanId,
     parent: &ExplainabilitySpanId,
     model_id: &str,
+    model_config: &ModelConfig,
     input_tokens: usize,
     output_tokens: usize,
     started: Instant,
@@ -61,7 +68,11 @@ pub(super) async fn emit_llm_completed(
         return;
     };
     let mut event =
-        LlmRequestCompleted::new(model_id.to_owned(), input_tokens, output_tokens, elapsed_ms);
+        LlmRequestCompleted::new(model_id.to_owned(), input_tokens, output_tokens, elapsed_ms)
+            .with_model_identity(
+                model_config.model.clone(),
+                model_config.provider_type().to_owned(),
+            );
     event.response = session.content(response);
     session
         .emit(

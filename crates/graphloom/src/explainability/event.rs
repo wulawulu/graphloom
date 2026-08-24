@@ -178,6 +178,20 @@ pub struct EmbeddingStarted {
     /// Configured embedding-model identifier.
     #[serde(with = "super::validation::metadata_string")]
     pub model_id: String,
+    /// Effective provider model name, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub model_name: Option<String>,
+    /// Effective provider type, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub provider: Option<String>,
     /// Full embedding input when the content mode permits it.
     #[serde(
         default,
@@ -193,8 +207,18 @@ impl EmbeddingStarted {
     pub fn new(model_id: String) -> Self {
         Self {
             model_id,
+            model_name: None,
+            provider: None,
             input: None,
         }
+    }
+
+    /// Attach the effective provider model identity without changing the configured identifier.
+    #[must_use]
+    pub fn with_model_identity(mut self, model_name: String, provider: String) -> Self {
+        self.model_name = Some(model_name);
+        self.provider = Some(provider);
+        self
     }
 }
 
@@ -205,6 +229,20 @@ pub struct EmbeddingCompleted {
     /// Configured embedding-model identifier.
     #[serde(with = "super::validation::metadata_string")]
     pub model_id: String,
+    /// Effective provider model name, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub model_name: Option<String>,
+    /// Effective provider type, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub provider: Option<String>,
     /// Input token count resolved from provider usage or the configured tokenizer.
     pub prompt_tokens: u64,
     /// Returned embedding dimensions.
@@ -242,9 +280,19 @@ impl EmbeddingCompleted {
     pub fn new(model_id: String, prompt_tokens: u64, dimensions: u32) -> Self {
         Self {
             model_id,
+            model_name: None,
+            provider: None,
             prompt_tokens,
             dimensions,
         }
+    }
+
+    /// Attach the effective provider model identity without changing the configured identifier.
+    #[must_use]
+    pub fn with_model_identity(mut self, model_name: String, provider: String) -> Self {
+        self.model_name = Some(model_name);
+        self.provider = Some(provider);
+        self
     }
 }
 
@@ -1475,6 +1523,20 @@ pub struct LlmRequestStarted {
     /// Configured completion-model identifier.
     #[serde(with = "super::validation::metadata_string")]
     pub model_id: String,
+    /// Effective provider model name, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub model_name: Option<String>,
+    /// Effective provider type, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub provider: Option<String>,
     /// Counted request input tokens.
     pub prompt_tokens: u64,
     /// Rendered prompt content captured for this request stage when the content mode permits it.
@@ -1494,9 +1556,19 @@ impl LlmRequestStarted {
     pub fn new(model_id: String, prompt_tokens: u64) -> Self {
         Self {
             model_id,
+            model_name: None,
+            provider: None,
             prompt_tokens,
             prompt: None,
         }
+    }
+
+    /// Attach the effective provider model identity without changing the configured identifier.
+    #[must_use]
+    pub fn with_model_identity(mut self, model_name: String, provider: String) -> Self {
+        self.model_name = Some(model_name);
+        self.provider = Some(provider);
+        self
     }
 }
 
@@ -1507,6 +1579,20 @@ pub struct LlmRequestCompleted {
     /// Configured completion-model identifier.
     #[serde(with = "super::validation::metadata_string")]
     pub model_id: String,
+    /// Effective provider model name, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub model_name: Option<String>,
+    /// Effective provider type, when known by the runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::validation::optional_metadata_string"
+    )]
+    pub provider: Option<String>,
     /// Counted request input tokens.
     pub input_tokens: u64,
     /// Counted generated tokens.
@@ -1528,11 +1614,21 @@ impl LlmRequestCompleted {
     pub fn new(model_id: String, input_tokens: u64, output_tokens: u64, elapsed_ms: u64) -> Self {
         Self {
             model_id,
+            model_name: None,
+            provider: None,
             input_tokens,
             output_tokens,
             elapsed_ms,
             response: None,
         }
+    }
+
+    /// Attach the effective provider model identity without changing the configured identifier.
+    #[must_use]
+    pub fn with_model_identity(mut self, model_name: String, provider: String) -> Self {
+        self.model_name = Some(model_name);
+        self.provider = Some(provider);
+        self
     }
 }
 
@@ -1705,6 +1801,42 @@ mod tests {
         let unknown = json!({"type": "future_event", "optional_field": true});
         let error = serde_json::from_value::<ExplainabilityEvent>(unknown);
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn test_should_deserialize_historical_model_events_without_effective_identity()
+    -> serde_json::Result<()> {
+        let event: ExplainabilityEvent = serde_json::from_value(json!({
+            "type": "llm_request_started",
+            "model_id": "default_completion_model",
+            "prompt_tokens": 7
+        }))?;
+        let ExplainabilityEvent::LlmRequestStarted(event) = event else {
+            return Err(serde_json::Error::io(std::io::Error::other(
+                "unexpected event variant",
+            )));
+        };
+        assert_eq!(event.model_id, "default_completion_model");
+        assert_eq!(event.model_name, None);
+        assert_eq!(event.provider, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_round_trip_effective_model_identity_without_secrets() -> serde_json::Result<()> {
+        let event = ExplainabilityEvent::LlmRequestCompleted(
+            LlmRequestCompleted::new("default_completion_model".to_owned(), 7, 3, 11)
+                .with_model_identity("deepseek-v4-flash".to_owned(), "deepseek".to_owned()),
+        );
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(value["model_id"], "default_completion_model");
+        assert_eq!(value["model_name"], "deepseek-v4-flash");
+        assert_eq!(value["provider"], "deepseek");
+        assert!(value.get("api_key").is_none());
+        assert!(value.get("api_base").is_none());
+        assert!(value.get("organization").is_none());
+        assert_eq!(serde_json::from_value::<ExplainabilityEvent>(value)?, event);
+        Ok(())
     }
 
     #[test]

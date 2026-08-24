@@ -9,6 +9,7 @@ use std::{
 };
 
 use chrono::Utc;
+use graphloom_llm::ModelConfig;
 
 use super::{
     QueryError, QueryOptions, SearchMethod,
@@ -34,6 +35,24 @@ const LOCAL_QUERY_ERROR_MESSAGE: &str = "Local query execution failed.";
 const GLOBAL_QUERY_ERROR_MESSAGE: &str = "Global query execution failed.";
 const BASIC_QUERY_ERROR_MESSAGE: &str = "Basic query execution failed.";
 const DRIFT_QUERY_ERROR_MESSAGE: &str = "DRIFT query execution failed.";
+
+/// Effective provider identity attached to model-call explainability events.
+#[derive(Debug, Clone)]
+pub(crate) struct ExplainabilityModelIdentity {
+    pub(crate) model_id: String,
+    pub(crate) model_name: String,
+    pub(crate) provider: String,
+}
+
+impl ExplainabilityModelIdentity {
+    pub(crate) fn from_config(model_id: &str, config: &ModelConfig) -> Self {
+        Self {
+            model_id: model_id.to_owned(),
+            model_name: config.model.clone(),
+            provider: config.provider_type().to_owned(),
+        }
+    }
+}
 
 /// Request-scoped configuration for Query Explainability.
 ///

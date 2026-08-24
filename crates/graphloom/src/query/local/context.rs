@@ -48,6 +48,7 @@ pub(crate) struct LocalContextBuilder {
     pub(crate) index: Arc<QueryDataIndex>,
     pub(crate) embedding_model: Arc<dyn EmbeddingModel>,
     pub(crate) embedding_model_id: String,
+    pub(crate) embedding_model_name: String,
     pub(crate) embedding_provider: String,
     pub(crate) vector_store: Arc<dyn VectorStore>,
     pub(crate) vector_schema: VectorIndexSchema,
@@ -719,7 +720,11 @@ impl LocalContextBuilder {
         trace: Option<&QueryTraceSession>,
     ) -> Result<(Vec<f32>, usize)> {
         if let Some(session) = explainability {
-            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone());
+            let mut event = EmbeddingStarted::new(self.embedding_model_id.clone())
+                .with_model_identity(
+                    self.embedding_model_name.clone(),
+                    self.embedding_provider.clone(),
+                );
             event.input = session.content(query);
             session
                 .emit(
@@ -775,11 +780,17 @@ impl LocalContextBuilder {
                         .emit(
                             session.spans().embedding(),
                             Some(session.spans().mapping()),
-                            ExplainabilityEvent::EmbeddingCompleted(EmbeddingCompleted::new(
-                                self.embedding_model_id.clone(),
-                                prompt_tokens,
-                                dimensions,
-                            )),
+                            ExplainabilityEvent::EmbeddingCompleted(
+                                EmbeddingCompleted::new(
+                                    self.embedding_model_id.clone(),
+                                    prompt_tokens,
+                                    dimensions,
+                                )
+                                .with_model_identity(
+                                    self.embedding_model_name.clone(),
+                                    self.embedding_provider.clone(),
+                                ),
+                            ),
                         )
                         .await;
                 }
@@ -2978,6 +2989,7 @@ mod tests {
                     prompt_tokens: 7,
                 }),
                 embedding_model_id: "embedding".to_owned(),
+                embedding_model_name: "bge-m3".to_owned(),
                 embedding_provider: "openai".to_owned(),
                 vector_store: Arc::new(RecordingStore {
                     results,

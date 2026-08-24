@@ -527,7 +527,11 @@ impl DynamicCommunitySelection {
         let Some(input_tokens) = explainability.usize_to_u64(input_tokens) else {
             return;
         };
-        let mut event = LlmRequestStarted::new(self.model_id.clone(), input_tokens);
+        let mut event = LlmRequestStarted::new(self.model_id.clone(), input_tokens)
+            .with_model_identity(
+                self.model_config.model.clone(),
+                self.model_config.provider_type().to_owned(),
+            );
         event.prompt = explainability.content(rendered);
         explainability
             .emit(
@@ -562,6 +566,10 @@ impl DynamicCommunitySelection {
             input_tokens,
             output_tokens,
             elapsed_ms,
+        )
+        .with_model_identity(
+            self.model_config.model.clone(),
+            self.model_config.provider_type().to_owned(),
         );
         event.response = explainability.content(raw);
         explainability
