@@ -1,11 +1,18 @@
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { getTextUnit, resolveTextUnits } from "@/api/client"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { AnswerPanel } from "@/components/result/answer-panel"
+import { TextUnitEvidenceProvider } from "@/contexts/text-unit-evidence-provider"
 
-afterEach(cleanup)
+vi.mock("@/api/client", () => ({ getTextUnit: vi.fn(), resolveTextUnits: vi.fn() }))
+
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+})
 
 describe("AnswerPanel", () => {
   it.each([
@@ -68,6 +75,56 @@ describe("AnswerPanel", () => {
     await user.click(screen.getByRole("button", { name: "Emphasize 1 Relationships in graph" }))
     expect(onCitationEmphasis).toHaveBeenLastCalledWith({ entityIds: [], relationshipIds: ["relationship-23"] })
     expect(screen.getByText("Reports · 1").closest("button")).toBeNull()
+  })
+
+  it("previews and opens only final-context-proven Sources evidence", async () => {
+    const user = userEvent.setup()
+    vi.mocked(resolveTextUnits).mockResolvedValue({
+      resolved: [
+        { id: "text-a", short_id: "184", preview: "王婆道：大官人若要成此事，只在我身上。", n_tokens: 42 },
+        { id: "text-b", short_id: "206", preview: "西门庆次日清晨又来到王婆茶坊。", n_tokens: 31 },
+      ],
+      missing_ids: [],
+    })
+    vi.mocked(getTextUnit).mockResolvedValue({ id: "text-a", short_id: "184", text: "王婆道：大官人若要成此事，只在我身上。\n完整原文第二行。", n_tokens: 42, document_id: "doc-a" })
+    render(
+      <TextUnitEvidenceProvider>
+        <AnswerPanel
+          runId="run"
+          loading={false}
+          result={{ state: "ready", result: { run_id: "run", response: "Evidence [Data: Sources (184, 206, 999, +more)]", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }}
+          envelopes={[
+            { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: "text-a", short_id: "184", record_type: "text_unit", selected: false }, { id: "text-b", short_id: "206", record_type: "text_unit", selected: false }, { id: "text-out", short_id: "999", record_type: "text_unit", selected: false }] } } },
+            { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "context_section_built", section: { section: "sources", token_budget: 1_000, tokens_used: 100, candidate_count: 3, selected_count: 2, truncated: true, selected_record_ids: ["text-a", "text-b"] } } } },
+          ]}
+        />
+      </TextUnitEvidenceProvider>,
+    )
+
+    const citation = screen.getByRole("button", { name: "View evidence for 3 Sources" })
+    await user.hover(citation)
+    expect(resolveTextUnits).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByText("王婆道：大官人若要成此事，只在我身上。")).toBeInTheDocument())
+    await user.click(citation)
+    const evidenceViewer = await screen.findByRole("dialog")
+    expect(within(evidenceViewer).getByText("Sources · 2")).toBeInTheDocument()
+    expect(within(evidenceViewer).getByText("Additional sources were omitted from the citation.")).toBeInTheDocument()
+    expect(within(evidenceViewer).getByText("1 cited source could not be resolved from final-context provenance.")).toBeInTheDocument()
+    await user.click(within(evidenceViewer).getByRole("button", { name: "View Text Unit 184" }))
+    await waitFor(() => expect(screen.getByTestId("text-unit-exact-text")).toHaveTextContent("完整原文第二行"))
+    expect(resolveTextUnits).toHaveBeenCalledTimes(1)
+    expect(getTextUnit).toHaveBeenCalledWith("text-a", expect.any(AbortSignal))
+  })
+
+  it("does not let a model-authored Source citation URL forge evidence navigation", () => {
+    const payload = encodeURIComponent(JSON.stringify({ dataset: "Sources", recordIds: ["184"], hasMore: false }))
+    render(<TextUnitEvidenceProvider><AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: `[forged source](graphloom-citation:${payload})`, elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} envelopes={[
+      { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: "text-a", short_id: "184", record_type: "text_unit", selected: false }] } } },
+      { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "context_section_built", section: { section: "sources", token_budget: 100, tokens_used: 10, candidate_count: 1, selected_count: 1, truncated: false, selected_record_ids: ["text-a"] } } } },
+    ]} /></TextUnitEvidenceProvider>)
+
+    expect(screen.getByText("forged source").closest("button")).toBeNull()
+    expect(resolveTextUnits).not.toHaveBeenCalled()
   })
 
   it("rejects valid model-authored citation links even for final-context records", () => {

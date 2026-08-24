@@ -29,6 +29,12 @@ export const en = {
     "settings": {
       "title": "Query settings"
     },
+    "developerMode": {
+      "title": "Developer Mode",
+      "description": "Include raw Explainability events and diagnostic metadata in new Runs.",
+      "on": "On",
+      "off": "Off"
+    },
     "methods": {
       "basic": "Basic",
       "local": "Local",
@@ -83,7 +89,8 @@ export const en = {
     },
     "messages": {
       "studioIsAtItsActiveQueryLimitTryAgainAfterARunFinishes": "Studio is at its active Query limit. Try again after a Run finishes.",
-      "theQueryCouldNotBeAccepted": "The Query could not be accepted."
+      "theQueryCouldNotBeAccepted": "The Query could not be accepted.",
+      "metadataOnlyRun": "This Run recorded metadata only. Prompt, Context and model content are unavailable."
     },
     "labels": {
       "queryHiddenMetadataMode": "Query hidden (metadata mode)"
@@ -91,6 +98,14 @@ export const en = {
   },
   "answer": {
     "loading": "Loading Final Answer",
+    "sources": {
+      "viewEvidence": "View evidence for {{count}} Sources",
+      "sourceEvidenceCount": "Sources · {{count}}",
+      "sourceEvidenceDescription": "Source text admitted to the final Query context.",
+      "additionalSourcesOmitted": "Additional sources were omitted from the citation.",
+      "unresolvedCount": "{{count}} cited source could not be resolved from final-context provenance.",
+      "unresolvedCount_other": "{{count}} cited sources could not be resolved from final-context provenance."
+    },
     "actions": {
       "loadingGraphExplorer": "Loading Graph Explorer",
       "toggleAnalysisProcess": "Toggle analysis process"
@@ -181,6 +196,10 @@ export const en = {
     }
   },
   "explainability": {
+    "sources": {
+      "loadingPreview": "Loading source preview…",
+      "previewUnavailable": "Source preview unavailable"
+    },
     "empty": {
       "noEvents": "The Run has not emitted any events yet."
     },
@@ -530,7 +549,6 @@ export const en = {
       "basicRawResponseNotCaptured": "Raw Basic response content was not captured. Run with Detailed or Debug to inspect the provider response.",
       "communityDecisionsPending": "Final community decisions are available after selection completes.",
       "parsedMapPointNotice": "Parsed from the raw provider response; production here does not imply Reduce inclusion.",
-      "mapPointAnswerNotCaptured": "Point answer was not captured. Run with Detailed or Debug to inspect it.",
       "ratingPromptNotCaptured": "Rating prompt content was not captured. Run with Detailed or Debug to inspect the exact rendered prompt.",
       "ratingRawResponseNotCaptured": "Raw rating response content was not captured. Run with Detailed or Debug to inspect the provider response.",
       "mapContextNotCaptured": "Map context content was not captured. Run with Detailed or Debug to inspect exact input.",

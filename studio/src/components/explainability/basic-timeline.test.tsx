@@ -1,12 +1,19 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { resolveTextUnits } from "@/api/client"
 import type { ExplainabilityCandidate, ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
+import { TextUnitEvidenceProvider } from "@/contexts/text-unit-evidence-provider"
 import { setStudioLocale } from "@/i18n"
 
-afterEach(cleanup)
+vi.mock("@/api/client", () => ({ resolveTextUnits: vi.fn() }))
+
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+})
 
 function envelope(sequence: number, spanId: string, event: ExplainabilityEventPayload, parentSpanId?: string): ExplainabilityEnvelope {
   return { schema_version: 1, sequence, record: { run_id: "basic-run", timestamp: new Date(sequence * 10).toISOString(), span_id: spanId, ...(parentSpanId === undefined ? {} : { parent_span_id: parentSpanId }), event } }
@@ -36,6 +43,10 @@ function renderBasic(events = basicEvents()): ReturnType<typeof render> {
   return render(<Timeline runId="basic-run" envelopes={events} streamStatus="closed" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)
 }
 
+function renderBasicWithEvidence(events = basicEvents()): ReturnType<typeof render> {
+  return render(<TextUnitEvidenceProvider><Timeline runId="basic-run" envelopes={events} streamStatus="closed" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} /></TextUnitEvidenceProvider>)
+}
+
 describe("Basic Timeline", () => {
   it("uses short IDs in retrieval and context while keeping stable UUIDs out of normal presentation", () => {
     const stableId = "71d89c81-1234-5678-90ab-12345678e942"
@@ -52,6 +63,23 @@ describe("Basic Timeline", () => {
     expect(screen.getAllByText("ANN rank 1")).toHaveLength(2)
   })
 
+  it("enriches visible retrieval and context candidates through one shared preview batch", async () => {
+    vi.mocked(resolveTextUnits).mockResolvedValue({
+      resolved: [
+        { id: "A", short_id: "a", preview: "王婆道：大官人若要成此事，只在我身上。", n_tokens: 42 },
+        { id: "B", short_id: "b", preview: "西门庆次日清晨又来到王婆茶坊。", n_tokens: 31 },
+        { id: "C", short_id: "c", preview: "王婆见他脚步儿勤。", n_tokens: 18 },
+      ],
+      missing_ids: [],
+    })
+    renderBasicWithEvidence()
+
+    await waitFor(() => expect(screen.getAllByText("王婆道：大官人若要成此事，只在我身上。")).toHaveLength(2))
+    expect(screen.getAllByText("ANN rank 2")).toHaveLength(2)
+    expect(resolveTextUnits).toHaveBeenCalledTimes(1)
+    expect(resolveTextUnits).toHaveBeenCalledWith(["C", "A", "B"], expect.any(AbortSignal))
+  })
+
   it("uses a compact stable-ID fallback when a text unit has no short ID", () => {
     const stableId = "71d89c81-1234-5678-90ab-12345678e942"
     renderBasic([
@@ -60,6 +88,7 @@ describe("Basic Timeline", () => {
     ])
     expect(screen.getByText("Text Unit")).toBeInTheDocument()
     expect(screen.getByText("ID: 71d89c81…5678e942")).toHaveClass("break-all")
+    expect(screen.getByText("Source preview unavailable")).toBeInTheDocument()
     expect(screen.queryByText(stableId)).not.toBeInTheDocument()
   })
 
@@ -120,15 +149,12 @@ describe("Basic Timeline", () => {
     expect(screen.queryByText("详细")).not.toBeInTheDocument()
   })
 
-  it("shows metadata content as not captured rather than empty", async () => {
-    const user = userEvent.setup()
-    renderBasic(basicEvents(false))
-    await user.click(screen.getByRole("button", { name: "View Basic Context" }))
-    expect(screen.getByText(/Basic context content was not captured/)).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "View Basic Prompt" }))
-    expect(screen.getByText(/Basic prompt content was not captured/)).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "View Raw Basic Response" }))
-    expect(screen.getByText(/Raw Basic response content was not captured/)).toBeInTheDocument()
+  it("hides empty content actions and shows one metadata-only notice", () => {
+    renderBasic([envelope(0, "run", { type: "run_started", content_mode: "metadata" }), ...basicEvents(false)])
+    expect(screen.queryByRole("button", { name: "View Basic Context" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "View Basic Prompt" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "View Raw Basic Response" })).not.toBeInTheDocument()
+    expect(screen.getAllByText("This Run recorded metadata only. Prompt, Context and model content are unavailable.")).toHaveLength(1)
   })
 
   it("shows an intentional empty-query skip instead of zero ANN results", () => {

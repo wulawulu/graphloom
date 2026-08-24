@@ -1,4 +1,11 @@
-use std::{error::Error, path::PathBuf, sync::Arc};
+use std::{
+    error::Error,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -72,6 +79,27 @@ impl GraphDataSource for FakeGraphDataSource {
         .into_iter()
         .filter(|text_unit| requested.contains(text_unit.id.as_str()))
         .collect())
+    }
+}
+
+#[derive(Debug)]
+struct CountingTextUnitDataSource {
+    inner: FakeGraphDataSource,
+    load_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl GraphDataSource for CountingTextUnitDataSource {
+    async fn load_snapshot(&self) -> Result<GraphDataSnapshot, GraphDataSourceError> {
+        self.inner.load_snapshot().await
+    }
+
+    async fn load_text_units(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<GraphTextUnitDetail>, GraphDataSourceError> {
+        self.load_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.load_text_units(ids).await
     }
 }
 
@@ -665,6 +693,84 @@ async fn test_should_return_exact_text_unit_detail_by_stable_id() -> TestResult 
         .oneshot(Request::get("/api/graph/text-units/missing-text").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_resolve_text_unit_refs_in_first_seen_order_with_explicit_missing_ids()
+-> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+
+    let (status, response) = post_json(
+        &router,
+        "/api/graph/text-units/resolve",
+        json!({"ids": ["text-2", "text-1", "text-2", "missing", "text-1"]}),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["resolved"][0]["id"], "text-2");
+    assert_eq!(response["resolved"][1]["id"], "text-1");
+    assert_eq!(response["resolved"][1]["short_id"], "184");
+    assert_eq!(
+        response["resolved"][1]["preview"],
+        "西门庆因蔡京生辰而准备重礼。 Exact second line."
+    );
+    assert_eq!(response["missing_ids"], json!(["missing"]));
+    assert!(response["resolved"][1].get("text").is_none());
+    assert!(response["resolved"][1].get("document_id").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_resolve_a_text_unit_batch_with_one_data_source_load() -> TestResult {
+    let load_count = Arc::new(AtomicUsize::new(0));
+    let source = CountingTextUnitDataSource {
+        inner: FakeGraphDataSource {
+            snapshot: Some(snapshot().await?),
+        },
+        load_count: Arc::clone(&load_count),
+    };
+    let (_, router) = router(Arc::new(source));
+
+    let (status, _) = post_json(
+        &router,
+        "/api/graph/text-units/resolve",
+        json!({"ids": ["text-2", "text-1", "missing"]}),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(load_count.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_invalid_text_unit_resolve_batches() -> TestResult {
+    let (_, router) = router(Arc::new(FakeGraphDataSource {
+        snapshot: Some(snapshot().await?),
+    }));
+    for ids in [
+        Vec::<String>::new(),
+        vec!["text".to_owned(); 101],
+        vec![" ".to_owned()],
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/graph/text-units/resolve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({"ids": ids}))?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+            b"invalid graph request"
+        );
+    }
     Ok(())
 }
 

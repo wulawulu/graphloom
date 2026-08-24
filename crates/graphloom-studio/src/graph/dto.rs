@@ -424,6 +424,26 @@ pub struct GraphTextUnitRef {
     pub n_tokens: Option<i64>,
 }
 
+/// Result of resolving stable text-unit identifiers to lightweight evidence.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GraphTextUnitResolveResponse {
+    /// Uniquely resolved references in request first-seen order.
+    pub resolved: Vec<GraphTextUnitRef>,
+    /// Requested identifiers that did not resolve uniquely, in first-seen order.
+    pub missing_ids: Vec<String>,
+}
+
+impl fmt::Debug for GraphTextUnitResolveResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GraphTextUnitResolveResponse")
+            .field("resolved", &self.resolved.len())
+            .field("missing_ids", &self.missing_ids.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for GraphTextUnitRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("GraphTextUnitRef { .. }")

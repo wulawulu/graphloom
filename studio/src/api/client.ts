@@ -14,6 +14,7 @@ import type {
   GraphSummary,
   GraphSubgraphRequest,
   GraphTextUnitDetail,
+  GraphTextUnitResolveResponse,
   QueryResultState,
   RelationshipListParameters,
   RunHistoryCursor,
@@ -160,6 +161,15 @@ export function getRelationship(id: string, signal?: AbortSignal): Promise<Graph
 
 export function getTextUnit(id: string, signal?: AbortSignal): Promise<GraphTextUnitDetail> {
   return requestJson<GraphTextUnitDetail>(`/api/graph/text-units/${encodeURIComponent(id)}`, { signal })
+}
+
+export function resolveTextUnits(ids: string[], signal?: AbortSignal): Promise<GraphTextUnitResolveResponse> {
+  return requestJson<GraphTextUnitResolveResponse>("/api/graph/text-units/resolve", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+    headers: { "Content-Type": "application/json" },
+    signal,
+  })
 }
 
 export function listCommunities(parameters: CommunityListParameters, signal?: AbortSignal): Promise<GraphListResponse<GraphCommunity>> {

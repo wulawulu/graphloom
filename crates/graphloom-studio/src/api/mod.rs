@@ -19,7 +19,7 @@ use self::{
     graph::{
         get_community, get_community_report, get_entity, get_overview, get_relationship,
         get_subgraph, get_summary, get_text_unit, list_communities, list_entities,
-        list_relationships,
+        list_relationships, resolve_text_units,
     },
     query::{GraphLoomQueryRunner, QueryRunner, start_query},
     query_result::{QueryResultRegistry, get_query_result},
@@ -242,6 +242,10 @@ impl StudioApiService {
             .route(
                 "/api/graph/relationships/{relationship_id}",
                 get(get_relationship),
+            )
+            .route(
+                "/api/graph/text-units/resolve",
+                axum::routing::post(resolve_text_units),
             )
             .route("/api/graph/text-units/{text_unit_id}", get(get_text_unit))
             .route("/api/graph/communities", get(list_communities))

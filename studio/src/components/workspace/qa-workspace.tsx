@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityEnvelope, ExplainabilityRun } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
+import { TextUnitEvidenceProvider } from "@/contexts/text-unit-evidence-provider"
 import { RunList } from "@/components/runs/run-list"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -71,18 +72,20 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
             </section>
             <section aria-label={t("answer.labels.graphLoomAnswer")}>
               <p className="mb-2 text-[11px] font-semibold tracking-wide text-primary uppercase">GraphLoom</p>
-              <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
-                <CollapsibleTrigger asChild>
-                  <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label={t("answer.actions.toggleAnalysisProcess")}>
-                    <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus)}</span>
-                    <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
-                  </Button>
-                </CollapsibleTrigger>
-                <CollapsibleContent className="pb-2 pt-3">
-                  <Timeline embedded runId={props.runId} envelopes={props.envelopes} streamStatus={props.streamStatus} onFocusGraph={props.onFocusGraph} onInspectCandidate={props.onInspectCandidate} />
-                </CollapsibleContent>
-              </Collapsible>
-              {props.answer}
+              <TextUnitEvidenceProvider key={props.runId ?? "no-run"}>
+                <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label={t("answer.actions.toggleAnalysisProcess")}>
+                      <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus)}</span>
+                      <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="pb-2 pt-3">
+                    <Timeline embedded runId={props.runId} envelopes={props.envelopes} streamStatus={props.streamStatus} onFocusGraph={props.onFocusGraph} onInspectCandidate={props.onInspectCandidate} />
+                  </CollapsibleContent>
+                </Collapsible>
+                {props.answer}
+              </TextUnitEvidenceProvider>
             </section>
           </div>
         )}

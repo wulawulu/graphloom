@@ -16,10 +16,18 @@ export interface CitationGraphIndex {
   relationships: Map<string, string>
 }
 
+export interface CitationEvidenceIndex extends CitationGraphIndex {
+  sources: Map<string, string>
+}
+
 export interface GraphEmphasis {
   entityIds: string[]
   relationshipIds: string[]
 }
+
+export type CitationTarget =
+  | { kind: "graph"; entityIds: string[]; relationshipIds: string[] }
+  | { kind: "sources"; textUnitIds: string[]; unresolvedCount: number }
 
 export type GraphEmphasisIntent = GraphEmphasis & { revision: number }
 
@@ -58,25 +66,35 @@ function isGroupSeparator(value: string): boolean {
 }
 
 export function buildCitationGraphIndex(envelopes: readonly ExplainabilityEnvelope[]): CitationGraphIndex {
+  const evidence = buildCitationEvidenceIndex(envelopes)
+  return { entities: evidence.entities, relationships: evidence.relationships }
+}
+
+export function buildCitationEvidenceIndex(envelopes: readonly ExplainabilityEnvelope[]): CitationEvidenceIndex {
   const entityIdentities = new Map<string, string | null>()
   const relationshipIdentities = new Map<string, string | null>()
+  const sourceIdentities = new Map<string, string | null>()
   const finalEntityIds = new Set<string>()
   const finalRelationshipIds = new Set<string>()
+  const finalSourceIds = new Set<string>()
 
   for (const envelope of envelopes) {
     const event = envelope.record.event
     if (event.type === "entities_selected") addCandidates(entityIdentities, event.entities)
     if (event.type === "relationships_selected") addCandidates(relationshipIdentities, event.relationships)
-    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds)
+    if ((event.type === "candidates_retrieved" || event.type === "candidates_filtered") && event.record_type === "text_unit") addCandidateIdentities(sourceIdentities, event.candidates)
+    if (event.type === "text_units_selected") addCandidateIdentities(sourceIdentities, event.text_units)
+    if (event.type === "context_section_built") addContextMembership(event.section, finalEntityIds, finalRelationshipIds, finalSourceIds)
   }
 
   return {
     entities: uniqueMappings(entityIdentities, finalEntityIds),
     relationships: uniqueMappings(relationshipIdentities, finalRelationshipIds),
+    sources: uniqueMappings(sourceIdentities, finalSourceIds),
   }
 }
 
-function addContextMembership(value: unknown, entityIds: Set<string>, relationshipIds: Set<string>): void {
+function addContextMembership(value: unknown, entityIds: Set<string>, relationshipIds: Set<string>, sourceIds: Set<string>): void {
   if (typeof value !== "object" || value === null) return
   const section = value as { section?: unknown; selected_record_ids?: unknown }
   if (!Array.isArray(section.selected_record_ids) || !section.selected_record_ids.every((id) => typeof id === "string")) return
@@ -84,9 +102,21 @@ function addContextMembership(value: unknown, entityIds: Set<string>, relationsh
     ? entityIds
     : section.section === "relationships"
       ? relationshipIds
-      : null
+      : section.section === "sources"
+        ? sourceIds
+        : null
   if (target === null) return
   section.selected_record_ids.forEach((id) => target.add(id))
+}
+
+function addCandidateIdentities(target: Map<string, string | null>, value: unknown): void {
+  if (!Array.isArray(value)) return
+  for (const item of value) {
+    if (!isCandidateIdentity(item) || item.short_id === undefined) continue
+    const current = target.get(item.short_id)
+    if (current === undefined) target.set(item.short_id, item.id)
+    else if (current !== item.id) target.set(item.short_id, null)
+  }
 }
 
 function addCandidates(target: Map<string, string | null>, value: unknown): void {
@@ -107,6 +137,13 @@ function isSelectedCandidate(value: unknown): value is ExplainabilityCandidate &
     && (candidate.short_id === undefined || typeof candidate.short_id === "string")
 }
 
+function isCandidateIdentity(value: unknown): value is ExplainabilityCandidate & { short_id?: string } {
+  if (typeof value !== "object" || value === null) return false
+  const candidate = value as Partial<ExplainabilityCandidate>
+  return typeof candidate.id === "string"
+    && (candidate.short_id === undefined || typeof candidate.short_id === "string")
+}
+
 function uniqueMappings(values: Map<string, string | null>, finalContextIds: ReadonlySet<string>): Map<string, string> {
   return new Map([...values].flatMap(([shortId, stableId]) => stableId === null || !finalContextIds.has(stableId) ? [] : [[shortId, stableId]]))
 }
@@ -118,16 +155,40 @@ export function resolveCitationGroup(group: CitationGroup, index: CitationGraphI
   return entityIds.length === 0 && relationshipIds.length === 0 ? null : { entityIds, relationshipIds }
 }
 
+export function resolveCitationTarget(group: CitationGroup, index: CitationEvidenceIndex): CitationTarget | null {
+  const dataset = group.dataset.toLowerCase()
+  if (dataset === "sources") {
+    const resolved = resolveRecordIdsWithMissing(group.recordIds, index.sources)
+    return resolved.ids.length === 0
+      ? null
+      : { kind: "sources", textUnitIds: resolved.ids, unresolvedCount: resolved.unresolvedCount }
+  }
+  const graph = resolveCitationGroup(group, index)
+  return graph === null ? null : { kind: "graph", ...graph }
+}
+
 function resolveRecordIds(recordIds: readonly string[], mappings: ReadonlyMap<string, string>): string[] {
+  return resolveRecordIdsWithMissing(recordIds, mappings).ids
+}
+
+function resolveRecordIdsWithMissing(recordIds: readonly string[], mappings: ReadonlyMap<string, string>): { ids: string[]; unresolvedCount: number } {
   const resolved: string[] = []
-  const seen = new Set<string>()
+  const seenStableIds = new Set<string>()
+  const seenRecordIds = new Set<string>()
+  let unresolvedCount = 0
   for (const recordId of recordIds) {
+    if (seenRecordIds.has(recordId)) continue
+    seenRecordIds.add(recordId)
     const stableId = mappings.get(recordId)
-    if (stableId === undefined || seen.has(stableId)) continue
-    seen.add(stableId)
+    if (stableId === undefined) {
+      unresolvedCount += 1
+      continue
+    }
+    if (seenStableIds.has(stableId)) continue
+    seenStableIds.add(stableId)
     resolved.push(stableId)
   }
-  return resolved
+  return { ids: resolved, unresolvedCount }
 }
 
 interface MarkdownNode {

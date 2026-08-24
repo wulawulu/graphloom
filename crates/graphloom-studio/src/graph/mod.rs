@@ -15,7 +15,7 @@ pub use dto::{
     GraphCommunity, GraphCommunityRef, GraphCommunityReportDetail, GraphCommunityReportSummary,
     GraphEntity, GraphEntityDetail, GraphEntityRef, GraphProjection, GraphProjectionEntity,
     GraphProjectionRelationship, GraphRelationship, GraphRelationshipDetail, GraphSummary,
-    GraphTextUnitDetail, GraphTextUnitRef,
+    GraphTextUnitDetail, GraphTextUnitRef, GraphTextUnitResolveResponse,
 };
 pub use parquet::ParquetGraphDataSource;
 pub(crate) use projection::{GraphProjectionError, overview, subgraph};

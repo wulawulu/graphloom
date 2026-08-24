@@ -1,6 +1,10 @@
 //! Read-only Graph Explorer HTTP handlers.
 
-use std::{cmp::Ordering, collections::BTreeSet, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     Json,
@@ -16,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use super::StudioApiState;
 use crate::graph::{
     GraphCommunity, GraphDataSnapshot, GraphEntity, GraphProjectionError, GraphReferenceIndex,
-    GraphRelationship, GraphSummary, GraphTextUnitIndex, overview, subgraph as project_subgraph,
+    GraphRelationship, GraphSummary, GraphTextUnitIndex, GraphTextUnitResolveResponse, overview,
+    subgraph as project_subgraph,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -29,6 +34,7 @@ const MAX_PROJECTION_ENTITY_LIMIT: usize = 200;
 const MAX_PROJECTION_RELATIONSHIP_LIMIT: usize = 400;
 const MAX_ENTITY_SEEDS: usize = 200;
 const MAX_RELATIONSHIP_SEEDS: usize = 400;
+const MAX_TEXT_UNIT_RESOLVE_IDS: usize = 100;
 
 const INVALID_GRAPH_REQUEST_BODY: &str = "invalid graph request";
 const GRAPH_ITEM_NOT_FOUND_BODY: &str = "graph item not found";
@@ -127,6 +133,12 @@ pub(super) struct CommunityListQuery {
 struct GraphListResponse<T> {
     items: Vec<T>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TextUnitResolveRequest {
+    ids: Vec<String>,
 }
 
 pub(super) async fn get_summary(State(state): State<Arc<StudioApiState>>) -> Response {
@@ -343,6 +355,44 @@ pub(super) async fn get_text_unit(
             || fixed_error(StatusCode::NOT_FOUND, GRAPH_ITEM_NOT_FOUND_BODY),
             |text_unit| Json(text_unit).into_response(),
         )
+}
+
+pub(super) async fn resolve_text_units(
+    State(state): State<Arc<StudioApiState>>,
+    request: Result<Json<TextUnitResolveRequest>, JsonRejection>,
+) -> Response {
+    let Ok(Json(request)) = request else {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    };
+    if request.ids.is_empty()
+        || request.ids.len() > MAX_TEXT_UNIT_RESOLVE_IDS
+        || request.ids.iter().any(|id| !valid_id(id))
+    {
+        return fixed_error(StatusCode::BAD_REQUEST, INVALID_GRAPH_REQUEST_BODY);
+    }
+    let mut seen = HashSet::with_capacity(request.ids.len());
+    let ids = request
+        .ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect::<Vec<_>>();
+    let Ok(text_units) = state.graph_data_source.load_text_units(&ids).await else {
+        return fixed_error(StatusCode::SERVICE_UNAVAILABLE, GRAPH_UNAVAILABLE_BODY);
+    };
+    let resolved = GraphTextUnitIndex::new(&text_units).references(&ids);
+    let resolved_ids = resolved
+        .iter()
+        .map(|text_unit| text_unit.id.as_str())
+        .collect::<HashSet<_>>();
+    let missing_ids = ids
+        .into_iter()
+        .filter(|id| !resolved_ids.contains(id.as_str()))
+        .collect();
+    Json(GraphTextUnitResolveResponse {
+        resolved,
+        missing_ids,
+    })
+    .into_response()
 }
 
 pub(super) async fn list_communities(

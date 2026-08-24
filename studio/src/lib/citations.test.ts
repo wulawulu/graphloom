@@ -2,19 +2,21 @@ import { describe, expect, it } from "vitest"
 
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import {
+  buildCitationEvidenceIndex,
   buildCitationGraphIndex,
   CITATION_PROVENANCE_ATTRIBUTE,
   CITATION_PROVENANCE_VALUE,
   parseDataCitation,
   remarkDataCitations,
   resolveCitationGroup,
+  resolveCitationTarget,
 } from "@/lib/citations"
 
 function envelope(sequence: number, event: ExplainabilityEventPayload): ExplainabilityEnvelope {
   return { schema_version: 1, sequence, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event } }
 }
 
-function contextSection(sequence: number, section: "entities" | "relationships", selectedRecordIds: string[]): ExplainabilityEnvelope {
+function contextSection(sequence: number, section: "entities" | "relationships" | "sources", selectedRecordIds: string[]): ExplainabilityEnvelope {
   return envelope(sequence, {
     type: "context_section_built",
     section: {
@@ -137,5 +139,41 @@ describe("GraphRAG data citations", () => {
 
     expect(resolveCitationGroup({ dataset: "Entities", recordIds: ["150"], hasMore: false }, index)).toBeNull()
     expect(resolveCitationGroup({ dataset: "Reports", recordIds: ["1"], hasMore: false }, index)).toBeNull()
+  })
+
+  it("resolves Sources through unique candidate identity and final Sources context provenance", () => {
+    const index = buildCitationEvidenceIndex([
+      envelope(1, { type: "candidates_retrieved", record_type: "text_unit", candidates: [
+        { id: "text-a", short_id: "184", record_type: "text_unit", selected: false },
+        { id: "text-b", short_id: "206", record_type: "text_unit", selected: false },
+      ] }),
+      contextSection(2, "sources", ["text-a", "text-b"]),
+    ])
+
+    expect(resolveCitationTarget({ dataset: "Sources", recordIds: ["184", "206"], hasMore: false }, index)).toEqual({ kind: "sources", textUnitIds: ["text-a", "text-b"], unresolvedCount: 0 })
+  })
+
+  it("excludes Sources outside final context and reports unknown short IDs", () => {
+    const index = buildCitationEvidenceIndex([
+      envelope(1, { type: "candidates_filtered", record_type: "text_unit", candidates: [
+        { id: "text-a", short_id: "184", record_type: "text_unit", selected: true },
+        { id: "text-b", short_id: "206", record_type: "text_unit", selected: false },
+      ] }),
+      contextSection(2, "sources", ["text-a"]),
+    ])
+
+    expect(resolveCitationTarget({ dataset: "sources", recordIds: ["184", "206", "999"], hasMore: true }, index)).toEqual({ kind: "sources", textUnitIds: ["text-a"], unresolvedCount: 2 })
+  })
+
+  it("rejects ambiguous Source short IDs rather than choosing a stable ID", () => {
+    const index = buildCitationEvidenceIndex([
+      envelope(1, { type: "candidates_retrieved", record_type: "text_unit", candidates: [
+        { id: "text-a", short_id: "184", record_type: "text_unit", selected: false },
+        { id: "text-b", short_id: "184", record_type: "text_unit", selected: false },
+      ] }),
+      contextSection(2, "sources", ["text-a", "text-b"]),
+    ])
+
+    expect(resolveCitationTarget({ dataset: "Sources", recordIds: ["184"], hasMore: false }, index)).toBeNull()
   })
 })

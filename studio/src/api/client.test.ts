@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { getGraphOverview, getGraphSubgraph, getGraphSummary, getQueryResult, getTextUnit, listRuns, startQuery } from "@/api/client"
+import { getGraphOverview, getGraphSubgraph, getGraphSummary, getQueryResult, getTextUnit, listRuns, resolveTextUnits, startQuery } from "@/api/client"
 
 function response(status: number, body: unknown): Response {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -71,5 +71,17 @@ describe("Studio API client", () => {
 
     await expect(getTextUnit("text/unit")).resolves.toMatchObject({ text: "Exact" })
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/graph/text-units/text%2Funit")
+  })
+
+  it("resolves lightweight text-unit evidence as one stable-ID batch", async () => {
+    const payload = { resolved: [{ id: "text-2", short_id: "206", preview: "Evidence", n_tokens: 8 }], missing_ids: ["missing"] }
+    const fetchMock = vi.fn().mockResolvedValue(response(200, payload))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(resolveTextUnits(["text-2", "missing"])).resolves.toEqual(payload)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/graph/text-units/resolve")
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(String(init.body))).toEqual({ ids: ["text-2", "missing"] })
   })
 })

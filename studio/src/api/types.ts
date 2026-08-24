@@ -554,6 +554,11 @@ export interface GraphTextUnitRef {
   n_tokens: number | null
 }
 
+export interface GraphTextUnitResolveResponse {
+  resolved: GraphTextUnitRef[]
+  missing_ids: string[]
+}
+
 export interface GraphTextUnitDetail {
   id: string
   short_id: string

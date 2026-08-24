@@ -31,6 +31,12 @@ export const zhCN = {
     "settings": {
       "title": "查询设置"
     },
+    "developerMode": {
+      "title": "开发者模式",
+      "description": "为新运行记录原始 Explainability 事件和诊断元数据。",
+      "on": "开启",
+      "off": "关闭"
+    },
     "methods": {
       "basic": "基础检索",
       "local": "局部搜索",
@@ -85,7 +91,8 @@ export const zhCN = {
     },
     "messages": {
       "studioIsAtItsActiveQueryLimitTryAgainAfterARunFinishes": "Studio 已达到并发查询上限，请在一个运行结束后重试。",
-      "theQueryCouldNotBeAccepted": "无法接受此查询。"
+      "theQueryCouldNotBeAccepted": "无法接受此查询。",
+      "metadataOnlyRun": "此运行仅记录了元数据，未保存 Prompt、Context 和模型内容。"
     },
     "labels": {
       "queryHiddenMetadataMode": "查询内容已隐藏（元数据模式）"
@@ -93,6 +100,14 @@ export const zhCN = {
   },
   "answer": {
     "loading": "正在加载最终答案",
+    "sources": {
+      "viewEvidence": "查看 {{count}} 条来源证据",
+      "sourceEvidenceCount": "来源 · {{count}}",
+      "sourceEvidenceDescription": "已进入最终查询 Context 的来源原文。",
+      "additionalSourcesOmitted": "Citation 省略了其他来源。",
+      "unresolvedCount": "{{count}} 条引用来源无法通过最终 Context provenance 解析。",
+      "unresolvedCount_other": "{{count}} 条引用来源无法通过最终 Context provenance 解析。"
+    },
     "actions": {
       "loadingGraphExplorer": "正在加载图谱浏览器",
       "toggleAnalysisProcess": "展开或折叠分析过程"
@@ -183,6 +198,10 @@ export const zhCN = {
     }
   },
   "explainability": {
+    "sources": {
+      "loadingPreview": "正在加载来源预览…",
+      "previewUnavailable": "来源预览不可用"
+    },
     "empty": {
       "noEvents": "此运行尚未产生事件。"
     },
@@ -532,7 +551,6 @@ export const zhCN = {
       "basicRawResponseNotCaptured": "未记录基础检索原始响应。请使用详细或调试模式运行以查看模型服务响应。",
       "communityDecisionsPending": "社区选择完成后将显示最终决策。",
       "parsedMapPointNotice": "从模型服务原始响应解析；在此生成不代表已纳入 Reduce。",
-      "mapPointAnswerNotCaptured": "未记录要点答案。请使用详细或调试模式运行以查看。",
       "ratingPromptNotCaptured": "未记录评估 Prompt。请使用详细或调试模式运行以查看原始 Prompt。",
       "ratingRawResponseNotCaptured": "未记录评估原始响应。请使用详细或调试模式运行以查看模型服务响应。",
       "mapContextNotCaptured": "未记录 Map Context。请使用详细或调试模式运行以查看原始输入。",
