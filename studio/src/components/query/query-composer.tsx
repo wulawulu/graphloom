@@ -10,16 +10,19 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  explainabilityDetails,
+  MAX_RESPONSE_TYPE_BYTES,
+  responseStyleOptions,
+  responseStyles,
+  responseTypeForStyle,
+  type ResponseStyle,
+  utf8ByteLength,
+} from "@/components/query/query-settings"
 
 interface QueryComposerProps {
   onAccepted: (response: StartQueryResponse, submittedQuery: string) => void
   resetRevision: number
-}
-
-const modeHelp: Record<ContentMode, string> = {
-  metadata: "Hides full query, context, and prompt content from explainability.",
-  content: "Includes permitted query, context, and model content.",
-  debug: "Uses the most verbose supported explainability mode.",
 }
 
 type StudioQueryMode = "basic" | "local" | "global" | "dynamic-global" | "drift"
@@ -44,14 +47,16 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
   const [query, setQuery] = useState("")
   const [queryMode, setQueryMode] = useState<StudioQueryMode>("local")
   const [contentMode, setContentMode] = useState<ContentMode>("metadata")
-  const [responseType, setResponseType] = useState("Multiple Paragraphs")
+  const [responseStyle, setResponseStyle] = useState<ResponseStyle>("standard")
+  const [customResponse, setCustomResponse] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => setQuery(""), [resetRevision])
 
   const submit = async (event: SyntheticEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
-    if (query.length === 0 || submitting) return
+    const responseType = responseTypeForStyle(responseStyle, customResponse)
+    if (query.length === 0 || submitting || responseType.length === 0 || utf8ByteLength(responseType) > MAX_RESPONSE_TYPE_BYTES) return
     setSubmitting(true)
     try {
       const mode = queryModes[queryMode]
@@ -75,6 +80,12 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
   }
 
   const mode = queryModes[queryMode]
+  const responseType = responseTypeForStyle(responseStyle, customResponse)
+  const customResponseError = responseStyle === "custom" && responseType.length === 0
+    ? "Custom response instructions are required."
+    : responseStyle === "custom" && utf8ByteLength(responseType) > MAX_RESPONSE_TYPE_BYTES
+      ? `Custom response instructions must be ${MAX_RESPONSE_TYPE_BYTES} bytes or fewer.`
+      : null
 
   return (
     <form className="rounded-lg border bg-card shadow-sm" onSubmit={(event) => void submit(event)}>
@@ -92,16 +103,34 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
       <Collapsible>
         <CollapsibleContent className="space-y-3 border-t px-3 py-3">
           <div className="space-y-1.5">
-            <label htmlFor="content-mode" className="text-xs font-medium text-muted-foreground">Explainability content</label>
+            <label htmlFor="content-mode" className="text-xs font-medium text-muted-foreground">Explainability detail</label>
             <Select value={contentMode} onValueChange={(value) => setContentMode(value as ContentMode)}>
               <SelectTrigger id="content-mode"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="metadata">Metadata</SelectItem><SelectItem value="content">Content</SelectItem><SelectItem value="debug">Debug</SelectItem></SelectContent>
+              <SelectContent>{Object.entries(explainabilityDetails).map(([value, metadata]) => <SelectItem key={value} value={value}>{metadata.label}</SelectItem>)}</SelectContent>
             </Select>
-            <p className="text-[11px] leading-4 text-muted-foreground">{modeHelp[contentMode]}</p>
+            <p className="text-[11px] leading-4 text-muted-foreground">{explainabilityDetails[contentMode].description}</p>
           </div>
           <div className="space-y-1.5">
-            <label htmlFor="response-type" className="text-xs font-medium text-muted-foreground">Response type</label>
-            <Input id="response-type" value={responseType} maxLength={256} onChange={(event) => setResponseType(event.target.value)} />
+            <label htmlFor="response-style" className="text-xs font-medium text-muted-foreground">Response style</label>
+            <Select value={responseStyle} onValueChange={(value) => setResponseStyle(value as ResponseStyle)}>
+              <SelectTrigger id="response-style"><SelectValue /></SelectTrigger>
+              <SelectContent>{responseStyleOptions.map(([value, metadata]) => <SelectItem key={value} value={value}>{metadata.label}</SelectItem>)}</SelectContent>
+            </Select>
+            <p className="text-[11px] leading-4 text-muted-foreground">{responseStyles[responseStyle].description}</p>
+            {responseStyle === "custom" ? (
+              <div className="space-y-1.5 pt-1">
+                <label htmlFor="custom-response" className="text-xs font-medium text-muted-foreground">Custom response instructions</label>
+                <Input
+                  id="custom-response"
+                  value={customResponse}
+                  aria-invalid={customResponseError !== null}
+                  aria-describedby={customResponseError === null ? undefined : "custom-response-error"}
+                  placeholder="For example: Answer in five bullet points."
+                  onChange={(event) => setCustomResponse(event.target.value)}
+                />
+                {customResponseError === null ? null : <p id="custom-response-error" className="text-[11px] leading-4 text-destructive">{customResponseError}</p>}
+              </div>
+            ) : null}
           </div>
         </CollapsibleContent>
         <div className="flex items-center justify-between border-t px-2 py-1.5">
@@ -116,11 +145,11 @@ export function QueryComposer({ onAccepted, resetRevision }: QueryComposerProps)
                 ))}
               </SelectContent>
             </Select>
-            <Badge variant="outline">{contentMode[0]?.toUpperCase()}{contentMode.slice(1)}</Badge>
+            <Badge variant="outline">{explainabilityDetails[contentMode].label}</Badge>
           </div>
           <div className="flex items-center gap-1">
             <CollapsibleTrigger asChild><Button type="button" variant="ghost" size="icon" aria-label="Query settings"><SlidersHorizontal /></Button></CollapsibleTrigger>
-            <Button size="icon" disabled={query.length === 0 || submitting} type="submit" aria-label={submitting ? `Submitting ${mode.label} Query` : `Run ${mode.label} Query`}>{submitting ? <LoaderCircle className="animate-spin" /> : <Play />}</Button>
+            <Button size="icon" disabled={query.length === 0 || submitting || customResponseError !== null} type="submit" aria-label={submitting ? `Submitting ${mode.label} Query` : `Run ${mode.label} Query`}>{submitting ? <LoaderCircle className="animate-spin" /> : <Play />}</Button>
           </div>
         </div>
       </Collapsible>
