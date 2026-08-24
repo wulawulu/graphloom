@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronLeft, ChevronRight, Database, TriangleAlert } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import {
   ApiError,
@@ -72,6 +73,7 @@ function subgraphRequest(intent: GraphFocusIntent): GraphSubgraphRequest {
 }
 
 export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectIntent = null, navigationResetRevision = 0, onClearEmphasis = noop, onClearFocus, runId }: GraphExplorerProps): React.ReactElement {
+  const { t } = useTranslation()
   const desktop = useDesktopLayout()
   const [summary, setSummary] = useState<GraphSummary | null>(null)
   const [summaryError, setSummaryError] = useState(false)
@@ -399,18 +401,18 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   const graphCanvas = (
     <div className="flex size-full min-h-0 flex-col p-2">
             <header className="flex h-9 shrink-0 items-center justify-between px-1">
-              <div className="flex items-center gap-2"><Database className="size-4 text-primary" /><h2 className="text-sm font-semibold">Knowledge Graph</h2></div>
-              {projection !== null ? <Badge variant="success">ready</Badge> : <Badge variant={unavailable ? "destructive" : "outline"}>{unavailable ? "unavailable" : "loading"}</Badge>}
+              <div className="flex items-center gap-2"><Database className="size-4 text-primary" /><h2 className="text-sm font-semibold">{t("Knowledge Graph")}</h2></div>
+              {projection !== null ? <Badge variant="success">{t("ready")}</Badge> : <Badge variant={unavailable ? "destructive" : "outline"}>{t(unavailable ? "unavailable" : "loading")}</Badge>}
             </header>
             {projection === null && loading ? <div className="space-y-3 p-4"><Skeleton className="h-12" /><Skeleton className="h-80" /></div> : null}
-            {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">Graph data unavailable</p><p className="mt-1 text-xs text-muted-foreground">Run GraphLoom index first.</p></div> : null}
-            {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{error}</p><p className="mt-1 text-xs text-muted-foreground">The focused records could not be loaded.</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>Load overview</Button></div> : null}
+            {projection === null && !loading && unavailable ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{t("Graph data unavailable")}</p><p className="mt-1 text-xs text-muted-foreground">{t("Run GraphLoom index first.")}</p></div> : null}
+            {projection === null && !loading && !unavailable && error !== null ? <div className="flex flex-1 flex-col items-center justify-center p-6 text-center"><TriangleAlert className="mb-3 size-8 text-warning" /><p className="text-sm font-medium">{t(error)}</p><p className="mt-1 text-xs text-muted-foreground">{t("The focused records could not be loaded.")}</p><Button className="mt-4" size="sm" variant="outline" onClick={loadOverview}>{t("Load overview")}</Button></div> : null}
             {projection !== null ? <NetworkPreview projection={projection} summary={summary} summaryError={summaryError} mode={mode} focusCore={focusCore} focusKind={focusKind} loading={loading} error={error} emphasisIntent={emphasisIntent} onClearEmphasis={onClearEmphasis} onEntity={openEntity} onRelationship={openRelationship} onBack={backFromFocus} backLabel={mode === "explorer-focus" && explorerOrigin?.kind === "query-focus" ? "Back to query focus" : "Back to overview"} onReload={reloadGraphData} /> : null}
     </div>
   )
   const inspector = (
     <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex size-full min-h-0 flex-col">
-      <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">Inspect</TabsTrigger><TabsTrigger value="entities">Entities</TabsTrigger><TabsTrigger value="relationships">Relations</TabsTrigger><TabsTrigger value="communities">Groups</TabsTrigger></TabsList>
+      <TabsList className="m-2 grid grid-cols-4"><TabsTrigger value="inspect">{t("Inspect")}</TabsTrigger><TabsTrigger value="entities">{t("Entities")}</TabsTrigger><TabsTrigger value="relationships">{t("Relations")}</TabsTrigger><TabsTrigger value="communities">{t("Groups")}</TabsTrigger></TabsList>
       <TabsContent value="inspect" className="min-h-0 flex-1"><GraphInspector detail={detail} decision={decision} loading={detailLoading} error={detailError} onClear={closeDetail} onFocusEntity={(id) => loadExplorerFocus({ entity_ids: [id], relationship_ids: [], depth: 1, max_entities: 80, max_relationships: 160 })} onFocusRelationship={(id) => loadExplorerFocus({ entity_ids: [], relationship_ids: [id], depth: 1, max_entities: 80, max_relationships: 160 })} /></TabsContent>
       <TabsContent value="entities" className="min-h-0 flex-1"><EntityList onSelect={openEntity} /></TabsContent>
       <TabsContent value="relationships" className="min-h-0 flex-1"><RelationshipList onSelect={openRelationship} /></TabsContent>
@@ -419,9 +421,9 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
   )
 
   return (
-    <section className="flex size-full min-h-0 flex-col" aria-label="Graph Explorer">
+    <section className="flex size-full min-h-0 flex-col" aria-label={t("Graph Explorer")}>
       <Tabs value={mobileView} onValueChange={setMobileView} className={desktop ? "hidden" : "shrink-0 p-2 pb-0"}>
-        <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="graph">Graph</TabsTrigger><TabsTrigger value="detail">Detail</TabsTrigger></TabsList>
+        <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="graph">{t("Graph")}</TabsTrigger><TabsTrigger value="detail">{t("Detail")}</TabsTrigger></TabsList>
       </Tabs>
       <div className="relative min-h-0 flex-1">
         <ResizablePanelGroup orientation="horizontal" className={desktop ? "" : "relative"}>
@@ -443,7 +445,7 @@ export function GraphExplorer({ emphasisIntent = null, focusIntent, inspectInten
         >
           <aside className="relative size-full min-h-0 border-l bg-card/20">
             <div className={desktop && inspectorCollapsed ? "invisible size-full" : "size-full"}>{inspector}</div>
-            {desktop ? <Button variant="ghost" size="icon" className={`absolute top-2 z-20 size-8 ${inspectorCollapsed ? "left-1.5" : "right-2"}`} aria-label={inspectorCollapsed ? "Expand graph inspector" : "Collapse graph inspector"} aria-expanded={!inspectorCollapsed} onClick={() => inspectorCollapsed ? inspectorPanelRef.current?.expand() : inspectorPanelRef.current?.collapse()}>{inspectorCollapsed ? <ChevronLeft /> : <ChevronRight />}</Button> : null}
+            {desktop ? <Button variant="ghost" size="icon" className={`absolute top-2 z-20 size-8 ${inspectorCollapsed ? "left-1.5" : "right-2"}`} aria-label={t(inspectorCollapsed ? "Expand graph inspector" : "Collapse graph inspector")} aria-expanded={!inspectorCollapsed} onClick={() => inspectorCollapsed ? inspectorPanelRef.current?.expand() : inspectorPanelRef.current?.collapse()}>{inspectorCollapsed ? <ChevronLeft /> : <ChevronRight />}</Button> : null}
           </aside>
         </ResizablePanel>
         </ResizablePanelGroup>

@@ -28,7 +28,7 @@ describe("semantic explainability timeline", () => {
       envelope(12, { type: "run_completed", elapsed_ms: 100 }),
     ])
 
-    expect(model.steps.map((step) => step.title)).toEqual(["Entity Mapping", "Graph Expansion", "Context Assembly", "Answer Generation"])
+    expect(model.steps.map((step) => step.kind)).toEqual(["entity-mapping", "graph-expansion", "context-assembly", "answer-generation"])
     expect(model.diagnosticEvents.map((item) => item.record.event.type)).toEqual(["run_started", "query_started", "run_completed"])
   })
 

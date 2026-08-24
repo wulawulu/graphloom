@@ -61,7 +61,7 @@ describe("Basic semantic timeline", () => {
   it("builds exactly Text Retrieval, Context Assembly, and Answer Generation", () => {
     const model = buildSemanticTimeline(fullBasicRun())
     expect(model.method).toBe("basic")
-    expect(model.steps.map((step) => step.title)).toEqual(["Text Retrieval", "Context Assembly", "Answer Generation"])
+    expect(model.steps.map((step) => step.kind)).toEqual(["text-retrieval", "basic-context-assembly", "basic-answer-generation"])
   })
 
   it("keeps ANN provider order distinct from effective table order and consumes backend decisions", () => {

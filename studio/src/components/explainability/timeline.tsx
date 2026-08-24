@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import { Activity, Radio } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityEnvelope } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
@@ -9,7 +10,6 @@ import { buildSemanticTimeline, type ExplainabilityRecordView } from "@/lib/sema
 import { isBasicSemanticStep } from "@/lib/semantic-basic"
 import { isGlobalSemanticStep } from "@/lib/semantic-global"
 import { isDriftSemanticStep } from "@/lib/semantic-drift"
-
 import { BasicSemanticStepCard } from "./basic-semantic-step"
 import { GlobalSemanticStepCard } from "./global-semantic-step"
 import { DriftSemanticStepCard } from "./drift-semantic-step"
@@ -26,11 +26,12 @@ interface TimelineProps {
 }
 
 export function Timeline({ embedded = false, runId, envelopes, streamStatus, onFocusGraph, onInspectCandidate }: TimelineProps): React.ReactElement {
+  const { t } = useTranslation()
   const model = useMemo(() => buildSemanticTimeline(envelopes), [envelopes])
   const content = (
     <div className="space-y-2 p-3">
-      {runId === null ? <EmptyTimeline title="No Run selected" detail="Choose a historical Run or submit a new Query." /> : null}
-      {runId !== null && envelopes.length === 0 ? <EmptyTimeline title="Waiting for explainability" detail={streamStatus === "reconnecting" ? "The live connection is reconnecting. Persisted history will be replayed." : "The Run has not emitted any events yet."} /> : null}
+      {runId === null ? <EmptyTimeline title={t("No Run selected")} detail={t("Choose a historical Run or submit a new Query.")} /> : null}
+      {runId !== null && envelopes.length === 0 ? <EmptyTimeline title={t("Waiting for explainability")} detail={streamStatus === "reconnecting" ? t("The live connection is reconnecting. Persisted history will be replayed.") : t("The Run has not emitted any events yet.")} /> : null}
       {model.steps.map((step) => isGlobalSemanticStep(step)
         ? <GlobalSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : isDriftSemanticStep(step)
@@ -38,16 +39,16 @@ export function Timeline({ embedded = false, runId, envelopes, streamStatus, onF
         : isBasicSemanticStep(step)
           ? <BasicSemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} />
         : <SemanticStepCard key={`${runId ?? "none"}:${step.id}`} step={step} onFocusGraph={onFocusGraph} onInspectCandidate={onInspectCandidate} />)}
-      {model.diagnosticEvents.length > 0 ? <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Diagnostics / Raw events · {model.diagnosticEvents.length}</summary><div className="mt-3 space-y-2">{model.diagnosticEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}</div></details> : null}
+      {model.diagnosticEvents.length > 0 ? <details className="rounded-md border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">{t("Diagnostics / Raw events · {{count}}", { count: model.diagnosticEvents.length })}</summary><div className="mt-3 space-y-2">{model.diagnosticEvents.map((envelope) => <TimelineEvent key={envelope.sequence} envelope={envelope} onFocusGraph={onFocusGraph} />)}</div></details> : null}
     </div>
   )
-  if (embedded) return <section aria-label="Analysis process">{content}</section>
+  if (embedded) return <section aria-label={t("Analysis process")}>{content}</section>
   return (
-    <section className="flex size-full min-h-0 flex-col" aria-label="Decision timeline">
+    <section className="flex size-full min-h-0 flex-col" aria-label={t("Decision timeline")}>
       <header className="flex h-10 shrink-0 items-center justify-between border-b px-3">
-        <div className="flex items-center gap-2"><Activity className="size-4 text-primary" /><h2 className="text-xs font-semibold">Decision Timeline</h2></div>
+        <div className="flex items-center gap-2"><Activity className="size-4 text-primary" /><h2 className="text-xs font-semibold">{t("Decision Timeline")}</h2></div>
         <Badge variant={streamStatus === "open" ? "success" : streamStatus === "reconnecting" ? "warning" : "outline"}>
-          <Radio className={streamStatus === "open" ? "animate-pulse" : ""} /> {streamStatus}
+          <Radio className={streamStatus === "open" ? "animate-pulse" : ""} /> {t(streamStatus)}
         </Badge>
       </header>
       <ScrollArea className="min-h-0 flex-1">

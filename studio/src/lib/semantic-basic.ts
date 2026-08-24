@@ -54,9 +54,9 @@ export interface BasicAnswerSummary {
 }
 
 export type BasicSemanticStep =
-  | { id: "text-retrieval"; kind: "text-retrieval"; title: "Text Retrieval"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicRetrievalSummary }
-  | { id: "basic-context-assembly"; kind: "basic-context-assembly"; title: "Context Assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicContextSummary }
-  | { id: "basic-answer-generation"; kind: "basic-answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicAnswerSummary }
+  | { id: "text-retrieval"; kind: "text-retrieval"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicRetrievalSummary }
+  | { id: "basic-context-assembly"; kind: "basic-context-assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicContextSummary }
+  | { id: "basic-answer-generation"; kind: "basic-answer-generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: BasicAnswerSummary }
 
 export interface BasicSemanticTimelineModel {
   steps: BasicSemanticStep[]
@@ -216,9 +216,9 @@ export function buildBasicSemanticTimeline(envelopes: readonly ExplainabilityEnv
 
   return {
     steps: [
-      { id: "text-retrieval", kind: "text-retrieval", title: "Text Retrieval", rawEvents: retrievalRaw, focusEnvelope: null, summary: retrievalSummary },
-      { id: "basic-context-assembly", kind: "basic-context-assembly", title: "Context Assembly", rawEvents: contextRaw, focusEnvelope: null, summary: contextSummary },
-      { id: "basic-answer-generation", kind: "basic-answer-generation", title: "Answer Generation", rawEvents: answerRaw, focusEnvelope: null, summary: answerSummary },
+      { id: "text-retrieval", kind: "text-retrieval", rawEvents: retrievalRaw, focusEnvelope: null, summary: retrievalSummary },
+      { id: "basic-context-assembly", kind: "basic-context-assembly", rawEvents: contextRaw, focusEnvelope: null, summary: contextSummary },
+      { id: "basic-answer-generation", kind: "basic-answer-generation", rawEvents: answerRaw, focusEnvelope: null, summary: answerSummary },
     ],
     diagnosticEvents: ordered.filter((envelope) => !claimed.has(envelope.sequence)),
   }

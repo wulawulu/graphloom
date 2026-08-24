@@ -1,9 +1,10 @@
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
+import { setStudioLocale } from "@/i18n"
 
 afterEach(cleanup)
 
@@ -21,6 +22,20 @@ async function openTechnicalDetails(user: ReturnType<typeof userEvent.setup>, st
 }
 
 describe("Timeline", () => {
+  it("localizes semantic presentation without changing domain content", async () => {
+    await act(() => setStudioLocale("zh-CN", false))
+    renderTimeline([
+      { type: "query_started", query: "Who is Alice?" },
+      { type: "candidates_retrieved", candidates: [{ id: "entity-1", title: "Alice", record_type: "entity", selected: false }] },
+      { type: "relationships_selected", relationships: [] },
+      { type: "context_completed", tokens_used: 2, context: "Alice raw Context" },
+      { type: "llm_request_started", model_id: "model-x" },
+    ])
+
+    expect(screen.getAllByRole("article").map((article) => article.getAttribute("aria-label")).filter((label) => label !== null)).toEqual(["实体映射", "图谱扩展", "Context 构建", "答案生成"])
+    expect(screen.getByText("Alice")).toBeInTheDocument()
+  })
+
   it("renders the empty state and keeps forward-compatible events in diagnostics", async () => {
     const user = userEvent.setup()
     const { rerender } = render(<Timeline runId={null} envelopes={[]} streamStatus="idle" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)

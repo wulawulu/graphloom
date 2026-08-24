@@ -1,8 +1,12 @@
+import type { TFunction } from "i18next"
+import { useTranslation } from "react-i18next"
+
 import type { ExplainabilityCandidate, ExplainabilityContextSection, ExplainabilityEventPayload } from "@/api/types"
 import { CandidateTable } from "@/components/explainability/details/candidate-table"
 import { DeveloperData } from "@/components/explainability/details/developer-data"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { describeEvent } from "@/lib/explainability"
 
 interface EventDetailProps {
   event: ExplainabilityEventPayload
@@ -44,20 +48,21 @@ function stringValue(event: ExplainabilityEventPayload, key: string): string | n
 }
 
 export function EventDetail({ event, onFocusGraph }: EventDetailProps): React.ReactElement {
+  const { t } = useTranslation()
   let content: React.ReactNode
   if (event.type === "candidates_retrieved" || event.type === "candidates_filtered") {
     content = <CandidateTable candidates={asCandidates(event.candidates)} />
   } else if (selectionFields[event.type] !== undefined) {
     const field = selectionFields[event.type]
     const candidates = field === undefined ? [] : asCandidates(event[field])
-    content = <div className="space-y-3">{onFocusGraph !== null && (event.type === "entities_selected" || event.type === "relationships_selected") ? <Button size="sm" onClick={onFocusGraph}>Focus all in graph</Button> : null}<CandidateTable candidates={candidates} label={event.type.replaceAll("_", " ")} /></div>
+    content = <div className="space-y-3">{onFocusGraph !== null && (event.type === "entities_selected" || event.type === "relationships_selected") ? <Button size="sm" onClick={onFocusGraph}>{t("Focus all in graph")}</Button> : null}<CandidateTable candidates={candidates} label={describeEvent(event).label} /></div>
   } else {
-    content = eventContent(event, onFocusGraph)
+    content = eventContent(t, event, onFocusGraph)
   }
   return <div className="space-y-3">{content}<DeveloperData event={event} /></div>
 }
 
-function eventContent(event: ExplainabilityEventPayload, onFocusGraph: (() => void) | null): React.ReactNode {
+function eventContent(t: TFunction, event: ExplainabilityEventPayload, onFocusGraph: (() => void) | null): React.ReactNode {
   switch (event.type) {
     case "graph_expansion_started":
       return <GraphExpansionDetail ids={asStrings(event.seed_entity_ids)} onFocusGraph={onFocusGraph} />
@@ -71,7 +76,7 @@ function eventContent(event: ExplainabilityEventPayload, onFocusGraph: (() => vo
     case "llm_request_completed":
       return <LlmDetail event={event} />
     case "run_failed":
-      return <KeyValues values={[["Status", "Run failed."], ["Category", stringValue(event, "error_kind")], ["Diagnostic", stringValue(event, "message")]]} />
+      return <KeyValues values={[["Status", t("Run failed.")], ["Category", stringValue(event, "error_kind")], ["Diagnostic", stringValue(event, "message")]]} />
     case "run_started":
       return <KeyValues values={[["Kind", stringValue(event, "kind")], ["Content mode", stringValue(event, "content_mode")]]} />
     case "run_completed":
@@ -92,7 +97,8 @@ function eventContent(event: ExplainabilityEventPayload, onFocusGraph: (() => vo
 }
 
 function GraphExpansionDetail({ ids, onFocusGraph }: { ids: string[]; onFocusGraph: (() => void) | null }): React.ReactElement {
-  return <div className="space-y-3"><KeyValues values={[["Seed entities", ids.length]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}{onFocusGraph !== null ? <Button size="sm" onClick={onFocusGraph}>Focus expansion in graph</Button> : null}</div>
+  const { t } = useTranslation()
+  return <div className="space-y-3"><KeyValues values={[["Seed entities", ids.length]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}{onFocusGraph !== null ? <Button size="sm" onClick={onFocusGraph}>{t("Focus expansion in graph")}</Button> : null}</div>
 }
 
 function ContextBudgetDetail({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {
@@ -102,39 +108,46 @@ function ContextBudgetDetail({ event }: { event: ExplainabilityEventPayload }): 
 }
 
 function ContextSectionDetail({ value }: { value: unknown }): React.ReactElement {
-  if (!isRecord(value)) return <p className="text-xs text-muted-foreground">No section metadata.</p>
+  const { t } = useTranslation()
+  if (!isRecord(value)) return <p className="text-xs text-muted-foreground">{t("No section metadata.")}</p>
   const section = value as unknown as ExplainabilityContextSection
   const ids = asStrings(section.selected_record_ids)
-  return <div className="space-y-3"><KeyValues values={[["Section", typeof section.section === "string" ? section.section : null], ["Name", typeof section.name === "string" ? section.name : null], ["Tokens", typeof section.tokens_used === "number" && typeof section.token_budget === "number" ? `${section.tokens_used} / ${section.token_budget}` : null], ["Records", typeof section.selected_count === "number" && typeof section.candidate_count === "number" ? `${section.selected_count} / ${section.candidate_count}` : null], ["Truncated", typeof section.truncated === "boolean" ? (section.truncated ? "Yes" : "No") : null]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}</div>
+  return <div className="space-y-3"><KeyValues values={[["Section", typeof section.section === "string" ? section.section : null], ["Name", typeof section.name === "string" ? section.name : null], ["Tokens", typeof section.tokens_used === "number" && typeof section.token_budget === "number" ? `${section.tokens_used} / ${section.token_budget}` : null], ["Records", typeof section.selected_count === "number" && typeof section.candidate_count === "number" ? `${section.selected_count} / ${section.candidate_count}` : null], ["Truncated", typeof section.truncated === "boolean" ? t(section.truncated ? "Yes" : "No") : null]]} />{ids.length > 0 ? <div className="flex flex-wrap gap-1">{ids.map((id) => <Badge key={id} variant="outline">{id}</Badge>)}</div> : null}</div>
 }
 
 function ContextCompletedDetail({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {
+  const { t } = useTranslation()
   const context = stringValue(event, "context")
-  return <div className="space-y-3"><KeyValues values={[["Tokens used", numberValue(event, "tokens_used")]]} />{context === null ? <p className="text-xs text-muted-foreground">Content hidden by explainability mode.</p> : <ContentBlock label="Context preview" value={context} />}</div>
+  return <div className="space-y-3"><KeyValues values={[["Tokens used", numberValue(event, "tokens_used")]]} />{context === null ? <p className="text-xs text-muted-foreground">{t("Content hidden by explainability mode.")}</p> : <ContentBlock label="Context preview" value={context} />}</div>
 }
 
 function LlmDetail({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {
+  const { t } = useTranslation()
   const prompt = stringValue(event, "prompt")
   const response = stringValue(event, "response")
-  return <div className="space-y-3"><KeyValues values={[["Model", stringValue(event, "model_id")], ["Prompt tokens", numberValue(event, "prompt_tokens")], ["Input tokens", numberValue(event, "input_tokens")], ["Output tokens", numberValue(event, "output_tokens")], ["Latency", withUnit(numberValue(event, "elapsed_ms"), "ms")]]} />{prompt !== null ? <ContentBlock label="Prompt" value={prompt} /> : null}{response !== null ? <ContentBlock label="Response" value={response} /> : null}{prompt === null && response === null ? <p className="text-xs text-muted-foreground">Content hidden by explainability mode.</p> : null}</div>
+  return <div className="space-y-3"><KeyValues values={[["Model", stringValue(event, "model_id")], ["Prompt tokens", numberValue(event, "prompt_tokens")], ["Input tokens", numberValue(event, "input_tokens")], ["Output tokens", numberValue(event, "output_tokens")], ["Latency", withUnit(numberValue(event, "elapsed_ms"), "ms")]]} />{prompt !== null ? <ContentBlock label="Prompt" value={prompt} /> : null}{response !== null ? <ContentBlock label="Response" value={response} /> : null}{prompt === null && response === null ? <p className="text-xs text-muted-foreground">{t("Content hidden by explainability mode.")}</p> : null}</div>
 }
 
 function ContentDetail({ label, metadata, content }: { label: string; metadata: Array<[string, unknown]>; content: string | null }): React.ReactElement {
-  return <div className="space-y-3"><KeyValues values={metadata} />{content === null ? <p className="text-xs text-muted-foreground">Content hidden by explainability mode.</p> : <ContentBlock label={label} value={content} />}</div>
+  const { t } = useTranslation()
+  return <div className="space-y-3"><KeyValues values={metadata} />{content === null ? <p className="text-xs text-muted-foreground">{t("Content hidden by explainability mode.")}</p> : <ContentBlock label={label} value={content} />}</div>
 }
 
 function ContentBlock({ label, value }: { label: string; value: string }): React.ReactElement {
-  return <details className="rounded-md border p-3"><summary className="cursor-pointer text-xs font-medium">{label}</summary><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5">{value}</pre></details>
+  const { t } = useTranslation()
+  return <details className="rounded-md border p-3"><summary className="cursor-pointer text-xs font-medium">{t(label)}</summary><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5">{value}</pre></details>
 }
 
 function GenericEventDetail({ event }: { event: ExplainabilityEventPayload }): React.ReactElement {
+  const { t } = useTranslation()
   const values = Object.entries(event).filter(([key, value]) => key !== "type" && ["string", "number", "boolean"].includes(typeof value))
-  return <div className="space-y-2"><p className="text-xs font-medium">Event details</p><KeyValues values={values.map(([key, value]) => [key.replaceAll("_", " "), value])} /></div>
+  return <div className="space-y-2"><p className="text-xs font-medium">{t("Event details")}</p><KeyValues values={values.map(([key, value]) => [key, value])} translateLabels={false} /></div>
 }
 
-function KeyValues({ values }: { values: Array<[string, unknown]> }): React.ReactElement {
+function KeyValues({ values, translateLabels = true }: { values: Array<[string, unknown]>; translateLabels?: boolean }): React.ReactElement {
+  const { t } = useTranslation()
   const present = values.filter(([, value]) => value !== null && value !== undefined)
-  return <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] gap-x-3 gap-y-1 text-xs">{present.map(([label, value]) => <div key={label} className="contents"><dt className="text-muted-foreground capitalize">{label}</dt><dd className="min-w-0 whitespace-pre-wrap">{String(value)}</dd></div>)}</dl>
+  return <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] gap-x-3 gap-y-1 text-xs">{present.map(([label, value]) => <div key={label} className="contents"><dt className="text-muted-foreground capitalize">{translateLabels ? t(label) : label}</dt><dd className="min-w-0 whitespace-pre-wrap">{String(value)}</dd></div>)}</dl>
 }
 
 function withUnit(value: number | null, unit: string): string | null {

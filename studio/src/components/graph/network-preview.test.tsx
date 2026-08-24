@@ -242,7 +242,7 @@ describe("NetworkPreview focus labels", () => {
 
     expect(screen.getByText("Query focus")).toBeInTheDocument()
     expect(screen.getByText("Final context")).toBeInTheDocument()
-    expect(screen.getByText(/1 final context records/)).toBeInTheDocument()
+    expect(screen.getByText(/1 final context record/)).toBeInTheDocument()
     expect(screen.getByText("Context neighbor")).toBeInTheDocument()
     expect(screen.queryByText("Focused subgraph")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Back to overview" })).toBeInTheDocument()

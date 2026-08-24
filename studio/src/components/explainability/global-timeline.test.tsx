@@ -144,13 +144,13 @@ describe("Global Timeline", () => {
     const user = userEvent.setup()
     renderGlobal()
     const community = screen.getByRole("article", { name: "Community Context" })
-    await user.click(within(community).getByRole("button", { name: "Expand map batch 1" }))
+    await user.click(within(community).getByRole("button", { name: "Expand Map batch 1" }))
     expect(within(community).getByText("report-a")).toBeInTheDocument()
     await user.click(within(community).getByRole("button", { name: "View Map Context" }))
     expect(screen.getByTestId("exact-map-context-0").textContent).toBe("MAP CONTEXT 0\n  preserve whitespace\n")
     await user.click(within(community).getByRole("button", { name: "Copy exact Map Batch 1 Context" }))
     await expect(navigator.clipboard.readText()).resolves.toBe("MAP CONTEXT 0\n  preserve whitespace\n")
-    await user.click(within(community).getByRole("button", { name: "Collapse map batch 1" }))
+    await user.click(within(community).getByRole("button", { name: "Collapse Map batch 1" }))
     expect(within(community).queryByText("report-a")).not.toBeInTheDocument()
 
     const map = screen.getByRole("article", { name: "Map Analysis" })
@@ -182,7 +182,7 @@ describe("Global Timeline", () => {
     const user = userEvent.setup()
     renderGlobal(globalEvents(false))
     const community = screen.getByRole("article", { name: "Community Context" })
-    await user.click(within(community).getByRole("button", { name: "Expand map batch 1" }))
+    await user.click(within(community).getByRole("button", { name: "Expand Map batch 1" }))
     await user.click(within(community).getByRole("button", { name: "View Map Context" }))
     expect(within(community).getByText(/Map context content was not captured/)).toBeInTheDocument()
 
@@ -299,7 +299,7 @@ describe("Global Timeline", () => {
     const user = userEvent.setup()
     const view = renderGlobal(globalEvents(), "global-a")
     const community = screen.getByRole("article", { name: "Community Context" })
-    await user.click(within(community).getByRole("button", { name: "Expand map batch 1" }))
+    await user.click(within(community).getByRole("button", { name: "Expand Map batch 1" }))
     expect(within(community).getByText("report-a")).toBeInTheDocument()
 
     view.rerender(<Timeline runId="local-b" envelopes={[envelope(1, "root", { type: "query_started", method: "local" }), envelope(2, "mapping", { type: "candidates_retrieved", candidates: [] })]} streamStatus="closed" onFocusGraph={vi.fn()} onInspectCandidate={vi.fn()} />)

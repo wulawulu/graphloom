@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { ChevronDown, History, MessageSquareText, Plus } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityEnvelope, ExplainabilityRun } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
@@ -33,11 +34,12 @@ interface QaWorkspaceProps {
 }
 
 export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
+  const { t } = useTranslation()
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const semanticTimeline = useMemo(() => buildSemanticTimeline(props.envelopes), [props.envelopes])
   const decisionCount = semanticTimeline.steps.length
-  const methodLabel = queryMethodLabel(semanticTimeline.method, semanticTimeline.globalVariant)
+  const methodLabel = t(queryMethodLabel(semanticTimeline.method, semanticTimeline.globalVariant))
 
   useEffect(() => setAnalysisOpen(false), [props.runId])
 
@@ -47,30 +49,30 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   }
 
   return (
-    <section className="flex size-full min-h-0 flex-col bg-card/20" aria-label="Graph QA workspace">
+    <section className="flex size-full min-h-0 flex-col bg-card/20" aria-label={t("Graph QA workspace")}>
       <header className="flex h-12 shrink-0 items-center justify-between border-b px-3">
-        <div className="flex items-center gap-2"><MessageSquareText className="size-4 text-primary" /><h2 className="text-sm font-semibold">Graph QA</h2><Badge variant="outline">{methodLabel}</Badge></div>
+        <div className="flex min-w-0 items-center gap-2"><MessageSquareText className="size-4 shrink-0 text-primary" /><h2 className="truncate text-sm font-semibold">{t("Graph QA")}</h2><Badge variant="outline" className="max-w-36 truncate">{methodLabel}</Badge></div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={props.onNewQuery}><Plus /> New Query</Button>
-          <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}><History /> History</Button>
+          <Button variant="ghost" size="sm" onClick={props.onNewQuery}><Plus /> {t("New Query")}</Button>
+          <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}><History /> {t("History")}</Button>
         </div>
       </header>
 
       <ScrollArea className="min-h-0 flex-1">
         {props.runId === null ? (
-          <div className="flex min-h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">Ask a question about the indexed graph.</div>
+          <div className="flex min-h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">{t("Ask a question about the indexed graph.")}</div>
         ) : (
           <div className="space-y-6 px-4 py-5">
-            <section aria-label="Current question">
-              <p className="mb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">You</p>
-              <p className="whitespace-pre-wrap text-sm leading-6">{props.question ?? "Query hidden (metadata mode)"}</p>
+            <section aria-label={t("Current question")}>
+              <p className="mb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">{t("You")}</p>
+              <p className="whitespace-pre-wrap text-sm leading-6">{props.question ?? t("Query hidden (metadata mode)")}</p>
             </section>
-            <section aria-label="GraphLoom answer">
+            <section aria-label={t("GraphLoom answer")}>
               <p className="mb-2 text-[11px] font-semibold tracking-wide text-primary uppercase">GraphLoom</p>
               <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
                 <CollapsibleTrigger asChild>
-                  <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label="Toggle analysis process">
-                    <span className="text-xs font-medium">{analysisSummary(decisionCount, props.runStatus, props.streamStatus)}</span>
+                  <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label={t("Toggle analysis process")}>
+                    <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus)}</span>
                     <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
                   </Button>
                 </CollapsibleTrigger>
@@ -88,7 +90,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
 
       <Sheet open={historyOpen} onOpenChange={setHistoryOpen}>
         <SheetContent className="gap-2">
-          <SheetHeader><SheetTitle>Recent Runs</SheetTitle><SheetDescription>Select an independent Graph QA Run.</SheetDescription></SheetHeader>
+          <SheetHeader><SheetTitle>{t("Recent Runs")}</SheetTitle><SheetDescription>{t("Select an independent Graph QA Run.")}</SheetDescription></SheetHeader>
           <RunList
             runs={props.runs}
             selectedRunId={props.runId}
@@ -105,14 +107,14 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   )
 }
 
-function analysisSummary(decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
-  const count = `${decisionCount} ${decisionCount === 1 ? "decision" : "decisions"}`
-  if (runStatus === "completed") return `Analysis process · ${count} · completed`
-  if (runStatus === "failed" || runStatus === "cancelled") return `Analysis process · ${count} · ${runStatus}`
+function analysisSummary(t: (key: string, options?: Record<string, unknown>) => string, decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
+  const status = runStatus === "failed" ? t("failed") : runStatus === "cancelled" ? t("cancelled") : null
+  if (runStatus === "completed") return t("Analysis process · {{count}} decision · completed", { count: decisionCount })
+  if (status !== null) return t("Analysis process · {{count}} decision · {{status}}", { count: decisionCount, status })
   if (runStatus === "running" || runStatus === "pending" || streamStatus === "open" || streamStatus === "connecting" || streamStatus === "reconnecting") {
-    return `Analysis process · ${count} · running`
+    return t("Analysis process · {{count}} decision · running", { count: decisionCount })
   }
-  return `Analysis process · ${count}`
+  return t("Analysis process · {{count}} decision", { count: decisionCount })
 }
 
 function queryMethodLabel(method: "local" | "global" | "basic" | "drift" | null, globalVariant: "static" | "dynamic" | null): string {

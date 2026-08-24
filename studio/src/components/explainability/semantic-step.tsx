@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { Braces, Check, Circle, DatabaseZap, GitBranch, Sparkles, X } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityContextSection, ExplainabilityEnvelope } from "@/api/types"
 import { CapturedContentViewer } from "@/components/explainability/captured-content-viewer"
@@ -7,6 +8,7 @@ import { TechnicalDetails } from "@/components/explainability/technical-details"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import type { ExplainabilityRecordView, LocalSemanticStep } from "@/lib/semantic-timeline"
+import { semanticStepTitle } from "@/i18n/presentation"
 
 interface SemanticStepCardProps {
   step: LocalSemanticStep
@@ -22,15 +24,17 @@ const RECORD_LABELS: Record<string, string> = {
 }
 
 export function SemanticStepCard({ step, onFocusGraph, onInspectCandidate }: SemanticStepCardProps): React.ReactElement {
+  const { t } = useTranslation()
   const focusEnvelope = step.focusEnvelope
+  const title = semanticStepTitle(t, step.kind)
   return (
-    <article className="rounded-md border bg-card/70 p-3" aria-label={step.title}>
+    <article className="rounded-md border bg-card/70 p-3" aria-label={title}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 gap-2">
           <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border bg-background text-primary"><StepIcon kind={step.kind} /></span>
-          <div className="min-w-0"><h3 className="text-sm font-semibold">{step.title}</h3><StepSummary step={step} /></div>
+          <div className="min-w-0"><h3 className="text-sm font-semibold">{title}</h3><StepSummary step={step} /></div>
         </div>
-        {focusEnvelope === null ? null : <Button variant="outline" size="sm" onClick={() => onFocusGraph(focusEnvelope)}>Focus in graph</Button>}
+        {focusEnvelope === null ? null : <Button variant="outline" size="sm" onClick={() => onFocusGraph(focusEnvelope)}>{t("Focus in graph")}</Button>}
       </div>
       <StepContent step={step} onInspectCandidate={onInspectCandidate} />
       <TechnicalDetails rawEvents={step.rawEvents} onFocusGraph={onFocusGraph} />
@@ -47,34 +51,36 @@ function StepIcon({ kind }: { kind: LocalSemanticStep["kind"] }): React.ReactEle
 }
 
 function StepSummary({ step }: { step: LocalSemanticStep }): React.ReactElement {
+  const { t } = useTranslation()
   if (step.kind === "entity-mapping") {
     const summary = step.summary
-    return <p className="mt-1 text-xs text-muted-foreground">{summary.retrievedCount} retrieved · {summary.selectedCount} selected · {summary.excludedCount} excluded{summary.pendingCount === 0 ? "" : ` · ${summary.pendingCount} pending`}</p>
+    return <p className="mt-1 text-xs text-muted-foreground">{t("{{count}} retrieved", { count: summary.retrievedCount })} · {t("{{count}} selected", { count: summary.selectedCount })} · {t("{{count}} excluded", { count: summary.excludedCount })}{summary.pendingCount === 0 ? "" : ` · ${t("{{count}} pending", { count: summary.pendingCount })}`}</p>
   }
   if (step.kind === "graph-expansion") {
     const total = Object.values(step.summary.selectedCounts).reduce((sum, count) => sum + count, 0)
-    return <p className="mt-1 text-xs text-muted-foreground">{total} context records selected through graph expansion</p>
+    return <p className="mt-1 text-xs text-muted-foreground">{t("{{count}} context record selected through graph expansion", { count: total })}</p>
   }
   if (step.kind === "context-assembly") {
     const { tokensUsed, totalTokenBudget } = step.summary
-    return <p className="mt-1 text-xs text-muted-foreground">{step.summary.sections.length} sections{tokensUsed === undefined ? "" : ` · ${tokensUsed.toLocaleString()}${totalTokenBudget === undefined ? "" : ` / ${totalTokenBudget.toLocaleString()}`} tokens`}</p>
+    return <p className="mt-1 text-xs text-muted-foreground">{t("{{count}} section", { count: step.summary.sections.length })}{tokensUsed === undefined ? "" : ` · ${tokensUsed.toLocaleString()}${totalTokenBudget === undefined ? "" : ` / ${totalTokenBudget.toLocaleString()}`} ${t("tokens")}`}</p>
   }
-  return <p className="mt-1 text-xs text-muted-foreground">{step.summary.calls} {step.summary.calls === 1 ? "call" : "calls"} · {step.summary.inputTokens.toLocaleString()} input · {step.summary.outputTokens.toLocaleString()} output</p>
+  return <p className="mt-1 text-xs text-muted-foreground">{t("{{count}} call", { count: step.summary.calls })} · {t("{{count}} input", { count: step.summary.inputTokens })} · {t("{{count}} output", { count: step.summary.outputTokens })}</p>
 }
 
 function StepContent({ step, onInspectCandidate }: { step: LocalSemanticStep; onInspectCandidate: (candidate: ExplainabilityRecordView) => void }): React.ReactNode {
+  const { t } = useTranslation()
   if (step.kind === "entity-mapping") {
     const metadata = [
       step.summary.model,
       step.summary.elapsedMs === undefined ? undefined : `${step.summary.elapsedMs} ms`,
-      step.summary.promptTokens === undefined ? undefined : `${step.summary.promptTokens} embedding tokens`,
-      step.summary.dimensions === undefined ? undefined : `${step.summary.dimensions} dimensions`,
+      step.summary.promptTokens === undefined ? undefined : t("{{count}} embedding token", { count: step.summary.promptTokens }),
+      step.summary.dimensions === undefined ? undefined : t("{{count}} dimension", { count: step.summary.dimensions }),
     ].filter((value): value is string => value !== undefined)
     return <div className="mt-3 space-y-3">{metadata.length === 0 ? null : <p className="text-[11px] text-muted-foreground">{metadata.join(" · ")}</p>}<DecisionRecordList records={step.summary.candidates} onInspectCandidate={onInspectCandidate} /></div>
   }
   if (step.kind === "graph-expansion") {
     const counts = Object.entries(step.summary.selectedCounts).filter(([, count]) => count > 0)
-    return <div className="mt-3 space-y-3">{counts.length === 0 ? <p className="text-xs text-muted-foreground">No expansion records were selected.</p> : <dl className="grid grid-cols-2 gap-2 text-xs">{counts.map(([type, count]) => <div key={type} className="flex justify-between rounded border bg-muted/20 px-2 py-1.5"><dt>{RECORD_LABELS[type] ?? type.replaceAll("_", " ")}</dt><dd className="font-mono">{count}</dd></div>)}</dl>}<DecisionRecordList records={step.summary.records} onInspectCandidate={onInspectCandidate} /></div>
+    return <div className="mt-3 space-y-3">{counts.length === 0 ? <p className="text-xs text-muted-foreground">{t("No expansion records were selected.")}</p> : <dl className="grid grid-cols-2 gap-2 text-xs">{counts.map(([type, count]) => <div key={type} className="flex justify-between rounded border bg-muted/20 px-2 py-1.5"><dt>{t(RECORD_LABELS[type] ?? type.replaceAll("_", " "))}</dt><dd className="font-mono">{count}</dd></div>)}</dl>}<DecisionRecordList records={step.summary.records} onInspectCandidate={onInspectCandidate} /></div>
   }
   if (step.kind === "context-assembly") {
     return <div className="mt-3 min-w-0 space-y-2">{step.summary.sections.map((section) => <ContextSectionRow key={`${section.section}:${section.name ?? ""}`} section={section} />)}<CapturedContentViewer buttonLabel="View LLM Context" title="LLM Context" content={step.summary.exactContext} unavailableMessage="LLM context content was not captured. Run with Content or Debug explainability mode to inspect the exact LLM context." testId="exact-llm-context" exactTabLabel="Exact input" copyLabel="Copy exact LLM context" description="Exact input is the captured source of truth; Preview is presentation only." /></div>
@@ -84,10 +90,12 @@ function StepContent({ step, onInspectCandidate }: { step: LocalSemanticStep; on
 }
 
 function Metric({ label, value }: { label: string; value: string | number }): React.ReactElement {
-  return <div className="rounded border bg-muted/20 px-2 py-1.5"><dt className="text-muted-foreground">{label}</dt><dd className="mt-0.5 font-medium">{value}</dd></div>
+  const { t } = useTranslation()
+  return <div className="rounded border bg-muted/20 px-2 py-1.5"><dt className="text-muted-foreground">{t(label)}</dt><dd className="mt-0.5 font-medium">{value}</dd></div>
 }
 
 function DecisionRecordList({ records, onInspectCandidate }: { records: ExplainabilityRecordView[]; onInspectCandidate: (candidate: ExplainabilityRecordView) => void }): React.ReactElement | null {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   if (records.length === 0) return null
   const visible = expanded ? records : records.slice(0, 20)
@@ -96,24 +104,25 @@ function DecisionRecordList({ records, onInspectCandidate }: { records: Explaina
       <div className="divide-y rounded-md border bg-background/50">
         {visible.map((record) => <DecisionRecordRow key={`${record.recordType}:${record.stableId}`} record={record} onInspectCandidate={onInspectCandidate} />)}
       </div>
-      {!expanded && visible.length < records.length ? <Button variant="ghost" size="sm" onClick={() => setExpanded(true)}>Show all {records.length} records</Button> : null}
+      {!expanded && visible.length < records.length ? <Button variant="ghost" size="sm" onClick={() => setExpanded(true)}>{t("Show all {{count}} records", { count: records.length })}</Button> : null}
     </div>
   )
 }
 
 function DecisionRecordRow({ record, onInspectCandidate }: { record: ExplainabilityRecordView; onInspectCandidate: (candidate: ExplainabilityRecordView) => void }): React.ReactElement {
+  const { t } = useTranslation()
   const inspectable = (record.recordType === "entity" || record.recordType === "relationship") && record.stableId.length > 0
   const label = record.title ?? record.shortId ?? record.stableId
   return (
     <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 gap-y-1 overflow-hidden px-2 py-2 text-xs">
       <span className="row-span-2 pt-0.5"><DecisionIcon record={record} /></span>
       <div className="min-w-0">
-        {inspectable ? <button type="button" className="block max-w-full truncate text-left font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={label} aria-label={`Inspect ${record.recordType} ${label}`} onClick={() => onInspectCandidate(record)}>{label}</button> : <span className="block truncate font-medium" title={label}>{label}</span>}
+        {inspectable ? <button type="button" className="block max-w-full truncate text-left font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={label} aria-label={t("Inspect {{type}} {{label}}", { type: t(record.recordType), label })} onClick={() => onInspectCandidate(record)}>{label}</button> : <span className="block truncate font-medium" title={label}>{label}</span>}
       </div>
-      <Badge variant="outline" className="max-w-36 shrink-0 truncate" title={decisionLabel(record)}>{decisionLabel(record)}</Badge>
+      <Badge variant="outline" className="max-w-36 shrink-0 truncate" title={t(decisionLabel(record))}>{t(decisionLabel(record))}</Badge>
       <div className="col-span-2 col-start-2 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
         <span className="min-w-0 flex-1 truncate font-mono" title={record.stableId}>{record.shortId === undefined ? compactStableId(record.stableId) : `${record.shortId} · ${compactStableId(record.stableId)}`}</span>
-        {record.score === undefined ? null : <span className="shrink-0 font-mono text-[11px]" aria-label={`Score ${record.score.toFixed(4)}`}>{record.score.toFixed(4)}</span>}
+        {record.score === undefined ? null : <span className="shrink-0 font-mono text-[11px]" aria-label={t("Score {{value}}", { value: record.score.toFixed(4) })}>{record.score.toFixed(4)}</span>}
       </div>
     </div>
   )
@@ -125,26 +134,28 @@ function compactStableId(id: string): string {
 }
 
 function ContextSectionRow({ section }: { section: ExplainabilityContextSection }): React.ReactElement {
+  const { t } = useTranslation()
   const emptySection = section.selected_count === 0 && section.tokens_used > 0
-  const tokenExplanation = emptySection ? "Tokens measure the literal final section text, including empty placeholders such as []." : undefined
+  const tokenExplanation = emptySection ? t("Tokens measure the literal final section text, including empty placeholders such as [].") : undefined
   return (
     <div className="min-w-0 overflow-hidden rounded border bg-muted/20 px-2 py-2 text-xs">
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-        <span className="truncate font-medium capitalize" title={section.name ?? section.section}>{section.name ?? section.section.replaceAll("_", " ")}</span>
-        <span className="shrink-0">{section.selected_count} / {section.candidate_count} included</span>
+        <span className="truncate font-medium capitalize" title={section.name ?? section.section}>{t(section.name ?? section.section.replaceAll("_", " "))}</span>
+        <span className="shrink-0">{t("{{selected}} / {{candidates}} included", { selected: section.selected_count, candidates: section.candidate_count })}</span>
       </div>
       <p className="mt-1 min-w-0 break-words text-[11px] text-muted-foreground" title={tokenExplanation}>
-        {section.tokens_used.toLocaleString()} / {section.token_budget.toLocaleString()} tokens{emptySection ? " · empty section" : ""}{section.truncated ? " · truncated" : ""}
+        {section.tokens_used.toLocaleString()} / {section.token_budget.toLocaleString()} {t("tokens")}{emptySection ? ` · ${t("empty section")}` : ""}{section.truncated ? ` · ${t("truncated")}` : ""}
       </p>
     </div>
   )
 }
 
 function DecisionIcon({ record }: { record: ExplainabilityRecordView }): React.ReactElement {
-  if (record.selectionStatus === "pending") return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label="Retrieved; selection pending" />
-  if (record.selectionStatus === "excluded") return <X className="size-3.5 shrink-0 text-muted-foreground" aria-label="Excluded" />
-  if (record.finalContext === "included") return <Check className="size-3.5 shrink-0 text-success" aria-label="Included in final context" />
-  return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label={record.finalContext === "excluded" ? "Not in final context" : "Final context unknown"} />
+  const { t } = useTranslation()
+  if (record.selectionStatus === "pending") return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label={t("Retrieved; selection pending")} />
+  if (record.selectionStatus === "excluded") return <X className="size-3.5 shrink-0 text-muted-foreground" aria-label={t("Excluded")} />
+  if (record.finalContext === "included") return <Check className="size-3.5 shrink-0 text-success" aria-label={t("Included in final context")} />
+  return <Circle className="size-3.5 shrink-0 text-muted-foreground" aria-label={t(record.finalContext === "excluded" ? "Not in final context" : "Final context unknown")} />
 }
 
 function decisionLabel(record: ExplainabilityRecordView): string {

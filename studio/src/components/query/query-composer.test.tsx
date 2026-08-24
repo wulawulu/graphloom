@@ -1,9 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { startQuery } from "@/api/client"
 import { QueryComposer } from "@/components/query/query-composer"
+import { setStudioLocale } from "@/i18n"
 
 vi.mock("@/api/client", () => ({
   ApiError: class extends Error { status = 500 },
@@ -184,4 +185,86 @@ describe("QueryComposer", () => {
     expect(screen.getByLabelText("Response style")).toHaveTextContent("Custom")
     expect(screen.getByLabelText("Custom response instructions")).toHaveValue("Five bullets")
   })
+
+  it("renders the Query settings presentation in Simplified Chinese", async () => {
+    const user = userEvent.setup()
+    await act(() => setStudioLocale("zh-CN", false))
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+
+    expect(screen.getByRole("combobox", { name: "查询方式" })).toHaveTextContent("局部搜索")
+    expect(screen.getByText("标准")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "查询设置" }))
+    expect(screen.getByLabelText("解释详情")).toHaveTextContent("标准")
+    expect(screen.getByLabelText("回答风格")).toHaveTextContent("标准")
+
+    await user.click(screen.getByLabelText("解释详情"))
+    expect(screen.getByRole("option", { name: "详细" })).toBeInTheDocument()
+    expect(screen.getByRole("option", { name: "调试" })).toBeInTheDocument()
+    await user.keyboard("{Escape}")
+    await user.click(screen.getByLabelText("回答风格"))
+    expect(screen.getByRole("option", { name: "自定义" })).toBeInTheDocument()
+  })
+
+  it("keeps Query wire values identical in English and Simplified Chinese", async () => {
+    const expectedRequest = {
+      query: "same question",
+      method: "global",
+      dynamic_community_selection: true,
+      content_mode: "content",
+      response_type: "Multiple Paragraphs",
+    }
+    vi.mocked(startQuery).mockResolvedValue(accepted)
+
+    const englishUser = userEvent.setup()
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    await chooseQueryMethod(englishUser, "Dynamic Global")
+    await openSettings(englishUser)
+    await chooseSetting(englishUser, "Explainability detail", "Detailed")
+    await submitQuestion(englishUser, "same question")
+    expect(startQuery).toHaveBeenLastCalledWith(expectedRequest)
+
+    cleanup()
+    await act(() => setStudioLocale("zh-CN", false))
+    const chineseUser = userEvent.setup()
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    await chooseQueryMethodLocalized(chineseUser, "查询方式", "动态全局搜索")
+    await openSettingsLocalized(chineseUser, "查询设置")
+    await chooseSetting(chineseUser, "解释详情", "详细")
+    await submitQuestionLocalized(chineseUser, "same question")
+    expect(startQuery).toHaveBeenLastCalledWith(expectedRequest)
+  })
+
+  it("changes locale without resetting Query business state or submitting a request", async () => {
+    const user = userEvent.setup()
+    render(<QueryComposer onAccepted={vi.fn()} resetRevision={0} />)
+    await user.type(screen.getByLabelText("Ask about the graph"), "draft query")
+    await chooseQueryMethod(user, "DRIFT")
+    await openSettings(user)
+    await chooseSetting(user, "Explainability detail", "Debug")
+    await chooseSetting(user, "Response style", "Custom")
+    await user.type(screen.getByLabelText("Custom response instructions"), "Answer in exactly 5 bullet points.")
+
+    await act(() => setStudioLocale("zh-CN", false))
+
+    expect(screen.getByLabelText("向图谱提问")).toHaveValue("draft query")
+    expect(screen.getByRole("combobox", { name: "查询方式" })).toHaveTextContent("DRIFT 探索搜索")
+    expect(screen.getByLabelText("解释详情")).toHaveTextContent("调试")
+    expect(screen.getByLabelText("回答风格")).toHaveTextContent("自定义")
+    expect(screen.getByLabelText("自定义回答要求")).toHaveValue("Answer in exactly 5 bullet points.")
+    expect(startQuery).not.toHaveBeenCalled()
+  })
 })
+
+async function chooseQueryMethodLocalized(user: ReturnType<typeof userEvent.setup>, setting: string, label: string): Promise<void> {
+  await user.click(screen.getByRole("combobox", { name: setting }))
+  await user.click(screen.getByRole("option", { name: label }))
+}
+
+async function openSettingsLocalized(user: ReturnType<typeof userEvent.setup>, label: string): Promise<void> {
+  await user.click(screen.getByRole("button", { name: label }))
+}
+
+async function submitQuestionLocalized(user: ReturnType<typeof userEvent.setup>, question: string): Promise<void> {
+  await user.type(screen.getByLabelText("向图谱提问"), question)
+  await user.click(screen.getByRole("button", { name: "运行动态全局搜索" }))
+}

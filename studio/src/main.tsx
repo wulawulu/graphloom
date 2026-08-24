@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 
 import { App } from "@/app"
 import { AppErrorBoundary } from "@/components/layout/app-error-boundary"
+import "@/i18n"
 
 import "@/index.css"
 

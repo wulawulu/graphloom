@@ -141,11 +141,11 @@ export interface GlobalAnswerGenerationSummary {
 }
 
 export type GlobalSemanticStep =
-  | { id: "community-selection"; kind: "community-selection"; title: "Community Selection"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DynamicCommunitySelectionSummary }
-  | { id: "community-context"; kind: "community-context"; title: "Community Context"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalCommunityContextSummary }
-  | { id: "map-analysis"; kind: "map-analysis"; title: "Map Analysis"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalMapAnalysisSummary }
-  | { id: "evidence-reduction"; kind: "evidence-reduction"; title: "Evidence Reduction"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalReduceSummary }
-  | { id: "global-answer-generation"; kind: "global-answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalAnswerGenerationSummary }
+  | { id: "community-selection"; kind: "community-selection"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DynamicCommunitySelectionSummary }
+  | { id: "community-context"; kind: "community-context"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalCommunityContextSummary }
+  | { id: "map-analysis"; kind: "map-analysis"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalMapAnalysisSummary }
+  | { id: "evidence-reduction"; kind: "evidence-reduction"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalReduceSummary }
+  | { id: "global-answer-generation"; kind: "global-answer-generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: GlobalAnswerGenerationSummary }
 
 export interface GlobalSemanticTimelineModel {
   variant: "static" | "dynamic"
@@ -344,7 +344,6 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     ...(dynamicSelection === undefined ? [] : [{
       id: "community-selection" as const,
       kind: "community-selection" as const,
-      title: "Community Selection" as const,
       rawEvents: dynamicSelection.rawEvents,
       focusEnvelope: null,
       summary: dynamicSelection.summary,
@@ -352,7 +351,6 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     {
       id: "community-context",
       kind: "community-context",
-      title: "Community Context",
       rawEvents: communityRaw,
       focusEnvelope: null,
       summary: {
@@ -366,7 +364,6 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     {
       id: "map-analysis",
       kind: "map-analysis",
-      title: "Map Analysis",
       rawEvents: mapRaw,
       focusEnvelope: null,
       summary: {
@@ -384,7 +381,6 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     {
       id: "evidence-reduction",
       kind: "evidence-reduction",
-      title: "Evidence Reduction",
       rawEvents: reduceRaw,
       focusEnvelope: null,
       summary: reduceSummary,
@@ -392,7 +388,6 @@ export function buildGlobalSemanticTimeline(ordered: readonly ExplainabilityEnve
     {
       id: "global-answer-generation",
       kind: "global-answer-generation",
-      title: "Answer Generation",
       rawEvents: answerRaw,
       focusEnvelope: null,
       summary: answerSummary,

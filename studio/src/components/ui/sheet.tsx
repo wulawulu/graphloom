@@ -1,5 +1,6 @@
 import { X } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
+import { useTranslation } from "react-i18next"
 
 import { cn } from "@/lib/utils"
 
@@ -8,6 +9,7 @@ const SheetTrigger = SheetPrimitive.Trigger
 const SheetClose = SheetPrimitive.Close
 
 function SheetContent({ className, children, ...props }: React.ComponentProps<typeof SheetPrimitive.Content>) {
+  const { t } = useTranslation()
   return (
     <SheetPrimitive.Portal>
       <SheetPrimitive.Overlay className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-in data-[state=closed]:animate-out" />
@@ -16,7 +18,7 @@ function SheetContent({ className, children, ...props }: React.ComponentProps<ty
         {...props}
       >
         {children}
-        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring" aria-label="Close detail panel">
+        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring" aria-label={t("Close detail panel")}>
           <X className="size-4" />
         </SheetPrimitive.Close>
       </SheetPrimitive.Content>

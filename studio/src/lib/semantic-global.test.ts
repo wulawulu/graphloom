@@ -55,7 +55,7 @@ describe("Global semantic timeline", () => {
     const model = buildSemanticTimeline(completeGlobalRun())
 
     expect(model.method).toBe("global")
-    expect(model.steps.map((step) => step.title)).toEqual(["Community Context", "Map Analysis", "Evidence Reduction", "Answer Generation"])
+    expect(model.steps.map((step) => step.kind)).toEqual(["community-context", "map-analysis", "evidence-reduction", "global-answer-generation"])
     const community = model.steps[0]
     const map = model.steps[1]
     const reduce = model.steps[2]
@@ -298,7 +298,7 @@ describe("Global semantic timeline", () => {
     ])
 
     expect(model.globalVariant).toBe("dynamic")
-    expect(model.steps.map((step) => step.title)).toEqual(["Community Selection", "Community Context", "Map Analysis", "Evidence Reduction", "Answer Generation"])
+    expect(model.steps.map((step) => step.kind)).toEqual(["community-selection", "community-context", "map-analysis", "evidence-reduction", "global-answer-generation"])
     const selection = model.steps[0]
     if (selection?.kind !== "community-selection") throw new Error("expected Community Selection")
     expect(selection.summary).toMatchObject({ completed: true, visitedCount: 3, selectedCount: 1, threshold: 3, attemptsStarted: 3, attemptsCompleted: 3 })

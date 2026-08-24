@@ -1,4 +1,7 @@
 import "@testing-library/jest-dom/vitest"
+import { afterEach, beforeEach } from "vitest"
+
+import { setStudioLocale } from "@/i18n"
 
 class ResizeObserverStub implements ResizeObserver {
   disconnect(): void {}
@@ -7,3 +10,10 @@ class ResizeObserverStub implements ResizeObserver {
 }
 
 globalThis.ResizeObserver = ResizeObserverStub
+HTMLElement.prototype.hasPointerCapture = () => false
+HTMLElement.prototype.setPointerCapture = () => undefined
+HTMLElement.prototype.releasePointerCapture = () => undefined
+HTMLElement.prototype.scrollIntoView = () => undefined
+
+beforeEach(async () => setStudioLocale("en", false))
+afterEach(async () => setStudioLocale("en", false))

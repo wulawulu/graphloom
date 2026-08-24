@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import type { GraphProjectionEntity, GraphProjectionRelationship } from "@/api/types"
 import { clampTooltipPosition } from "@/lib/graph-tooltip"
@@ -15,6 +16,7 @@ interface GraphTooltipProps {
 }
 
 export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): React.ReactElement {
+  const { t } = useTranslation()
   const tooltipRef = useRef<HTMLDivElement>(null)
   const [position, setPosition] = useState({ x: 8, y: 8 })
   useLayoutEffect(() => {
@@ -30,11 +32,11 @@ export function GraphTooltip({ bounds, content, x, y }: GraphTooltipProps): Reac
       role="tooltip"
     >
       {content.kind === "entity" ? (
-        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? "Untyped"}</p><p className="mt-1 text-xs text-muted-foreground">Degree {content.value.degree ?? "—"} · Rank {content.value.rank ?? "—"}</p></>
+        <><p className="font-semibold">{content.value.title}</p><p className="mt-0.5 text-xs text-muted-foreground">{content.value.entity_type ?? t("Untyped")}</p><p className="mt-1 text-xs text-muted-foreground">{t("Degree {{value}}", { value: content.value.degree ?? "—" })} · {t("Rank {{value}}", { value: content.value.rank ?? "—" })}</p></>
       ) : (
-        <><p className="font-semibold">{content.value.source} → {content.value.target}</p><p className="mt-0.5 text-xs text-muted-foreground">Weight {content.value.weight ?? "—"} · Rank {content.value.rank ?? "—"}</p></>
+        <><p className="font-semibold">{content.value.source} → {content.value.target}</p><p className="mt-0.5 text-xs text-muted-foreground">{t("Weight {{value}}", { value: content.value.weight ?? "—" })} · {t("Rank {{value}}", { value: content.value.rank ?? "—" })}</p></>
       )}
-      <p className="mt-1.5 text-[10px] text-muted-foreground">Click for details</p>
+      <p className="mt-1.5 text-[10px] text-muted-foreground">{t("Click for details")}</p>
     </div>
   )
 }

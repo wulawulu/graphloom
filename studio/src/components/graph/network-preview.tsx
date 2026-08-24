@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { Core } from "cytoscape"
 import { Focus, LoaderCircle, RefreshCcw, RotateCw } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import type { GraphProjection, GraphSummary } from "@/api/types"
 import type { GraphFocusKind, GraphViewMode } from "@/components/graph/graph-explorer"
@@ -130,6 +131,7 @@ function applyCitationEmphasis(
 }
 
 export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
+  const { t } = useTranslation()
   const { mode, onEntity, onRelationship, projection } = props
   const emphasisIntent = props.emphasisIntent ?? null
   const focusCore = props.focusCore ?? null
@@ -301,8 +303,8 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
   ]
   const focused = mode !== "overview"
   const finalContextFocus = mode === "query-focus" && props.focusKind === "final-context"
-  const title = mode === "query-focus" ? "Query focus" : mode === "explorer-focus" ? "Focused subgraph" : "Overview"
-  const coreLabel = finalContextFocus ? "Final context" : "Focus target"
+  const title = t(mode === "query-focus" ? "Query focus" : mode === "explorer-focus" ? "Focused subgraph" : "Overview")
+  const coreLabel = t(finalContextFocus ? "Final context" : "Focus target")
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -310,45 +312,45 @@ export function NetworkPreview(props: NetworkPreviewProps): React.ReactElement {
         <div className="min-w-0 text-[11px]">
           <div className="flex items-center gap-2 font-medium">
             <span>{title}</span>
-            {props.loading ? <LoaderCircle className="size-3.5 animate-spin text-primary" aria-label="Loading graph data" /> : null}
+            {props.loading ? <LoaderCircle className="size-3.5 animate-spin text-primary" aria-label={t("Loading graph data")} /> : null}
           </div>
           <p className="text-muted-foreground">
-            {focused ? `${coreCount} ${finalContextFocus ? "final context" : "focus"} records · ` : ""}{projection.entities.length} nodes · {projection.relationships.length} edges
-            {mode === "overview" && projection.unresolved_relationship_count > 0 ? ` · ${projection.unresolved_relationship_count} unresolved relationships in source graph` : ""}
-            {projection.truncated ? " · bounded view" : ""}
+            {focused ? `${t(finalContextFocus ? "{{count}} final context record" : "{{count}} focus record", { count: coreCount })} · ` : ""}{t("{{count}} node", { count: projection.entities.length })} · {t("{{count}} edge", { count: projection.relationships.length })}
+            {mode === "overview" && projection.unresolved_relationship_count > 0 ? ` · ${t("{{count}} unresolved relationship in source graph", { count: projection.unresolved_relationship_count })}` : ""}
+            {projection.truncated ? ` · ${t("bounded view")}` : ""}
           </p>
-          {props.summary !== null ? <p className="text-muted-foreground">{props.summary.entity_count.toLocaleString()} entities · {props.summary.relationship_count.toLocaleString()} relationships · {props.summary.community_count.toLocaleString()} communities · {props.summary.community_report_count.toLocaleString()} reports</p> : null}
+          {props.summary !== null ? <p className="text-muted-foreground">{t("{{count}} entity", { count: props.summary.entity_count })} · {t("{{count}} relationship", { count: props.summary.relationship_count })} · {t("{{count}} community", { count: props.summary.community_count })} · {t("{{count}} report", { count: props.summary.community_report_count })}</p> : null}
         </div>
         <div className="flex items-center gap-1">
           {focused ? (
-            <div className="flex rounded-md border p-0.5" role="group" aria-label="Graph visibility">
-              <Button variant={visualMode === "focus" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "focus"} onClick={() => setVisualMode("focus")}>Focus</Button>
-              <Button variant={visualMode === "full" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "full"} onClick={() => setVisualMode("full")}>Full</Button>
+            <div className="flex rounded-md border p-0.5" role="group" aria-label={t("Graph visibility")}>
+              <Button variant={visualMode === "focus" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "focus"} onClick={() => setVisualMode("focus")}>{t("Focus")}</Button>
+              <Button variant={visualMode === "full" ? "secondary" : "ghost"} size="sm" className="h-7 px-2" aria-pressed={visualMode === "full"} onClick={() => setVisualMode("full")}>{t("Full")}</Button>
             </div>
           ) : null}
-          {focused ? <Button variant="outline" size="sm" onClick={props.onBack}>{props.backLabel}</Button> : null}
-          <Button variant="ghost" size="icon" title="Fit the current projection" aria-label="Fit graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode, visualMode, focusCore) }}><Focus /></Button>
-          <Button variant="ghost" size="icon" title="Re-run layout without loading data" aria-label="Re-layout graph projection" onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, visualMode, focusCore, true) }}><RefreshCcw /></Button>
-          <Button variant="ghost" size="icon" title="Reload graph data from the backend" aria-label="Reload graph data" onClick={props.onReload}><RotateCw /></Button>
+          {focused ? <Button variant="outline" size="sm" onClick={props.onBack}>{t(props.backLabel)}</Button> : null}
+          <Button variant="ghost" size="icon" title={t("Fit the current projection")} aria-label={t("Fit graph projection")} onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) focusCollection(cy, projection, mode, visualMode, focusCore) }}><Focus /></Button>
+          <Button variant="ghost" size="icon" title={t("Re-run layout without loading data")} aria-label={t("Re-layout graph projection")} onClick={() => { const cy = cytoscapeRef.current; if (cy !== null) runLayout(cy, projection, mode, visualMode, focusCore, true) }}><RefreshCcw /></Button>
+          <Button variant="ghost" size="icon" title={t("Reload graph data from the backend")} aria-label={t("Reload graph data")} onClick={props.onReload}><RotateCw /></Button>
         </div>
       </div>
-      {props.error !== null ? <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-red-300">{props.error}</p> : null}
-      {props.summary === null && props.summaryError ? <p className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">Graph summary is unavailable. The bounded visualization is still available.</p> : null}
+      {props.error !== null ? <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-red-300">{t(props.error)}</p> : null}
+      {props.summary === null && props.summaryError ? <p className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">{t("Graph summary is unavailable. The bounded visualization is still available.")}</p> : null}
       {missingCount > 0 ? (
         <details className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs">
-          <summary className="cursor-pointer text-warning">{missingCount} selected records could not be represented in the graph.</summary>
+          <summary className="cursor-pointer text-warning">{t("{{count}} selected record could not be represented in the graph.", { count: missingCount })}</summary>
           <div className="mt-2 flex flex-wrap gap-1 font-mono text-[10px] text-muted-foreground">{missingIds.map((id) => <span key={id} className="rounded bg-muted px-1.5 py-0.5">{id}</span>)}</div>
         </details>
       ) : null}
-      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground" aria-label="Graph legend">
-        <Legend color="var(--graph-person)" label="PERSON" /><Legend color="var(--graph-organization)" label="ORGANIZATION" /><Legend color="var(--graph-geo)" label="GEO" /><Legend color="var(--graph-event)" label="EVENT" /><Legend color="var(--graph-default)" label="Other" />
-        {focused ? <><span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{coreLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)] opacity-30" />Context neighbor</span></> : null}
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground" aria-label={t("Graph legend")}>
+        <Legend color="var(--graph-person)" label="PERSON" /><Legend color="var(--graph-organization)" label="ORGANIZATION" /><Legend color="var(--graph-geo)" label="GEO" /><Legend color="var(--graph-event)" label="EVENT" /><Legend color="var(--graph-default)" label={t("Other")} />
+        {focused ? <><span className="border-l pl-3"><span className="mr-1 inline-block size-2.5 rounded-full border-2 border-[var(--graph-seed)]" />{coreLabel}</span><span><span className="mr-1 inline-block size-2.5 rounded-full bg-[var(--graph-default)] opacity-30" />{t("Context neighbor")}</span></> : null}
       </div>
       <div className="relative min-h-80 flex-1 overflow-hidden rounded-md border bg-background">
         <div className="absolute inset-0">
-          <div ref={containerRef} className="size-full" aria-label="Knowledge graph network preview" />
+          <div ref={containerRef} className="size-full" aria-label={t("Knowledge graph network preview")} />
         </div>
-        {rendererError ? <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-background/95 p-6 text-center" role="alert"><p className="text-sm font-medium text-destructive">Graph visualization failed to initialize.</p><p className="mt-1 text-xs text-muted-foreground">Check the browser console for renderer diagnostics.</p></div> : null}
+        {rendererError ? <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-background/95 p-6 text-center" role="alert"><p className="text-sm font-medium text-destructive">{t("Graph visualization failed to initialize.")}</p><p className="mt-1 text-xs text-muted-foreground">{t("Check the browser console for renderer diagnostics.")}</p></div> : null}
         {tooltip !== null ? <GraphTooltip {...tooltip} /> : null}
       </div>
     </div>

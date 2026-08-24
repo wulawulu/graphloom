@@ -69,7 +69,7 @@ describe("DRIFT semantic timeline", () => {
   it("builds exactly the three DRIFT semantic steps", () => {
     const model = buildSemanticTimeline(fullDriftRun())
     expect(model.method).toBe("drift")
-    expect(model.steps.map((step) => step.title)).toEqual(["Primer & Ranking", "Exploration", "Final Synthesis"])
+    expect(model.steps.map((step) => step.kind)).toEqual(["drift-primer-ranking", "drift-exploration", "drift-final-synthesis"])
   })
 
   it("preserves backend ranking and aggregate facts without recomputing them", () => {

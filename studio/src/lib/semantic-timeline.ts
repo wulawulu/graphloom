@@ -59,10 +59,10 @@ export interface AnswerGenerationSummary {
 }
 
 export type LocalSemanticStep =
-  | { id: "entity-mapping"; kind: "entity-mapping"; title: "Entity Mapping"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: EntityMappingSummary }
-  | { id: "graph-expansion"; kind: "graph-expansion"; title: "Graph Expansion"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: GraphExpansionSummary }
-  | { id: "context-assembly"; kind: "context-assembly"; title: "Context Assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: ContextAssemblySummary }
-  | { id: "answer-generation"; kind: "answer-generation"; title: "Answer Generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: AnswerGenerationSummary }
+  | { id: "entity-mapping"; kind: "entity-mapping"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: EntityMappingSummary }
+  | { id: "graph-expansion"; kind: "graph-expansion"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: ExplainabilityEnvelope | null; summary: GraphExpansionSummary }
+  | { id: "context-assembly"; kind: "context-assembly"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: ContextAssemblySummary }
+  | { id: "answer-generation"; kind: "answer-generation"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: AnswerGenerationSummary }
 
 export type SemanticStep = LocalSemanticStep | GlobalSemanticStep | BasicSemanticStep | DriftSemanticStep
 
@@ -195,7 +195,6 @@ function buildEntityMapping(rawEvents: ExplainabilityEnvelope[], finalContext: F
   return {
     id: "entity-mapping",
     kind: "entity-mapping",
-    title: "Entity Mapping",
     rawEvents,
     focusEnvelope,
     summary: {
@@ -228,7 +227,7 @@ function buildGraphExpansion(rawEvents: ExplainabilityEnvelope[], finalContext: 
     if (!record.selected) continue
     selectedCounts[record.recordType] = (selectedCounts[record.recordType] ?? 0) + 1
   }
-  return { id: "graph-expansion", kind: "graph-expansion", title: "Graph Expansion", rawEvents, focusEnvelope, summary: { records, selectedCounts } }
+  return { id: "graph-expansion", kind: "graph-expansion", rawEvents, focusEnvelope, summary: { records, selectedCounts } }
 }
 
 function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: ExplainabilityContextSection[]): LocalSemanticStep {
@@ -244,7 +243,7 @@ function buildContextAssembly(rawEvents: ExplainabilityEnvelope[], sections: Exp
     }
   }
   if (tokensUsed === undefined && sections.length > 0) tokensUsed = sections.reduce((total, section) => total + section.tokens_used, 0)
-  return { id: "context-assembly", kind: "context-assembly", title: "Context Assembly", rawEvents, focusEnvelope: null, summary: { sections, totalTokenBudget, tokensUsed, exactContext } }
+  return { id: "context-assembly", kind: "context-assembly", rawEvents, focusEnvelope: null, summary: { sections, totalTokenBudget, tokensUsed, exactContext } }
 }
 
 function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): LocalSemanticStep {
@@ -269,7 +268,7 @@ function buildAnswerGeneration(rawEvents: ExplainabilityEnvelope[]): LocalSemant
     }
     model = stringValue(event.model_id) ?? model
   }
-  return { id: "answer-generation", kind: "answer-generation", title: "Answer Generation", rawEvents, focusEnvelope: null, summary: { calls: Math.max(startedCalls, completedCalls), inputTokens: completedCalls > 0 ? inputTokens : startedInputTokens, outputTokens, elapsedMs, model } }
+  return { id: "answer-generation", kind: "answer-generation", rawEvents, focusEnvelope: null, summary: { calls: Math.max(startedCalls, completedCalls), inputTokens: completedCalls > 0 ? inputTokens : startedInputTokens, outputTokens, elapsedMs, model } }
 }
 
 interface FinalContextIndex {

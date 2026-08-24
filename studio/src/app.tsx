@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityEnvelope, StartQueryResponse } from "@/api/types"
 import { StudioShell } from "@/components/layout/studio-shell"
@@ -19,6 +20,7 @@ const GraphExplorer = lazy(() => import("@/components/graph/graph-explorer").the
 const AnswerPanel = lazy(() => import("@/components/result/answer-panel").then((module) => ({ default: module.AnswerPanel })))
 
 export function App(): React.ReactElement {
+  const { t } = useTranslation()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [graphFocus, setGraphFocus] = useState<GraphFocusIntent | null>(null)
   const [citationEmphasis, setCitationEmphasis] = useState<GraphEmphasisIntent | null>(null)
@@ -136,7 +138,7 @@ export function App(): React.ReactElement {
     ? null
     : activeSubmittedRunId === displayedRunId && submittedQuestion !== null
       ? submittedQuestion
-      : displayedRun?.query ?? "Query hidden (metadata mode)"
+      : displayedRun?.query ?? t("Query hidden (metadata mode)")
 
   const queryWorkspace = (
     <QaWorkspace
@@ -144,7 +146,7 @@ export function App(): React.ReactElement {
       runStatus={displayedRun?.status}
       question={displayedQuestion}
       composer={<QueryComposer onAccepted={onAccepted} resetRevision={composerRevision} />}
-      answer={<Suspense fallback={<PanelLoading label="Loading Final Answer" />}><AnswerPanel runId={displayedRunId} result={displayedResult} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
+      answer={<Suspense fallback={<PanelLoading label={t("Loading Final Answer")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
       envelopes={displayedEnvelopes}
       streamStatus={stream.status}
       runs={history.runs}
@@ -164,7 +166,7 @@ export function App(): React.ReactElement {
     <TooltipProvider delayDuration={250}>
       <StudioShell
         queryWorkspace={queryWorkspace}
-        graph={<Suspense fallback={<PanelLoading label="Loading Graph Explorer" />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} navigationResetRevision={graphNavigationRevision} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
+        graph={<Suspense fallback={<PanelLoading label={t("Loading Graph Explorer")} />}><GraphExplorer runId={selectedRunId} focusIntent={graphFocus} inspectIntent={graphInspection} navigationResetRevision={graphNavigationRevision} onClearFocus={clearGraphFocus} emphasisIntent={citationEmphasis} onClearEmphasis={clearCitationEmphasis} /></Suspense>}
         mobileTab={mobileTab}
         onMobileTabChange={setMobileTab}
       />

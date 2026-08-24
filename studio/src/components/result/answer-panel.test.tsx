@@ -21,7 +21,7 @@ describe("AnswerPanel", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "**Answer** <script>alert(1)</script>", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.getByText("Answer")).toBeInTheDocument()
     expect(document.querySelector("script")).toBeNull()
-    expect(screen.getByText("1 calls")).toBeInTheDocument()
+    expect(screen.getByText("1 call")).toBeInTheDocument()
   })
 
   it("does not load remote images embedded in model Markdown", () => {

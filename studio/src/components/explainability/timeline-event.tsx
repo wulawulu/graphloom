@@ -1,11 +1,13 @@
 import { Braces, CircleAlert, DatabaseZap, GitBranch, LifeBuoy, Sparkles } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 import type { ExplainabilityEnvelope } from "@/api/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { EventDetail } from "@/components/explainability/details/event-detail"
-import { describeEvent, eventSummary, highlightFromEvent, type TimelineCategory } from "@/lib/explainability"
+import { localizedEventSummary } from "@/i18n/presentation"
+import { describeEvent, highlightFromEvent, type TimelineCategory } from "@/lib/explainability"
 
 interface TimelineEventProps {
   envelope: ExplainabilityEnvelope
@@ -23,9 +25,10 @@ function CategoryIcon({ category }: { category: TimelineCategory }): React.React
 }
 
 export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): React.ReactElement {
+  const { t } = useTranslation()
   const event = envelope.record.event
   const descriptor = describeEvent(event)
-  const summary = eventSummary(event)
+  const summary = localizedEventSummary(t, event)
   const highlight = highlightFromEvent(event)
 
   return (
@@ -37,17 +40,17 @@ export function TimelineEvent({ envelope, onFocusGraph }: TimelineEventProps): R
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium capitalize">{descriptor.label}</span>
-                <Badge variant="outline">{descriptor.category}</Badge>
+                <span className="text-sm font-medium capitalize">{t(descriptor.label)}</span>
+                <Badge variant="outline">{t(descriptor.category)}</Badge>
                 <span className="font-mono text-[10px] text-muted-foreground">#{envelope.sequence}</span>
               </div>
               {summary.length > 0 ? <p className="mt-1 text-xs text-muted-foreground">{summary}</p> : null}
-              <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">span {envelope.record.span_id}{envelope.record.parent_span_id === undefined ? "" : ` · parent ${envelope.record.parent_span_id}`}</p>
+              <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{t("span")} {envelope.record.span_id}{envelope.record.parent_span_id === undefined ? "" : ` · ${t("parent")} ${envelope.record.parent_span_id}`}</p>
               <time className="mt-1 block text-[10px] text-muted-foreground">{new Date(envelope.record.timestamp).toLocaleTimeString()}</time>
             </div>
             <div className="flex shrink-0 gap-1">
-              {highlight !== null ? <Button variant="outline" size="sm" onClick={() => onFocusGraph(envelope)}>Focus in graph</Button> : null}
-              <CollapsibleTrigger asChild><Button variant="ghost" size="sm">Details</Button></CollapsibleTrigger>
+              {highlight !== null ? <Button variant="outline" size="sm" onClick={() => onFocusGraph(envelope)}>{t("Focus in graph")}</Button> : null}
+              <CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t("Details")}</Button></CollapsibleTrigger>
             </div>
           </div>
           <CollapsibleContent className="mt-3 space-y-3 border-t pt-3">

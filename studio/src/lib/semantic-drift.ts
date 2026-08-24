@@ -147,9 +147,9 @@ export interface DriftSynthesisSummary extends DriftLlmView {
 }
 
 export type DriftSemanticStep =
-  | { id: "drift-primer-ranking"; kind: "drift-primer-ranking"; title: "Primer & Ranking"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftPrimerSummary }
-  | { id: "drift-exploration"; kind: "drift-exploration"; title: "Exploration"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftExplorationSummary }
-  | { id: "drift-final-synthesis"; kind: "drift-final-synthesis"; title: "Final Synthesis"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftSynthesisSummary }
+  | { id: "drift-primer-ranking"; kind: "drift-primer-ranking"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftPrimerSummary }
+  | { id: "drift-exploration"; kind: "drift-exploration"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftExplorationSummary }
+  | { id: "drift-final-synthesis"; kind: "drift-final-synthesis"; rawEvents: ExplainabilityEnvelope[]; focusEnvelope: null; summary: DriftSynthesisSummary }
 
 export interface DriftSemanticTimelineModel {
   steps: DriftSemanticStep[]
@@ -337,8 +337,8 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
   }
   return {
     steps: [
-      { id: "drift-primer-ranking", kind: "drift-primer-ranking", title: "Primer & Ranking", rawEvents: primerRaw.sort(bySequence), focusEnvelope: null, summary: primerSummary },
-      { id: "drift-exploration", kind: "drift-exploration", title: "Exploration", rawEvents: explorationRaw.sort(bySequence), focusEnvelope: null, summary: {
+      { id: "drift-primer-ranking", kind: "drift-primer-ranking", rawEvents: primerRaw.sort(bySequence), focusEnvelope: null, summary: primerSummary },
+      { id: "drift-exploration", kind: "drift-exploration", rawEvents: explorationRaw.sort(bySequence), focusEnvelope: null, summary: {
         started: explorationStarted !== undefined,
         maxDepth: explorationStarted?.record.event.max_depth,
         selectionLimit: explorationStarted?.record.event.selection_limit,
@@ -351,7 +351,7 @@ export function buildDriftSemanticTimeline(envelopes: readonly ExplainabilityEnv
         nodeCount: reduceBuilt?.record.event.node_count,
         edgeCount: reduceBuilt?.record.event.edge_count,
       } },
-      { id: "drift-final-synthesis", kind: "drift-final-synthesis", title: "Final Synthesis", rawEvents: synthesisRaw.sort(bySequence), focusEnvelope: null, summary: synthesisSummary },
+      { id: "drift-final-synthesis", kind: "drift-final-synthesis", rawEvents: synthesisRaw.sort(bySequence), focusEnvelope: null, summary: synthesisSummary },
     ],
     diagnosticEvents: ordered.filter((envelope) => !claimed.has(envelopeKey(envelope))),
   }
