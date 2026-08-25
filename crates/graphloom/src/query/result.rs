@@ -262,6 +262,42 @@ pub struct QueryResult {
     pub usage: QueryUsage,
 }
 
+impl QueryResult {
+    /// Construct a completed Query result from its canonical parts.
+    ///
+    /// This is primarily useful for consumers which implement a `QueryEventStream` test double.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use graphloom::query::{QueryContext, QueryResult, QueryUsage};
+    ///
+    /// let result = QueryResult::new(
+    ///     "answer".to_owned(),
+    ///     QueryContext::default(),
+    ///     Duration::from_millis(1),
+    ///     QueryUsage::default(),
+    /// );
+    /// assert_eq!(result.response, "answer");
+    /// ```
+    #[must_use]
+    pub fn new(
+        response: String,
+        context: QueryContext,
+        elapsed: Duration,
+        usage: QueryUsage,
+    ) -> Self {
+        Self {
+            response,
+            context,
+            elapsed,
+            usage,
+        }
+    }
+}
+
 /// Event emitted by a streaming Query.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

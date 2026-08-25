@@ -214,13 +214,18 @@ impl QueryEngine {
         options: QueryOptions,
         instrumentation: Option<QueryInstrumentation>,
     ) -> crate::Result<QueryEventStream> {
-        let result = self
+        match self
             .query_stream_inner(&options, instrumentation.clone())
-            .await;
-        if let (Err(error), Some(instrumentation)) = (&result, instrumentation) {
-            instrumentation.finish_graphloom_error(error).await;
+            .await
+        {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                if let Some(instrumentation) = instrumentation {
+                    instrumentation.finish_graphloom_error(&error).await;
+                }
+                Err(error)
+            }
         }
-        result
     }
 
     async fn query_stream_inner(

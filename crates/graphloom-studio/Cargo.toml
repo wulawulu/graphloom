@@ -20,12 +20,14 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap = { workspace = true, optional = true }
+dashmap.workspace = true
 futures-util.workspace = true
 graphloom.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "signal"] }
 tower-http = { workspace = true, optional = true }
+tracing.workspace = true
 
 [[bin]]
 name = "graphloom-studio"

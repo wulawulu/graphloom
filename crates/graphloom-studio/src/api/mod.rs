@@ -1,7 +1,9 @@
 //! Composable Studio Query and Explainability Run HTTP APIs.
 
+mod answer_live;
 mod graph;
 mod query;
+mod query_answer_sse;
 mod query_result;
 mod runs;
 
@@ -16,12 +18,14 @@ use tokio::sync::Semaphore;
 
 pub use self::query_result::{StudioQueryResult, StudioQueryUsage, StudioQueryUsageCategory};
 use self::{
+    answer_live::QueryAnswerLiveHub,
     graph::{
         get_community, get_community_report, get_entity, get_overview, get_relationship,
         get_subgraph, get_summary, get_text_unit, list_communities, list_entities,
         list_relationships, resolve_text_units,
     },
     query::{GraphLoomQueryRunner, QueryRunner, start_query},
+    query_answer_sse::get_query_answer_events,
     query_result::{QueryResultRegistry, get_query_result},
     runs::{get_run, list_runs},
 };
@@ -221,6 +225,9 @@ impl StudioApiService {
                 query_results: Arc::new(QueryResultRegistry::new(
                     options.max_retained_query_results(),
                 )),
+                query_answer_live: Arc::new(QueryAnswerLiveHub::new(
+                    options.max_retained_query_results(),
+                )),
                 graph_data_source,
             }),
         }
@@ -230,6 +237,7 @@ impl StudioApiService {
     pub fn router(&self) -> Router {
         let api = Router::new()
             .route("/api/query", axum::routing::post(start_query))
+            .route("/api/query/{run_id}/events", get(get_query_answer_events))
             .route("/api/query/{run_id}/result", get(get_query_result))
             .route("/api/explainability/runs", get(list_runs))
             .route("/api/explainability/runs/{run_id}", get(get_run))
@@ -271,6 +279,7 @@ struct StudioApiState {
     query_runner: Arc<dyn QueryRunner>,
     query_permits: Arc<Semaphore>,
     query_results: Arc<QueryResultRegistry>,
+    query_answer_live: Arc<QueryAnswerLiveHub>,
     graph_data_source: Arc<dyn GraphDataSource>,
 }
 

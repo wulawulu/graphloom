@@ -112,15 +112,6 @@ impl fmt::Debug for QueryExecutionResult {
 }
 
 impl QueryExecutionResult {
-    #[cfg(test)]
-    pub(super) fn for_test(response: String, elapsed_ms: u64, usage: StudioQueryUsage) -> Self {
-        Self {
-            response,
-            elapsed_ms,
-            usage,
-        }
-    }
-
     pub(super) fn with_run_id(self, run_id: ExplainabilityRunId) -> StudioQueryResult {
         StudioQueryResult {
             run_id,

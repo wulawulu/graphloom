@@ -10,3 +10,4 @@ for current behavior and operational guides.
 - [Query record/replay PRD](query-record-replay-prd.md)
 - [Query record/replay proxy design](query-record-replay-design.md)
 - [Query record/replay implementation plan](query-record-replay-impl-plan.md)
+- [Studio live Query design](studio-live-query-design.md)

@@ -7,6 +7,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use chrono::{TimeZone, Utc};
+use futures_util::stream;
 use graphloom::{
     GraphRagConfig,
     explainability::{
@@ -17,7 +18,10 @@ use graphloom::{
         ExplainabilityStore, ExplainabilityStoreError, InMemoryExplainabilityStore, QueryStarted,
         RunCompleted, RunCompletion, RunFailed, RunQuery, RunStarted,
     },
-    query::{QueryOptions, SearchMethod},
+    query::{
+        QueryContext, QueryEvent, QueryEventStream, QueryOptions, QueryResult, QueryUsage,
+        QueryUsageCategory, SearchMethod,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,9 +29,10 @@ use tokio::sync::{Semaphore, mpsc};
 use tower::ServiceExt;
 
 use super::{
-    StudioApiOptions, StudioApiService, StudioQueryUsage, StudioQueryUsageCategory,
+    StudioApiOptions, StudioApiService,
+    answer_live::{LiveAnswerStatus, QueryAnswerEvent, QueryAnswerLiveHub},
     query::{QueryRunner, QueryRunnerError},
-    query_result::{QueryExecutionResult, QueryResultRegistry},
+    query_result::QueryResultRegistry,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +41,7 @@ enum RunnerOutcome {
     Failure,
     MissingFinish,
     ResultMaterializationFailure,
+    Panic,
 }
 
 #[derive(Debug)]
@@ -324,7 +330,7 @@ impl fmt::Debug for ControlledRunner {
 
 #[async_trait]
 impl QueryRunner for ControlledRunner {
-    async fn run(&self, options: QueryOptions) -> Result<QueryExecutionResult, QueryRunnerError> {
+    async fn stream(&self, options: QueryOptions) -> Result<QueryEventStream, QueryRunnerError> {
         let explainability = options
             .explainability
             .as_ref()
@@ -347,8 +353,12 @@ impl QueryRunner for ControlledRunner {
         permit.forget();
 
         if matches!(self.outcome, RunnerOutcome::MissingFinish) {
-            return Ok(test_execution_result(&options.query));
+            return Ok(Box::pin(stream::empty()));
         }
+        assert!(
+            !matches!(self.outcome, RunnerOutcome::Panic),
+            "test runner panic"
+        );
         let sink = explainability.sink();
         let run_id = explainability.run_id().clone();
         emit(
@@ -378,9 +388,12 @@ impl QueryRunner for ControlledRunner {
                     .await
                     .map_err(|_| QueryRunnerError::Failed)?;
                 if matches!(self.outcome, RunnerOutcome::ResultMaterializationFailure) {
-                    Err(QueryRunnerError::ResultMaterialization)
+                    Ok(test_query_stream(&options.query, std::time::Duration::MAX))
                 } else {
-                    Ok(test_execution_result(&options.query))
+                    Ok(test_query_stream(
+                        &options.query,
+                        std::time::Duration::from_millis(42),
+                    ))
                 }
             }
             RunnerOutcome::Failure => {
@@ -398,39 +411,46 @@ impl QueryRunner for ControlledRunner {
                     .map_err(|_| QueryRunnerError::Failed)?;
                 Err(QueryRunnerError::Failed)
             }
-            RunnerOutcome::MissingFinish => Ok(test_execution_result(&options.query)),
+            RunnerOutcome::MissingFinish => Ok(Box::pin(stream::empty())),
+            RunnerOutcome::Panic => unreachable!("panic outcome handled above"),
         }
     }
 }
 
-fn test_execution_result(query: &str) -> QueryExecutionResult {
-    QueryExecutionResult::for_test(
-        format!("final answer for {query}"),
-        42,
-        StudioQueryUsage {
-            llm_calls: 2,
-            prompt_tokens: 30,
-            output_tokens: 12,
-            categories: std::collections::BTreeMap::from([
-                (
-                    "completion".to_owned(),
-                    StudioQueryUsageCategory {
-                        llm_calls: 1,
-                        prompt_tokens: 20,
-                        output_tokens: 12,
-                    },
-                ),
-                (
-                    "selection".to_owned(),
-                    StudioQueryUsageCategory {
-                        llm_calls: 1,
-                        prompt_tokens: 10,
-                        output_tokens: 0,
-                    },
-                ),
-            ]),
-        },
-    )
+fn test_query_stream(query: &str, elapsed: std::time::Duration) -> QueryEventStream {
+    let answer = format!("final answer for {query}");
+    let mut usage = QueryUsage::default();
+    usage.llm_calls = 2;
+    usage.prompt_tokens = 30;
+    usage.output_tokens = 12;
+    usage.categories = std::collections::BTreeMap::from([
+        ("completion".to_owned(), query_usage_category(1, 20, 12)),
+        ("selection".to_owned(), query_usage_category(1, 10, 0)),
+    ]);
+    let events = vec![
+        Ok(QueryEvent::Context(QueryContext::default())),
+        Ok(QueryEvent::Token("final answer ".to_owned())),
+        Ok(QueryEvent::Token(format!("for {query}"))),
+        Ok(QueryEvent::Completed(QueryResult::new(
+            answer,
+            QueryContext::default(),
+            elapsed,
+            usage,
+        ))),
+    ];
+    Box::pin(stream::iter(events))
+}
+
+fn query_usage_category(
+    llm_calls: usize,
+    prompt_tokens: usize,
+    output_tokens: usize,
+) -> QueryUsageCategory {
+    let mut category = QueryUsageCategory::default();
+    category.llm_calls = llm_calls;
+    category.prompt_tokens = prompt_tokens;
+    category.output_tokens = output_tokens;
+    category
 }
 
 async fn emit(
@@ -457,6 +477,7 @@ struct Harness {
     release: Arc<Semaphore>,
     query_permits: Arc<Semaphore>,
     query_results: Arc<QueryResultRegistry>,
+    query_answer_live: Arc<QueryAnswerLiveHub>,
 }
 
 fn harness(outcome: RunnerOutcome, maximum: usize) -> Harness {
@@ -495,6 +516,7 @@ fn harness_with_retention(
     );
     let query_permits = Arc::clone(&service.state.query_permits);
     let query_results = Arc::clone(&service.state.query_results);
+    let query_answer_live = Arc::clone(&service.state.query_answer_live);
     Harness {
         router: service.router(),
         store,
@@ -503,6 +525,7 @@ fn harness_with_retention(
         release,
         query_permits,
         query_results,
+        query_answer_live,
     }
 }
 
@@ -534,7 +557,8 @@ fn failing_router(failure: StoreFailure) -> Router {
 struct Accepted {
     run_id: ExplainabilityRunId,
     run_url: String,
-    events_url: String,
+    explainability_events_url: String,
+    answer_events_url: String,
     result_url: String,
 }
 
@@ -612,7 +636,14 @@ async fn test_should_accept_default_local_after_run_is_live_and_not_wait_for_que
         location.and_then(|value| value.to_str().ok().map(str::to_owned)),
         Some(accepted.run_url.clone())
     );
-    assert_eq!(accepted.events_url, format!("{}/events", accepted.run_url));
+    assert_eq!(
+        accepted.explainability_events_url,
+        format!("{}/events", accepted.run_url)
+    );
+    assert_eq!(
+        accepted.answer_events_url,
+        format!("/api/query/{}/events", accepted.run_id)
+    );
     assert_eq!(
         accepted.result_url,
         format!("/api/query/{}/result", accepted.run_id)
@@ -677,6 +708,150 @@ async fn test_should_accept_default_local_after_run_is_live_and_not_wait_for_que
 }
 
 #[tokio::test]
+async fn test_should_stream_answer_then_reconcile_to_canonical_result_before_terminal() {
+    let mut harness = harness(RunnerOutcome::Success, 1);
+    let accepted = accepted(post(&harness.router, json!({"query":"live"})).await).await;
+    let _observed = harness.observations.recv().await.expect("runner entered");
+    let running = harness
+        .query_answer_live
+        .subscribe(&accepted.run_id)
+        .expect("running answer snapshot")
+        .initial_snapshot();
+    assert_eq!(
+        running,
+        QueryAnswerEvent::Snapshot {
+            sequence: 0,
+            text: String::new(),
+            status: LiveAnswerStatus::Running,
+        }
+    );
+
+    harness.release.add_permits(1);
+    harness.store.wait_for_completion().await;
+    let finished = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task completed");
+    drop(finished);
+    let terminal = harness
+        .query_answer_live
+        .subscribe(&accepted.run_id)
+        .expect("terminal answer snapshot")
+        .initial_snapshot();
+    assert_eq!(
+        terminal,
+        QueryAnswerEvent::Snapshot {
+            sequence: 3,
+            text: "final answer for live".to_owned(),
+            status: LiveAnswerStatus::Completed,
+        }
+    );
+    assert_eq!(
+        get_result(&harness.router, &accepted.run_id).await.status(),
+        StatusCode::OK
+    );
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::get(&accepted.answer_events_url)
+                .header("last-event-id", "2")
+                .body(Body::empty())
+                .expect("answer SSE request"),
+        )
+        .await
+        .expect("answer SSE response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-cache"))
+    );
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("answer SSE body");
+    let text = std::str::from_utf8(&body).expect("UTF-8 answer SSE");
+    assert!(text.contains("id: 3"));
+    assert!(text.contains("event: answer"));
+    assert!(text.contains("\"sequence\":3"));
+    assert!(text.contains("\"status\":\"completed\""));
+    assert!(!text.contains("usage"));
+}
+
+#[tokio::test]
+async fn test_should_publish_safe_failed_answer_terminal_and_preserve_no_result() {
+    let mut harness = harness(RunnerOutcome::Failure, 1);
+    let accepted = accepted(post(&harness.router, json!({"query":"secret failure"})).await).await;
+    let _observed = harness.observations.recv().await.expect("runner entered");
+    harness.release.add_permits(1);
+    harness.store.wait_for_completion().await;
+    let finished = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task completed");
+    drop(finished);
+    assert_eq!(
+        harness
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("failed answer snapshot")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 1,
+            text: String::new(),
+            status: LiveAnswerStatus::Failed,
+        }
+    );
+    assert!(harness.query_results.get(&accepted.run_id).await.is_none());
+    let response = harness
+        .router
+        .oneshot(
+            Request::get(&accepted.answer_events_url)
+                .body(Body::empty())
+                .expect("failed answer SSE request"),
+        )
+        .await
+        .expect("failed answer SSE response");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("failed answer SSE body");
+    let text = std::str::from_utf8(&body).expect("UTF-8 failed answer SSE");
+    assert!(text.contains("\"status\":\"failed\""));
+    assert!(!text.contains("secret failure"));
+}
+
+#[tokio::test]
+async fn test_should_recover_panicked_query_worker_to_terminal_failure() {
+    let mut harness = harness(RunnerOutcome::Panic, 1);
+    let accepted = accepted(post(&harness.router, json!({"query":"panic"})).await).await;
+    let _observed = harness.observations.recv().await.expect("runner entered");
+    harness.release.add_permits(1);
+    harness.store.wait_for_completion().await;
+    assert_eq!(
+        harness
+            .store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run")
+            .status,
+        ExplainabilityRunStatus::Failed
+    );
+    assert_eq!(
+        harness
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("failed answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 1,
+            text: String::new(),
+            status: LiveAnswerStatus::Failed,
+        }
+    );
+}
+
+#[tokio::test]
 async fn test_should_complete_failed_query_as_failed_and_keep_post_accepted() {
     let mut harness = harness(RunnerOutcome::Failure, 1);
     let accepted = accepted(post(&harness.router, json!({"query":"failure"})).await).await;
@@ -700,26 +875,26 @@ async fn test_should_complete_failed_query_as_failed_and_keep_post_accepted() {
 }
 
 #[tokio::test]
-async fn test_should_leave_run_running_when_executor_does_not_finish() {
+async fn test_should_fail_run_when_executor_ends_without_completed_event() {
     let mut harness = harness(RunnerOutcome::MissingFinish, 1);
     let accepted = accepted(post(&harness.router, json!({"query":"unfinished"})).await).await;
     let mut live = harness.hub.subscribe(&accepted.run_id).expect("live run");
     let _observed = harness.observations.recv().await.expect("runner entered");
     harness.release.add_permits(1);
     drain_closed(&mut live).await;
+    let released = Arc::clone(&harness.query_permits)
+        .acquire_owned()
+        .await
+        .expect("query task completed");
+    drop(released);
     let run = harness
         .store
         .get_run(&accepted.run_id)
         .await
         .expect("store read")
         .expect("run");
-    assert_eq!(run.status, ExplainabilityRunStatus::Running);
-    assert!(run.completed_at.is_none());
-    let released = Arc::clone(&harness.query_permits)
-        .acquire_owned()
-        .await
-        .expect("query task completed");
-    drop(released);
+    assert_eq!(run.status, ExplainabilityRunStatus::Failed);
+    assert!(run.completed_at.is_some());
     assert_eq!(
         harness
             .router
@@ -732,13 +907,13 @@ async fn test_should_leave_run_running_when_executor_does_not_finish() {
             .await
             .expect("response")
             .status(),
-        StatusCode::ACCEPTED
+        StatusCode::CONFLICT
     );
     assert!(harness.query_results.get(&accepted.run_id).await.is_none());
 }
 
 #[tokio::test]
-async fn test_should_leave_run_running_when_result_materialization_fails() {
+async fn test_should_fail_run_when_result_materialization_fails() {
     let mut harness = harness(RunnerOutcome::ResultMaterializationFailure, 1);
     let accepted =
         accepted(post(&harness.router, json!({"query":"conversion failure"})).await).await;
@@ -760,11 +935,11 @@ async fn test_should_leave_run_running_when_result_materialization_fails() {
             .expect("store read")
             .expect("run")
             .status,
-        ExplainabilityRunStatus::Running
+        ExplainabilityRunStatus::Failed
     );
     assert_eq!(
         get_result(&harness.router, &accepted.run_id).await.status(),
-        StatusCode::ACCEPTED
+        StatusCode::CONFLICT
     );
     assert!(harness.query_results.get(&accepted.run_id).await.is_none());
 }
@@ -999,7 +1174,7 @@ async fn test_should_complete_post_to_sse_to_run_lifecycle() {
         .router
         .clone()
         .oneshot(
-            Request::get(&accepted.events_url)
+            Request::get(&accepted.explainability_events_url)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1055,7 +1230,7 @@ async fn test_should_continue_query_after_sse_client_disconnects() {
         .router
         .clone()
         .oneshot(
-            Request::get(&accepted.events_url)
+            Request::get(&accepted.explainability_events_url)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1625,6 +1800,17 @@ fn test_should_compile_direct_public_query_tokio_spawn() {
         options: QueryOptions,
     ) -> tokio::task::JoinHandle<graphloom::Result<graphloom::query::QueryResult>> {
         tokio::spawn(async move { graphloom::api::query(config, options).await })
+    }
+    let _spawn = spawn;
+}
+
+#[test]
+fn test_should_compile_direct_public_query_stream_tokio_spawn() {
+    fn spawn(
+        config: GraphRagConfig,
+        options: QueryOptions,
+    ) -> tokio::task::JoinHandle<graphloom::Result<graphloom::query::QueryEventStream>> {
+        tokio::spawn(async move { graphloom::api::query_stream(config, options).await })
     }
     let _spawn = spawn;
 }
