@@ -145,6 +145,8 @@ describe("AnswerPanel", () => {
     )
 
     const citation = screen.getByRole("button", { name: "View evidence for 3 Sources" })
+    expect(citation.tagName).toBe("BUTTON")
+    expect(citation.closest(".contents")).toBeNull()
     await user.hover(citation)
     expect(resolveTextUnits).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(screen.getByText("王婆道：大官人若要成此事，只在我身上。")).toBeInTheDocument())

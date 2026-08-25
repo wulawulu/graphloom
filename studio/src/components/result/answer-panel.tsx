@@ -90,17 +90,14 @@ function SourceEvidenceViewer({ viewer, onClose }: { viewer: { group: CitationGr
 function SourceCitation({ group, label, target, onOpen }: { group: CitationGroup; label: string; target: Extract<CitationTarget, { kind: "sources" }>; onOpen: () => void }): React.ReactElement {
   const { t } = useTranslation()
   const evidence = useTextUnitEvidence()
-  const [hoverPreviewOpen, setHoverPreviewOpen] = useState(false)
-  const [focusPreviewOpen, setFocusPreviewOpen] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(false)
   const load = (): void => evidence.resolve(target.textUnitIds)
   return (
-    <HoverCard open={hoverPreviewOpen || focusPreviewOpen} onOpenChange={(open) => { setHoverPreviewOpen(open); if (open) load() }}>
+    <HoverCard open={previewOpen} onOpenChange={(open) => { setPreviewOpen(open); if (open) load() }}>
       <HoverCardTrigger asChild>
-        <span className="contents">
-          <button type="button" className="mx-0.5 inline-flex items-center rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 align-baseline text-[11px] font-medium text-primary transition-colors hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("answer.sources.viewEvidence", { count: group.recordIds.length })} onPointerEnter={() => { load(); setFocusPreviewOpen(true) }} onPointerLeave={() => setFocusPreviewOpen(false)} onFocus={() => { load(); setFocusPreviewOpen(true) }} onBlur={() => setFocusPreviewOpen(false)} onClick={() => { load(); setFocusPreviewOpen(false); setHoverPreviewOpen(false); onOpen() }}>{label}</button>
-        </span>
+        <button type="button" className="mx-0.5 inline-flex items-center rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 align-baseline text-[11px] font-medium text-primary transition-colors hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("answer.sources.viewEvidence", { count: group.recordIds.length })} onPointerEnter={load} onFocus={() => { load(); setPreviewOpen(true) }} onBlur={() => setPreviewOpen(false)} onClick={() => { load(); setPreviewOpen(false); onOpen() }}>{label}</button>
       </HoverCardTrigger>
-      <HoverCardContent className="w-96 max-w-[calc(100vw-2rem)] space-y-2" align="start">
+      <HoverCardContent className="w-96 max-w-[calc(100vw-2rem)] space-y-2" side="top" sideOffset={8} align="center">
         <p className="text-xs font-semibold">{t("answer.sources.sourceEvidenceCount", { count: target.textUnitIds.length })}</p>
         {target.textUnitIds.map((id) => {
           const reference = evidence.refs.get(id)
