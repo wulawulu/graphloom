@@ -115,7 +115,7 @@ function RetrievalCandidateList({ candidates }: { candidates: ExplainabilityCand
 
 function CandidateRow({ candidate, preview, previewStatus, onOpen }: { candidate: ExplainabilityCandidate; preview: string | undefined; previewStatus: "idle" | "loading" | "resolved" | "unavailable"; onOpen: () => void }): React.ReactElement {
   const { t } = useTranslation()
-  const label = candidateLabel(candidate, t)
+  const label = candidate.short_id === undefined ? t("explainability.labels.textUnit") : t("explainability.labels.textUnitId", { id: candidate.short_id })
   const fallbackId = candidate.short_id === undefined ? compactStableId(candidate.id) : null
   return (
     <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 gap-y-1 overflow-hidden px-2 py-2 text-xs">
@@ -124,7 +124,7 @@ function CandidateRow({ candidate, preview, previewStatus, onOpen }: { candidate
       <Badge variant="outline" className="max-w-48 shrink-0 truncate" title={t("graph.labels.retrieved")}>{t("graph.labels.retrieved")}</Badge>
       <div className="col-span-2 col-start-2 flex min-w-0 gap-3 text-[10px] text-muted-foreground">{candidate.rank === undefined ? null : <span>{t("explainability.labels.annRankValue", { value: candidate.rank })}</span>}{candidate.score === undefined ? null : <span>{t("explainability.labels.scoreValue", { value: candidate.score.toFixed(4) })}</span>}</div>
       <p className="col-span-2 col-start-2 mt-1 line-clamp-3 min-w-0 whitespace-normal break-words text-xs leading-5 text-muted-foreground">{preview ?? t(previewStatus === "unavailable" ? "explainability.sources.previewUnavailable" : "explainability.sources.loadingPreview")}</p>
-      <Button variant="link" size="sm" className="col-start-3 h-auto justify-self-end px-0 py-0 text-[11px]" onClick={onOpen}>{t("explainability.actions.viewSource")}</Button>
+      <Button variant="ghost" size="sm" className="col-start-3 h-auto justify-self-end px-0 py-0 text-[11px] text-primary hover:bg-transparent hover:underline" onClick={onOpen}>{t("explainability.actions.viewSource")}</Button>
     </div>
   )
 }
@@ -167,8 +167,8 @@ function FinalSourceRow({ candidate, preview, previewStatus, onOpen }: { candida
   return (
     <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 gap-y-1 px-2 py-2 text-xs">
       <Check className="mt-0.5 size-3.5 text-success" aria-label={t("graph.labels.included")} />
-      <p className="break-words font-medium">{candidateLabel(candidate, t)}</p>
-      <Button variant="link" size="sm" className="h-auto px-0 py-0 text-[11px]" onClick={onOpen}>{t("explainability.actions.viewSource")}</Button>
+      <p className="break-words font-medium">{candidate.short_id === undefined ? t("explainability.labels.textUnit") : t("explainability.labels.textUnitId", { id: candidate.short_id })}</p>
+      <Button variant="ghost" size="sm" className="h-auto px-0 py-0 text-[11px] text-primary hover:bg-transparent hover:underline" onClick={onOpen}>{t("explainability.actions.viewSource")}</Button>
       <p className="col-span-2 col-start-2 line-clamp-2 min-w-0 whitespace-normal break-words text-xs leading-5 text-muted-foreground">{preview ?? t(previewStatus === "unavailable" ? "explainability.sources.previewUnavailable" : "explainability.sources.loadingPreview")}</p>
     </div>
   )
@@ -180,7 +180,7 @@ function ExcludedSources({ candidates }: { candidates: ExplainabilityCandidate[]
     <Collapsible>
       <CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t("explainability.basic.viewExcludedSources", { count: candidates.length })}</Button></CollapsibleTrigger>
       <CollapsibleContent className="mt-1 rounded border bg-muted/10 px-3 py-2">
-        <ul className="space-y-2">{candidates.map((candidate) => <li key={candidate.id} className="flex min-w-0 items-center justify-between gap-3 text-xs"><span className="min-w-0 break-words font-medium">{candidateLabel(candidate, t)}</span><span className="shrink-0 text-[10px] text-muted-foreground">{t(candidate.reason === "token_budget" ? "explainability.basic.tokenBudgetCutoff" : "graph.labels.notIncluded")}</span></li>)}</ul>
+        <ul className="space-y-2">{candidates.map((candidate) => <li key={candidate.id} className="flex min-w-0 items-center justify-between gap-3 text-xs"><span className="min-w-0 break-words font-medium">{candidate.short_id === undefined ? t("explainability.labels.textUnit") : t("explainability.labels.textUnitId", { id: candidate.short_id })}</span><span className="shrink-0 text-[10px] text-muted-foreground">{t(candidate.reason === "token_budget" ? "explainability.basic.tokenBudgetCutoff" : "graph.labels.notIncluded")}</span></li>)}</ul>
       </CollapsibleContent>
     </Collapsible>
   )
@@ -188,10 +188,6 @@ function ExcludedSources({ candidates }: { candidates: ExplainabilityCandidate[]
 
 function detailReference(candidate: ExplainabilityCandidate, reference: { short_id: string; n_tokens: number | null } | undefined): TextUnitDetailReference {
   return { id: candidate.id, shortId: reference?.short_id ?? candidate.short_id, nTokens: reference?.n_tokens }
-}
-
-function candidateLabel(candidate: ExplainabilityCandidate, t: ReturnType<typeof useTranslation>["t"]): string {
-  return candidate.short_id === undefined ? t("explainability.labels.textUnit") : t("explainability.labels.textUnitId", { id: candidate.short_id })
 }
 
 function compactStableId(id: string): string {
