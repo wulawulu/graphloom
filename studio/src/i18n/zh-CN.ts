@@ -100,6 +100,25 @@ export const zhCN = {
   },
   "answer": {
     "loading": "正在加载最终答案",
+    "usage": {
+      "modelOperations": "{{count}} 次模型操作",
+      "modelOperations_other": "{{count}} 次模型操作",
+      "modelOperationsHelp": "模型操作包括向量化和文本生成等模型请求。",
+      "basicSummary": "向量化 {{embedding}} 次 · 回答生成 {{generation}} 次",
+      "usageDetails": "使用情况",
+      "stage": "阶段",
+      "model": "模型",
+      "operation": "操作",
+      "operations": "次数",
+      "inputTokens": "输入 Tokens",
+      "outputTokens": "输出 Tokens",
+      "total": "总计",
+      "textRetrieval": "文本检索",
+      "answerGeneration": "回答生成",
+      "embedding": "向量化",
+      "textGeneration": "文本生成",
+      "modelOperation": "模型操作"
+    },
     "sources": {
       "viewEvidence": "查看 {{count}} 条来源证据",
       "sourceEvidenceCount": "来源 · {{count}}",
@@ -198,6 +217,16 @@ export const zhCN = {
     }
   },
   "explainability": {
+    "basic": {
+      "candidateSources": "候选来源",
+      "includedSources": "最终纳入",
+      "contextTokens": "Context Tokens",
+      "finalSources": "最终使用的来源",
+      "noFinalSources": "没有来源进入最终 Context。",
+      "viewAllFinalSources": "查看全部 {{count}} 条来源",
+      "viewExcludedSources": "查看 {{count}} 条未纳入来源",
+      "tokenBudgetCutoff": "Token 预算截止后"
+    },
     "sources": {
       "loadingPreview": "正在加载来源预览…",
       "previewUnavailable": "来源预览不可用"
@@ -294,6 +323,7 @@ export const zhCN = {
       "annRankValue": "ANN 排名 {{value}}",
       "basicContext": "基础检索 Context",
       "basicPrompt": "基础检索 Prompt",
+      "modelPrompt": "模型提示词",
       "rawBasicResponse": "基础检索原始响应",
       "waitingForCommunityContext": "等待社区 Context",
       "waitingForMapAnalysis": "等待 Map 分析",
@@ -459,8 +489,11 @@ export const zhCN = {
       "showFewerBasicTextUnits": "收起基础检索文本单元",
       "showFewerTextUnits": "收起文本单元",
       "viewBasicContext": "查看基础检索 Context",
+      "viewExactBasicContext": "查看 Exact Context",
       "copyExactBasicContext": "复制基础检索 Context 原文",
       "viewBasicPrompt": "查看基础检索 Prompt",
+      "viewModelPrompt": "查看模型提示词",
+      "viewSource": "查看原文",
       "viewRawBasicResponse": "查看基础检索原始响应",
       "selectingCommunities": "正在选择社区",
       "showFewerWaves": "收起波次",
@@ -574,7 +607,7 @@ export const zhCN = {
       "showAllCountRecords": "显示全部 {{count}} 条记录",
       "countTextUnitRetrieved": "已检索 {{count}} 个文本单元",
       "countTextUnitRetrieved_other": "已检索 {{count}} 个文本单元",
-      "countExcludedByTokenBudget": "{{count}} 项因 Token 预算未纳入",
+      "countExcludedByTokenBudget": "Token 预算截止后 {{count}} 项未纳入",
       "showAllCountBasicTextUnits": "显示全部 {{count}} 个基础检索文本单元",
       "showAllCountTextUnits": "显示全部 {{count}} 个文本单元",
       "countCommunityRated": "已评估 {{count}} 个社区",

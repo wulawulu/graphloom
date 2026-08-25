@@ -98,6 +98,25 @@ export const en = {
   },
   "answer": {
     "loading": "Loading Final Answer",
+    "usage": {
+      "modelOperations": "{{count}} model operation",
+      "modelOperations_other": "{{count}} model operations",
+      "modelOperationsHelp": "Model operations include requests such as vectorization and text generation.",
+      "basicSummary": "Vectorization ×{{embedding}} · answer generation ×{{generation}}",
+      "usageDetails": "Usage details",
+      "stage": "Stage",
+      "model": "Model",
+      "operation": "Operation",
+      "operations": "Operations",
+      "inputTokens": "Input Tokens",
+      "outputTokens": "Output Tokens",
+      "total": "Total",
+      "textRetrieval": "Text retrieval",
+      "answerGeneration": "Answer generation",
+      "embedding": "Vectorization",
+      "textGeneration": "Text generation",
+      "modelOperation": "Model operation"
+    },
     "sources": {
       "viewEvidence": "View evidence for {{count}} Sources",
       "sourceEvidenceCount": "Sources · {{count}}",
@@ -196,6 +215,16 @@ export const en = {
     }
   },
   "explainability": {
+    "basic": {
+      "candidateSources": "Candidate sources",
+      "includedSources": "Included sources",
+      "contextTokens": "Context Tokens",
+      "finalSources": "Sources used in final context",
+      "noFinalSources": "No sources entered the final context.",
+      "viewAllFinalSources": "View all {{count}} sources",
+      "viewExcludedSources": "View {{count}} sources not included",
+      "tokenBudgetCutoff": "After token-budget cutoff"
+    },
     "sources": {
       "loadingPreview": "Loading source preview…",
       "previewUnavailable": "Source preview unavailable"
@@ -292,6 +321,7 @@ export const en = {
       "annRankValue": "ANN rank {{value}}",
       "basicContext": "Basic Context",
       "basicPrompt": "Basic Prompt",
+      "modelPrompt": "Model Prompt",
       "rawBasicResponse": "Raw Basic Response",
       "waitingForCommunityContext": "Waiting for community context",
       "waitingForMapAnalysis": "Waiting for Map analysis",
@@ -457,8 +487,11 @@ export const en = {
       "showFewerBasicTextUnits": "Show fewer Basic text units",
       "showFewerTextUnits": "Show fewer text units",
       "viewBasicContext": "View Basic Context",
+      "viewExactBasicContext": "View Exact Context",
       "copyExactBasicContext": "Copy exact Basic context",
       "viewBasicPrompt": "View Basic Prompt",
+      "viewModelPrompt": "View Model Prompt",
+      "viewSource": "View source",
       "viewRawBasicResponse": "View Raw Basic Response",
       "selectingCommunities": "Selecting communities",
       "showFewerWaves": "Show fewer waves",
@@ -572,7 +605,7 @@ export const en = {
       "showAllCountRecords": "Show all {{count}} records",
       "countTextUnitRetrieved": "{{count}} text unit retrieved",
       "countTextUnitRetrieved_other": "{{count}} text units retrieved",
-      "countExcludedByTokenBudget": "{{count}} excluded by token budget",
+      "countExcludedByTokenBudget": "{{count}} after token-budget cutoff",
       "showAllCountBasicTextUnits": "Show all {{count}} Basic text units",
       "showAllCountTextUnits": "Show all {{count}} text units",
       "countCommunityRated": "{{count}} community rated",

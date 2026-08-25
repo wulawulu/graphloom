@@ -2,13 +2,13 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { resolveTextUnits } from "@/api/client"
+import { getTextUnit, resolveTextUnits } from "@/api/client"
 import type { ExplainabilityCandidate, ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { Timeline } from "@/components/explainability/timeline"
 import { TextUnitEvidenceProvider } from "@/contexts/text-unit-evidence-provider"
 import { setStudioLocale } from "@/i18n"
 
-vi.mock("@/api/client", () => ({ resolveTextUnits: vi.fn() }))
+vi.mock("@/api/client", () => ({ getTextUnit: vi.fn(), resolveTextUnits: vi.fn() }))
 
 afterEach(() => {
   cleanup()
@@ -60,7 +60,7 @@ describe("Basic Timeline", () => {
     ])
     expect(screen.getAllByText("Text Unit 184")).toHaveLength(2)
     expect(screen.queryByText(stableId)).not.toBeInTheDocument()
-    expect(screen.getAllByText("ANN rank 1")).toHaveLength(2)
+    expect(screen.getAllByText("ANN rank 1")).toHaveLength(1)
   })
 
   it("enriches visible retrieval and context candidates through one shared preview batch", async () => {
@@ -75,9 +75,24 @@ describe("Basic Timeline", () => {
     renderBasicWithEvidence()
 
     await waitFor(() => expect(screen.getAllByText("王婆道：大官人若要成此事，只在我身上。")).toHaveLength(2))
-    expect(screen.getAllByText("ANN rank 2")).toHaveLength(2)
+    expect(screen.getAllByText("ANN rank 2")).toHaveLength(1)
     expect(resolveTextUnits).toHaveBeenCalledTimes(1)
     expect(resolveTextUnits).toHaveBeenCalledWith(["C", "A", "B"], expect.any(AbortSignal))
+  })
+
+  it("loads exact Text Unit content only after the explicit retrieval action", async () => {
+    vi.mocked(resolveTextUnits).mockResolvedValue({ resolved: [{ id: "C", short_id: "c", preview: "Candidate preview", n_tokens: 9 }], missing_ids: ["A", "B"] })
+    vi.mocked(getTextUnit).mockResolvedValue({ id: "C", short_id: "c", text: "Exact candidate source text", n_tokens: 9, document_id: "doc-c" })
+    const user = userEvent.setup()
+    renderBasicWithEvidence()
+    const retrieval = screen.getByRole("article", { name: "Text Retrieval" })
+
+    expect(getTextUnit).not.toHaveBeenCalled()
+    await user.click(within(retrieval).getAllByRole("button", { name: "View source" })[0]!)
+
+    expect(await screen.findByTestId("text-unit-exact-text")).toHaveTextContent("Exact candidate source text")
+    expect(getTextUnit).toHaveBeenCalledTimes(1)
+    expect(getTextUnit).toHaveBeenCalledWith("C", expect.any(AbortSignal))
   })
 
   it("uses a compact stable-ID fallback when a text unit has no short ID", () => {
@@ -109,38 +124,72 @@ describe("Basic Timeline", () => {
     const retrieval = screen.getByRole("article", { name: "Text Retrieval" })
     const context = screen.getByRole("article", { name: "Context Assembly" })
     expect(within(retrieval).getAllByText(/Text Unit/).map((node) => node.textContent)).toEqual(["Text Unit c", "Text Unit a", "Text Unit b"])
-    expect(within(context).getAllByText(/Text Unit/).map((node) => node.textContent)).toEqual(["Text Unit a", "Text Unit b", "Text Unit c"])
+    expect(within(context).getAllByText(/Text Unit/).map((node) => node.textContent)).toEqual(["Text Unit a"])
     expect(within(context).getByText(/preserves source-table order/)).toBeInTheDocument()
-    expect(within(context).getAllByText("Not included after token-budget stop")).toHaveLength(2)
+    expect(within(context).getByRole("button", { name: "View 2 sources not included" })).toBeInTheDocument()
+    expect(within(context).queryByText("Text Unit b")).not.toBeInTheDocument()
   })
 
-  it("opens and copies exact context, prompt, and raw response without rebuilding content", async () => {
+  it("renders final sources in selected_record_ids order instead of ANN rank order", () => {
+    renderBasic([
+      envelope(1, "root", { type: "query_started", method: "basic" }),
+      envelope(2, "retrieval", { type: "candidates_retrieved", record_type: "text_unit", candidates: [candidate("A", 1), candidate("B", 2), candidate("C", 3)] }, "root"),
+      envelope(3, "context", { type: "context_budget_allocated", total_token_budget: 20, sections: [{ section: "sources", token_budget: 20 }] }, "root"),
+      envelope(4, "retrieval", { type: "candidates_filtered", record_type: "text_unit", candidates: [candidate("B", 2, true), candidate("A", 1, true), candidate("C", 3, false, "token_budget")] }, "root"),
+      envelope(5, "context", { type: "context_section_built", section: { section: "sources", token_budget: 20, tokens_used: 12, candidate_count: 3, selected_count: 2, truncated: true, selected_record_ids: ["B", "A"] } }, "root"),
+      envelope(6, "context", { type: "context_completed", tokens_used: 12, context: "id|text\nb|B\na|A\n" }, "root"),
+    ])
+
+    const context = screen.getByRole("article", { name: "Context Assembly" })
+    expect(within(context).getAllByText(/Text Unit/).map((node) => node.textContent)).toEqual(["Text Unit b", "Text Unit a"])
+    expect(within(context).queryByText("Text Unit c")).not.toBeInTheDocument()
+  })
+
+  it("keeps excluded sources folded and describes the shared token-budget cutoff", async () => {
     const user = userEvent.setup()
     renderBasic()
-    await user.click(screen.getByRole("button", { name: "View Basic Context" }))
-    expect(screen.getByTestId("exact-basic-context").textContent).toBe("id|text\nA|exact  context\n")
-    await user.click(screen.getByRole("button", { name: "Copy exact Basic context" }))
-    await expect(navigator.clipboard.readText()).resolves.toBe("id|text\nA|exact  context\n")
-    await user.click(screen.getByRole("button", { name: "View Basic Prompt" }))
+    const context = screen.getByRole("article", { name: "Context Assembly" })
+
+    expect(within(context).queryByText("Text Unit b")).not.toBeInTheDocument()
+    await user.click(within(context).getByRole("button", { name: "View 2 sources not included" }))
+    expect(within(context).getByText("Text Unit b")).toBeInTheDocument()
+    expect(within(within(context).getByRole("list")).getAllByText("After token-budget cutoff")).toHaveLength(2)
+  })
+
+  it("hides exact context in content mode while preserving model prompt and raw response", async () => {
+    const user = userEvent.setup()
+    renderBasic()
+    expect(screen.queryByRole("button", { name: "View Exact Context" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "View Model Prompt" }))
     expect(screen.getByTestId("exact-basic-prompt").textContent).toBe("BASIC PROMPT\n  exact")
     await user.click(screen.getByRole("button", { name: "View Raw Basic Response" }))
     expect(screen.getByTestId("raw-basic-response").textContent).toBe("RAW BASIC RESPONSE")
   })
 
+  it("keeps exact context available in Developer Mode", async () => {
+    const user = userEvent.setup()
+    renderBasic([envelope(0, "run", { type: "run_started", content_mode: "debug" }), ...basicEvents()])
+
+    await user.click(screen.getByRole("button", { name: "View Exact Context" }))
+    expect(screen.getByTestId("exact-basic-context").textContent).toBe("id|text\nA|exact  context\n")
+    await user.click(screen.getByRole("button", { name: "Copy exact Basic context" }))
+    await expect(navigator.clipboard.readText()).resolves.toBe("id|text\nA|exact  context\n")
+  })
+
   it("preserves Prompt, Context, and response content that collides with UI vocabulary", async () => {
     const user = userEvent.setup()
     await act(() => setStudioLocale("zh-CN", false))
-    const events = basicEvents().map((item) => {
+    const events = [envelope(0, "run", { type: "run_started", content_mode: "debug" }), ...basicEvents().map((item) => {
       if (item.record.event.type === "context_completed") return { ...item, record: { ...item.record, event: { ...item.record.event, context: "Relationships" } } }
       if (item.record.event.type === "llm_request_started") return { ...item, record: { ...item.record, event: { ...item.record.event, prompt: "Standard" } } }
       if (item.record.event.type === "llm_request_completed") return { ...item, record: { ...item.record, event: { ...item.record.event, response: "Detailed" } } }
       return item
-    })
+    })]
     renderBasic(events)
 
-    await user.click(screen.getByRole("button", { name: "查看基础检索 Context" }))
+    await user.click(screen.getByRole("button", { name: "查看 Exact Context" }))
     expect(screen.getByTestId("exact-basic-context")).toHaveTextContent("Relationships")
-    await user.click(screen.getByRole("button", { name: "查看基础检索 Prompt" }))
+    await user.click(screen.getByRole("button", { name: "查看模型提示词" }))
     expect(screen.getByTestId("exact-basic-prompt")).toHaveTextContent("Standard")
     await user.click(screen.getByRole("button", { name: "查看基础检索原始响应" }))
     expect(screen.getByTestId("raw-basic-response")).toHaveTextContent("Detailed")
