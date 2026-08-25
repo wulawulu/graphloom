@@ -24,7 +24,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-const accepted = { run_id: "run-new", run_url: "", events_url: "", result_url: "" }
+const accepted = { run_id: "run-new", run_url: "", explainability_events_url: "", answer_events_url: "", result_url: "" }
 
 async function chooseQueryMethod(user: ReturnType<typeof userEvent.setup>, label: string): Promise<void> {
   await user.click(screen.getByRole("combobox", { name: "Query method" }))

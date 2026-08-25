@@ -6,6 +6,21 @@ import { useRun } from "@/hooks/use-run"
 afterEach(() => vi.unstubAllGlobals())
 
 describe("selected Run lifecycle", () => {
+  it("loads an active Run once without fixed-interval result polling", async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith("/result")) return Promise.resolve(new Response("waiting", { status: 202 }))
+      return Promise.resolve(new Response(JSON.stringify({ run_id: "running", status: "running" }), { status: 200 }))
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    renderHook(() => useRun("running"))
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
   it("clears terminal metadata and result immediately when switching Runs", async () => {
     let resolveRunning: ((response: Response) => void) | undefined
     const runningResponse = new Promise<Response>((resolve) => { resolveRunning = resolve })

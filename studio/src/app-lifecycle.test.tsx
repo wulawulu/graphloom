@@ -41,7 +41,7 @@ vi.mock("@/components/workspace/qa-workspace", () => ({
 
 vi.mock("@/components/query/query-composer", () => ({
   QueryComposer: ({ onAccepted }: { onAccepted: (response: StartQueryResponse, query: string) => void }) => (
-    <button type="button" onClick={() => onAccepted({ run_id: "run-new", run_url: "", events_url: "", result_url: "" }, "Fresh question")}>Accept new Query</button>
+    <button type="button" onClick={() => onAccepted({ run_id: "run-new", run_url: "", explainability_events_url: "", answer_events_url: "", result_url: "" }, "Fresh question")}>Accept new Query</button>
   ),
 }))
 
@@ -51,6 +51,10 @@ vi.mock("@/components/result/answer-panel", () => ({
 
 vi.mock("@/hooks/use-explainability-stream", () => ({
   useExplainabilityStream: () => ({ envelopes: lifecycle.envelopes, status: lifecycle.status === "running" ? "open" : "closed" }),
+}))
+
+vi.mock("@/hooks/use-query-answer-stream", () => ({
+  useQueryAnswerStream: () => ({ text: "", status: "streaming", hasStarted: false, sequence: 0 }),
 }))
 
 vi.mock("@/hooks/use-run", () => ({
@@ -109,7 +113,7 @@ describe("App graph focus ownership", () => {
 
     await user.click(screen.getByRole("button", { name: "New Query test" }))
     expect(screen.getByText("Workspace run none")).toBeInTheDocument()
-    expect(screen.getByText("Graph run run-a")).toBeInTheDocument()
+    expect(screen.getByText("Graph run none")).toBeInTheDocument()
     expect(screen.getByText("Graph overview")).toBeInTheDocument()
     expect(screen.getByText(/Navigation revision/).textContent).not.toBe(revisionBefore)
   })

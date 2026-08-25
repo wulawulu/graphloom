@@ -16,16 +16,20 @@ import { useTextUnitEvidence } from "@/contexts/text-unit-evidence"
 import { buildCitationEvidenceIndex, resolveCitationTarget, type CitationGroup, type CitationTarget, type GraphEmphasis } from "@/lib/citations"
 import { buildQueryUsagePresentation, type QueryUsagePresentation } from "@/lib/query-usage-presentation"
 import { detectRunContentMode } from "@/lib/timeline-presentation"
+import type { QueryAnswerStreamState } from "@/hooks/use-query-answer-stream"
 
 interface AnswerPanelProps {
   runId: string | null
   result: QueryResultState
+  liveAnswer?: QueryAnswerStreamState
   loading: boolean
   envelopes?: ExplainabilityEnvelope[]
   onCitationEmphasis?: (emphasis: GraphEmphasis) => void
 }
 
-export function AnswerPanel({ runId, result, loading, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
+const emptyLiveAnswer: QueryAnswerStreamState = { text: "", status: "idle", hasStarted: false, sequence: 0 }
+
+export function AnswerPanel({ runId, result, liveAnswer = emptyLiveAnswer, loading, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
   const { t } = useTranslation()
   const citationIndex = useMemo(() => buildCitationEvidenceIndex(envelopes), [envelopes])
   const showRawUsageCategories = detectRunContentMode(envelopes) === "debug"
@@ -49,8 +53,14 @@ export function AnswerPanel({ runId, result, loading, envelopes = [], onCitation
         <div className="min-w-0 max-w-full px-3 pb-3">
           {loading ? <><Skeleton className="mb-3 h-4 w-1/3" /><Skeleton className="h-20" /></> : null}
           {!loading && runId === null ? <AnswerState title={t("answer.labels.noResultYet")} detail={t("answer.messages.selectOrSubmitAQueryRun")} /> : null}
-          {!loading && result.state === "waiting" && runId !== null ? <AnswerState title={t("answer.labels.queryIsRunning")} detail={t("answer.messages.theFinalBusinessResultWillAppearHereWhenTheRunCompletes")} /> : null}
-          {!loading && result.state === "failed" ? <AnswerState title={t("answer.labels.queryDidNotComplete")} detail={t("answer.messages.explainabilityFailureHint")} tone="error" /> : null}
+          {!loading && result.state === "waiting" && runId !== null && liveAnswer.text.length === 0 && liveAnswer.status !== "failed" ? <p className="py-2 text-xs text-muted-foreground">{t("answer.status.preparingAnswer")}</p> : null}
+          {!loading && liveAnswer.text.length > 0 && result.state !== "ready" ? (
+            <div className="grid gap-3">
+              <article className="min-w-0 max-w-full overflow-x-hidden"><SafeMarkdown renderCitation={renderCitation}>{liveAnswer.text}</SafeMarkdown>{liveAnswer.status === "streaming" || liveAnswer.status === "connecting" || liveAnswer.status === "reconnecting" ? <span className="ml-0.5 inline-block animate-pulse text-primary" aria-hidden="true">▌</span> : null}</article>
+              {liveAnswer.status === "failed" || result.state === "failed" ? <p role="alert" className="text-xs text-destructive">{t("answer.status.answerInterrupted")}</p> : null}
+            </div>
+          ) : null}
+          {!loading && (liveAnswer.status === "failed" || result.state === "failed") && liveAnswer.text.length === 0 ? <AnswerState title={t("answer.status.generationFailed")} detail={t("answer.messages.explainabilityFailureHint")} tone="error" /> : null}
           {!loading && result.state === "gone" ? <AnswerState title={t("answer.labels.resultNoLongerRetained")} detail={t("answer.messages.retainedResultUnavailable")} /> : null}
           {!loading && result.state === "missing" ? <AnswerState title={t("answer.labels.resultUnavailable")} detail={t("answer.messages.theQueryRunDoesNotExistInThisStoreNamespace")} /> : null}
           {!loading && result.state === "ready" ? (

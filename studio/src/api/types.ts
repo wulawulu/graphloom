@@ -14,9 +14,18 @@ export interface StartQueryRequest {
 export interface StartQueryResponse {
   run_id: string
   run_url: string
-  events_url: string
+  explainability_events_url: string
+  answer_events_url: string
   result_url: string
 }
+
+export type QueryAnswerSnapshotStatus = "streaming" | "completed" | "failed"
+
+export type QueryAnswerEvent =
+  | { type: "snapshot"; sequence: number; text: string; status: QueryAnswerSnapshotStatus }
+  | { type: "delta"; sequence: number; delta: string }
+  | { type: "completed"; sequence: number }
+  | { type: "failed"; sequence: number }
 
 export interface ExplainabilityRun {
   run_id: string

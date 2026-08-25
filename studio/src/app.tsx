@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { useExplainabilityStream } from "@/hooks/use-explainability-stream"
+import { useQueryAnswerStream } from "@/hooks/use-query-answer-stream"
 import { useRun } from "@/hooks/use-run"
 import { useRunHistory } from "@/hooks/use-run-history"
 import { QaWorkspace } from "@/components/workspace/qa-workspace"
@@ -42,6 +43,12 @@ export function App(): React.ReactElement {
     refreshHistory()
   }, [refreshHistory, refreshSelectedRun])
   const stream = useExplainabilityStream(selectedRunId, selected.run?.status, onTerminal)
+  const answerStreamRunId = activeSubmittedRunId === selectedRunId
+    || selected.run?.status === "running"
+    || selected.run?.status === "pending"
+    ? selectedRunId
+    : null
+  const answerStream = useQueryAnswerStream(answerStreamRunId, onTerminal)
 
   const selectRun = useCallback((runId: string | null) => {
     setActiveSubmittedRunId(null)
@@ -80,6 +87,7 @@ export function App(): React.ReactElement {
   }, [refreshHistory])
 
   const onNewQuery = useCallback(() => {
+    setSelectedRunId(null)
     setActiveSubmittedRunId(null)
     setSubmittedQuestion(null)
     setShowCurrentQa(false)
@@ -146,7 +154,9 @@ export function App(): React.ReactElement {
       runStatus={displayedRun?.status}
       question={displayedQuestion}
       composer={<QueryComposer onAccepted={onAccepted} resetRevision={composerRevision} />}
-      answer={<Suspense fallback={<PanelLoading label={t("answer.loading")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
+      answer={<Suspense fallback={<PanelLoading label={t("answer.loading")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} liveAnswer={answerStream} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
+      answerHasStarted={answerStream.hasStarted}
+      isActiveSubmission={activeSubmittedRunId === displayedRunId}
       envelopes={displayedEnvelopes}
       streamStatus={stream.status}
       runs={history.runs}

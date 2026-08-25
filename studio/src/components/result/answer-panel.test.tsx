@@ -15,9 +15,45 @@ afterEach(() => {
 })
 
 describe("AnswerPanel", () => {
+  it("renders incomplete streaming Markdown safely and activates citations only after syntax and provenance complete", () => {
+    const result = { state: "waiting" } as const
+    const view = render(
+      <TextUnitEvidenceProvider>
+        <AnswerPanel runId="run" result={result} loading={false} liveAnswer={{ text: "# 标\n\n[Data: Sources (184,", status: "streaming", hasStarted: true, sequence: 1 }} />
+      </TextUnitEvidenceProvider>,
+    )
+    expect(screen.getByRole("heading", { name: "标" })).toBeInTheDocument()
+    expect(screen.queryByText("Sources · 2")).not.toBeInTheDocument()
+    expect(document.querySelector("script")).toBeNull()
+
+    view.rerender(
+      <TextUnitEvidenceProvider>
+        <AnswerPanel runId="run" result={result} loading={false} liveAnswer={{ text: "# 标题\n\n[Data: Sources (184, 206)]", status: "streaming", hasStarted: true, sequence: 2 }} />
+      </TextUnitEvidenceProvider>,
+    )
+    expect(screen.getByRole("heading", { name: "标题" })).toBeInTheDocument()
+    expect(screen.getByText("Sources · 2").closest("button")).toBeNull()
+
+    view.rerender(
+      <TextUnitEvidenceProvider>
+        <AnswerPanel
+          runId="run"
+          result={result}
+          loading={false}
+          liveAnswer={{ text: "# 标题\n\n[Data: Sources (184, 206)]", status: "streaming", hasStarted: true, sequence: 2 }}
+          envelopes={[
+            { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "candidates_retrieved", record_type: "text_unit", candidates: [{ id: "text-a", short_id: "184", record_type: "text_unit", selected: false }, { id: "text-b", short_id: "206", record_type: "text_unit", selected: false }] } } },
+            { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "span", event: { type: "context_section_built", section: { section: "sources", token_budget: 100, tokens_used: 20, candidate_count: 2, selected_count: 2, truncated: false, selected_record_ids: ["text-a", "text-b"] } } } },
+          ]}
+        />
+      </TextUnitEvidenceProvider>,
+    )
+    expect(screen.getByRole("button", { name: "View evidence for 2 Sources" })).toBeInTheDocument()
+  })
+
   it.each([
-    [{ state: "waiting" } as const, "Query is running"],
-    [{ state: "failed" } as const, "Query did not complete"],
+    [{ state: "waiting" } as const, "Preparing answer…"],
+    [{ state: "failed" } as const, "Generation failed"],
     [{ state: "gone" } as const, "Result no longer retained"],
   ])("renders lifecycle state", (result, label) => {
     render(<AnswerPanel runId="run" result={result} loading={false} />)

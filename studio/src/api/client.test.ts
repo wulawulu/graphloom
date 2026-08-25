@@ -14,7 +14,7 @@ afterEach(() => vi.unstubAllGlobals())
 describe("Studio API client", () => {
   it("handles accepted Query and all result lifecycle statuses", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response(202, { run_id: "run-1", run_url: "/run", events_url: "/events", result_url: "/result" }))
+      .mockResolvedValueOnce(response(202, { run_id: "run-1", run_url: "/run", explainability_events_url: "/explainability-events", answer_events_url: "/answer-events", result_url: "/result" }))
       .mockResolvedValueOnce(response(200, { run_id: "run-1", response: "answer", elapsed_ms: 3, usage: { llm_calls: 1, prompt_tokens: 2, output_tokens: 3, categories: {} } }))
       .mockResolvedValueOnce(response(202, "waiting"))
       .mockResolvedValueOnce(response(409, "failed"))

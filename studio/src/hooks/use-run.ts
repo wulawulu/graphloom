@@ -17,10 +17,6 @@ const initialState: RunState = {
   error: null,
 }
 
-function isTerminal(run: ExplainabilityRun): boolean {
-  return run.status === "completed" || run.status === "failed" || run.status === "cancelled"
-}
-
 export function useRun(runId: string | null): RunState & { refresh: () => void } {
   const [state, setState] = useState<RunState>(initialState)
   const [revision, setRevision] = useState(0)
@@ -33,17 +29,12 @@ export function useRun(runId: string | null): RunState & { refresh: () => void }
     }
     setState({ ...initialState, loading: true })
     const controller = new AbortController()
-    let timeout: ReturnType<typeof setTimeout> | undefined
-
     const load = async (): Promise<void> => {
       setState((current) => ({ ...current, loading: current.run === null, error: null }))
       try {
         const run = await getRun(runId, controller.signal)
         const result = await getQueryResult(runId, controller.signal)
         setState({ run, result, loading: false, error: null })
-        if (!isTerminal(run)) {
-          timeout = setTimeout(() => void load(), 2_000)
-        }
       } catch (error) {
         if (controller.signal.aborted) return
         const message = error instanceof ApiError && error.status === 404
@@ -56,7 +47,6 @@ export function useRun(runId: string | null): RunState & { refresh: () => void }
 
     return () => {
       controller.abort()
-      if (timeout !== undefined) clearTimeout(timeout)
     }
   }, [revision, runId])
 

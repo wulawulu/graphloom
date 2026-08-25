@@ -23,6 +23,8 @@ function props() {
     runStatus: "completed",
     question: "How is Alice connected?",
     answer: <div>Authoritative answer</div>,
+    answerHasStarted: false,
+    isActiveSubmission: false,
     composer: <div>Bottom composer</div>,
     envelopes: events,
     streamStatus: "closed" as const,
@@ -40,17 +42,43 @@ function props() {
 }
 
 describe("QaWorkspace", () => {
+  it("opens Analysis for a new Run and auto-collapses on the first answer token", () => {
+    const values = props()
+    const view = render(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted={false} />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+    view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted />)
+    expect(screen.queryByRole("heading", { name: "Entity Mapping" })).not.toBeInTheDocument()
+  })
+
+  it("respects a manual Analysis choice when the first answer token arrives", async () => {
+    const user = userEvent.setup()
+    const values = props()
+    const view = render(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted={false} />)
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+    view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+  })
+
+  it("keeps Analysis open when a Run fails before any answer token", () => {
+    const values = props()
+    const view = render(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted={false} />)
+    view.rerender(<QaWorkspace {...values} runStatus="failed" isActiveSubmission answerHasStarted={false} />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+  })
+
   it("shows one current Question and Answer with Analysis collapsed by default", () => {
     render(<QaWorkspace {...props()} />)
 
     const workspace = screen.getByRole("region", { name: "Graph QA workspace" })
     expect(within(workspace).getByText("How is Alice connected?")).toBeInTheDocument()
     expect(within(workspace).getByText("Authoritative answer")).toBeInTheDocument()
-    expect(screen.getByText("Analysis process · 1 decision · completed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis · 1 step")).toBeInTheDocument()
     expect(screen.queryByText("Entities selected")).not.toBeInTheDocument()
     expect(screen.getByText("Bottom composer")).toBeInTheDocument()
     expect(screen.queryByRole("region", { name: "Query run history" })).not.toBeInTheDocument()
-    const analysis = screen.getByText("Analysis process · 1 decision · completed")
+    const analysis = screen.getByText("Analysis · 1 step")
     const answer = screen.getByText("Authoritative answer")
     expect(analysis.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
   })
@@ -58,10 +86,10 @@ describe("QaWorkspace", () => {
   it("keeps terminal Run status authoritative while persisted events replay", () => {
     const values = props()
     const { rerender } = render(<QaWorkspace {...values} streamStatus="open" />)
-    expect(screen.getByText("Analysis process · 1 decision · completed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis · 1 step")).toBeInTheDocument()
 
     rerender(<QaWorkspace {...values} runStatus="failed" streamStatus="connecting" />)
-    expect(screen.getByText("Analysis process · 1 decision · failed")).toBeInTheDocument()
+    expect(screen.getByText("Analysis interrupted · 1 step")).toBeInTheDocument()
   })
 
   it("expands semantic decisions, inspects candidates, and keeps graph focus explicit", async () => {

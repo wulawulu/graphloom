@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { ChevronDown, History, MessageSquareText, Plus } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -21,6 +21,8 @@ interface QaWorkspaceProps {
   runStatus: string | undefined
   question: string | null
   answer: React.ReactNode
+  answerHasStarted: boolean
+  isActiveSubmission: boolean
   composer: React.ReactNode
   envelopes: ExplainabilityEnvelope[]
   streamStatus: StreamStatus
@@ -39,12 +41,28 @@ interface QaWorkspaceProps {
 export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   const { t } = useTranslation()
   const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [analysisUserControlled, setAnalysisUserControlled] = useState(false)
+  const analysisRunId = useRef<string | null>(null)
+  const analysisInitialized = useRef(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const semanticTimeline = useMemo(() => buildSemanticTimeline(props.envelopes), [props.envelopes])
   const decisionCount = semanticTimeline.steps.length
   const methodLabel = t(queryMethodLabel(semanticTimeline.method, semanticTimeline.globalVariant))
 
-  useEffect(() => setAnalysisOpen(false), [props.runId])
+  useEffect(() => {
+    if (analysisRunId.current !== props.runId) {
+      analysisRunId.current = props.runId
+      analysisInitialized.current = false
+      setAnalysisUserControlled(false)
+    }
+    if (analysisInitialized.current || (!props.isActiveSubmission && props.runStatus === undefined)) return
+    analysisInitialized.current = true
+    setAnalysisOpen(props.isActiveSubmission || props.runStatus === "running" || props.runStatus === "pending")
+  }, [props.isActiveSubmission, props.runId, props.runStatus])
+
+  useEffect(() => {
+    if (props.answerHasStarted && !analysisUserControlled) setAnalysisOpen(false)
+  }, [analysisUserControlled, props.answerHasStarted])
 
   const selectHistoryRun = (runId: string): void => {
     props.onSelectRun(runId)
@@ -73,7 +91,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
             <section aria-label={t("answer.labels.graphLoomAnswer")}>
               <p className="mb-2 text-[11px] font-semibold tracking-wide text-primary uppercase">GraphLoom</p>
               <TextUnitEvidenceProvider key={props.runId ?? "no-run"}>
-                <Collapsible open={analysisOpen} onOpenChange={setAnalysisOpen} className="mb-3 border-b pb-2">
+                <Collapsible open={analysisOpen} onOpenChange={(open) => { setAnalysisOpen(open); setAnalysisUserControlled(true) }} className="mb-3 border-b pb-2">
                   <CollapsibleTrigger asChild>
                     <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label={t("answer.actions.toggleAnalysisProcess")}>
                       <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus)}</span>
@@ -113,13 +131,12 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
 }
 
 function analysisSummary(t: TFunction, decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
-  const status = runStatus === "failed" ? t("answer.status.failed") : runStatus === "cancelled" ? t("answer.status.cancelled") : null
-  if (runStatus === "completed") return t("answer.counts.analysisProcessCountDecisionCompleted", { count: decisionCount })
-  if (status !== null) return t("answer.counts.analysisProcessCountDecisionStatus", { count: decisionCount, status })
+  if (runStatus === "completed") return t("answer.counts.analysisStepsCompleted", { count: decisionCount })
+  if (runStatus === "failed" || runStatus === "cancelled") return t("answer.counts.analysisStepsInterrupted", { count: decisionCount })
   if (runStatus === "running" || runStatus === "pending" || streamStatus === "open" || streamStatus === "connecting" || streamStatus === "reconnecting") {
-    return t("answer.counts.analysisProcessCountDecisionRunning", { count: decisionCount })
+    return t("answer.counts.analysisStepsRunning", { count: decisionCount })
   }
-  return t("answer.counts.analysisProcessCountDecision", { count: decisionCount })
+  return t("answer.counts.analysisSteps", { count: decisionCount })
 }
 
 function queryMethodLabel(method: "local" | "global" | "basic" | "drift" | null, globalVariant: "static" | "dynamic" | null): StudioTranslationKey {
