@@ -28,7 +28,50 @@ describe("AnswerPanel", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "**Answer** <script>alert(1)</script>", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.getByText("Answer")).toBeInTheDocument()
     expect(document.querySelector("script")).toBeNull()
-    expect(screen.getByText("1 call")).toBeInTheDocument()
+    expect(screen.getByText("1 model operation")).toBeInTheDocument()
+  })
+
+  it("presents Basic embedding and completion usage without exposing internal categories", async () => {
+    const user = userEvent.setup()
+    render(<AnswerPanel
+      runId="run"
+      loading={false}
+      result={{ state: "ready", result: { run_id: "run", response: "Answer", elapsed_ms: 3_200, usage: { llm_calls: 2, prompt_tokens: 11_183, output_tokens: 1_075, categories: { build_context: { llm_calls: 1, prompt_tokens: 17, output_tokens: 0 }, response: { llm_calls: 1, prompt_tokens: 11_166, output_tokens: 1_075 } } } } }}
+      envelopes={[
+        { schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "root", event: { type: "query_started", method: "basic" } } },
+        { schema_version: 1, sequence: 2, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "embedding", parent_span_id: "root", event: { type: "embedding_started", model_id: "embedding-default", model_name: "bge-m3" } } },
+        { schema_version: 1, sequence: 3, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "embedding", parent_span_id: "root", event: { type: "embedding_completed", model_id: "embedding-default", model_name: "bge-m3", prompt_tokens: 17, dimensions: 1024 } } },
+        { schema_version: 1, sequence: 4, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "llm", parent_span_id: "root", event: { type: "llm_request_started", model_id: "completion-default", model_name: "deepseek-v4-flash", prompt_tokens: 11_166 } } },
+      ]}
+    />)
+
+    expect(screen.getByText("3.2 s")).toBeInTheDocument()
+    expect(screen.getByText("Vectorization ×1 · answer generation ×1")).toBeInTheDocument()
+    expect(screen.queryByText("2 calls")).not.toBeInTheDocument()
+    expect(screen.queryByText("17/0")).not.toBeInTheDocument()
+    expect(screen.queryByText("build_context")).not.toBeInTheDocument()
+    expect(screen.queryByText("response")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Usage details" }))
+    const rows = screen.getAllByRole("row")
+    expect(within(rows[1]!).getByText("Text retrieval")).toBeInTheDocument()
+    expect(within(rows[1]!).getByText("bge-m3")).toBeInTheDocument()
+    expect(within(rows[1]!).getByText("Vectorization")).toBeInTheDocument()
+    expect(within(rows[1]!).getByText("17")).toBeInTheDocument()
+    expect(within(rows[1]!).getByText("—")).toBeInTheDocument()
+    expect(within(rows[2]!).getByText("Answer generation")).toBeInTheDocument()
+    expect(within(rows[2]!).getByText("deepseek-v4-flash")).toBeInTheDocument()
+    expect(within(rows[2]!).getByText("11,166")).toBeInTheDocument()
+    expect(within(rows[2]!).getByText("1,075")).toBeInTheDocument()
+  })
+
+  it("renders an unknown non-Basic usage category through a safe fallback", async () => {
+    const user = userEvent.setup()
+    render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "Answer", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 25, output_tokens: 3, categories: { future_stage: { llm_calls: 1, prompt_tokens: 25, output_tokens: 3 } } } } }} />)
+
+    await user.click(screen.getByRole("button", { name: "Usage details" }))
+    expect(screen.getByText("Future stage")).toBeInTheDocument()
+    expect(screen.getByText("Model operation")).toBeInTheDocument()
+    expect(screen.queryByText("future_stage")).not.toBeInTheDocument()
   })
 
   it("keeps long prose, URLs, UUIDs, inline code, code blocks, and tables inside the answer boundary", () => {

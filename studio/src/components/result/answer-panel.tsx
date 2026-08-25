@@ -6,12 +6,16 @@ import type { ExplainabilityEnvelope, QueryResultState } from "@/api/types"
 import { SafeMarkdown } from "@/components/content/safe-markdown"
 import { GraphSourceEvidence } from "@/components/graph/graph-source-evidence"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useTextUnitEvidence } from "@/contexts/text-unit-evidence"
 import { buildCitationEvidenceIndex, resolveCitationTarget, type CitationGroup, type CitationTarget, type GraphEmphasis } from "@/lib/citations"
+import { buildQueryUsagePresentation, type QueryUsagePresentation } from "@/lib/query-usage-presentation"
+import { detectRunContentMode } from "@/lib/timeline-presentation"
 
 interface AnswerPanelProps {
   runId: string | null
@@ -24,6 +28,7 @@ interface AnswerPanelProps {
 export function AnswerPanel({ runId, result, loading, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
   const { t } = useTranslation()
   const citationIndex = useMemo(() => buildCitationEvidenceIndex(envelopes), [envelopes])
+  const showRawUsageCategories = detectRunContentMode(envelopes) === "debug"
   const [sourceViewer, setSourceViewer] = useState<{ group: CitationGroup; target: Extract<CitationTarget, { kind: "sources" }> } | null>(null)
   useEffect(() => setSourceViewer(null), [runId])
   const renderCitation = (group: CitationGroup): React.ReactNode => {
@@ -51,20 +56,7 @@ export function AnswerPanel({ runId, result, loading, envelopes = [], onCitation
           {!loading && result.state === "ready" ? (
             <div className="grid gap-4">
               <article className="min-w-0 max-w-full overflow-x-hidden"><SafeMarkdown renderCitation={renderCitation}>{result.result.response}</SafeMarkdown></article>
-              <aside className="space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline"><Clock3 /> {result.result.elapsed_ms} ms</Badge>
-                  <Badge variant="outline"><Sparkles /> {t("answer.counts.countCall", { count: result.result.usage.llm_calls })}</Badge>
-                  <Badge variant="outline">{t("answer.counts.countInput", { count: result.result.usage.prompt_tokens })}</Badge>
-                  <Badge variant="outline">{t("answer.counts.countOutput", { count: result.result.usage.output_tokens })}</Badge>
-                </div>
-                {Object.keys(result.result.usage.categories).length > 0 ? (
-                  <Table>
-                    <TableHeader><TableRow><TableHead>{t("answer.labels.category")}</TableHead><TableHead>{t("answer.labels.calls")}</TableHead><TableHead>{t("answer.labels.tokens")}</TableHead></TableRow></TableHeader>
-                    <TableBody>{Object.entries(result.result.usage.categories).map(([name, usage]) => <TableRow key={name}><TableCell>{name}</TableCell><TableCell>{usage.llm_calls}</TableCell><TableCell>{usage.prompt_tokens}/{usage.output_tokens}</TableCell></TableRow>)}</TableBody>
-                  </Table>
-                ) : null}
-              </aside>
+              <UsageFooter elapsedMs={result.result.elapsed_ms} presentation={buildQueryUsagePresentation(result.result.usage, envelopes)} showRawCategories={showRawUsageCategories} />
             </div>
           ) : null}
         </div>
@@ -120,6 +112,40 @@ function SourceCitation({ group, label, target, onOpen }: { group: CitationGroup
       </HoverCardContent>
     </HoverCard>
   )
+}
+
+function UsageFooter({ elapsedMs, presentation, showRawCategories }: { elapsedMs: number; presentation: QueryUsagePresentation; showRawCategories: boolean }): React.ReactElement {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const showModel = presentation.rows.some((row) => row.model !== undefined)
+  const operationSummary = presentation.basicOperations === undefined
+    ? t("answer.usage.modelOperations", { count: presentation.totalOperations })
+    : t("answer.usage.basicSummary", {
+        embedding: presentation.basicOperations.embedding,
+        generation: presentation.basicOperations.generation,
+      })
+  return (
+    <aside className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="outline"><Clock3 /> {formatDuration(elapsedMs)}</Badge>
+        <Badge variant="outline" title={t("answer.usage.modelOperationsHelp")}><Sparkles /> {operationSummary}</Badge>
+      </div>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" aria-expanded={open}>{t("answer.usage.usageDetails")}</Button></CollapsibleTrigger>
+        <CollapsibleContent className="mt-1 max-w-full overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader><TableRow><TableHead>{t("answer.usage.stage")}</TableHead>{showModel ? <TableHead>{t("answer.usage.model")}</TableHead> : null}<TableHead>{t("answer.usage.operation")}</TableHead><TableHead>{t("answer.usage.operations")}</TableHead><TableHead>{t("answer.usage.inputTokens")}</TableHead><TableHead>{t("answer.usage.outputTokens")}</TableHead></TableRow></TableHeader>
+            <TableBody>{presentation.rows.map((row) => <TableRow key={row.rawCategory || "total"}><TableCell>{row.stageKey === undefined ? row.stageFallback : t(row.stageKey)}{showRawCategories && row.rawCategory.length > 0 ? <code className="mt-0.5 block text-[10px] text-muted-foreground">{row.rawCategory}</code> : null}</TableCell>{showModel ? <TableCell>{row.model ?? "—"}</TableCell> : null}<TableCell>{t(row.operationKey)}</TableCell><TableCell>{row.calls.toLocaleString()}</TableCell><TableCell>{row.inputTokens.toLocaleString()}</TableCell><TableCell>{row.outputApplicable ? row.outputTokens.toLocaleString() : "—"}</TableCell></TableRow>)}</TableBody>
+          </Table>
+        </CollapsibleContent>
+      </Collapsible>
+    </aside>
+  )
+}
+
+function formatDuration(elapsedMs: number): string {
+  if (elapsedMs < 1_000) return `${elapsedMs.toLocaleString()} ms`
+  return `${(elapsedMs / 1_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`
 }
 
 function AnswerState({ title, detail, tone = "neutral" }: { title: string; detail: string; tone?: "neutral" | "error" }): React.ReactElement {
