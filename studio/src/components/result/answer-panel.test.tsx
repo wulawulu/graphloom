@@ -74,6 +74,20 @@ describe("AnswerPanel", () => {
     expect(screen.queryByText("future_stage")).not.toBeInTheDocument()
   })
 
+  it.each(["local", "global", "drift"] as const)("keeps %s usage renderable through the non-Basic fallback", async (method) => {
+    const user = userEvent.setup()
+    render(<AnswerPanel
+      runId="run"
+      loading={false}
+      result={{ state: "ready", result: { run_id: "run", response: "Answer", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 25, output_tokens: 3, categories: { response: { llm_calls: 1, prompt_tokens: 25, output_tokens: 3 } } } } }}
+      envelopes={[{ schema_version: 1, sequence: 1, record: { run_id: "run", timestamp: "2026-08-19T00:00:00Z", span_id: "root", event: { type: "query_started", method } } }]}
+    />)
+
+    await user.click(screen.getByRole("button", { name: "Usage details" }))
+    expect(screen.getByText("Response")).toBeInTheDocument()
+    expect(screen.getByText("Model operation")).toBeInTheDocument()
+  })
+
   it("keeps long prose, URLs, UUIDs, inline code, code blocks, and tables inside the answer boundary", () => {
     const response = `中文长段落王婆如何影响人物关系。\n\nlongEnglishTokenWithoutAnyWhitespaceAAAAAAAAAAAAAAAAAAAAAAAA\n\nhttps://example.com/${"a".repeat(80)}\n\n71d89c81-1234-5678-90ab-12345678e942 and \`${"x".repeat(80)}\`\n\n\`\`\`text\n${"code".repeat(40)}\n\`\`\`\n\n| ${"wide".repeat(20)} | B |\n| --- | --- |\n| value | value |`
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response, elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
