@@ -69,8 +69,16 @@ describe("QaWorkspace", () => {
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
   })
 
-  it("opens Analysis without replay collapse when joining a running Run with partial text", () => {
-    render(<QaWorkspace {...props()} runStatus="running" isActiveSubmission={false} answerHasStarted />)
+  it("keeps Analysis open when a running history Run restores an existing partial snapshot", () => {
+    const values = { ...props(), runId: "history-run" }
+    const view = render(<QaWorkspace {...values} runStatus={undefined} isActiveSubmission={false} answerHasStarted={false} />)
+    view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission={false} answerHasStarted={false} />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+
+    view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission={false} answerHasStarted />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+
+    view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission={false} answerHasStarted />)
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
   })
 

@@ -70,8 +70,8 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
     }
     const firstAnswerTokenArrived = !previousAnswerHasStarted.current && props.answerHasStarted
     previousAnswerHasStarted.current = props.answerHasStarted
-    if (firstAnswerTokenArrived && !analysisUserControlled) setAnalysisOpen(false)
-  }, [analysisUserControlled, props.answerHasStarted, props.runId])
+    if (firstAnswerTokenArrived && props.isActiveSubmission && !analysisUserControlled) setAnalysisOpen(false)
+  }, [analysisUserControlled, props.answerHasStarted, props.isActiveSubmission, props.runId])
 
   const selectHistoryRun = (runId: string): void => {
     props.onSelectRun(runId)

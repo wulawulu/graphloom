@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { ApiError, getQueryResult, getRun } from "@/api/client"
 import type { ExplainabilityRun, QueryResultState } from "@/api/types"
@@ -28,15 +28,18 @@ const TERMINAL_RETRY_DELAYS_MS = [100, 300] as const
 export function useRun(runId: string | null): RunState & { refresh: () => void; refreshTerminal: () => void } {
   const [state, setState] = useState<RunState>(initialState)
   const [request, setRequest] = useState<RefreshRequest>({ revision: 0, terminal: false, runId: null })
+  const activeRunIdRef = useRef<string | null>(null)
   const refresh = useCallback(() => setRequest((value) => ({ revision: value.revision + 1, terminal: false, runId })), [runId])
   const refreshTerminal = useCallback(() => setRequest((value) => ({ revision: value.revision + 1, terminal: true, runId })), [runId])
 
   useEffect(() => {
+    const runIdentityChanged = activeRunIdRef.current !== runId
+    activeRunIdRef.current = runId
     if (runId === null) {
       setState(initialState)
       return undefined
     }
-    setState({ ...initialState, loading: true })
+    if (runIdentityChanged) setState({ ...initialState, loading: true })
     const controller = new AbortController()
     let retryTimer: number | undefined
     const isTerminalRefresh = request.terminal && request.runId === runId
@@ -45,7 +48,12 @@ export function useRun(runId: string | null): RunState & { refresh: () => void; 
       try {
         const run = await getRun(runId, controller.signal)
         const result = await getQueryResult(runId, controller.signal)
-        setState({ run, result, loading: false, error: null })
+        setState((current) => ({
+          run,
+          result: !runIdentityChanged && current.result.state === "ready" && result.state === "waiting" ? current.result : result,
+          loading: false,
+          error: null,
+        }))
         if (isTerminalRefresh && result.state === "waiting" && retryIndex < TERMINAL_RETRY_DELAYS_MS.length) {
           retryTimer = window.setTimeout(() => void load(retryIndex + 1), TERMINAL_RETRY_DELAYS_MS[retryIndex])
         }

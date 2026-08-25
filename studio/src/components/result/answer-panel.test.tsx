@@ -65,6 +65,21 @@ describe("AnswerPanel", () => {
     expect(screen.getByText("The final result could not be refreshed after bounded retries. Reopen this Run to try again.")).toBeInTheDocument()
   })
 
+  it("keeps a partial answer visible until the canonical result replaces it", () => {
+    const liveAnswer = { text: "partial answer", status: "completed" as const, hasStarted: true, sequence: 3 }
+    const view = render(<AnswerPanel runId="run" result={{ state: "waiting" }} loading={false} liveAnswer={liveAnswer} />)
+    expect(screen.getByText("partial answer")).toBeInTheDocument()
+    expect(document.querySelector(".h-20")).toBeNull()
+
+    view.rerender(<AnswerPanel runId="run" result={{ state: "waiting" }} loading={false} liveAnswer={liveAnswer} />)
+    expect(screen.getByText("partial answer")).toBeInTheDocument()
+    expect(document.querySelector(".h-20")).toBeNull()
+
+    view.rerender(<AnswerPanel runId="run" result={{ state: "ready", result: { run_id: "run", response: "canonical answer", elapsed_ms: 1, usage: { llm_calls: 1, prompt_tokens: 1, output_tokens: 1, categories: {} } } }} loading={false} liveAnswer={liveAnswer} />)
+    expect(screen.getByText("canonical answer")).toBeInTheDocument()
+    expect(screen.queryByText("partial answer")).not.toBeInTheDocument()
+  })
+
   it("renders markdown without raw HTML and shows usage", () => {
     render(<AnswerPanel runId="run" loading={false} result={{ state: "ready", result: { run_id: "run", response: "**Answer** <script>alert(1)</script>", elapsed_ms: 10, usage: { llm_calls: 1, prompt_tokens: 20, output_tokens: 4, categories: {} } } }} />)
     expect(screen.getByText("Answer")).toBeInTheDocument()
