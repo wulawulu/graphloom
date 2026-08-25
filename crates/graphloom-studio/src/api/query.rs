@@ -173,26 +173,30 @@ fn spawn_query_execution(execution: QueryExecution, state: Arc<StudioApiState>) 
     }));
 }
 
-async fn recover_panicked_query(state: &StudioApiState, run_id: ExplainabilityRunId) {
+pub(super) async fn recover_panicked_query(state: &StudioApiState, run_id: ExplainabilityRunId) {
     tracing::error!(run_id = %run_id, "Studio Query executor task failed");
     match state.store.get_run(&run_id).await {
         Ok(Some(run)) if matches!(run.status, ExplainabilityRunStatus::Completed) => {
             if let Some(result) = state.query_results.get(&run_id).await {
-                let _published = state
-                    .query_answer_live
-                    .complete(&run_id, result.response.clone());
+                if state.query_results.publish(&run_id).await {
+                    let _published = state
+                        .query_answer_live
+                        .complete(&run_id, result.response.clone());
+                } else {
+                    let _published = state.query_answer_live.fail(&run_id);
+                }
             } else {
                 let _published = state.query_answer_live.fail(&run_id);
             }
         }
         _ => {
             state.query_results.remove(&run_id).await;
-            let _published = state.query_answer_live.fail(&run_id);
             if let Ok(completion) =
-                RunCompletion::new(run_id, ExplainabilityRunStatus::Failed, Utc::now())
+                RunCompletion::new(run_id.clone(), ExplainabilityRunStatus::Failed, Utc::now())
             {
                 let _completion_result = state.store.complete_run(completion).await;
             }
+            let _published = state.query_answer_live.fail(&run_id);
         }
     }
 }
@@ -390,7 +394,7 @@ async fn complete_successful_query(
 ) {
     let studio_result = result.with_run_id(run_id.clone());
     let canonical_text = studio_result.response.clone();
-    query_results.insert(studio_result).await;
+    query_results.insert_pending(studio_result).await;
     let completion_succeeded = match RunCompletion::new(
         run_id.clone(),
         ExplainabilityRunStatus::Completed,
@@ -400,7 +404,11 @@ async fn complete_successful_query(
         Err(_) => false,
     };
     if completion_succeeded {
-        let _published = answer_live.complete(&run_id, canonical_text);
+        if query_results.publish(&run_id).await {
+            let _published = answer_live.complete(&run_id, canonical_text);
+        } else {
+            let _published = answer_live.fail(&run_id);
+        }
     } else {
         query_results.remove(&run_id).await;
         let _published = answer_live.fail(&run_id);
@@ -412,10 +420,11 @@ async fn complete_failed_query(
     answer_live: &QueryAnswerLiveHub,
     run_id: ExplainabilityRunId,
 ) {
-    let _published = answer_live.fail(&run_id);
     let _finish_result = recorder.sink().finish_run(&run_id).await;
-    if let Ok(completion) = RunCompletion::new(run_id, ExplainabilityRunStatus::Failed, Utc::now())
+    if let Ok(completion) =
+        RunCompletion::new(run_id.clone(), ExplainabilityRunStatus::Failed, Utc::now())
     {
         let _completion_result = recorder.complete_run(completion).await;
     }
+    let _published = answer_live.fail(&run_id);
 }

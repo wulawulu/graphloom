@@ -31,8 +31,8 @@ use tower::ServiceExt;
 use super::{
     StudioApiOptions, StudioApiService,
     answer_live::{LiveAnswerStatus, QueryAnswerEvent, QueryAnswerLiveHub},
-    query::{QueryRunner, QueryRunnerError},
-    query_result::QueryResultRegistry,
+    query::{QueryRunner, QueryRunnerError, recover_panicked_query},
+    query_result::{QueryExecutionResult, QueryResultRegistry},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -852,6 +852,79 @@ async fn test_should_recover_panicked_query_worker_to_terminal_failure() {
 }
 
 #[tokio::test]
+async fn test_should_publish_pending_result_when_recovering_after_completed_run() {
+    let store = Arc::new(InMemoryExplainabilityStore::new());
+    let hub = Arc::new(ExplainabilityLiveHub::new(
+        ExplainabilityLiveHubOptions::new(),
+    ));
+    let (entered, _observations) = mpsc::channel(1);
+    let runner = Arc::new(ControlledRunner {
+        entered,
+        release: Arc::new(Semaphore::new(0)),
+        outcome: RunnerOutcome::Success,
+    });
+    let store_dependency: Arc<dyn ExplainabilityStore> = store.clone();
+    let service = StudioApiService::with_runner(
+        PathBuf::from("."),
+        store_dependency,
+        hub,
+        StudioApiOptions::new().with_max_retained_query_results(NonZeroUsize::MIN),
+        runner,
+    );
+    let run_id: ExplainabilityRunId = "panic-after-completion".parse().expect("run id");
+    let mut run = ExplainabilityRun::new(run_id.clone(), ExplainabilityRunKind::Query, Utc::now());
+    run.status = ExplainabilityRunStatus::Running;
+    store.create_run(run).await.expect("create run");
+    store
+        .complete_run(
+            RunCompletion::new(
+                run_id.clone(),
+                ExplainabilityRunStatus::Completed,
+                Utc::now(),
+            )
+            .expect("completion"),
+        )
+        .await
+        .expect("complete run");
+    assert!(service.state.query_answer_live.create(run_id.clone()));
+    let result = QueryExecutionResult::try_from(QueryResult::new(
+        "canonical after panic".to_owned(),
+        QueryContext::default(),
+        std::time::Duration::from_millis(1),
+        QueryUsage::default(),
+    ))
+    .expect("convert result")
+    .with_run_id(run_id.clone());
+    service.state.query_results.insert_pending(result).await;
+
+    recover_panicked_query(&service.state, run_id.clone()).await;
+
+    assert_eq!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(&run_id)
+            .expect("completed answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 1,
+            text: "canonical after panic".to_owned(),
+            status: LiveAnswerStatus::Completed,
+        }
+    );
+    assert_eq!(
+        service
+            .state
+            .query_results
+            .get(&run_id)
+            .await
+            .expect("published result")
+            .response,
+        "canonical after panic"
+    );
+}
+
+#[tokio::test]
 async fn test_should_complete_failed_query_as_failed_and_keep_post_accepted() {
     let mut harness = harness(RunnerOutcome::Failure, 1);
     let accepted = accepted(post(&harness.router, json!({"query":"failure"})).await).await;
@@ -1421,7 +1494,7 @@ async fn test_should_evict_oldest_successful_result_without_deleting_run_history
 }
 
 #[tokio::test]
-async fn test_should_publish_result_before_completed_metadata_becomes_visible() {
+async fn test_should_publish_result_and_answer_terminal_after_completed_metadata() {
     let store = Arc::new(BlockingCompletionStore::default());
     let hub = Arc::new(ExplainabilityLiveHub::new(
         ExplainabilityLiveHubOptions::new(),
@@ -1468,12 +1541,213 @@ async fn test_should_publish_result_before_completed_metadata_becomes_visible() 
         get_result(&router, &accepted.run_id).await.status(),
         StatusCode::ACCEPTED
     );
+    assert_eq!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("running answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 2,
+            text: "final answer for ".to_owned() + "ordered result",
+            status: LiveAnswerStatus::Running,
+        }
+    );
 
     store.release_completion();
     store.wait_for_completion_finish().await;
     assert_eq!(
         get_result(&router, &accepted.run_id).await.status(),
         StatusCode::OK
+    );
+    assert_eq!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("completed answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 3,
+            text: "final answer for ordered result".to_owned(),
+            status: LiveAnswerStatus::Completed,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_should_pin_concurrent_results_until_their_runs_complete() {
+    let store = Arc::new(BlockingCompletionStore::default());
+    let hub = Arc::new(ExplainabilityLiveHub::new(
+        ExplainabilityLiveHubOptions::new(),
+    ));
+    let (entered, mut observations) = mpsc::channel(2);
+    let release = Arc::new(Semaphore::new(0));
+    let runner = Arc::new(ControlledRunner {
+        entered,
+        release: Arc::clone(&release),
+        outcome: RunnerOutcome::Success,
+    });
+    let store_dependency: Arc<dyn ExplainabilityStore> = store.clone();
+    let service = StudioApiService::with_runner(
+        PathBuf::from("."),
+        store_dependency,
+        hub,
+        StudioApiOptions::new()
+            .with_max_concurrent_queries(NonZeroUsize::new(2).expect("non-zero concurrency"))
+            .with_max_retained_query_results(NonZeroUsize::MIN),
+        runner,
+    );
+    let router = service.router();
+    let first = accepted(post(&router, json!({"query":"first concurrent"})).await).await;
+    let second = accepted(post(&router, json!({"query":"second concurrent"})).await).await;
+    let _first_observed = observations.recv().await.expect("first runner entered");
+    let _second_observed = observations.recv().await.expect("second runner entered");
+    release.add_permits(2);
+    store.wait_for_completion_entry().await;
+    store.wait_for_completion_entry().await;
+
+    assert!(
+        service
+            .state
+            .query_results
+            .get(&first.run_id)
+            .await
+            .is_some()
+    );
+    assert!(
+        service
+            .state
+            .query_results
+            .get(&second.run_id)
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        get_result(&router, &first.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        get_result(&router, &second.run_id).await.status(),
+        StatusCode::ACCEPTED
+    );
+
+    store.release_completion();
+    let one_task_done = Arc::clone(&service.state.query_permits)
+        .acquire_owned()
+        .await
+        .expect("one query task completed");
+    drop(one_task_done);
+    let first_status = store
+        .get_run(&first.run_id)
+        .await
+        .expect("first store read")
+        .expect("first run")
+        .status;
+    let second_status = store
+        .get_run(&second.run_id)
+        .await
+        .expect("second store read")
+        .expect("second run")
+        .status;
+    let completed_id = if matches!(first_status, ExplainabilityRunStatus::Completed) {
+        assert_eq!(second_status, ExplainabilityRunStatus::Running);
+        &first.run_id
+    } else {
+        assert_eq!(first_status, ExplainabilityRunStatus::Running);
+        assert_eq!(second_status, ExplainabilityRunStatus::Completed);
+        &second.run_id
+    };
+    assert_eq!(
+        get_result(&router, completed_id).await.status(),
+        StatusCode::OK
+    );
+    assert!(matches!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(completed_id)
+            .expect("completed answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            status: LiveAnswerStatus::Completed,
+            ..
+        }
+    ));
+
+    store.release_completion();
+    let both_tasks_done = Arc::clone(&service.state.query_permits)
+        .acquire_many_owned(2)
+        .await
+        .expect("both query tasks completed");
+    drop(both_tasks_done);
+}
+
+#[tokio::test]
+async fn test_should_publish_answer_failure_after_failed_metadata() {
+    let store = Arc::new(BlockingCompletionStore::default());
+    let hub = Arc::new(ExplainabilityLiveHub::new(
+        ExplainabilityLiveHubOptions::new(),
+    ));
+    let (entered, mut observations) = mpsc::channel(1);
+    let release = Arc::new(Semaphore::new(0));
+    let runner = Arc::new(ControlledRunner {
+        entered,
+        release: Arc::clone(&release),
+        outcome: RunnerOutcome::Failure,
+    });
+    let store_dependency: Arc<dyn ExplainabilityStore> = store.clone();
+    let service = StudioApiService::with_runner(
+        PathBuf::from("."),
+        store_dependency,
+        hub,
+        StudioApiOptions::new(),
+        runner,
+    );
+    let accepted =
+        accepted(post(&service.router(), json!({"query":"ordered failure"})).await).await;
+    let _observed = observations.recv().await.expect("runner entered");
+    release.add_permits(1);
+    store.wait_for_completion_entry().await;
+
+    assert_eq!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("running answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 0,
+            text: String::new(),
+            status: LiveAnswerStatus::Running,
+        }
+    );
+
+    store.release_completion();
+    store.wait_for_completion_finish().await;
+    assert_eq!(
+        store
+            .get_run(&accepted.run_id)
+            .await
+            .expect("store read")
+            .expect("run")
+            .status,
+        ExplainabilityRunStatus::Failed
+    );
+    assert_eq!(
+        service
+            .state
+            .query_answer_live
+            .subscribe(&accepted.run_id)
+            .expect("failed answer")
+            .initial_snapshot(),
+        QueryAnswerEvent::Snapshot {
+            sequence: 1,
+            text: String::new(),
+            status: LiveAnswerStatus::Failed,
+        }
     );
 }
 

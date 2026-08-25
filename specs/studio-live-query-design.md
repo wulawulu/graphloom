@@ -42,8 +42,9 @@ Browser                QueryAnswerLiveHub             Query executor          Re
    │◀──── snapshot(seq, text) ──┤                            │                         │
    │                            │◀──── append Core delta ────┤                         │
    │◀──────── delta(seq) ───────┤                            │                         │
-   │                            │                            ├── insert result ───────▶│
+   │                            │                            ├── insert pending result ▶│
    │                            │                            ├── complete Run ────────▶│
+   │                            │                            ├── publish result ───────▶│
    │◀────── completed(seq) ─────┤◀──── complete answer ─────┤                         │
    │ GET canonical result       │                            │                         │
    ├────────────────────────────────────────────────────────────────────────────────▶│
@@ -57,11 +58,17 @@ Every delta and terminal transition increments the per-run sequence exactly once
 equal payload sequences. Completed/failed states are retained in bounded FIFO order; active runs
 are bounded independently by Studio Query admission.
 
-On success, the result is inserted and Run metadata becomes terminal before answer completion is
-published. Consequently, `GET /api/query/{run_id}/result` is ready when the browser receives the
-answer terminal event. A streamed/final mismatch is never fabricated as a delta: the canonical
-response replaces retained snapshot text at the terminal transition and the frontend also replaces
-its rendered buffer after fetching the canonical result.
+On success, the result is inserted as pending before Run completion. Pending entries are fetchable
+once Store metadata becomes terminal but are excluded from FIFO eviction. After Run completion the
+registry publishes the result into bounded recent retention, then answer completion is emitted.
+Pending entries are bounded by Query admission in addition to the published retention bound. Store
+metadata terminal and answer terminal therefore both observe a ready canonical result. Core may
+emit its persisted Explainability terminal envelope before Studio receives `QueryEvent::Completed`;
+that earlier fallback can observe 202, so the frontend performs a short event-triggered bounded
+reconciliation until either Store metadata or the answer terminal confirms readiness. A
+streamed/final mismatch is never fabricated as a delta: the canonical response replaces retained
+snapshot text at the terminal transition and the frontend also replaces its rendered buffer after
+fetching the canonical result.
 
 ## Query mode boundary
 

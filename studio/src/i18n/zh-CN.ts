@@ -154,7 +154,8 @@ export const zhCN = {
       "selectOrSubmitAQueryRun": "请选择或提交一次查询运行。",
       "theQueryRunDoesNotExistInThisStoreNamespace": "此 Store 命名空间中不存在该查询运行。",
       "explainabilityFailureHint": "请在可解释性时间线中查看安全的失败摘要。",
-      "retainedResultUnavailable": "此运行已经完成，但进程内结果已不可用；可解释性历史记录仍可查看。"
+      "retainedResultUnavailable": "此运行已经完成，但进程内结果已不可用；可解释性历史记录仍可查看。",
+      "finalResultRefreshUnavailable": "有限次重试后仍无法刷新最终结果。请重新打开此运行再试。"
     },
     "counts": {
       "analysisSteps": "分析过程 · {{count}} 个步骤",
@@ -163,6 +164,8 @@ export const zhCN = {
       "analysisStepsCompleted_other": "分析过程 · {{count}} 个步骤",
       "analysisStepsRunning": "正在分析 · {{count}} 个步骤",
       "analysisStepsRunning_other": "正在分析 · {{count}} 个步骤",
+      "generatingAnswerSteps": "正在生成答案 · {{count}} 个分析步骤",
+      "generatingAnswerSteps_other": "正在生成答案 · {{count}} 个分析步骤",
       "analysisStepsInterrupted": "分析中断 · {{count}} 个步骤",
       "analysisStepsInterrupted_other": "分析中断 · {{count}} 个步骤",
       "emphasizeCountDatasetInGraph": "在图谱中强调 {{count}} 个 {{dataset}}",

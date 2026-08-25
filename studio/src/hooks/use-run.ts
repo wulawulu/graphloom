@@ -17,10 +17,19 @@ const initialState: RunState = {
   error: null,
 }
 
-export function useRun(runId: string | null): RunState & { refresh: () => void } {
+interface RefreshRequest {
+  revision: number
+  terminal: boolean
+  runId: string | null
+}
+
+const TERMINAL_RETRY_DELAYS_MS = [100, 300] as const
+
+export function useRun(runId: string | null): RunState & { refresh: () => void; refreshTerminal: () => void } {
   const [state, setState] = useState<RunState>(initialState)
-  const [revision, setRevision] = useState(0)
-  const refresh = useCallback(() => setRevision((value) => value + 1), [])
+  const [request, setRequest] = useState<RefreshRequest>({ revision: 0, terminal: false, runId: null })
+  const refresh = useCallback(() => setRequest((value) => ({ revision: value.revision + 1, terminal: false, runId })), [runId])
+  const refreshTerminal = useCallback(() => setRequest((value) => ({ revision: value.revision + 1, terminal: true, runId })), [runId])
 
   useEffect(() => {
     if (runId === null) {
@@ -29,14 +38,23 @@ export function useRun(runId: string | null): RunState & { refresh: () => void }
     }
     setState({ ...initialState, loading: true })
     const controller = new AbortController()
-    const load = async (): Promise<void> => {
+    let retryTimer: number | undefined
+    const isTerminalRefresh = request.terminal && request.runId === runId
+    const load = async (retryIndex = 0): Promise<void> => {
       setState((current) => ({ ...current, loading: current.run === null, error: null }))
       try {
         const run = await getRun(runId, controller.signal)
         const result = await getQueryResult(runId, controller.signal)
         setState({ run, result, loading: false, error: null })
+        if (isTerminalRefresh && result.state === "waiting" && retryIndex < TERMINAL_RETRY_DELAYS_MS.length) {
+          retryTimer = window.setTimeout(() => void load(retryIndex + 1), TERMINAL_RETRY_DELAYS_MS[retryIndex])
+        }
       } catch (error) {
         if (controller.signal.aborted) return
+        if (isTerminalRefresh && !(error instanceof ApiError && error.status === 404) && retryIndex < TERMINAL_RETRY_DELAYS_MS.length) {
+          retryTimer = window.setTimeout(() => void load(retryIndex + 1), TERMINAL_RETRY_DELAYS_MS[retryIndex])
+          return
+        }
         const message = error instanceof ApiError && error.status === 404
           ? "Run not found."
           : "Run metadata is unavailable."
@@ -47,8 +65,9 @@ export function useRun(runId: string | null): RunState & { refresh: () => void }
 
     return () => {
       controller.abort()
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     }
-  }, [revision, runId])
+  }, [request, runId])
 
-  return { ...state, refresh }
+  return { ...state, refresh, refreshTerminal }
 }

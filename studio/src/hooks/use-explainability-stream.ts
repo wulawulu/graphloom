@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 
-import type { ExplainabilityEnvelope, RunStatus } from "@/api/types"
+import type { ExplainabilityEnvelope, ExplainabilityRun } from "@/api/types"
 import { isTerminalEvent, mergeEnvelopes } from "@/lib/explainability"
 
 export type StreamStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed"
@@ -75,13 +75,13 @@ export function createExplainabilityConnection(options: ExplainabilityConnection
   }
 }
 
-function isTerminalStatus(status: RunStatus | undefined): boolean {
+function isTerminalStatus(status: ExplainabilityRun["status"] | undefined): boolean {
   return status === "completed" || status === "failed" || status === "cancelled"
 }
 
 export function useExplainabilityStream(
   runId: string | null,
-  runStatus: RunStatus | undefined,
+  run: Pick<ExplainabilityRun, "run_id" | "status"> | null,
   onTerminal: () => void,
   factory: EventSourceFactory = browserEventSourceFactory,
 ): { envelopes: ExplainabilityEnvelope[]; status: StreamStatus } {
@@ -110,10 +110,10 @@ export function useExplainabilityStream(
   }, [factory, onTerminal, runId])
 
   useEffect(() => {
-    if (isTerminalStatus(runStatus) && status === "reconnecting") {
+    if (run?.run_id === runId && isTerminalStatus(run.status) && status === "reconnecting") {
       closeRef.current?.()
     }
-  }, [runStatus, status])
+  }, [run, runId, status])
 
   return { envelopes, status }
 }

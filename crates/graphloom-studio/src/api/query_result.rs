@@ -225,23 +225,31 @@ impl QueryResultRegistry {
         }
     }
 
-    pub(super) async fn insert(&self, result: StudioQueryResult) {
+    /// Insert a result before its Run becomes terminal. Pending entries are not part of FIFO
+    /// eviction, so concurrent completions cannot remove a result before either terminal stream
+    /// makes it fetchable.
+    pub(super) async fn insert_pending(&self, result: StudioQueryResult) {
         let run_id = result.run_id.clone();
         let mut state = self.state.lock().await;
-        if state
-            .results
-            .insert(run_id.clone(), Arc::new(result))
-            .is_some()
-        {
-            state.insertion_order.retain(|existing| existing != &run_id);
+        state.results.insert(run_id.clone(), Arc::new(result));
+        state.insertion_order.retain(|existing| existing != &run_id);
+    }
+
+    /// Make a pending result eligible for bounded recent-result retention.
+    pub(super) async fn publish(&self, run_id: &ExplainabilityRunId) -> bool {
+        let mut state = self.state.lock().await;
+        if !state.results.contains_key(run_id) {
+            return false;
         }
-        state.insertion_order.push_back(run_id);
-        while state.results.len() > self.capacity.get() {
+        state.insertion_order.retain(|existing| existing != run_id);
+        state.insertion_order.push_back(run_id.clone());
+        while state.insertion_order.len() > self.capacity.get() {
             let Some(oldest) = state.insertion_order.pop_front() else {
                 break;
             };
             state.results.remove(&oldest);
         }
+        true
     }
 
     pub(super) async fn get(&self, run_id: &ExplainabilityRunId) -> Option<Arc<StudioQueryResult>> {
@@ -400,21 +408,23 @@ mod tests {
         let first_id: ExplainabilityRunId = "first-result".parse().expect("run id");
         let second_id: ExplainabilityRunId = "second-result".parse().expect("run id");
         registry
-            .insert(StudioQueryResult {
+            .insert_pending(StudioQueryResult {
                 run_id: first_id.clone(),
                 response: "first".to_owned(),
                 elapsed_ms: 1,
                 usage: convert_usage_values(0, 0, 0, BTreeMap::new()).expect("usage"),
             })
             .await;
+        assert!(registry.publish(&first_id).await);
         registry
-            .insert(StudioQueryResult {
+            .insert_pending(StudioQueryResult {
                 run_id: second_id.clone(),
                 response: "second".to_owned(),
                 elapsed_ms: 2,
                 usage: convert_usage_values(0, 0, 0, BTreeMap::new()).expect("usage"),
             })
             .await;
+        assert!(registry.publish(&second_id).await);
         assert!(registry.get(&first_id).await.is_none());
         assert_eq!(
             registry

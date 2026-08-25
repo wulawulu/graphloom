@@ -44,6 +44,8 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   const [analysisUserControlled, setAnalysisUserControlled] = useState(false)
   const analysisRunId = useRef<string | null>(null)
   const analysisInitialized = useRef(false)
+  const answerStartedRunId = useRef<string | null>(null)
+  const previousAnswerHasStarted = useRef(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const semanticTimeline = useMemo(() => buildSemanticTimeline(props.envelopes), [props.envelopes])
   const decisionCount = semanticTimeline.steps.length
@@ -61,8 +63,15 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   }, [props.isActiveSubmission, props.runId, props.runStatus])
 
   useEffect(() => {
-    if (props.answerHasStarted && !analysisUserControlled) setAnalysisOpen(false)
-  }, [analysisUserControlled, props.answerHasStarted])
+    if (answerStartedRunId.current !== props.runId) {
+      answerStartedRunId.current = props.runId
+      previousAnswerHasStarted.current = props.answerHasStarted
+      return
+    }
+    const firstAnswerTokenArrived = !previousAnswerHasStarted.current && props.answerHasStarted
+    previousAnswerHasStarted.current = props.answerHasStarted
+    if (firstAnswerTokenArrived && !analysisUserControlled) setAnalysisOpen(false)
+  }, [analysisUserControlled, props.answerHasStarted, props.runId])
 
   const selectHistoryRun = (runId: string): void => {
     props.onSelectRun(runId)
@@ -94,7 +103,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
                 <Collapsible open={analysisOpen} onOpenChange={(open) => { setAnalysisOpen(open); setAnalysisUserControlled(true) }} className="mb-3 border-b pb-2">
                   <CollapsibleTrigger asChild>
                     <Button variant="ghost" className="h-9 w-full justify-between px-1" aria-label={t("answer.actions.toggleAnalysisProcess")}>
-                      <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus)}</span>
+                      <span className="min-w-0 truncate text-xs font-medium">{analysisSummary(t, decisionCount, props.runStatus, props.streamStatus, props.answerHasStarted)}</span>
                       <ChevronDown className={`size-4 transition-transform ${analysisOpen ? "rotate-180" : ""}`} />
                     </Button>
                   </CollapsibleTrigger>
@@ -130,9 +139,10 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
   )
 }
 
-function analysisSummary(t: TFunction, decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus): string {
+function analysisSummary(t: TFunction, decisionCount: number, runStatus: string | undefined, streamStatus: StreamStatus, answerHasStarted: boolean): string {
   if (runStatus === "completed") return t("answer.counts.analysisStepsCompleted", { count: decisionCount })
   if (runStatus === "failed" || runStatus === "cancelled") return t("answer.counts.analysisStepsInterrupted", { count: decisionCount })
+  if (answerHasStarted) return t("answer.counts.generatingAnswerSteps", { count: decisionCount })
   if (runStatus === "running" || runStatus === "pending" || streamStatus === "open" || streamStatus === "connecting" || streamStatus === "reconnecting") {
     return t("answer.counts.analysisStepsRunning", { count: decisionCount })
   }

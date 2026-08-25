@@ -23,13 +23,14 @@ interface AnswerPanelProps {
   result: QueryResultState
   liveAnswer?: QueryAnswerStreamState
   loading: boolean
+  refreshFailed?: boolean
   envelopes?: ExplainabilityEnvelope[]
   onCitationEmphasis?: (emphasis: GraphEmphasis) => void
 }
 
 const emptyLiveAnswer: QueryAnswerStreamState = { text: "", status: "idle", hasStarted: false, sequence: 0 }
 
-export function AnswerPanel({ runId, result, liveAnswer = emptyLiveAnswer, loading, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
+export function AnswerPanel({ runId, result, liveAnswer = emptyLiveAnswer, loading, refreshFailed = false, envelopes = [], onCitationEmphasis }: AnswerPanelProps): React.ReactElement {
   const { t } = useTranslation()
   const citationIndex = useMemo(() => buildCitationEvidenceIndex(envelopes), [envelopes])
   const showRawUsageCategories = detectRunContentMode(envelopes) === "debug"
@@ -53,6 +54,7 @@ export function AnswerPanel({ runId, result, liveAnswer = emptyLiveAnswer, loadi
         <div className="min-w-0 max-w-full px-3 pb-3">
           {loading ? <><Skeleton className="mb-3 h-4 w-1/3" /><Skeleton className="h-20" /></> : null}
           {!loading && runId === null ? <AnswerState title={t("answer.labels.noResultYet")} detail={t("answer.messages.selectOrSubmitAQueryRun")} /> : null}
+          {!loading && refreshFailed ? <AnswerState title={t("answer.labels.resultUnavailable")} detail={t("answer.messages.finalResultRefreshUnavailable")} tone="error" /> : null}
           {!loading && result.state === "waiting" && runId !== null && liveAnswer.text.length === 0 && liveAnswer.status !== "failed" ? <p className="py-2 text-xs text-muted-foreground">{t("answer.status.preparingAnswer")}</p> : null}
           {!loading && liveAnswer.text.length > 0 && result.state !== "ready" ? (
             <div className="grid gap-3">

@@ -48,6 +48,7 @@ describe("QaWorkspace", () => {
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
     view.rerender(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted />)
     expect(screen.queryByRole("heading", { name: "Entity Mapping" })).not.toBeInTheDocument()
+    expect(screen.getByText("Generating answer · 1 analysis step")).toBeInTheDocument()
   })
 
   it("respects a manual Analysis choice when the first answer token arrives", async () => {
@@ -65,6 +66,11 @@ describe("QaWorkspace", () => {
     const values = props()
     const view = render(<QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted={false} />)
     view.rerender(<QaWorkspace {...values} runStatus="failed" isActiveSubmission answerHasStarted={false} />)
+    expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
+  })
+
+  it("opens Analysis without replay collapse when joining a running Run with partial text", () => {
+    render(<QaWorkspace {...props()} runStatus="running" isActiveSubmission={false} answerHasStarted />)
     expect(screen.getByRole("heading", { name: "Entity Mapping" })).toBeInTheDocument()
   })
 

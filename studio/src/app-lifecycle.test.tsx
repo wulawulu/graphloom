@@ -63,6 +63,7 @@ vi.mock("@/hooks/use-run", () => ({
     result: { state: lifecycle.status === "completed" ? "ready" : "waiting", result: { run_id: runId, response: "answer", elapsed_ms: 1, usage: { llm_calls: 1, prompt_tokens: 1, output_tokens: 1, categories: {} } } },
     loading: false,
     refresh: vi.fn(),
+    refreshTerminal: vi.fn(),
   }),
 }))
 

@@ -152,7 +152,8 @@ export const en = {
       "selectOrSubmitAQueryRun": "Select or submit a Query Run.",
       "theQueryRunDoesNotExistInThisStoreNamespace": "The Query Run does not exist in this Store namespace.",
       "explainabilityFailureHint": "Inspect the Explainability timeline for the safe failure summary.",
-      "retainedResultUnavailable": "This run completed, but its process-local result is no longer available. Explainability history is still available."
+      "retainedResultUnavailable": "This run completed, but its process-local result is no longer available. Explainability history is still available.",
+      "finalResultRefreshUnavailable": "The final result could not be refreshed after bounded retries. Reopen this Run to try again."
     },
     "counts": {
       "analysisSteps": "Analysis · {{count}} step",
@@ -161,6 +162,8 @@ export const en = {
       "analysisStepsCompleted_other": "Analysis · {{count}} steps",
       "analysisStepsRunning": "Analyzing · {{count}} step",
       "analysisStepsRunning_other": "Analyzing · {{count}} steps",
+      "generatingAnswerSteps": "Generating answer · {{count}} analysis step",
+      "generatingAnswerSteps_other": "Generating answer · {{count}} analysis steps",
       "analysisStepsInterrupted": "Analysis interrupted · {{count}} step",
       "analysisStepsInterrupted_other": "Analysis interrupted · {{count}} steps",
       "emphasizeCountDatasetInGraph": "Emphasize {{count}} {{dataset}} in graph",

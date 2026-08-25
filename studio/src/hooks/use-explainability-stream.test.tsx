@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
-import type { ExplainabilityEnvelope } from "@/api/types"
+import type { ExplainabilityEnvelope, ExplainabilityRun } from "@/api/types"
 import {
   createExplainabilityConnection,
   type EventSourceFactory,
@@ -61,7 +61,7 @@ describe("Explainability EventSource lifecycle", () => {
     const factory: EventSourceFactory = () => { const source = new FakeEventSource(); sources.push(source); return source }
     const terminal = vi.fn()
     const { result, rerender } = renderHook(
-      ({ runId }) => useExplainabilityStream(runId, "running", terminal, factory),
+      ({ runId }) => useExplainabilityStream(runId, runId === null ? null : { run_id: runId, status: "running" }, terminal, factory),
       { initialProps: { runId: "run-1" as string | null } },
     )
     act(() => {
@@ -80,7 +80,7 @@ describe("Explainability EventSource lifecycle", () => {
     const terminal = vi.fn()
     const factory: EventSourceFactory = () => source
     const { result, rerender } = renderHook(
-      ({ status }) => useExplainabilityStream("run-1", status, terminal, factory),
+      ({ status }: { status: ExplainabilityRun["status"] }) => useExplainabilityStream("run-1", { run_id: "run-1", status }, terminal, factory),
       { initialProps: { status: "running" } },
     )
     act(() => source.onerror?.(new Event("error")))
@@ -88,5 +88,22 @@ describe("Explainability EventSource lifecycle", () => {
     rerender({ status: "completed" })
     expect(source.closed).toBe(true)
     expect(result.current.status).toBe("closed")
+  })
+
+  it("does not let stale terminal metadata close the new Run connection", () => {
+    type HookProps = { runId: string; metadata: Pick<ExplainabilityRun, "run_id" | "status"> }
+    const sources: FakeEventSource[] = []
+    const factory: EventSourceFactory = () => { const source = new FakeEventSource(); sources.push(source); return source }
+    const terminal = vi.fn()
+    const { rerender } = renderHook(
+      ({ runId, metadata }: HookProps) => useExplainabilityStream(runId, metadata, terminal, factory),
+      { initialProps: { runId: "run-a", metadata: { run_id: "run-a", status: "running" } } satisfies HookProps },
+    )
+    act(() => sources[0]?.onerror?.(new Event("error")))
+
+    rerender({ runId: "run-b", metadata: { run_id: "run-a", status: "completed" } })
+
+    expect(sources[0]?.closed).toBe(true)
+    expect(sources[1]?.closed).toBe(false)
   })
 })

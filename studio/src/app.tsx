@@ -36,16 +36,17 @@ export function App(): React.ReactElement {
   const history = useRunHistory()
   const selected = useRun(selectedRunId)
   const refreshHistory = history.refresh
-  const refreshSelectedRun = selected.refresh
+  const refreshSelectedRun = selected.refreshTerminal
+  const selectedRunStatus = selected.run?.run_id === selectedRunId ? selected.run.status : undefined
 
   const onTerminal = useCallback(() => {
     refreshSelectedRun()
     refreshHistory()
   }, [refreshHistory, refreshSelectedRun])
-  const stream = useExplainabilityStream(selectedRunId, selected.run?.status, onTerminal)
+  const stream = useExplainabilityStream(selectedRunId, selected.run, onTerminal)
   const answerStreamRunId = activeSubmittedRunId === selectedRunId
-    || selected.run?.status === "running"
-    || selected.run?.status === "pending"
+    || selectedRunStatus === "running"
+    || selectedRunStatus === "pending"
     ? selectedRunId
     : null
   const answerStream = useQueryAnswerStream(answerStreamRunId, onTerminal)
@@ -154,7 +155,7 @@ export function App(): React.ReactElement {
       runStatus={displayedRun?.status}
       question={displayedQuestion}
       composer={<QueryComposer onAccepted={onAccepted} resetRevision={composerRevision} />}
-      answer={<Suspense fallback={<PanelLoading label={t("answer.loading")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} liveAnswer={answerStream} loading={displayedLoading} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
+      answer={<Suspense fallback={<PanelLoading label={t("answer.loading")} />}><AnswerPanel runId={displayedRunId} result={displayedResult} liveAnswer={answerStream} loading={displayedLoading} refreshFailed={selected.error !== null} envelopes={displayedEnvelopes} onCitationEmphasis={onCitationEmphasis} /></Suspense>}
       answerHasStarted={answerStream.hasStarted}
       isActiveSubmission={activeSubmittedRunId === displayedRunId}
       envelopes={displayedEnvelopes}
