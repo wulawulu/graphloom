@@ -3,6 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react"
 /** Distance from the bottom that still counts as reading the latest output. */
 export const FOLLOW_THRESHOLD_PX = 96
 
+const PROGRAMMATIC_TARGET_EPSILON_PX = 2
+const SMOOTH_IDLE_TIMEOUT_MS = 150
+const SMOOTH_START_TIMEOUT_MS = 1_000
+
 interface AutoFollowOptions {
   resetKey: string | null
   threshold?: number
@@ -15,6 +19,12 @@ interface AutoFollowController {
   pause: () => void
   resume: () => void
   scrollToLatest: () => void
+}
+
+interface SmoothOperation {
+  generation: number
+  target: number
+  contentChanged: boolean
 }
 
 /** Returns the viewport's non-negative distance from its latest scroll position. */
@@ -30,15 +40,20 @@ export function isNearBottom(
   return distanceFromBottom(viewport) <= threshold
 }
 
+function latestScrollTop(viewport: Pick<HTMLElement, "clientHeight" | "scrollHeight">): number {
+  return Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+}
+
 /** Keeps a scroll viewport on newly laid-out content until the reader scrolls away. */
 export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: AutoFollowOptions): AutoFollowController {
   const viewportRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const shouldFollowRef = useRef(true)
-  const programmaticScrollRef = useRef(false)
+  const programmaticTargetRef = useRef<number | null>(null)
+  const smoothOperationRef = useRef<SmoothOperation | null>(null)
+  const operationGenerationRef = useRef(0)
   const scrollFrameRef = useRef<number | null>(null)
-  const guardFrameRef = useRef<number | null>(null)
-  const smoothGuardTimerRef = useRef<number | null>(null)
+  const smoothTimerRef = useRef<number | null>(null)
   const [following, setFollowing] = useState(true)
 
   const cancelScrollFrame = useCallback((): void => {
@@ -47,16 +62,10 @@ export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: Aut
     scrollFrameRef.current = null
   }, [])
 
-  const clearProgrammaticGuard = useCallback((): void => {
-    programmaticScrollRef.current = false
-    if (guardFrameRef.current !== null) {
-      cancelAnimationFrame(guardFrameRef.current)
-      guardFrameRef.current = null
-    }
-    if (smoothGuardTimerRef.current !== null) {
-      window.clearTimeout(smoothGuardTimerRef.current)
-      smoothGuardTimerRef.current = null
-    }
+  const clearSmoothTimer = useCallback((): void => {
+    if (smoothTimerRef.current === null) return
+    window.clearTimeout(smoothTimerRef.current)
+    smoothTimerRef.current = null
   }, [])
 
   const setFollowState = useCallback((next: boolean): void => {
@@ -65,50 +74,89 @@ export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: Aut
     if (!next) cancelScrollFrame()
   }, [cancelScrollFrame])
 
-  const releaseAutoScrollGuard = useCallback((): void => {
-    if (guardFrameRef.current !== null) cancelAnimationFrame(guardFrameRef.current)
-    guardFrameRef.current = requestAnimationFrame(() => {
-      guardFrameRef.current = requestAnimationFrame(() => {
-        guardFrameRef.current = null
-        programmaticScrollRef.current = false
-      })
-    })
-  }, [])
-
-  const scrollLatest = useCallback((behavior: ScrollBehavior): void => {
+  const performAutoScroll = useCallback((): void => {
     const viewport = viewportRef.current
     if (viewport === null) return
-
-    programmaticScrollRef.current = true
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior })
-    if (behavior === "smooth") {
-      if (smoothGuardTimerRef.current !== null) window.clearTimeout(smoothGuardTimerRef.current)
-      smoothGuardTimerRef.current = window.setTimeout(() => {
-        smoothGuardTimerRef.current = null
-        programmaticScrollRef.current = false
-        const currentViewport = viewportRef.current
-        if (currentViewport !== null) setFollowState(isNearBottom(currentViewport, threshold))
-      }, 1_000)
-      return
-    }
-    releaseAutoScrollGuard()
-  }, [releaseAutoScrollGuard, setFollowState, threshold])
+    programmaticTargetRef.current = latestScrollTop(viewport)
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
+  }, [])
 
   const scheduleScrollToLatest = useCallback((): void => {
-    if (!shouldFollowRef.current || scrollFrameRef.current !== null) return
+    if (!shouldFollowRef.current || scrollFrameRef.current !== null || smoothOperationRef.current !== null) return
     scrollFrameRef.current = requestAnimationFrame(() => {
       scrollFrameRef.current = null
-      if (shouldFollowRef.current) scrollLatest("auto")
+      if (shouldFollowRef.current && smoothOperationRef.current === null) performAutoScroll()
     })
-  }, [scrollLatest])
+  }, [performAutoScroll])
 
-  const pause = useCallback((): void => setFollowState(false), [setFollowState])
+  const finishSmoothScroll = useCallback((generation: number): void => {
+    const operation = smoothOperationRef.current
+    if (operation === null || operation.generation !== generation) return
+    const viewport = viewportRef.current
+    smoothOperationRef.current = null
+    clearSmoothTimer()
+    if (viewport === null || !shouldFollowRef.current) return
+
+    const expectedTarget = Math.min(operation.target, latestScrollTop(viewport))
+    const reachedTarget = Math.abs(viewport.scrollTop - expectedTarget) <= PROGRAMMATIC_TARGET_EPSILON_PX
+    if (!reachedTarget) {
+      setFollowState(false)
+      return
+    }
+    if (operation.contentChanged) scheduleScrollToLatest()
+    else setFollowState(isNearBottom(viewport, threshold))
+  }, [clearSmoothTimer, scheduleScrollToLatest, setFollowState, threshold])
+
+  const armSmoothTimer = useCallback((generation: number, delay: number): void => {
+    clearSmoothTimer()
+    smoothTimerRef.current = window.setTimeout(() => {
+      smoothTimerRef.current = null
+      finishSmoothScroll(generation)
+    }, delay)
+  }, [clearSmoothTimer, finishSmoothScroll])
+
+  const stopSmoothScroll = useCallback((): void => {
+    const operation = smoothOperationRef.current
+    operationGenerationRef.current += 1
+    smoothOperationRef.current = null
+    clearSmoothTimer()
+    if (operation === null) return
+
+    const viewport = viewportRef.current
+    if (viewport === null) return
+    programmaticTargetRef.current = viewport.scrollTop
+    viewport.scrollTo({ top: viewport.scrollTop, behavior: "auto" })
+  }, [clearSmoothTimer])
+
+  const pause = useCallback((): void => {
+    setFollowState(false)
+    stopSmoothScroll()
+  }, [setFollowState, stopSmoothScroll])
+
   const resume = useCallback((): void => setFollowState(true), [setFollowState])
+
   const scrollToLatest = useCallback((): void => {
+    const viewport = viewportRef.current
+    if (viewport === null) return
     setFollowState(true)
+    stopSmoothScroll()
+
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
-    scrollLatest(reducedMotion ? "auto" : "smooth")
-  }, [scrollLatest, setFollowState])
+    if (reducedMotion) {
+      performAutoScroll()
+      return
+    }
+
+    const generation = operationGenerationRef.current + 1
+    operationGenerationRef.current = generation
+    smoothOperationRef.current = {
+      generation,
+      target: latestScrollTop(viewport),
+      contentChanged: false,
+    }
+    armSmoothTimer(generation, SMOOTH_START_TIMEOUT_MS)
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
+  }, [armSmoothTimer, performAutoScroll, setFollowState, stopSmoothScroll])
 
   useEffect(() => {
     const viewport = viewportRef.current
@@ -116,25 +164,43 @@ export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: Aut
     if (viewport === null || content === null) return undefined
 
     let active = true
-    clearProgrammaticGuard()
+    operationGenerationRef.current += 1
+    smoothOperationRef.current = null
+    programmaticTargetRef.current = null
+    clearSmoothTimer()
     cancelScrollFrame()
     setFollowState(true)
 
     const syncFollowFromScroll = (): void => {
-      if (programmaticScrollRef.current) return
+      const target = programmaticTargetRef.current
+      if (target !== null) {
+        programmaticTargetRef.current = null
+        if (Math.abs(viewport.scrollTop - target) <= PROGRAMMATIC_TARGET_EPSILON_PX) return
+      }
+
+      const smoothOperation = smoothOperationRef.current
+      if (smoothOperation !== null) {
+        armSmoothTimer(smoothOperation.generation, SMOOTH_IDLE_TIMEOUT_MS)
+        return
+      }
       setFollowState(isNearBottom(viewport, threshold))
     }
-    const finishProgrammaticScroll = (): void => {
-      if (!programmaticScrollRef.current) return
-      clearProgrammaticGuard()
-      setFollowState(isNearBottom(viewport, threshold))
+    const finishCurrentSmoothScroll = (): void => {
+      const operation = smoothOperationRef.current
+      if (operation !== null) finishSmoothScroll(operation.generation)
     }
     const observer = new ResizeObserver(() => {
-      if (active && shouldFollowRef.current) scheduleScrollToLatest()
+      if (!active || !shouldFollowRef.current) return
+      const smoothOperation = smoothOperationRef.current
+      if (smoothOperation !== null) {
+        smoothOperation.contentChanged = true
+        return
+      }
+      scheduleScrollToLatest()
     })
 
     viewport.addEventListener("scroll", syncFollowFromScroll, { passive: true })
-    viewport.addEventListener("scrollend", finishProgrammaticScroll)
+    viewport.addEventListener("scrollend", finishCurrentSmoothScroll)
     observer.observe(content)
     scheduleScrollToLatest()
 
@@ -142,11 +208,12 @@ export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: Aut
       active = false
       observer.disconnect()
       viewport.removeEventListener("scroll", syncFollowFromScroll)
-      viewport.removeEventListener("scrollend", finishProgrammaticScroll)
+      viewport.removeEventListener("scrollend", finishCurrentSmoothScroll)
       cancelScrollFrame()
-      clearProgrammaticGuard()
+      stopSmoothScroll()
+      programmaticTargetRef.current = null
     }
-  }, [cancelScrollFrame, clearProgrammaticGuard, resetKey, scheduleScrollToLatest, setFollowState, threshold])
+  }, [armSmoothTimer, cancelScrollFrame, clearSmoothTimer, finishSmoothScroll, resetKey, scheduleScrollToLatest, setFollowState, stopSmoothScroll, threshold])
 
   return { viewportRef, contentRef, following, pause, resume, scrollToLatest }
 }

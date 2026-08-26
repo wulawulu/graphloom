@@ -101,7 +101,7 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
         </div>
       </header>
 
-      <div className="relative min-h-0 flex-1">
+      <div className="min-h-0 flex-1">
         <ScrollArea viewportRef={viewportRef} className="size-full">
           <div ref={contentRef}>
             {props.runId === null ? (
@@ -133,21 +133,22 @@ export function QaWorkspace(props: QaWorkspaceProps): React.ReactElement {
             )}
           </div>
         </ScrollArea>
-        {props.runId !== null && !following ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-end px-4">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="pointer-events-auto bg-background/95 shadow-sm backdrop-blur-sm"
-              aria-label={t("answer.actions.backToLatest")}
-              onClick={scrollToLatest}
-            >
-              <ArrowDown /> {t("answer.actions.backToLatest")}
-            </Button>
-          </div>
-        ) : null}
       </div>
+
+      {props.runId !== null && !following ? (
+        <div className="flex shrink-0 justify-end bg-background/80 px-3 pt-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="bg-background shadow-sm"
+            aria-label={t("answer.actions.backToLatest")}
+            onClick={scrollToLatest}
+          >
+            <ArrowDown /> {t("answer.actions.backToLatest")}
+          </Button>
+        </div>
+      ) : null}
 
       <div className="shrink-0 border-t bg-background/80 p-3">{props.composer}</div>
 

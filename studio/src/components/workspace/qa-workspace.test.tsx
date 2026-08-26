@@ -201,6 +201,9 @@ describe("QaWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
     const backToLatest = screen.getByRole("button", { name: "Back to latest" })
     expect(backToLatest).toBeInTheDocument()
+    expect(backToLatest.parentElement).toHaveClass("shrink-0")
+    expect(backToLatest.parentElement).not.toHaveClass("absolute")
+    expect(backToLatest.parentElement?.nextElementSibling).toContainElement(screen.getByText("Bottom composer"))
 
     await user.click(backToLatest)
     expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ behavior: "smooth" }))

@@ -109,6 +109,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   if (originalScrollTo !== undefined) Object.defineProperty(HTMLElement.prototype, "scrollTo", originalScrollTo)
 })
@@ -182,7 +183,7 @@ describe("useAutoFollow", () => {
     expect(screen.getByText("following")).toBeInTheDocument()
   })
 
-  it("guards programmatic scroll events and uses smooth motion for an explicit return", () => {
+  it("uses smooth motion for an explicit return and pauses when that motion is interrupted", () => {
     render(<AutoFollowHarness resetKey="run-a" />)
     const viewport = screen.getByTestId("viewport")
     setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 100 })
@@ -198,6 +199,70 @@ describe("useAutoFollow", () => {
     viewport.scrollTop = 200
     fireEvent.scroll(viewport)
     expect(screen.getByText("following")).toBeInTheDocument()
+    fireEvent(viewport, new Event("scrollend"))
+    expect(screen.getByText("paused")).toBeInTheDocument()
+  })
+
+  it("lets a user scroll override continuous machine auto-scroll targets", () => {
+    render(<AutoFollowHarness resetKey="run-a" />)
+    const viewport = screen.getByTestId("viewport")
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 800, scrollTop: 600 })
+    settleInitialFollow()
+    const scrollTo = vi.mocked(viewport.scrollTo)
+    scrollTo.mockClear()
+    scrollTo.mockImplementationOnce(function pendingAutoScroll(this: HTMLElement): void {})
+
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 600 })
+    act(() => activeObserver().trigger())
+    flushAnimationFrame()
+    expect(scrollTo).toHaveBeenCalledOnce()
+
+    viewport.scrollTop = 200
+    fireEvent.scroll(viewport)
+    expect(screen.getByText("paused")).toBeInTheDocument()
+
+    scrollTo.mockClear()
+    act(() => activeObserver().trigger())
+    flushAnimationFrame()
+    expect(scrollTo).not.toHaveBeenCalled()
+  })
+
+  it("keeps an explicit pause authoritative over an older smooth completion", () => {
+    vi.useFakeTimers()
+    render(<AutoFollowHarness resetKey="run-a" />)
+    const viewport = screen.getByTestId("viewport")
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 100 })
+    settleInitialFollow()
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    fireEvent.click(screen.getByRole("button", { name: "Back to latest" }))
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }))
+
+    act(() => vi.advanceTimersByTime(2_000))
+    fireEvent(viewport, new Event("scrollend"))
+    expect(screen.getByText("paused")).toBeInTheDocument()
+  })
+
+  it("defers streaming catch-up until a smooth return finishes", () => {
+    render(<AutoFollowHarness resetKey="run-a" />)
+    const viewport = screen.getByTestId("viewport")
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 100 })
+    settleInitialFollow()
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    fireEvent.click(screen.getByRole("button", { name: "Back to latest" }))
+    const scrollTo = vi.mocked(viewport.scrollTo)
+    scrollTo.mockClear()
+
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_200, scrollTop: 800 })
+    act(() => activeObserver().trigger())
+    flushAnimationFrame()
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    fireEvent(viewport, new Event("scrollend"))
+    flushAnimationFrame()
+    expect(scrollTo).toHaveBeenCalledOnce()
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1_200, behavior: "auto" })
   })
 
   it("uses immediate motion for an explicit return when reduced motion is requested", () => {
@@ -226,6 +291,31 @@ describe("useAutoFollow", () => {
     expect(screen.getByText("following")).toBeInTheDocument()
     expect(oldObserver.disconnected).toBe(true)
     expect(activeObserver()).not.toBe(oldObserver)
+  })
+
+  it("invalidates an old smooth timer and pending frame on a Run switch", () => {
+    vi.useFakeTimers()
+    const view = render(<AutoFollowHarness resetKey="run-a" />)
+    const viewport = screen.getByTestId("viewport")
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 100 })
+    settleInitialFollow()
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    fireEvent.click(screen.getByRole("button", { name: "Back to latest" }))
+    const oldObserver = activeObserver()
+
+    view.rerender(<AutoFollowHarness resetKey="run-b" />)
+    const scrollTo = vi.mocked(viewport.scrollTo)
+    act(() => vi.runOnlyPendingTimers())
+    scrollTo.mockClear()
+    act(() => {
+      oldObserver.trigger()
+      vi.advanceTimersByTime(2_000)
+    })
+    fireEvent(viewport, new Event("scrollend"))
+
+    expect(screen.getByText("following")).toBeInTheDocument()
+    expect(scrollTo).not.toHaveBeenCalled()
   })
 
   it("leaves one active observer and one scheduled follow after a StrictMode probe", () => {
