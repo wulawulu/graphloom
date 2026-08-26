@@ -127,7 +127,8 @@ export const en = {
     },
     "actions": {
       "loadingGraphExplorer": "Loading Graph Explorer",
-      "toggleAnalysisProcess": "Toggle analysis process"
+      "toggleAnalysisProcess": "Toggle analysis process",
+      "backToLatest": "Back to latest"
     },
     "labels": {
       "graphQaWorkspace": "Graph QA workspace",

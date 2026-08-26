@@ -79,3 +79,34 @@ fetching the canonical result.
   Explainability evidence.
 
 These claims are guarded by the Core `api_query` streaming regressions and Studio executor tests.
+
+## Browser auto-follow ownership
+
+The Query workspace follows layout rather than transport fields, so Explainability growth, Answer
+Markdown reflow, Analysis collapse, citations, and canonical-result reconciliation share one path.
+The Radix Viewport remains the only scroll owner; the shell, page, and composer are outside this
+controller.
+
+```text
+Query content resize                    Viewport scroll
+        │                                     │
+        ▼                                     ▼
+  ResizeObserver                       distance from bottom
+        │                                     │
+        ▼                                     ├── near latest ──▶ follow
+  should follow?                             │
+        │ yes                                 └── away ─────────▶ pause
+        ▼
+ coalesced animation frame
+        │
+        ▼
+ Radix Viewport scroll latest
+```
+
+Programmatic scroll events are guarded and cannot be interpreted as a reader leaving the latest
+region. Content resize never changes follow intent. A real reader scroll updates intent from the
+Viewport metrics, and returning within the 96-pixel threshold resumes following. Switching Runs
+resets the controller and disconnects the prior observer and listeners. Machine following uses
+immediate scrolling; the explicit **Back to latest** action uses smooth scrolling unless reduced
+motion is requested. Manually expanding Analysis pauses following so the next Answer delta does not
+pull the reader away from the requested evidence.

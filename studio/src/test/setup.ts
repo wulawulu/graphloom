@@ -14,6 +14,7 @@ HTMLElement.prototype.hasPointerCapture = () => false
 HTMLElement.prototype.setPointerCapture = () => undefined
 HTMLElement.prototype.releasePointerCapture = () => undefined
 HTMLElement.prototype.scrollIntoView = () => undefined
+HTMLElement.prototype.scrollTo = () => undefined
 
 beforeEach(async () => setStudioLocale("en", false))
 afterEach(async () => setStudioLocale("en", false))

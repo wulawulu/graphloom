@@ -1,11 +1,15 @@
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ExplainabilityEnvelope, ExplainabilityEventPayload } from "@/api/types"
 import { QaWorkspace } from "@/components/workspace/qa-workspace"
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 function envelope(sequence: number, event: ExplainabilityEventPayload, spanId = "span", parentSpanId?: string): ExplainabilityEnvelope {
   return { schema_version: 1, sequence, record: { run_id: "run-1", timestamp: "2026-08-09T00:00:00Z", span_id: spanId, parent_span_id: parentSpanId, event } }
@@ -187,5 +191,85 @@ describe("QaWorkspace", () => {
     await user.click(screen.getByText("Query hidden (metadata mode)"))
     expect(values.onSelectRun).toHaveBeenCalledWith("run-hidden")
     expect(screen.queryByText("Recent Runs")).not.toBeInTheDocument()
+  })
+
+  it("pauses follow when the user expands Analysis and returns smoothly on request", async () => {
+    const user = userEvent.setup()
+    const scrollTo = vi.spyOn(HTMLElement.prototype, "scrollTo")
+    render(<QaWorkspace {...props()} />)
+
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    const backToLatest = screen.getByRole("button", { name: "Back to latest" })
+    expect(backToLatest).toBeInTheDocument()
+
+    await user.click(backToLatest)
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ behavior: "smooth" }))
+    expect(screen.queryByRole("button", { name: "Back to latest" })).not.toBeInTheDocument()
+  })
+
+  it("resets follow for a new Query and when switching completed history Runs", async () => {
+    const user = userEvent.setup()
+    const values = props()
+    const view = render(<QaWorkspace {...values} />)
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    expect(screen.getByRole("button", { name: "Back to latest" })).toBeInTheDocument()
+
+    view.rerender(<QaWorkspace {...values} runId="run-2" question="Second question" />)
+    expect(screen.queryByRole("button", { name: "Back to latest" })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Toggle analysis process" }))
+    expect(screen.getByRole("button", { name: "Back to latest" })).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "New Query" }))
+    expect(values.onNewQuery).toHaveBeenCalledOnce()
+    expect(screen.queryByRole("button", { name: "Back to latest" })).not.toBeInTheDocument()
+  })
+
+  it("keeps latest visible through Analysis collapse and canonical Answer reconciliation", () => {
+    const animationFrames = new Map<number, FrameRequestCallback>()
+    const observers: ResizeObserverCallback[] = []
+    let nextFrame = 1
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      const id = nextFrame
+      nextFrame += 1
+      animationFrames.set(id, callback)
+      return id
+    }))
+    vi.stubGlobal("cancelAnimationFrame", vi.fn((id: number) => animationFrames.delete(id)))
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { observers.push(callback) }
+      disconnect(): void {}
+      observe(): void {}
+      unobserve(): void {}
+    })
+    const scrollTo = vi.spyOn(HTMLElement.prototype, "scrollTo")
+    const values = props()
+    const view = render(
+      <QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted={false} answer={<div>Waiting</div>} />,
+    )
+
+    view.rerender(
+      <QaWorkspace {...values} runStatus="running" isActiveSubmission answerHasStarted answer={<div>First token</div>} />,
+    )
+    act(() => observers.at(-1)?.([], {} as ResizeObserver))
+    act(() => {
+      const callbacks = [...animationFrames.values()]
+      animationFrames.clear()
+      callbacks.forEach((callback) => callback(0))
+    })
+    expect(screen.queryByRole("heading", { name: "Entity Mapping" })).not.toBeInTheDocument()
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ behavior: "auto" }))
+
+    scrollTo.mockClear()
+    view.rerender(
+      <QaWorkspace {...values} answerHasStarted answer={<div>Canonical answer and usage</div>} />,
+    )
+    act(() => observers.at(-1)?.([], {} as ResizeObserver))
+    act(() => {
+      const callbacks = [...animationFrames.values()]
+      animationFrames.clear()
+      callbacks.forEach((callback) => callback(0))
+    })
+    expect(screen.getByText("Canonical answer and usage")).toBeInTheDocument()
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: "auto" }))
   })
 })

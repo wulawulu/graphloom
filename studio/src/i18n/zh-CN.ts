@@ -129,7 +129,8 @@ export const zhCN = {
     },
     "actions": {
       "loadingGraphExplorer": "正在加载图谱浏览器",
-      "toggleAnalysisProcess": "展开或折叠分析过程"
+      "toggleAnalysisProcess": "展开或折叠分析过程",
+      "backToLatest": "回到最新"
     },
     "labels": {
       "graphQaWorkspace": "图谱问答工作区",
