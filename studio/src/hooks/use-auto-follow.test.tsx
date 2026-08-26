@@ -203,6 +203,21 @@ describe("useAutoFollow", () => {
     expect(screen.getByText("paused")).toBeInTheDocument()
   })
 
+  it("keeps following when a smooth return ends inside the latest threshold", () => {
+    render(<AutoFollowHarness resetKey="run-a" />)
+    const viewport = screen.getByTestId("viewport")
+    setViewportMetrics(viewport, { clientHeight: 200, scrollHeight: 1_000, scrollTop: 100 })
+    settleInitialFollow()
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    fireEvent.click(screen.getByRole("button", { name: "Back to latest" }))
+
+    viewport.scrollTop = 750
+    fireEvent.scroll(viewport)
+    fireEvent(viewport, new Event("scrollend"))
+    expect(screen.getByText("following")).toBeInTheDocument()
+  })
+
   it("lets a user scroll override continuous machine auto-scroll targets", () => {
     render(<AutoFollowHarness resetKey="run-a" />)
     const viewport = screen.getByTestId("viewport")

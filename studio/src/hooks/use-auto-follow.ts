@@ -99,7 +99,7 @@ export function useAutoFollow({ resetKey, threshold = FOLLOW_THRESHOLD_PX }: Aut
 
     const expectedTarget = Math.min(operation.target, latestScrollTop(viewport))
     const reachedTarget = Math.abs(viewport.scrollTop - expectedTarget) <= PROGRAMMATIC_TARGET_EPSILON_PX
-    if (!reachedTarget) {
+    if (!reachedTarget && !isNearBottom(viewport, threshold)) {
       setFollowState(false)
       return
     }
